@@ -544,7 +544,11 @@ test("33 physical items from three parcels share one order, report and selective
     assert(offer,"Missing offer "+sku);
     return {offer,quantity};
   });
-  const {draft,quote}=await createAndPay(c,ordered.map(({offer,quantity})=>({category_id:offer.category_id,offer_id:offer.offer_id,quantity})),terms);
+  const tracks=Array.from({length:3},()=>("ZT"+randomUUID().slice(0,8).toUpperCase()));
+  const {draft,quote}=await createAndPay(c,ordered.map(({offer,quantity})=>({
+    category_id:offer.category_id,offer_id:offer.offer_id,quantity,
+    ...(offer.service==="compare"?{items:tracks.map((tracking_no,index)=>({supplier_alias:`Supplier ${index+1}`,tracking_no}))}:{}),
+  })),terms);
   const amount=ordered.reduce((total,{offer,quantity})=>total+(offer.rules.package_cents??offer.rules.unit_cents*quantity),0);
   assert.equal(quote.amount_cents,amount);
   const path="/orders/"+draft.id;
@@ -567,8 +571,9 @@ test("33 physical items from three parcels share one order, report and selective
   const desk=await staff.fetch("/staff/desk");
   const location=desk.locations.find((row:{code:string})=>row.code==="R-01").id;
   const itemIds:string[]=[],inbound:{adviceId:string;tracking:string}[]=[];
-  for(let offset=0;offset<33;offset+=11) {
-    const tracking="ZT"+randomUUID().slice(0,8).toUpperCase();
+  const individual=order.items.filter((row:{service:string})=>row.service==="inspection");
+  const comparison=order.items.filter((row:{service:string})=>row.service==="compare");
+  for(const [batch,tracking] of tracks.entries()) {
     const advice=await c.fetch("/me/parcels",{address_id:registration.warehouse_address.id,carrier_code:"zto",tracking_no:tracking,order_ids:[draft.id]},"POST",201);
     inbound.push({adviceId:advice.id,tracking});
     const beforeIntake=(await c.fetch(path)).parcels.find((p:{id:string})=>p.id===advice.id);
@@ -577,7 +582,7 @@ test("33 physical items from three parcels share one order, report and selective
     const match=await staff.fetch("/staff/intake/lookup",{tracking_no:tracking,carrier_code:"zto"});
     assert.deepEqual(match.order_ids,[draft.id]);
     const pkg=await staff.fetch("/staff/intake/check-in",{tracking_no:tracking,advice_id:advice.id,carrier_code:"zto",outer_media_ids:[await staff.photo("intake_outer")]},"POST",201);
-    const positions=order.items.slice(offset,offset+11);
+    const positions=[...individual.slice(batch*10,batch*10+10),comparison[batch]];
     const listed=positions.map(()=>({code:"S-"+randomUUID(),location_id:location}));
     const {item_ids}=await staff.fetch("/staff/packages/"+pkg.id+"/items",{revision:pkg.revision,items:listed},"POST",201);
     assert.equal(item_ids.length,11);
@@ -586,7 +591,7 @@ test("33 physical items from three parcels share one order, report and selective
       await staff.fetch("/staff/items/"+item_ids[index]+"/assign",{revision:1,order_line_id:position.order_line_id,
         expected_item_id:position.id,evidence_ids:[await staff.photo("label_photo")]});
     }
-    assert.equal((await c.fetch(path)).state,offset<22?"awaiting_samples":"queued");
+    assert.equal((await c.fetch(path)).state,batch<2?"awaiting_samples":"queued");
   }
   assert.equal((await c.fetch(path)).parcels.length,3);
   const admin=await staffLogin("admin");
@@ -625,6 +630,10 @@ test("33 physical items from three parcels share one order, report and selective
   const group=sections.find(s=>s.service==="compare");
   assert(group);
   assert.equal(new Set(group.results.map(r=>r.item)).size,3);
+  const compared=current.items.filter((item:{service:string})=>item.service==="compare");
+  assert.equal(new Set(compared.map((item:{package_code:string})=>item.package_code)).size,3);
+  assert.deepEqual(compared.map((item:{declared_fields:{supplier_alias:string}})=>item.declared_fields.supplier_alias),
+    ["Supplier 1","Supplier 2","Supplier 3"]);
   const labels=sections.flatMap(s=>s.results.map(r=>r.label));
   for(const expected of ["Visible condition","Hardware condition","Surface finish"]) assert(labels.includes(expected));
   assert.deepEqual(published.versions.map((v:{version:number})=>v.version),[1]);
@@ -894,6 +903,10 @@ test("33 physical items from three parcels share one order, report and selective
     await other.fetch(path+"/shipments/"+packed.shipment_id,undefined,"GET",404);
   }
   assert.equal(outboundWaybills.size,2);
+  const deliveredBatch=(await c.fetch("/me/desk")).active_batches.find((row:{id:string})=>row.id===batch.batch_id);
+  assert.deepEqual(deliveredBatch.outbound_shipments.map((shipment:{id:string})=>shipment.id).sort(),
+    shipments.map(shipment=>shipment.shipment_id).sort());
+  assert.equal(deliveredBatch.quote_amount_cents,splitQuote.amount_cents);
   const retention=await c.fetch("/me/items/"+retained+"/dispositions",{action:"retain",terms_version_id:termsVersion},"POST",201);
   const storage=await staff.fetch("/staff/dispositions/"+retention.id+"/storage-quote",{});
   const storageQuote=(await c.fetch("/me/desk")).quotes.find((q:{id:string})=>q.id===storage.quote_id);
@@ -914,6 +927,35 @@ test("33 physical items from three parcels share one order, report and selective
   assert.equal(storedDetail.paid_storage_until,retainedNow.storage_until);
   assert.equal(storedDetail.instruction,null);
   assert.equal((await pool.query("select 1 from storage_periods where charge_id=$1",[storageFee.charge_item_id])).rowCount,1);
+
+  const compareItemIds=compared.map((item:{item_id:string})=>item.item_id);
+  const separateDecisions=[
+    {...returnBody,item_id:compareItemIds[0]},
+    {action:"retain",terms_version_id:termsVersion,item_id:compareItemIds[1]},
+    {action:"to_forwarder",terms_version_id:termsVersion,item_id:compareItemIds[2],destination},
+  ];
+  for(const decision of separateDecisions) {
+    assert.equal((await c.fetch(path+"/dispositions",decision,"POST",201)).state,"requested");
+  }
+  const compareDecisions=(await c.fetch(path)).items.filter((item:{service:string})=>item.service==="compare");
+  assert.deepEqual(compareDecisions.map((item:{instruction:{action:string}})=>item.instruction.action),
+    ["return_to_seller","retain","to_forwarder"]);
+
+  const referenceItem=itemIds[6];
+  await c.fetch(path+"/dispositions",{action:"reserve_reference",terms_version_id:termsVersion,item_id:referenceItem},"POST",201);
+  const {pending_reference_tasks}=await staff.fetch("/staff/storage");
+  const task=pending_reference_tasks.find((row:{item_id:string})=>row.item_id===referenceItem);
+  const safe=desk.locations.find((row:{code:string})=>row.code==="A-04-02-03");
+  assert(task);
+  const referenceCode=inventory.find((item:{item_id:string})=>item.item_id===referenceItem).code;
+  const sealed=await staff.fetch("/staff/storage/move",{item_id:referenceItem,revision:task.item_revision,
+    location_id:safe.id,scanned_item_code:referenceCode,scanned_location_code:safe.code,seal_code:task.seal_code});
+  assert.equal(sealed.reference_activated,true);
+  const splitInventory=(await c.fetch("/me/desk")).items;
+  assert.equal(splitInventory.find((item:{item_id:string})=>item.item_id===referenceItem).reference_sample.state,"active");
+  for(const shipped of [itemId,...selected]) {
+    assert.equal(splitInventory.find((item:{item_id:string})=>item.item_id===shipped).custody_state,"outbound");
+  }
 });
 
 test("unmatched intake remains private until a staff evidence decision",async()=>{
@@ -6421,6 +6463,224 @@ test("independent review remediation (NEW-001 to NEW-011) and 4-step Golden Samp
 
   const notices=(await cust.fetch("/me/notifications")).rows;
   assert.ok(notices.some((n:{template:string})=>n.template==="reference.sealed"),"Customer receives reference.sealed notification");
+});
+
+test("customer workspace binds the reviewed checklist, preserves notes and paginates owned orders",async()=>{
+  const {c,terms}=await signCustomer();
+  const {c:other}=await signCustomer();
+  const {offers}=await c.fetch("/catalog");
+  const offer=offers.find((row:{sku_code:string})=>row.sku_code==="apparel-sub-bottoms-inspection-1");
+  assert.equal(offer.category_slug,"apparel");
+  const line={category_id:offer.category_id,offer_id:offer.offer_id,template_version_id:offer.template_version_id,
+    quantity:30,attributes:{garment_type:"bottoms",name:"Test leggings"},items:[
+      {sample_code:"P-01",garment_type:"bottoms",supplier_alias:"Supplier A",tracking_no:"SF12345678"},
+      {sample_code:"P-02",garment_type:"bottoms",supplier_alias:"Supplier B",tracking_no:"ZTO1234567"},
+    ]};
+  const wrongVersion=await c.fetch("/orders",{lines:[{...line,template_version_id:randomUUID()}]},"POST",409);
+  assert.equal(wrongVersion.error.code,"TEMPLATE_CHANGED");
+  const wrongGarment=await c.fetch("/orders",{lines:[{...line,attributes:{garment_type:"tops"}}]},"POST",422);
+  assert.equal(wrongGarment.error.code,"INCOMPATIBLE_SAMPLES");
+
+  const created=await c.fetch("/orders",{lines:[line]},"POST",201);
+  const path="/orders/"+created.id;
+  const written=await c.fetch(path,{revision:created.revision,lines:[line],customer_notes:"Check the waist seam."},"PATCH");
+  assert.equal((await c.fetch(path)).customer_notes,"Check the waist seam.");
+  const cleared=await c.fetch(path,{revision:written.revision,lines:[line],customer_notes:""},"PATCH");
+  assert.equal((await c.fetch(path)).customer_notes,"");
+  const quote=await c.fetch(path+"/quotes",{revision:cleared.revision},"POST",201);
+  assert.equal(quote.order_id,created.id);
+  assert.equal(quote.line_snapshot[0].template_version_id,line.template_version_id);
+  assert.equal(quote.line_snapshot[0].price_version,offer.price_version);
+  assert.equal(quote.amount_cents,30*offer.rules.unit_cents);
+  assert(Date.parse(quote.expires_at)>Date.now());
+  await other.fetch(path+"/quotes",{revision:cleared.revision},"POST",404);
+
+  const submit=await c.fetch(path+"/submit",{revision:cleared.revision,quote_id:quote.id,terms_version_ids:terms.map(t=>t.id),
+    acknowledgements:{scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true}});
+  const checkout=await c.fetch("/charges/"+submit.charge.charge_item_id+"/checkout",{quote_revision:quote.revision});
+  const paid=await c.fetch("/checkout/demo/"+checkout.attempt_id,{});
+  assert.equal(paid.order_number,created.public_no);
+  const order=await c.fetch(path);
+  assert.equal(order.state,"awaiting_samples");
+  assert.equal(order.items.length,30);
+  assert.equal(new Set(order.items.map((item:{id:string})=>item.id)).size,30);
+  assert.equal(order.items[1].declared_fields.tracking_no,"ZTO1234567");
+
+  for(let i=0;i<21;i++) {
+    await c.fetch("/orders",{lines:[{category_id:line.category_id,offer_id:line.offer_id,quantity:1}]},"POST",201);
+  }
+  const first=await c.fetch("/me/orders?state=draft");
+  const second=await c.fetch("/me/orders?state=draft&page=2");
+  assert.equal(first.rows.length,20);
+  assert.equal(first.has_more,true);
+  assert.equal(second.rows.length,1);
+  assert.equal(second.has_more,false);
+  assert(!first.rows.some((row:{id:string})=>row.id===second.rows[0].id));
+  assert.equal((await c.fetch("/me/orders?q="+created.public_no.toLowerCase())).rows[0].payment_state,"paid");
+  assert.deepEqual((await other.fetch("/me/orders?q="+created.public_no)).rows,[]);
+});
+
+test("a ten-item shortage stays frozen until the case is resolved and all ten items are identified",async()=>{
+  const {c,terms,registration}=await signCustomer();
+  const {c:other}=await signCustomer();
+  const receiver=await staffLogin("receiving");
+  const support=await staffLogin("admin");
+  const {offers}=await c.fetch("/catalog");
+  const offer=offers.find((row:{sku_code:string})=>row.sku_code==="apparel-inspection-1");
+  const {draft}=await createAndPay(c,[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:10}],terms);
+  const path="/orders/"+draft.id;
+  const declared=(await c.fetch(path)).items;
+  const {locations}=await receiver.fetch("/staff/desk");
+  const receiving=locations.find((row:{code:string})=>row.code==="R-01");
+
+  async function advise() {
+    const tracking_no="SF"+randomUUID().replaceAll("-","").slice(0,10).toUpperCase();
+    const advice=await c.fetch("/me/parcels",{address_id:registration.warehouse_address.id,tracking_no,carrier_code:"sf",order_ids:[draft.id]},"POST",201);
+    return {tracking_no,id:advice.id};
+  }
+  async function receive(advice:Awaited<ReturnType<typeof advise>>,positions:{id:string;order_line_id:string}[]) {
+    const pkg=await receiver.fetch("/staff/intake/check-in",{tracking_no:advice.tracking_no,advice_id:advice.id,
+      carrier_code:"sf",outer_media_ids:[await receiver.photo("intake_outer")]},"POST",201);
+    const intake=await receiver.fetch("/staff/packages/"+pkg.id+"/items",{revision:pkg.revision,
+      items:positions.map(()=>({code:"S-"+randomUUID(),location_id:receiving.id}))},"POST",201);
+    for(const [index,position] of positions.entries()) {
+      const itemPath="/staff/items/"+intake.item_ids[index];
+      const evidence=await receiver.photo("label_photo");
+      await receiver.fetch(itemPath+"/assign",{revision:1,order_line_id:position.order_line_id,
+        expected_item_id:position.id,evidence_ids:[evidence]});
+    }
+    return {id:pkg.id,revision:intake.revision};
+  }
+
+  const first=await advise(),later=await advise();
+  const pkg=await receive(first,declared.slice(0,8));
+  const discrepancyPath="/staff/packages/"+pkg.id+"/discrepancy";
+  const partial=await receiver.fetch(discrepancyPath,{revision:pkg.revision,order_id:draft.id,
+    discrepancy_type:"partial_shipment_in_transit",expected_qty:10,actual_qty:8,note:"Two items are in a separate parcel."});
+  assert.equal(partial.order_held,false);
+  assert.equal((await c.fetch(path)).state,"awaiting_samples");
+  const shortage=await receiver.fetch(discrepancyPath,{revision:partial.revision,order_id:draft.id,
+    discrepancy_type:"shortage",expected_qty:10,actual_qty:8,note:"Seller reported the second shipment missing."});
+  assert.equal(shortage.order_held,true);
+  assert.equal((await c.fetch(path)).state,"on_hold");
+  assert((await c.fetch("/actions")).rows.some((row:{id:string})=>row.id===shortage.ticket_id));
+  await other.fetch("/cases/"+shortage.ticket_id,undefined,"GET",404);
+
+  const ticket=await c.fetch("/cases/"+shortage.ticket_id);
+  const reply=await c.fetch("/cases/"+shortage.ticket_id+"/messages",{revision:ticket.revision,body:"Seller will replace the two missing items."});
+  await support.fetch("/staff/tickets/"+shortage.ticket_id+"/events",{kind:"resolve",revision:reply.revision,body:"Customer confirmed replacement."});
+  const resume="/staff/orders/"+draft.id+"/resume",reason="Reconciled replacement against the order.";
+  assert.equal((await receiver.fetch(resume,{reason},"POST",409)).error.code,"ORDER_BLOCKED");
+  await receive(later,declared.slice(8));
+  assert.equal((await c.fetch(path)).state,"on_hold");
+  assert.equal((await receiver.fetch(resume,{reason})).state,"queued");
+  assert.equal((await c.fetch(path)).items.filter((item:{item_id:string|null})=>item.item_id).length,10);
+  assert.equal((await pool.query("select count(*)::int n from inspection_tasks t join order_lines l on l.id=t.order_line_id where l.order_id=$1",[draft.id])).rows[0].n,10);
+  assert(!(await c.fetch("/actions")).rows.some((row:{id:string})=>row.id===shortage.ticket_id));
+});
+
+test("a standalone 30-item inspection splits a documented defect, a reference sample and forwarding",async()=>{
+  const {c,terms,registration}=await signCustomer();
+  const receiver=await staffLogin("receiving");
+  const inspector=await staffLogin("inspector");
+  const reviewer=await staffLogin("reviewer");
+  const {offers}=await c.fetch("/catalog");
+  const offer=offers.find((row:{sku_code:string})=>row.sku_code==="apparel-inspection-1");
+  const tracking=Array.from({length:3},()=>("SF"+randomUUID().replaceAll("-","").slice(0,10).toUpperCase()));
+  const items=Array.from({length:30},(_,index)=>({
+    sample_code:"BATCH-"+String(index+1).padStart(2,"0"),
+    supplier_alias:"Fixture supplier",
+    size_label:"M",color_declared:"Navy",tracking_no:tracking[Math.floor(index/10)],
+  }));
+  const {draft,quote}=await createAndPay(c,[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:30,items}],terms);
+  assert.equal(quote.amount_cents,offer.rules.unit_cents*30);
+  const path="/orders/"+draft.id;
+  const positions=(await c.fetch(path)).items;
+  const desk=await receiver.fetch("/staff/desk");
+  const receiving=desk.locations.find((row:{code:string})=>row.code==="R-01");
+  const referenceZone=desk.locations.find((row:{code:string})=>row.code==="A-04-02-03");
+  const physical:{id:string;code:string}[]=[];
+  for(const [index,tracking_no] of tracking.entries()) {
+    const advice=await c.fetch("/me/parcels",{address_id:registration.warehouse_address.id,tracking_no,
+      carrier_code:"sf",order_ids:[draft.id]},"POST",201);
+    const pkg=await receiver.fetch("/staff/intake/check-in",{tracking_no,advice_id:advice.id,carrier_code:"sf",
+      outer_media_ids:[await receiver.photo("intake_outer")]},"POST",201);
+    const batch=Array.from({length:10},()=>({code:"S-"+randomUUID(),location_id:receiving.id}));
+    const intake=await receiver.fetch("/staff/packages/"+pkg.id+"/items",{revision:pkg.revision,items:batch},"POST",201);
+    for(const [offset,id] of (intake.item_ids as string[]).entries()) {
+      const position=positions[index*10+offset];
+      await receiver.fetch("/staff/items/"+id+"/assign",{revision:1,expected_item_id:position.id,
+        order_line_id:position.order_line_id,evidence_ids:[await receiver.photo("label_photo")]});
+      physical.push({id,code:batch[offset].code});
+    }
+    assert.equal((await c.fetch(path)).state,index<2?"awaiting_samples":"queued");
+  }
+  const {rows:tasks}=await pool.query<{id:string;revision:number;item_id:string}>(`select t.id,t.revision,a.item_id from inspection_tasks t
+    join order_line_item_links a on a.id=t.assignment_id join order_lines l on l.id=t.order_line_id where l.order_id=$1`,[draft.id]);
+  assert.equal(tasks.length,30);
+  for(const task of tasks) {
+    const taskPath="/staff/inspection-tasks/"+task.id;
+    const started=await inspector.fetch(taskPath+"/start",{revision:task.revision});
+    const view=await inspector.fetch(taskPath) as InspectionView;
+    if(task.item_id!==physical[0].id) {
+      await submitRequiredChecks(inspector,task.id,started.revision,view);
+      continue;
+    }
+    const results=[];
+    for(const check of view.content.checks.filter(check=>check.required)) {
+      const common={item_key:check.key,component:view.components[0].id,attempt:1,method:check.method,
+        is_final:true,evidence_ids:[await inspector.photo("shot")]};
+      results.push(check.key==="appearance"?{...common,status:"OBSERVED_ISSUE",reason:"Open seam at hem.",
+        details:{part_code:"hem",severity:"material_issue",annotations:[{x:25,y:55,w:25,h:15,label:"Open seam"}]}}
+        :{...common,status:"RECORDED",typed_value:42,unit:check.unit});
+    }
+    const written=await inspector.fetch(taskPath+"/results",{revision:started.revision,results},"PUT");
+    await inspector.fetch(taskPath+"/submit",{revision:written.revision});
+  }
+  const order=await c.fetch(path);
+  const submitted=await inspector.fetch("/staff/orders/"+draft.id+"/report/submit",{revision:order.revision,task_ids:tasks.map(task=>task.id)});
+  await reviewer.fetch("/staff/reports/"+submitted.id+"/approve",{revision:1,checklist:["reviewed_en","evidence_checked"]},"POST",202);
+  for(let i=0;i<100;i++) {if(!await workOnce()) break;}
+  const report=await c.fetch(path+"/report");
+  assert.equal(report.snapshot.sections.length,30);
+  const defect=report.snapshot.sections.flatMap((section:{results:object[]})=>section.results)
+    .find((result:{item:string;status:string})=>result.item===physical[0].code&&result.status==="OBSERVED_ISSUE");
+  assert.equal(defect.annotations[0].label,"Open seam");
+  assert((await c.fetch("/media/"+defect.evidence_ids[0])).image.length>0);
+
+  const terms_version_id=terms.find((term:{kind:string})=>term.kind==="terms").id;
+  const toSeller={recipient:"Fixture seller",address:"Fixture return address",phone:"00000000000"};
+  const toForwarder={recipient:"Fixture forwarder",address:"Fixture forwarding address",phone:"00000000000",member_code:"TEST-BATCH"};
+  const returned=await c.fetch(path+"/dispositions",{action:"return_to_seller",item_id:physical[0].id,terms_version_id,
+    destination:toSeller,return_info:{requested_from_seller:true,customer_pays_shipping:true}},"POST",201);
+  const forwarded=await c.fetch(path+"/dispositions",{action:"to_forwarder",item_id:physical[1].id,terms_version_id,destination:toForwarder},"POST",201);
+  await c.fetch(path+"/dispositions",{action:"reserve_reference",item_id:physical[2].id,terms_version_id},"POST",201);
+  const sealed=(await receiver.fetch("/staff/storage")).pending_reference_tasks.find((task:{item_id:string})=>task.item_id===physical[2].id);
+  assert.equal((await receiver.fetch("/staff/storage/move",{item_id:physical[2].id,revision:sealed.item_revision,
+    location_id:referenceZone.id,scanned_item_code:physical[2].code,scanned_location_code:referenceZone.code,seal_code:sealed.seal_code})).reference_activated,true);
+
+  for(const [instruction,item] of [[returned,physical[0]],[forwarded,physical[1]]]) {
+    const batch=await c.fetch("/dispatch-batches",{disposition_ids:[instruction.id]},"POST",201);
+    const confirmed=await c.fetch("/dispatch-batches/"+batch.batch_id+"/confirm",{revision:batch.revision});
+    const batchPath="/staff/dispatch-batches/"+batch.batch_id;
+    const quoted=await receiver.fetch(batchPath+"/quote",{revision:confirmed.revision,rate_version_id:desk.rates[0].id,
+      parcels:[{item_ids:[item.id],weight_g:540}]});
+    const charge=await c.fetch("/quotes/"+quoted.quote_id+"/accept",{revision:quoted.revision});
+    const payment=await c.fetch("/charges/"+charge.charge_item_id+"/checkout",{quote_revision:quoted.revision});
+    await c.fetch("/checkout/demo/"+payment.attempt_id,{});
+    const packed=await receiver.fetch(batchPath+"/parcels",{revision:quoted.revision+1,quote_id:quoted.quote_id,item_ids:[item.id],
+      weight_g:540,packed_media_ids:[await receiver.photo("dispatch")]},"POST",201);
+    const tracking_no="YTO"+randomUUID().slice(0,8).toUpperCase();
+    await receiver.fetch("/staff/shipments/"+packed.shipment_id+"/handover",{revision:packed.revision,item_ids:[item.id],
+      carrier_code:"yto",tracking_no,handed_at:new Date().toISOString(),evidence_ids:[await receiver.photo("dispatch")]});
+    assert.equal((await c.fetch("/shipments/"+packed.shipment_id+"/tracking")).tracking_no,tracking_no);
+  }
+  const final=await c.fetch(path);
+  assert.equal(final.shipments.length,2);
+  assert.equal(final.items.filter((item:{custody_state:string})=>item.custody_state==="outbound").length,2);
+  assert((await c.fetch("/me/reference-samples")).items.some((item:{item_id:string;state:string})=>item.item_id===physical[2].id&&item.state==="active"));
+  const charges=(await c.fetch("/me/billing")).charges.filter((charge:{order_ids:string[]})=>charge.order_ids.includes(draft.id));
+  assert.equal(charges.filter((charge:{purpose:string;state:string})=>charge.purpose==="dispatch"&&charge.state==="paid").length,2);
 });
 
 test("all core operations have a validated success response",assertCoreCoverage);

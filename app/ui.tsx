@@ -12,15 +12,16 @@ function browserCookie(key:string) {
   if(typeof document==="undefined") return "";
   return document.cookie.split(";").map(s=>s.trim()).find(s=>s.startsWith(key+"="))?.slice(key.length+1)??"";
 }
-export async function request(path:string,method="GET",body?:unknown,idempotencyKey?:string) {
+export async function request(path:string,method="GET",body?:unknown,idempotencyKey?:string,signal?:AbortSignal) {
   const form=body instanceof FormData;
   const csrf=browserCookie("qcw_csrf");
-  const r=await fetch("/api/v1"+path,{method,cache:"no-store",headers:method==="GET"?{}:{
+  const r=await fetch("/api/v1"+path,{method,signal,cache:"no-store",headers:method==="GET"?{}:{
     ...(!form?{"content-type":"application/json"}:{}),"Idempotency-Key":idempotencyKey??crypto.randomUUID(),
     ...(csrf?{"X-CSRF-Token":csrf}:{}),
   },...(body!==undefined?{body:form?body:JSON.stringify(body)}:{})});
-  const data=await r.json();
-  if(!r.ok) throw new RequestError(data.error?.message??"Request failed.",data.error?.code);
+  const data=await r.json().catch(()=>null);
+  if(!r.ok) throw new RequestError(data?.error?.message??"The request failed. Try again.",data?.error?.code);
+  if(data===null) throw new RequestError("The server response could not be read. Try again.");
   return data;
 }
 async function compressImageClient(file:File):Promise<{bytes:ArrayBuffer;mime:string}> {
@@ -376,8 +377,10 @@ export function ErrorBlock({error}:{error:string}) {return <div className="notic
 export function Tabs({links,path}:{links:[string,string][];path:string}) {return <nav className="tabs">{links.map(([to,label])=><Link aria-current={to===path?"page":undefined} href={to} key={to}>{label}</Link>)}</nav>;}
 export function Table({headers,rows,empty}:{headers:string[];rows:ReactNode[][];empty?:string}) {
   if(!rows.length)return empty?<Empty>{empty}</Empty>:null;
-  return <div className="table-wrap" tabIndex={0}><table><thead><tr>{headers.map((h,i)=><th scope="col" key={i}>{h}</th>)}</tr></thead>
-    <tbody>{rows.map((r,i)=><tr key={i}>{r.map((cell,n)=><td key={n}>{cell}</td>)}</tr>)}</tbody></table></div>;
+  return <div className="table-wrap responsive-table" tabIndex={0}><table role="table"><thead><tr role="row">{headers.map((h,i)=><th scope="col" key={i}>{h}</th>)}</tr></thead>
+    <tbody>{rows.map((r,i)=><tr key={i} role="row">{r.map((cell,n)=><td role="cell" key={n}>
+      {headers[n]&&<span className="table-cell-label" aria-hidden="true">{headers[n]}</span>}{cell}
+    </td>)}</tr>)}</tbody></table></div>;
 }
 export function NextAction({title,children}:{title:string;children:ReactNode}) {
   return <div className="notice"><h3>{title}</h3>{children}</div>;

@@ -16,7 +16,7 @@ import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, cr
 import { acceptQuote, amendDispatchBatch, calculateShippingPreview, cancelDisposition, checkStorageReminders, closeCompletedOrder, confirmBatch, handover, instruct, packShipment, planBatch, publishShippingRate, quoteBatch, readDispatchBatch, receiveReturn, releaseReferenceSample, storageQuote } from "./dispatch";
 import { checkout, demoPay, orderPayment, orderRefundPayments, refundApprove, refundRequest, resolvePaymentDispute, stripeEvent, verifyStripe } from "./payments";
 import { approveTrackingTranslation, correctCustomerParcelTracking, correctStaffTracking, providerCallback, refreshTracking, submitTrackingTranslation, tracking, trackingAdmin, trackingMonitor, updateTrackingAlert, verificationState, verifyTracking } from "./logistics";
-import { adminDesk, bills, customerActions, customerDesk, customerNotifications, dispatchQueueStates, items, markNotificationRead, orderLedger, orderLedgerCsv, readOrderByPublicNumber, readStaffObjectSummary, reconcileFinance, searchStaffOrders, staffOrderDetail, staffOrderFilters, warehouseDesk, warehouseDispatchBatch, warehouseDispatchQueue, warehouseItem, warehousePackage } from "./reads";
+import { adminDesk, bills, customerActions, customerDesk, customerNotifications, dispatchQueueStates, items, listCustomerOrders, markNotificationRead, orderLedger, orderLedgerCsv, readOrderByPublicNumber, readStaffObjectSummary, reconcileFinance, searchStaffOrders, staffOrderDetail, staffOrderFilters, warehouseDesk, warehouseDispatchBatch, warehouseDispatchQueue, warehouseItem, warehousePackage } from "./reads";
 import { staffAccess } from "./staff-access";
 import { customerDestination, withDestination } from "./portal-routes";
 import { orderFulfillmentRecord } from "./fulfillment-reads";
@@ -128,11 +128,17 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   const revokeShare=path.match(/^\/me\/report-shares\/([a-f0-9-]{36})$/i);
   if(method==="DELETE"&&revokeShare)return extraWrite(req,path,actor,z.object({}).strict(),
     (db,customer)=>revokeReportShare(db,customer,idSchema.parse(revokeShare[1])));
+  if(method==="GET"&&path==="/me/orders") {
+    const query=z.string().trim().max(68).parse(url.searchParams.get("q")??"");
+    const state=z.string().regex(/^[a-z_]{0,32}$/).parse(url.searchParams.get("state")??"");
+    const page=z.coerce.number().int().min(1).max(10000).parse(url.searchParams.get("page")??"1");
+    return json(await transaction(db=>listCustomerOrders(db,actorRequired(actor),query,state,page)));
+  }
   if(method==="GET"&&path==="/me/reports") {
     const reference=z.string().trim().toUpperCase().pipe(z.string().regex(/^(QW|R)-[A-F0-9]{1,64}$/)).optional()
       .parse(url.searchParams.get("reference")||undefined)??null;
     const version=z.coerce.number().int().min(1).max(2147483647).optional().parse(url.searchParams.get("version")||undefined)??null;
-    return json(await transaction(db=>listPublishedReports(db,actorRequired(actor),reference,version)));
+    return json(await transaction(db=>listPublishedReports(db,actorRequired(actor),reference,version,url.searchParams.get("latest")==="1")));
   }
   if(method==="GET" && path==="/health") {
     await pool.query("select 1");

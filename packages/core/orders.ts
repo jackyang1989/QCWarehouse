@@ -52,7 +52,7 @@ export const priceSchema=z.object({
   minimum:z.number().int().positive(),maximum:z.number().int().positive(),unit_cents:z.number().int().positive().optional(),
   package_cents:z.number().int().positive().optional(),business_days:z.number().int().positive(),demo:z.boolean().optional()
 }).refine(p=>p.maximum>=p.minimum && Number(!!p.unit_cents)+Number(!!p.package_cents)===1);
-export type LineInput={category_id:string; offer_id:string; quantity:number; options?:object; attributes?:object; items?:object[]};
+export type LineInput={category_id:string; offer_id:string; template_version_id?:string; quantity:number; options?:object; attributes?:object; items?:object[]};
 async function validateLineSamples(db:DB,org:string,line:{category_id:string;options?:unknown;attributes?:unknown;items?:unknown[];draft_items?:unknown[]},service:string) {
   const items=(Array.isArray(line.items)?line.items:Array.isArray(line.draft_items)?line.draft_items:[]) as {category_id?:string;size_label?:string;size?:string;attachment_ids?:unknown}[];
   const lineAttachments=Array.isArray((line.attributes as {attachment_ids?:unknown})?.attachment_ids)
@@ -89,7 +89,7 @@ async function validateLineSamples(db:DB,org:string,line:{category_id:string;opt
   }
 }
 const offersSql=`
-  select o.id offer_id,o.sku_code,o.title,c.id category_id,c.labels category,c.admission_snapshot,t.id template_version_id,t.content,
+  select o.id offer_id,o.sku_code,o.title,c.id category_id,c.slug category_slug,c.labels category,c.admission_snapshot,t.id template_version_id,t.content,
     st.code service,p.id price_version,p.rules
   from service_offers o join service_types st on st.id=o.service_type_id
   join offer_templates ot on ot.offer_id=o.id join categories c on c.id=ot.category_id
@@ -140,6 +140,13 @@ export async function saveOrder(db:DB,actor:Actor,input:{lines:LineInput[];custo
   }
   for(const [lineIndex,line] of input.lines.entries()) {
     const {offer}=await eligible(db,line,true);
+    guard(!line.template_version_id||line.template_version_id===offer.template_version_id,
+      "TEMPLATE_CHANGED","The checklist changed. Reload the service and review the current checklist.");
+    if(offer.category_slug==="apparel"&&offer.content.subcategory) {
+      const declarations=[line.attributes,...(line.items??[])] as ({garment_type?:unknown}|undefined)[];
+      guard(declarations.every(fields=>!fields?.garment_type||fields.garment_type===offer.content.subcategory),
+        "INCOMPATIBLE_SAMPLES","Choose the checklist that matches the declared garment type.",422);
+    }
     await validateLineSamples(db,org,line,offer.service);
     const normalizedItems=Array.from({length:line.quantity},(_,idx)=>{
       const raw=(line.items?.[idx]??{}) as Record<string,unknown>;
@@ -316,13 +323,26 @@ export function businessDeadline(start:Date,days:number,holidays:Iterable<string
   }
   return d;
 }
-export async function readyOrder(db:DB,id:string) {
-  const order=await one(db,"select * from orders where id=$1 for update",[id]);
-  if(order.state!=="awaiting_samples" || !order.paid_at) return;
-  const counts=await one<{total:number;ready:number}>(db,`select count(*)::int total,count(*) filter(where w.identity_state='identified' and w.custody_state in ('received','stored'))::int ready
+export function orderItemReadiness(db:DB,id:string) {
+  return one<{total:number;ready:number}>(db,`select count(*)::int total,count(*) filter(where w.identity_state='identified' and w.custody_state in ('received','stored'))::int ready
     from order_lines l join expected_items e on e.order_line_id=l.id and e.in_scope
     left join order_line_item_links a on a.expected_item_id=e.id and a.unlinked_at is null
     left join warehouse_items w on w.id=a.item_id where l.order_id=$1`,[id]);
+}
+
+export const orderAcceptsSampleAssignmentSql=`o.paid_at is not null and (
+  o.state='awaiting_samples' or (o.state='on_hold' and o.held_from_state='awaiting_samples'
+    and exists(select 1 from order_blocks b where b.order_id=o.id and b.reason='quantity_discrepancy'
+      and b.resolved_at is null and exists(select 1 from tickets k where k.order_id=o.id and k.org_id=o.org_id
+        and k.public_no like 'QTY-%' and k.details->>'package_id'=b.object_key and k.details->>'discrepancy_type'='shortage'))
+    and not exists(select 1 from order_blocks b where b.order_id=o.id and b.reason<>'quantity_discrepancy' and b.resolved_at is null)
+  )
+)`;
+
+export async function readyOrder(db:DB,id:string) {
+  const order=await one(db,"select * from orders where id=$1 for update",[id]);
+  if(order.state!=="awaiting_samples" || !order.paid_at) return;
+  const counts=await orderItemReadiness(db,id);
   if(!counts.total || counts.total!==counts.ready || (await db.query("select 1 from order_blocks where order_id=$1 and resolved_at is null",[id])).rowCount) return;
   const lines=(await db.query(`select l.*,st.code service from order_lines l join service_offers o on o.id=l.offer_id join service_types st on st.id=o.service_type_id where l.order_id=$1`,[id])).rows;
   for(const line of lines) {
@@ -399,6 +419,6 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
     ({id,revision,purpose,action,state,amount_cents,expires_at,batch_id:batch_id??null,item_codes:item_codes??null}));
   return {...orderDTO(order as Parameters<typeof orderDTO>[0]),price_cents:order.price_cents,
     customer_notes:order.customer_notes??null,held_at:order.held_at??null,held_from_state:order.held_from_state??null,hold_reason:order.hold_reason??null,
-    created_at:order.created_at,paid_at:order.paid_at??null,samples_ready_at:order.samples_ready_at??null,sla_due_at:order.sla_due_at??null,
+    created_at:order.created_at,report_published_at:order.report_published_at??null,closed_at:order.closed_at??null,paid_at:order.paid_at??null,samples_ready_at:order.samples_ready_at??null,sla_due_at:order.sla_due_at??null,
     lines,items:rows,report_version:report?.published_version??null,manual_quote:manual??null,parcels,cases,shipments,quotes,consents};
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
 import { CustomerActions, CustomerDesk, DemoCheckout, NewOrder, OrderFulfillment, OrderView, ReportView, TrackView } from "./customer";
 import { AdminDesk, LogisticsConfiguration, LogisticsDesk, StaffOrder, TaskView, WarehouseDesk, WarehouseDispatchBatch, WarehouseItemView, WarehousePackageView, WarehouseScan } from "./staff";
 import { Action, request, Tag } from "./ui";
@@ -22,6 +23,22 @@ import { canOpenStaffPage, customerDestination, customerTabs, staffHome, staffTa
 import type { Actor } from "../packages/core/common";
 
 export function Portal({path,target,route,actor:a,demo=false}:{path:string;target:string;route:PortalRoute;actor:Actor|null;demo?:boolean}) {
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const menuToggle=useRef<HTMLButtonElement>(null);
+  function closeMobileNavigation() {
+    setMobileNavOpen(false);
+    menuToggle.current?.focus();
+  }
+  useEffect(() => { setMobileNavOpen(false); }, [path]);
+  useEffect(()=>{
+    if(!mobileNavOpen) return;
+    const onKeyDown=(event:KeyboardEvent)=>{
+      if(event.key==="Escape") closeMobileNavigation();
+    };
+    document.getElementById("workspace-sidebar-nav")?.querySelector<HTMLButtonElement>("button")?.focus();
+    document.addEventListener("keydown",onKeyDown);
+    return ()=>document.removeEventListener("keydown",onKeyDown);
+  },[mobileNavOpen]);
   const isStaff=route.area==="warehouse"||route.area==="admin";
   const publicPage=route.area==="public";
   const warehouseLinks=a?.kind==="staff"?staffTabs("warehouse",a.roles):[];
@@ -83,11 +100,11 @@ export function Portal({path,target,route,actor:a,demo=false}:{path:string;targe
   else if((route.view==="order-quote"||route.view==="order-shipment")&&route.recordId) content=<OrderFulfillment key={route.recordId} order={route.id} id={route.recordId} kind={route.view==="order-quote"?"quotes":"shipments"}/>;
   else if(route.view==="report") content=<ReportView key={route.id} number={route.id} version={route.version}/>;
   else if(path==="/reports") content=<PublishedReports/>;
-  else if(path==="/account/notifications") content=<NotificationInbox/>;
+  else if(path==="/account/notifications"||path==="/notifications") content=<NotificationInbox/>;
   else if(route.view==="order") content=<OrderView key={route.id} number={route.id} section={route.section}/>;
   else if(route.view==="demo") content=<DemoCheckout id={route.id}/>;
   else if(route.view==="parcel"||route.view==="shipment") content=<TrackView kind={route.view==="parcel"?"parcels":"shipments"} id={route.id}/>;
-  else content=<CustomerDesk path={path}/>;
+  else content=<CustomerDesk path={path==="/billing"?"/account/billing":path} demo={demo}/>;
   const locale=isStaff?"zh-CN":"en";
   const signOut=a?<Action run={async()=>{await request("/auth/logout","POST",{});location.assign(a.kind==="staff"?"/staff/login":"/login");}}>{a.kind==="staff"?"退出登录":"Sign out"}</Action>:undefined;
   const homeLink=a?.kind==="customer"?"/account":undefined;
@@ -97,25 +114,42 @@ export function Portal({path,target,route,actor:a,demo=false}:{path:string;targe
     {publicPage ? <PublicFooter/> : <SiteFooter/>}
   </>;
 
-  const section=route.area==="admin"?"运营总览":route.area==="warehouse"?"仓库总览":"Workspace";
-  const currentLink=links.find(([href])=>href===path);
-  const parentLink=links.filter(([href])=>href!=="/wh"&&href!=="/admin"&&path.startsWith(href+"/")).sort(([left],[right])=>right.length-left.length)[0];
+  const normPath = path==="/billing"?"/account/billing":path==="/notifications"?"/account/notifications":path;
+  const section=route.area==="admin"?"运营总览":route.area==="warehouse"?"仓库总览":"My Workspace";
+  const currentLink=links.find(([href])=>href===normPath);
+  const parentLink=links.filter(([href])=>href!=="/wh"&&href!=="/admin"&&normPath.startsWith(href+"/")).sort(([left],[right])=>right.length-left.length)[0];
   const rawTopLinks:[string,string][]=route.area==="warehouse"?[
     ["/wh/scan","扫码查询"],["/wh/inspection","检查队列"],["/wh/review","报告复核"],["/wh/dispatch","出库管理"],
   ]:route.area==="admin"?[
     ["/admin/orders","订单管理"],["/admin/finance","财务"],["/admin/logistics","物流监控"],["/admin/templates","模板配置"],["/admin/storage/locations","库位管理"],
   ]:[
-    ["/catalog","Services"],["/categories","Product Categories"],["/how-it-works","How It Works"],["/report-guide","Reports"],["/pricing","Pricing"],
+    ["/catalog","Services"],["/categories","Product Categories"],["/how-it-works","How It Works"],["/report-guide","Sample Reports"],["/pricing","Pricing"],
   ];
   const topLinks=isStaff?rawTopLinks.filter(([href])=>links.some(([l])=>l===href)):rawTopLinks;
 
   return <div className={`workspace workspace-${route.area}`} lang={locale}>
     <a className="skip-link" href="#main-content">{isStaff?"跳至主要内容":"Skip to main content"}</a>
     <header className="workspace-top">
-      <div className="workspace-brand"><Brand/><span className="workspace-context">INSPECTION PLATFORM</span></div>
+      <div className="workspace-brand">
+        {route.area==="customer"&&<button
+          type="button"
+          ref={menuToggle}
+          className="workspace-menu-toggle"
+          aria-expanded={mobileNavOpen}
+          aria-controls="workspace-sidebar-nav"
+          aria-label={mobileNavOpen?"Close workspace menu":"Open workspace menu"}
+          onClick={()=>setMobileNavOpen(v=>!v)}
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            {mobileNavOpen ? <path d="M6 6l12 12M18 6L6 18"/> : <path d="M4 7h16M4 12h16M4 17h16"/>}
+          </svg>
+        </button>}
+        <Brand/>
+        <span className="workspace-context">INSPECTION PLATFORM</span>
+      </div>
       <span className="topspacer"/>
       <nav className="topnav" aria-label={isStaff?"快捷导航":"Platform navigation"}>
-        {topLinks.map(([href,label])=><Link key={href} href={href} aria-current={path===href?"page":undefined}>{label}</Link>)}
+        {topLinks.map(([href,label])=><Link key={href} href={href} aria-current={normPath===href?"page":undefined}>{label}</Link>)}
       </nav>
       <div className="header-right">
         {demo&&<QuickSwitch active={route.area as "customer"|"warehouse"|"admin"} actor={a}/>}
@@ -123,12 +157,21 @@ export function Portal({path,target,route,actor:a,demo=false}:{path:string;targe
         {signOut}
       </div>
     </header>
-    <div className={`workspace-layout ${path==="/orders/new"?"wizard-layout":""}`}>
-      <WorkspaceNavigation area={route.area as "admin"|"warehouse"|"customer"} title={section} links={links} path={path} demo={demo}/>
+    {mobileNavOpen && <div className="workspace-drawer-backdrop" onClick={closeMobileNavigation} aria-hidden="true"/>}
+    <div className="workspace-layout">
+      <WorkspaceNavigation
+        area={route.area as "admin"|"warehouse"|"customer"}
+        title={section}
+        links={links}
+        path={normPath}
+        demo={demo}
+        mobileOpen={mobileNavOpen}
+        onCloseMobile={route.area==="customer"?closeMobileNavigation:undefined}
+      />
       <main className={`workspace-main view-${route.view}`} id="main-content" tabIndex={-1}>
         <nav className="breadcrumb" aria-label={isStaff?"当前位置":"Breadcrumb"}>
           <Link href="/">{isStaff?"QCWarehouse":"QCWarehouse"}</Link><span aria-hidden="true">›</span>
-          {links[0][0]===path?<strong>{section}</strong>:<><Link href={links[0][0]}>{section}</Link>
+          {links[0][0]===normPath?<strong>{section}</strong>:<><Link href={links[0][0]}>{section}</Link>
             {(currentLink||parentLink)&&<><span aria-hidden="true">›</span>{currentLink?<strong>{currentLink[1]}</strong>:<Link href={parentLink[0]}>{parentLink[1]}</Link>}</>}
           </>}
         </nav>

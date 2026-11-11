@@ -2,7 +2,7 @@ import type { DB } from "../db";
 import { audit, code, event, guard, hash, lock, one, organization, revision, role, uuid, type Actor } from "./common";
 import { requireCustomerActive } from "./auth";
 import { processImageBytes } from "./media";
-import { readyOrder } from "./orders";
+import { orderAcceptsSampleAssignmentSql, readyOrder } from "./orders";
 import { assertZonePurpose, requireSpace } from "./storage";
 
 export function waybill(value:string) {
@@ -222,12 +222,12 @@ export async function assign(db:DB,actor:Actor,itemId:string,input:{
   role(actor,"receiver","warehouse_admin");
   const line=await one(db,"select * from order_lines where id=$1",[input.order_line_id]);
   await lock(db,"org:"+line.org_id);
-  const order=await one(db,"select * from orders where id=$1 for update",[line.order_id]);
+  const order=await one(db,`select (${orderAcceptsSampleAssignmentSql}) accepts_assignment from orders o where id=$1 for update`,[line.order_id]);
   const item=await one(db,"select * from warehouse_items where id=$1 and org_id=$2 for update",[itemId,line.org_id]);
   revision(item.revision,input.revision);
   guard(item.identity_state!=="quarantined" && item.condition_state!=="restricted",
     "ITEM_QUARANTINED","Quarantined or restricted items cannot be assigned to an inspection order.");
-  guard(order.paid_at && order.state==="awaiting_samples" && !item.parent_item_id && ["received","stored"].includes(item.custody_state),
+  guard(order.accepts_assignment && !item.parent_item_id && ["received","stored"].includes(item.custody_state),
     "ASSIGNMENT_UNAVAILABLE","This item or order is not ready for assignment.");
   const exp=await one<{id:string;declared_fields:Record<string,unknown>|null}>(
     db,

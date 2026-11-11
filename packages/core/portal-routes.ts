@@ -1,9 +1,9 @@
 import { hasStaffAccess, staffAccess } from "./staff-access";
 
 export const customerTabs:[string,string][]=[
-  ["/account","Account"],["/orders","Orders"],["/orders/new","New inspection"],["/parcels","Parcels"],["/items","Items"],
+  ["/account","Account"],["/orders","Orders"],["/orders/new","New Inspection"],["/parcels","Parcels"],["/items","Items"],
   ["/reports","Reports"],["/account/billing","Billing"],["/support","Support"],
-  ["/actions","Action required"],["/account/notifications","Notifications"],
+  ["/actions","Action Required"],["/account/notifications","Notifications"],
 ];
 const warehouseOverview=["receiver","warehouse_admin","inspector","reviewer","super_admin"] as const;
 const warehouseTabs=[
@@ -102,7 +102,7 @@ for(const [paths,route] of [
   [["/account/recovery"],{area:"public",view:"account-recovery"}],
   [["/staff/login"],{area:"public",view:"staff-login"}],
   [["/orders/new"],{area:"customer",view:"new-order"}],
-  [["/account/notifications","/account/security"],{area:"customer",view:"customer"}],
+  [["/account/notifications","/account/security","/billing","/notifications"],{area:"customer",view:"customer"}],
   [["/actions"],{area:"customer",view:"customer-actions"}],
   [["/admin/tickets"],{area:"admin",view:"staff-tickets"}],
   [["/admin/operations"],{area:"admin",view:"operations"}],

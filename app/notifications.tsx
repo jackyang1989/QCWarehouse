@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { Action, Empty, ErrorBlock, Panel, request, stamp, Table, useLoad, type Row } from "./ui";
 
 const noticeTitles:Record<string,string>={
+  "reference.sealed":"Your Golden Sample is active",
   "ticket.reply":"Support has replied to your case",
   "report.published":"Your inspection report is ready",
   "report.amended":"An updated report has been published",
@@ -25,13 +26,18 @@ function UpdatesTable({notices,onRead}:{notices:Row[];onRead:()=>void}) {
     {notices.length?<Table headers={["Update","Received","Status",""]} rows={notices.map(notice=>{
       const href=notice.case_id?"/support/cases/"+notice.case_id:
         notice.report_version&&notice.order_number?"/orders/"+notice.order_number+"/report/versions/"+notice.report_version:
-        notice.order_number?"/orders/"+notice.order_number:
+        notice.item_code?"/items#item-"+notice.item_code:
         notice.shipment_id?"/shipments/"+notice.shipment_id:
         notice.advice_id?"/parcels/"+notice.advice_id:
         notice.charge_id?"/account/billing#charge-"+notice.charge_id:
+        notice.order_number?"/orders/"+notice.order_number:
         notice.template==="email.delivery_failed"?"/account":
         notice.template==="payment.confirmed"||notice.template==="dispatch.quoted"?"/account/billing":null;
-      return [noticeTitles[notice.template]??"Account update",stamp(notice.created_at),notice.read_at?"Read":"Unread",
+      const title=noticeTitles[notice.template]??"Account update";
+      return [<span className="cell-stack"><span style={{fontWeight:notice.read_at?500:750}}>{title}</span>
+          {notice.item_code&&<small className="code">{notice.item_code}</small>}
+          {notice.order_number&&<small>Order <span className="code">{notice.order_number}</span>{notice.report_version?` · Report v${notice.report_version}`:""}</small>}</span>,
+        stamp(notice.created_at),notice.read_at?"Read":"Unread",
         <div className="actions">{href&&<Link href={href}>Open</Link>}
           {!notice.read_at&&<Action run={async()=>{
             await request("/me/notifications/"+notice.id+"/read","POST",{});onRead();
@@ -41,8 +47,8 @@ function UpdatesTable({notices,onRead}:{notices:Row[];onRead:()=>void}) {
   </>;
 }
 export function RecentUpdates({notices,onRead}:{notices:Row[];onRead:()=>void}) {
-  return <Panel title="Recent updates"><UpdatesTable notices={notices} onRead={onRead}/>
-    <Link href="/account/notifications">View notification history →</Link>
+  return <Panel title="Recent activity"><UpdatesTable notices={notices.slice(0,5)} onRead={onRead}/>
+    <Link href="/account/notifications">View all notifications →</Link>
   </Panel>;
 }
 export function NotificationInbox() {
@@ -59,7 +65,7 @@ export function NotificationInbox() {
       <h1>Notifications</h1><p className="muted">Find updates about reports, payments, parcels, and support cases.</p></div>
     <Panel title={unread?"Unread updates":"All updates"}>
       <div className="actions"><Link href="/account/notifications" aria-current={!unread?"page":undefined}>All</Link>
-        <Link href="/account/notifications?unread=1" aria-current={unread?"page":undefined}>Unread</Link>
+        <Link href="/account/notifications?unread=1" aria-current={unread?"page":undefined}>Unread{data?` (${data.unread_count})`:""}</Link>
         <button type="button" onClick={reload}>Refresh</button></div>
       {error&&<ErrorBlock error={error}/>}
       {!data&&!error&&<p role="status">Loading updates…</p>}

@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { DB } from "../db";
 import { audit, code, event, guard, hash, lock, one, organization, revision, role, uuid, type Actor } from "./common";
 import { integrationPreflight } from "./integrations";
-import { activatePaidOrder, priceSchema, readyOrder, templateSchema } from "./orders";
+import { activatePaidOrder, orderItemReadiness, priceSchema, readyOrder, templateSchema } from "./orders";
 import { assertItemNotFrozen, assertZonePurpose, requireSpace } from "./storage";
 
 export async function computeOrderRefundStage(
@@ -221,6 +221,21 @@ export async function resumeOrder(db:DB,actor:Actor,id:string,reason:string) {
   const o=await one(db,"select * from orders where id=$1 for update",[id]);
   guard(o.state==="on_hold" && o.held_from_state,"ORDER_NOT_ON_HOLD","This order is not currently on hold.");
   await db.query("update order_blocks set resolved_at=now() where order_id=$1 and reason='staff_hold' and resolved_at is null",[id]);
+  if(o.held_from_state==="awaiting_samples") {
+    const counts=await orderItemReadiness(db,id);
+    if(counts.total>0&&counts.ready===counts.total) {
+      const {rows}=await db.query<{id:string}>(`update order_blocks b set resolved_at=now()
+        where b.order_id=$1 and b.reason='quantity_discrepancy' and b.resolved_at is null
+        and exists(select 1 from tickets k where k.order_id=b.order_id and k.org_id=$2
+          and k.public_no like 'QTY-%' and k.details->>'package_id'=b.object_key
+          and k.details->>'discrepancy_type'='shortage' and k.state in ('resolved','closed'))
+        and not exists(select 1 from tickets k where k.order_id=b.order_id and k.org_id=$2
+          and k.public_no like 'QTY-%' and k.details->>'package_id'=b.object_key
+          and (k.details->>'discrepancy_type' is distinct from 'shortage' or k.state not in ('resolved','closed')))
+        returning b.id`,[id,o.org_id]);
+      for(const block of rows) await audit(db,actor,"reconcile_quantity_shortage","order_blocks",block.id,{order_id:id});
+    }
+  }
   const openBlocks=(await db.query("select reason from order_blocks where order_id=$1 and resolved_at is null",[id])).rowCount;
   guard(!openBlocks,"ORDER_BLOCKED","Resolve all active order blocks before resuming.");
   const fromState=o.held_from_state as string;

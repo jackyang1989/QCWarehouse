@@ -288,82 +288,48 @@ const navigationSections = {
   ],
 } satisfies Record<string,[string,string[]][]>;
 
-const wizardSidebarSteps:[string,string][]=[
-  ["Select Inspection","Product category & service"],
-  ["Configure Service","Template & sample count"],
-  ["Sample Details","Items & supplier info"],
-  ["Inspection Scope","Checks & requirements"],
-  ["Review & Terms","Verify details & quote"],
-  ["Payment Preview","Confirm & send samples"],
-];
-
-export function WorkspaceNavigation({area,title,links,path,demo=false}:{area:keyof typeof navigationSections;title:string;links:[string,string][];path:string;demo?:boolean}) {
-  const [wizardStep,setWizardStep]=useState(0);
-  useEffect(()=>{
-    function onStep(e:Event) {
-      const detail=(e as CustomEvent<number>).detail;
-      if(typeof detail==="number") setWizardStep(detail);
-    }
-    window.addEventListener("qcw:wizard-step",onStep);
-    return ()=>window.removeEventListener("qcw:wizard-step",onStep);
-  },[]);
-
-  if(area==="customer" && path==="/orders/new") {
-    return <aside className="workspace-sidebar">
-      <div className="wizard-left-head">
-        <div className="eyebrow">INSPECTION WORKFLOW</div>
-        <h2>Create an<br/>Inspection</h2>
-        <p>A structured, traceable process from product arrival to inspection report.</p>
-      </div>
-      <div className="wizard-steps" role="list" aria-label="Inspection workflow steps">
-        {wizardSidebarSteps.map(([name,sub],idx)=><button
-          key={name}
-          type="button"
-          className={`wizard-step ${idx===wizardStep?"active":idx<wizardStep?"done":""}`}
-          onClick={()=>window.dispatchEvent(new CustomEvent("qcw:wizard-go",{detail:idx}))}
-        >
-          <span className="stepno">{idx<wizardStep?"✓":String(idx+1).padStart(2,"0")}</span>
-          <div><strong>{name}</strong><small>{sub}</small></div>
-        </button>)}
-      </div>
-      <div className="sidebar-note">
-        <b>Need assistance?</b>
-        Not sure which inspection is right for your item? Review the scope or contact our team before committing.
-      </div>
-      <div style={{margin:"16px 10px 0"}}>
-        <Link className="button sm" style={{width:"100%",background:"#1b314e",borderColor:"#335073",color:"#e8f1fc"}} href="/orders">← Back to My Orders</Link>
-      </div>
-    </aside>;
-  }
-
-  const current=links.find(([href])=>href===path)?.[0]
-    ?? links.filter(([href])=>href!=="/wh"&&href!=="/admin"&&path.startsWith(href+"/")).sort(([left],[right])=>right.length-left.length)[0]?.[0]
-    ?? (path.startsWith("/wh/task/")?"/wh/execute":path.startsWith("/shipments/")?"/parcels":undefined);
+export function WorkspaceNavigation({area,title,links,path,demo=false,mobileOpen=false,onCloseMobile}:{area:keyof typeof navigationSections;title:string;links:[string,string][];path:string;demo?:boolean;mobileOpen?:boolean;onCloseMobile?:()=>void}) {
+  const normPath = path==="/billing"?"/account/billing":path==="/notifications"?"/account/notifications":path;
+  const current=links.find(([href])=>href===normPath)?.[0]
+    ?? links.filter(([href])=>href!=="/wh"&&href!=="/admin"&&normPath.startsWith(href+"/")).sort(([left],[right])=>right.length-left.length)[0]?.[0]
+    ?? (normPath.startsWith("/wh/task/")?"/wh/execute":normPath.startsWith("/shipments/")?"/parcels":normPath.startsWith("/support/cases/")?"/support":undefined);
   const grouped = navigationSections[area].map(([name,paths])=>[name,paths.flatMap(href=>links.filter(([url])=>url===href))] as const);
   const hasAdminCatalog = links.some(([url])=>url==="/admin/catalog");
   const otherLinks = area==="warehouse"
     ? []
     : links.filter(([href])=>!(area==="admin"&&hasAdminCatalog&&href==="/admin/settings") && !grouped.some(([,group])=>group.some(([url])=>url===href)));
   const isStaff = area==="warehouse" || area==="admin";
-  return <aside className="workspace-sidebar">
+  return <aside className={`workspace-sidebar ${mobileOpen?"mobile-open":""}`} id="workspace-sidebar-nav">
     <div className="workspace-sidebar-title">
-      <p className="eyebrow">{isStaff?"OPERATIONS / INTERNAL":"CUSTOMER WORKSPACE"}</p>
-      <strong>{area==="customer"?"My Workspace":area==="warehouse"?"仓库作业中心":"运营管理中心"}</strong>
-      <p>{area==="customer"?"Your inspections, receiving address, samples and reports — organized in one place.":"统一实物、检查、证据和订单履约信息"}</p>
+      <div className="row" style={{justifyContent:"space-between",alignItems:"flex-start"}}>
+        <div>
+          {isStaff&&<p className="eyebrow">OPERATIONS / INTERNAL</p>}
+          <strong>{area==="customer"?"My Workspace":area==="warehouse"?"仓库作业中心":"运营管理中心"}</strong>
+        </div>
+        {onCloseMobile && (
+          <button
+            type="button"
+            className="workspace-drawer-close"
+            aria-label="Close workspace navigation"
+            onClick={onCloseMobile}
+          >
+            ✕
+          </button>
+        )}
+      </div>
+      {isStaff&&<p>统一实物、检查、证据和订单履约信息</p>}
     </div>
     <nav className="workspace-nav" aria-label={title}>
       {[...grouped,[area==="customer"?"More":"平台配置",otherLinks] as const].filter(([,group])=>group.length>0).map(([name,group])=><div className="workspace-nav-group" key={name}>
         <p>{name}</p>
-        {group.map(([href,label])=><Link key={href} href={href} aria-current={href===current?"page":undefined}>
+        {group.map(([href,label])=><Link key={href} href={href} aria-current={href===current?"page":undefined} onClick={onCloseMobile}>
           <PlatformIcon name={navIcons[href]??"orders"}/><span>{label}</span>
         </Link>)}
       </div>)}
     </nav>
-    <div className="sidebar-note">
-      <b>{isStaff?(demo?"演示环境提醒":"作业与审计留痕"):"Documented inspections"}</b>
-      {isStaff
-        ?(demo?"所有操作均为本机模拟。实际资金、物流、客户资产和报告发布需要服务端授权。":"所有收货、库位、质检证据与资金操作均实时记录服务端审计台账。")
-        :"Item IDs, photo evidence and published report versions stay traceable throughout the process."}
-    </div>
+    {isStaff&&<div className="sidebar-note">
+      <b>{demo?"演示环境提醒":"作业与审计留痕"}</b>
+      {demo?"所有操作均为本机模拟。实际资金、物流、客户资产和报告发布需要服务端授权。":"所有收货、库位、质检证据与资金操作均实时记录服务端审计台账。"}
+    </div>}
   </aside>;
 }

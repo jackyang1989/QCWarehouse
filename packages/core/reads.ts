@@ -3,7 +3,7 @@ import { z } from "zod";
 import { guard, hash, one, organization, role, type Actor } from "./common";
 import { receiving } from "./auth";
 import { customerEmailDeliveryStatus } from "./email";
-import { orderDTO } from "./orders";
+import { orderAcceptsSampleAssignmentSql, orderDTO } from "./orders";
 import { orderShipments } from "./fulfillment-reads";
 import { getIntakeContext, waybill } from "./intake";
 import { hasStaffAccess, staffAccess } from "./staff-access";
@@ -14,7 +14,7 @@ export async function items(db:DB,actor:Actor) {
     p.code package_code,p.advice_id inbound_advice_id,
     (select t.tracking_norm from tracking_records t where t.package_id=p.id and t.direction='inbound' and t.closed_at is null order by t.generation desc limit 1) inbound_tracking_norm,
     (select max(sp.ends_at) from storage_periods sp where sp.item_id=w.id) paid_storage_until,
-    a.order_line_id,e.declared_fields,o.id order_id,o.public_no order_no,sl.code location_code,
+    a.order_line_id,e.declared_fields,o.id order_id,o.public_no order_no,o.state order_state,sl.code location_code,
     (select coalesce(jsonb_agg(jsonb_build_object('id',c.id,'code',c.code,'custody_state',c.custody_state) order by c.code),'[]'::jsonb)
      from warehouse_items c where c.parent_item_id=w.id) components,
     (select jsonb_build_object(
@@ -53,6 +53,8 @@ export async function bills(db:DB,actor:Actor) {
     d.batch_id,
     (select p.state from payments p where p.charge_item_id=c.id order by p.updated_at desc nulls last,p.id desc limit 1) latest_attempt_state,
     (select p.provider_ref from payments p where p.id=c.applied_payment_id) paid_ref,
+    (select min(a.at) from audit_events a where a.entity_type='charge_items' and a.entity_id=c.id and a.action='payment_confirmed') paid_at,
+    coalesce(i.expires_at,d.expires_at,s.expires_at) expires_at,
     case when c.free_authorization is not null then 'FREE-AUTH' else null end receipt_summary,
     coalesce(i.revision,d.revision,s.revision) quote_revision
     from charge_items c left join inspection_quotes i on i.id=c.inspection_quote_id left join dispatch_quote_versions d on d.id=c.dispatch_quote_id
@@ -63,12 +65,23 @@ export async function customerActions(db:DB,actor:Actor) {
   const {rows}=await db.query(`select * from (
     select o.id,'order' kind,o.state,o.public_no reference,null::timestamptz due_at
     from orders o where o.org_id=$1 and (
-      o.state='draft' or
+      (o.state='draft' and not exists(select 1 from manual_quote_requests m where m.order_id=o.id
+        and m.revision=o.revision and m.state in ('requested','offered'))) or
       (o.state='awaiting_payment' and not exists(
         select 1 from charge_items c join payments p on p.charge_item_id=c.id
         where c.inspection_quote_id::text=o.submission_snapshot->>'quote_id' and c.voided_at is null and p.state='processing')) or
-      (o.state='awaiting_samples' and not exists(select 1 from advice_orders a where a.order_id=o.id and a.org_id=o.org_id))
+      (o.state='awaiting_samples' and not exists(select 1 from advice_orders a where a.order_id=o.id and a.org_id=o.org_id)) or
+      (o.state in ('report_ready','action_pending') and exists(
+        select 1 from order_lines l join order_line_item_links a on a.order_line_id=l.id and a.unlinked_at is null
+        join warehouse_items w on w.id=a.item_id and w.org_id=o.org_id
+        where l.order_id=o.id and w.custody_state in ('received','stored') and w.parent_item_id is null and w.identity_state<>'quarantined'
+        and not exists(select 1 from disposition_requests d where d.item_id=w.id and d.state<>'cancelled' and d.state<>'completed')
+        and not exists(select 1 from reference_samples r where r.item_id=w.id and (r.state='pending_safe_storage' or (r.state='active' and r.expires_at>now())))))
     )
+    union all select q.id,'inspection_quote','manual_quote_ready',o.public_no,q.expires_at
+      from manual_quote_requests m join orders o on o.id=m.order_id and o.revision=m.revision
+      join inspection_quotes q on q.id=m.accepted_quote_id and q.order_id=o.id
+      where o.org_id=$1 and o.state='draft' and m.state='offered' and q.accepted_at is null and q.expires_at>now()
     union all select q.id,'quote',b.action,null,q.expires_at from dispatch_quote_versions q
       join dispatch_batches b on b.id=q.batch_id where b.org_id=$1 and b.state='quoted' and q.accepted_at is null and q.expires_at>now()
     union all select q.id,'quote','retain',w.code,q.expires_at from storage_quotes q
@@ -110,10 +123,35 @@ export async function customerActions(db:DB,actor:Actor) {
   ) actions order by due_at nulls last,kind,reference,id limit 200`,[org,actor.id]);
   return {rows};
 }
+const customerOrderSelect=`select o.id,o.public_no,o.state,o.revision,o.price_cents,o.created_at,
+    greatest(o.updated_at,o.paid_at,o.samples_ready_at,o.report_published_at,o.closed_at,o.held_at,
+      (select max(a.at) from audit_events a where a.entity_type='orders' and a.entity_id=o.id)) updated_at,
+    o.sla_due_at,
+    (select coalesce(sum(l.quantity),0)::int from order_lines l where l.order_id=o.id) item_count,
+    (select s.title->>'en' from order_lines l join service_offers s on s.id=l.offer_id where l.order_id=o.id order by l.id limit 1) service_title,
+    (select st.code from order_lines l join service_offers s on s.id=l.offer_id join service_types st on st.id=s.service_type_id where l.order_id=o.id order by l.id limit 1) service_code,
+    (select r.published_version from reports r where r.order_id=o.id limit 1) report_version,
+    (select case when c.applied_payment_id is not null or c.free_authorization is not null then 'paid'
+      when exists(select 1 from payments p where p.charge_item_id=c.id and p.state='processing') then 'processing'
+      when iq.expires_at<=now() then 'expired' else 'open' end
+     from charge_items c join inspection_quotes iq on iq.id=c.inspection_quote_id
+     where iq.order_id=o.id and iq.id::text=o.submission_snapshot->>'quote_id' and c.voided_at is null limit 1) payment_state
+    from orders o`;
+
+export async function listCustomerOrders(db:DB,actor:Actor,query:string,state:string,page:number) {
+  const pageSize=20;
+  const {rows}=await db.query(customerOrderSelect+` where o.org_id=$1
+    and ($2='' or strpos(upper(o.public_no),upper($2))>0) and ($3='' or o.state=$3)
+    order by updated_at desc,o.id desc limit $4 offset $5`,[organization(actor),query,state,pageSize+1,(page-1)*pageSize]);
+  return {rows:rows.slice(0,pageSize),has_more:rows.length>pageSize};
+}
+
 export async function customerDesk(db:DB,actor:Actor) {
   const org=organization(actor);
-  const orders=(await db.query(`select id,public_no,state,revision,price_cents,created_at from orders where org_id=$1 order by created_at desc limit 200`,[org])).rows;
+  const orders=(await db.query(customerOrderSelect+" where o.org_id=$1 order by updated_at desc,o.id desc limit 200",[org])).rows;
   const advices=(await db.query(`select a.id,a.address_snapshot,t.tracking_norm,t.carrier_code,t.transport_state,t.sync_state,p.state warehouse_state,
+    count(*) filter (where p.id is null) over()::int awaiting_check_in_count,
+    count(*) filter (where p.id is not null) over()::int checked_in_count,
     array(select order_id from advice_orders where advice_id=a.id) order_ids,
     array(select o.public_no from advice_orders ao join orders o on o.id=ao.order_id where ao.advice_id=a.id order by o.public_no) order_numbers
     from package_advices a
@@ -121,18 +159,22 @@ export async function customerDesk(db:DB,actor:Actor) {
     where a.org_id=$1 order by a.created_at desc limit 200`,[org])).rows;
   const shipments=(await db.query(`select s.id,s.batch_id,s.state,s.tracking_norm,s.carrier_code,s.shipped_at,b.action from shipments s join dispatch_batches b on b.id=s.batch_id
     where b.org_id=$1 and s.shipped_at is not null order by s.shipped_at desc limit 200`,[org])).rows;
-  const quotes=(await db.query(`select q.id,q.revision,q.amount_cents,q.expires_at,'dispatch' purpose,q.batch_id,b.action,
+  const quotes=(await db.query(`select pending.*,count(*) over()::int quote_count from (
+    select q.id,q.revision,q.amount_cents,q.expires_at,'dispatch' purpose,q.batch_id,b.action,
     q.snapshot, (select jsonb_object_agg(w.id::text,w.code) from dispatch_batch_items bi join warehouse_items w
       on w.id=bi.item_id and w.org_id=bi.org_id where bi.batch_id=b.id and bi.org_id=b.org_id) item_codes
     from dispatch_quote_versions q join dispatch_batches b on b.id=q.batch_id where b.org_id=$1 and b.state='quoted' and q.accepted_at is null and q.expires_at>now()
     union all select q.id,q.revision,q.amount_cents,q.expires_at,'storage',null,d.action,q.snapshot,jsonb_build_object(w.id::text,w.code)
     from storage_quotes q join disposition_requests d on d.id=q.disposition_id join warehouse_items w on w.id=d.item_id and w.org_id=d.org_id
-    where d.org_id=$1 and q.accepted_at is null and q.expires_at>now() limit 100`,[org])).rows;
+    where d.org_id=$1 and d.state='requested' and q.accepted_at is null and q.expires_at>now()
+    ) pending order by expires_at,id limit 100`,[org])).rows;
   const batches=(await db.query("select id,state,revision,action from dispatch_batches where org_id=$1 and state='draft' limit 100",[org])).rows;
   const active_batches=(await db.query(`select b.id,b.state,b.revision,b.action,b.destination_snapshot,
     q.id quote_id,q.amount_cents quote_amount_cents,q.expires_at quote_expires_at,
     coalesce((select array_agg(w.code order by w.code) from dispatch_batch_items bi join warehouse_items w on w.id=bi.item_id where bi.batch_id=b.id and bi.released_at is null),array[]::text[]) item_codes,
-    coalesce((select array_agg(distinct s.tracking_norm) filter (where s.tracking_norm is not null) from shipments s where s.batch_id=b.id),array[]::text[]) waybills
+    coalesce((select array_agg(distinct s.tracking_norm) filter (where s.tracking_norm is not null) from shipments s where s.batch_id=b.id),array[]::text[]) waybills,
+    coalesce((select jsonb_agg(jsonb_build_object('id',s.id,'tracking_norm',s.tracking_norm) order by s.shipped_at,s.id)
+      from shipments s where s.batch_id=b.id and s.shipped_at is not null and s.tracking_norm is not null),'[]'::jsonb) outbound_shipments
     from dispatch_batches b
     left join lateral(select id,amount_cents,expires_at from dispatch_quote_versions where batch_id=b.id order by revision desc limit 1) q on true
     where b.org_id=$1 order by b.id desc limit 60`,[org])).rows;
@@ -157,8 +199,19 @@ export async function customerDesk(db:DB,actor:Actor) {
   }
   const reports=(await db.query(`select r.order_id,r.public_no,r.published_version,o.public_no order_no from reports r join orders o on o.id=r.order_id
     where o.org_id=$1 and r.published_version is not null limit 200`,[org])).rows;
-  const tickets=(await db.query(`select id,public_no,subject,state,details->>'decision' decision from tickets where org_id=$1 order by created_at desc limit 100`,[org])).rows;
-  const notices=(await customerNotifications(db,actor)).rows;
+  const tickets=(await db.query(`select k.id,k.public_no,k.category,k.subject,k.state,k.created_at,k.next_action_at,k.details->>'decision' decision,o.public_no order_no,
+    coalesce((select max(e.created_at) from ticket_events e where e.ticket_id=k.id and e.kind<>'internal_note'),k.created_at) updated_at
+    from tickets k left join orders o on o.id=k.order_id and o.org_id=k.org_id where k.org_id=$1 order by k.created_at desc limit 100`,[org])).rows;
+  const refunds=(await db.query(`select r.id,r.amount_cents,r.state,r.created_at,c.purpose,
+    (select o.public_no from inspection_quotes iq join orders o on o.id=iq.order_id where iq.id=c.inspection_quote_id limit 1) order_no
+    from refunds r join payments p on p.id=r.payment_id join charge_items c on c.id=p.charge_item_id
+    where c.org_id=$1 order by r.created_at desc limit 100`,[org])).rows;
+  const inspectionQuotes=(await db.query(`select q.id,q.amount_cents,q.currency,q.expires_at,o.public_no order_number
+    from manual_quote_requests m join orders o on o.id=m.order_id and o.revision=m.revision
+    join inspection_quotes q on q.id=m.accepted_quote_id and q.order_id=o.id
+    where o.org_id=$1 and o.state='draft' and m.state='offered' and q.accepted_at is null and q.expires_at>now()
+    order by q.expires_at,q.id`,[org])).rows;
+  const notices=(await customerNotifications(db,actor,false,null,5)).rows;
   const references=(await db.query(`select r.id reference_id,r.item_id,r.state,r.revision,r.condition_note,r.expires_at,
     r.authorization_snapshot->>'seal_code' seal_code,
     r.authorization_snapshot->>'safe_location_code' safe_location_code,
@@ -171,10 +224,24 @@ export async function customerDesk(db:DB,actor:Actor) {
     w.code,w.custody_state
     from reference_samples r join warehouse_items w on w.id=r.item_id
     where r.org_id=$1 order by r.expires_at desc,r.revision desc limit 100`,[org])).rows;
-  return {orders,advices,shipments,quotes,batches,active_batches,recent_destinations,reports,tickets,notices,references,profile:await receiving(db,actor.id),email_delivery:await customerEmailDeliveryStatus(db,actor),items:await items(db,actor),bills:await bills(db,actor)};
+  const counts=await one(db,`select
+    (select count(*)::int from orders o where o.org_id=$1 and o.state not in ('draft','closed','cancelled')) active_inspections,
+    (select count(*)::int from warehouse_items w where w.org_id=$1 and w.parent_item_id is null
+      and w.custody_state in ('received','stored')) in_custody,
+    (select count(*)::int from warehouse_items w
+      join order_line_item_links a on a.item_id=w.id and a.unlinked_at is null
+      join order_lines l on l.id=a.order_line_id join orders o on o.id=l.order_id
+      where w.org_id=$1 and o.org_id=$1 and o.state in ('report_ready','action_pending') and w.parent_item_id is null
+      and w.custody_state in ('received','stored') and w.identity_state<>'quarantined'
+      and not exists(select 1 from disposition_requests d where d.item_id=w.id and d.state not in ('completed','cancelled'))
+      and not exists(select 1 from reference_samples r where r.item_id=w.id
+        and (r.state='pending_safe_storage' or (r.state='active' and r.expires_at>now())))) awaiting_instructions`,[org]);
+  const summary={...counts,awaiting_check_in:advices[0]?.awaiting_check_in_count??0,checked_in:advices[0]?.checked_in_count??0,
+    pending_quotes:(quotes[0]?.quote_count??0)+inspectionQuotes.length};
+  return {summary,orders,advices,shipments,quotes,inspectionQuotes,batches,active_batches,recent_destinations,reports,tickets,refunds,notices,references,profile:await receiving(db,actor.id),email_delivery:await customerEmailDeliveryStatus(db,actor),items:await items(db,actor),bills:await bills(db,actor)};
 }
-export async function customerNotifications(db:DB,actor:Actor,unread=false,before:string|null=null) {
-  const org=organization(actor),pageSize=50;
+export async function customerNotifications(db:DB,actor:Actor,unread=false,before:string|null=null,pageSize=50) {
+  const org=organization(actor);
   if(before)await one(db,"select id from notifications where id=$1 and user_id=$2",[before,actor.id]);
   const {rows}=await db.query(`with batch as (
     select n.id,n.template,n.read_at,n.created_at,n.order_id,n.payload
@@ -192,11 +259,13 @@ export async function customerNotifications(db:DB,actor:Actor,unread=false,befor
       (select tr.shipment_id from tracking_records tr where tr.id::text=n.payload->>'tracker_id' and tr.org_id=$2)) shipment_id,
     coalesce((select p.advice_id from packages p where p.id::text=n.payload->>'package_id' and p.org_id=$2),
       (select tr.advice_id from tracking_records tr where tr.id::text=n.payload->>'tracker_id' and tr.org_id=$2)) advice_id,
-    (select c.id from charge_items c where c.id::text=n.payload->>'charge_id' and c.org_id=$2) charge_id
+    (select c.id from charge_items c where c.id::text=n.payload->>'charge_id' and c.org_id=$2) charge_id,
+    (select w.code from warehouse_items w where w.id::text=n.payload->>'item_id' and w.org_id=$2) item_code
   from batch n left join orders o on o.id=n.order_id and o.org_id=$2
   order by n.created_at desc nulls last,n.id desc`,[actor.id,org,unread,before,pageSize+1]);
   const page=rows.slice(0,pageSize);
-  return {rows:page,next_before:rows.length>pageSize?page.at(-1)?.id:null};
+  const unread_count=(await one<{n:number}>(db,"select count(*)::int n from notifications where user_id=$1 and read_at is null",[actor.id])).n;
+  return {rows:page,unread_count,next_before:rows.length>pageSize?page.at(-1)?.id:null};
 }
 export async function markNotificationRead(db:DB,actor:Actor,id:string) {
   organization(actor);
@@ -272,7 +341,7 @@ export async function warehouseItem(db:DB,actor:Actor,code:string) {
     (select array_agg(tr.tracking_norm order by tr.tracking_norm) from advice_orders ao join tracking_records tr on tr.advice_id=ao.advice_id and tr.direction='inbound' and tr.closed_at is null where ao.order_id=o.id) advised_tracking_nos
     from expected_items e join order_lines l on l.id=e.order_line_id
     join orders o on o.id=l.order_id join service_offers s on s.id=l.offer_id
-    where l.org_id=$1 and o.state='awaiting_samples' and o.paid_at is not null and e.in_scope
+    where l.org_id=$1 and ${orderAcceptsSampleAssignmentSql} and e.in_scope
     and not exists(select 1 from order_line_item_links a where a.expected_item_id=e.id and a.unlinked_at is null)
     order by o.public_no,l.id,e.position`,[item.org_id])).rows:[];
   const positions=rawPositions.map(pos=>{
