@@ -5,7 +5,7 @@ import addFormats from "ajv-formats";
 import { parse } from "yaml";
 import { z } from "zod";
 import { transaction, pool, type DB } from "../db";
-import { actorFrom, appOrigin, closeCustomerAccount, completeRegistration, confirmEmailChange, cookie, csrfCookie, csrfTokenFor, currentTerms, decideAccountRecovery, demoSwitchAccount, executeAccountRecovery, finishProvider, getCookie, linkProviderIdentity, listIdentities, listSessions, pendingProvider, publicPolicy, readAccountRecoveryStatus, reportDownloadSignature, reportShareToken, requestAccountRecovery, requestEmailChange, revokeOtherSessions, revokeSession, staffSignIn, staffUpdateUserRoles, staffUpdateUserStatus, startCustomerReauth, startOtp, startProvider, unlinkIdentity, verifyCsrfToken, verifyCustomerReauth, verifyOtp, verifyReportDownload } from "./auth";
+import { actorFrom, appOrigin, closeCustomerAccount, completeRegistration, confirmEmailChange, cookie, csrfCookie, csrfTokenFor, currentTerms, customerPreferences, decideAccountRecovery, demoSwitchAccount, executeAccountRecovery, finishProvider, getCookie, linkProviderIdentity, listIdentities, listSessions, pendingProvider, publicPolicy, readAccountRecoveryStatus, reportDownloadSignature, reportShareToken, requestAccountRecovery, requestEmailChange, revokeOtherSessions, revokeSession, staffSignIn, staffUpdateUserRoles, staffUpdateUserStatus, startCustomerReauth, startOtp, startProvider, unlinkIdentity, updateCustomerPreferences, verifyCsrfToken, verifyCustomerReauth, verifyOtp, verifyReportDownload } from "./auth";
 import { Problem, audit, guard, hash, idempotent, isDemo, one, organization, role, uuid, type Actor } from "./common";
 import { integrationPreflight, signInMethods } from "./integrations";
 import { failedJobs, retryFailedJob } from "./worker";
@@ -14,9 +14,9 @@ import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote,
 import { advise, assign, bindUnmatchedPackageOwner, checkIn, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
 import { acceptQuote, amendDispatchBatch, calculateShippingPreview, cancelDisposition, checkStorageReminders, closeCompletedOrder, confirmBatch, handover, instruct, packShipment, planBatch, publishShippingRate, quoteBatch, readDispatchBatch, receiveReturn, releaseReferenceSample, storageQuote } from "./dispatch";
-import { checkout, demoPay, orderPayment, orderRefundPayments, refundApprove, refundRequest, resolvePaymentDispute, stripeEvent, verifyStripe } from "./payments";
+import { chargeReceipt, checkout, demoPay, orderPayment, orderRefundPayments, refundApprove, refundRequest, resolvePaymentDispute, stripeEvent, verifyStripe } from "./payments";
 import { approveTrackingTranslation, correctCustomerParcelTracking, correctStaffTracking, providerCallback, refreshTracking, submitTrackingTranslation, tracking, trackingAdmin, trackingMonitor, updateTrackingAlert, verificationState, verifyTracking } from "./logistics";
-import { adminDesk, bills, customerActions, customerDesk, customerNotifications, dispatchQueueStates, items, listCustomerOrders, markNotificationRead, orderLedger, orderLedgerCsv, readOrderByPublicNumber, readStaffObjectSummary, reconcileFinance, searchStaffOrders, staffOrderDetail, staffOrderFilters, warehouseDesk, warehouseDispatchBatch, warehouseDispatchQueue, warehouseItem, warehousePackage } from "./reads";
+import { adminDesk, bills, customerActions, customerDesk, customerInventory, customerNotifications, dispatchQueueStates, items, listCustomerOrders, markNotificationRead, orderLedger, orderLedgerCsv, readOrderByPublicNumber, readStaffObjectSummary, reconcileFinance, searchStaffOrders, staffOrderDetail, staffOrderFilters, warehouseDesk, warehouseDispatchBatch, warehouseDispatchQueue, warehouseItem, warehousePackage } from "./reads";
 import { staffAccess } from "./staff-access";
 import { customerDestination, withDestination } from "./portal-routes";
 import { orderFulfillmentRecord } from "./fulfillment-reads";
@@ -100,6 +100,12 @@ function authResult(result:{state:string;secret:string;kind:string}) {
 function binary(file:{data:Buffer;mime:string}) {
   return new Response(new Uint8Array(file.data),{headers:{"content-type":file.mime,"cache-control":"private, no-store","x-content-type-options":"nosniff"}});
 }
+async function supportPhotoForm(req:Request) {
+  guard(Number(req.headers.get("content-length")??0)<=8_100_000,"BODY_TOO_LARGE","Photo is too large.",413);
+  const form=await req.formData(),file=form.get("photo");
+  guard(file instanceof File&&file.size>0&&file.size<=8_000_000,"FILE_INVALID","Choose a photo up to 8 MB.",422);
+  return {form,bytes:Buffer.from(await file.arrayBuffer())};
+}
 async function extras(req:Request,path:string,actor:Actor|null):Promise<Response|null> {
   const method=req.method;
   const url=new URL(req.url);
@@ -133,6 +139,12 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const state=z.string().regex(/^[a-z_]{0,32}$/).parse(url.searchParams.get("state")??"");
     const page=z.coerce.number().int().min(1).max(10000).parse(url.searchParams.get("page")??"1");
     return json(await transaction(db=>listCustomerOrders(db,actorRequired(actor),query,state,page)));
+  }
+  if(method==="GET"&&path==="/me/inventory") {
+    const page=z.coerce.number().int().min(1).max(10000).parse(url.searchParams.get("page")??"1");
+    const filter=z.enum(["all","inspection","handling","reference"]).parse(url.searchParams.get("filter")??"all");
+    const code=z.string().regex(/^S-[a-zA-Z0-9-]{1,64}$/).optional().parse(url.searchParams.get("code")??undefined);
+    return json(await transaction(db=>customerInventory(db,actorRequired(actor),page,filter,code)));
   }
   if(method==="GET"&&path==="/me/reports") {
     const reference=z.string().trim().toUpperCase().pipe(z.string().regex(/^(QW|R)-[A-F0-9]{1,64}$/)).optional()
@@ -340,8 +352,11 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     guard(raw.length<=500000,"BODY_TOO_LARGE","Callback too large.",413);
     return json(await transaction(db=>providerCallback(db,callback[1],raw)));
   }
-  if(method==="GET" && path==="/me") return json({actor:actorRequired(actor)});
-  if(method==="GET" && path==="/me/desk") return json(await transaction(db=>customerDesk(db,actorRequired(actor))));
+  if(method==="GET" && path==="/me") {
+    const current=actorRequired(actor);
+    return json({actor:current,...(current.kind==="customer"?{profile:await customerPreferences(pool,current)}:{})});
+  }
+  if(method==="GET" && path==="/me/desk") return json(await transaction(db=>customerDesk(db,actorRequired(actor),url.searchParams.get("include_items")!=="0")));
   if(method==="GET" && path==="/me/email-delivery-status") return json(await transaction(db=>customerEmailDeliveryStatus(db,actorRequired(actor))));
   if(method==="GET" && path==="/me/privacy/export") return json(await transaction(db=>exportCustomerPrivacyData(db,actorRequired(actor))));
   if(method==="POST" && path==="/me/privacy/requests")
@@ -365,11 +380,8 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     csrf(req);
     const customer=actorRequired(actor);organization(customer);
     const id=idSchema.parse(caseRoute[1]),key=idSchema.parse(req.headers.get("idempotency-key"));
-    guard(Number(req.headers.get("content-length")??0)<=8_100_000,"BODY_TOO_LARGE","Photo is too large.",413);
-    const form=await req.formData(),file=form.get("photo");
-    guard(file instanceof File&&file.size>0&&file.size<=8_000_000,"FILE_INVALID","Choose a photo up to 8 MB.",422);
+    const {form,bytes}=await supportPhotoForm(req);
     const input=customerTicketMessage.parse({revision:Number(form.get("revision")),body:form.get("body")});
-    const bytes=Buffer.from(await file.arrayBuffer());
     return json(await transaction(db=>idempotent(db,customer.id+":"+path,key,{...input,photo:hash(bytes)},
       ()=>replyToCase(db,customer,id,input,bytes))));
   }
@@ -796,8 +808,19 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   if(method==="POST" && manual) return extraWrite(req,path,actor,z.object({revision:revSchema,reason:z.string().trim().min(4).max(1200)}),
     (db,a,b)=>requestManualQuote(db,a,idSchema.parse(manual[1]),b.revision,b.reason));
   if(method==="POST" && path==="/me/cases") {
-    const b=z.object({subject:z.string().trim().min(2).max(150),message:z.string().trim().min(2).max(2000),order_id:idSchema.optional(),category:orderCaseCategory.optional()});
-    return extraWrite(req,path,actor,b,(db,a,v)=>reportIssue(db,a,v.subject,v.message,v.order_id,v.category));
+    const schema=z.object({subject:z.string().trim().min(2).max(150),message:z.string().trim().min(2).max(2000),
+      order_id:idSchema.optional(),category:orderCaseCategory.optional(),parcel_id:idSchema.optional()});
+    if(req.headers.get("content-type")?.startsWith("multipart/form-data")) {
+      csrf(req);
+      const customer=actorRequired(actor);organization(customer);
+      const key=idSchema.parse(req.headers.get("idempotency-key"));
+      const {form,bytes}=await supportPhotoForm(req);
+      const v=schema.parse({subject:form.get("subject"),message:form.get("message"),
+        order_id:form.get("order_id")||undefined,category:form.get("category")||undefined,parcel_id:form.get("parcel_id")||undefined});
+      return json(await transaction(db=>idempotent(db,customer.id+":"+path,key,{...v,photo:hash(bytes)},
+        ()=>reportIssue(db,customer,v.subject,v.message,v.order_id,v.category,v.parcel_id,bytes))));
+    }
+    return extraWrite(req,path,actor,schema,(db,a,v)=>reportIssue(db,a,v.subject,v.message,v.order_id,v.category,v.parcel_id));
   }
   if(method==="POST" && path==="/staff/admin/warehouse-addresses")
     return extraWrite(req,path,actor,staffSchemas.address,setAddress);
@@ -1102,6 +1125,7 @@ async function dispatch(db:DB,actor:Actor,id:string,op:string,b:Record<string,an
     case "trackOutbound":
       return tracking(db,actor,id,op==="trackInbound"?"advice":"shipment",new URL(req.url).searchParams.get("locale")??"en");
     case "ownedItems": return {items:(await items(db,actor)).map(x=>({item_id:x.item_id,code:x.code,custody_state:x.custody_state,allowed_actions:x.allowed_actions}))};
+    case "updateCustomerPreferences": return updateCustomerPreferences(db,actor,b);
     case "billing": return {charges:(await bills(db,actor)).map(x=>({
       charge_item_id:x.charge_item_id,purpose:x.purpose,state:x.state,amount_cents:x.amount_cents,currency:x.currency,
       refunded_cents:x.refunded_cents,order_ids:x.order_ids,
@@ -1156,6 +1180,7 @@ export async function handle(req:Request,path:string) {
     const a=actorRequired(actor);
     guard(a.kind==="customer"?op["x-roles"].includes("customer"):op["x-roles"].some(r=>a.roles.includes(r)),
       "FORBIDDEN","This action requires a different role.",403);
+    if(op.operationId==="chargeReceipt") return json(await chargeReceipt(a,args[0]),status);
     return json(await transaction(db=>{
       const run=()=>dispatch(db,a,args[0]??"",op.operationId,data,req);
       return key?idempotent(db,a.id+":"+req.method+":"+path,key,data,run):run();

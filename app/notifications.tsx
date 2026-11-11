@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Action, Empty, ErrorBlock, Panel, request, stamp, Table, useLoad, type Row } from "./ui";
+import { Action, Empty, ErrorBlock, Panel, request, useWorkspaceStamp, Table, useLoad, type Row } from "./ui";
 
 const noticeTitles:Record<string,string>={
   "reference.sealed":"Your Golden Sample is active",
@@ -22,11 +22,12 @@ const noticeTitles:Record<string,string>={
   "email.delivery_failed":"We couldn't deliver email to this address",
 };
 function UpdatesTable({notices,onRead}:{notices:Row[];onRead:()=>void}) {
+  const stamp=useWorkspaceStamp();
   return <>
     {notices.length?<Table headers={["Update","Received","Status",""]} rows={notices.map(notice=>{
       const href=notice.case_id?"/support/cases/"+notice.case_id:
         notice.report_version&&notice.order_number?"/orders/"+notice.order_number+"/report/versions/"+notice.report_version:
-        notice.item_code?"/items#item-"+notice.item_code:
+        notice.item_code?"/items?item="+encodeURIComponent(notice.item_code):
         notice.shipment_id?"/shipments/"+notice.shipment_id:
         notice.advice_id?"/parcels/"+notice.advice_id:
         notice.charge_id?"/account/billing#charge-"+notice.charge_id:

@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { DB } from "../db";
 import { audit, code, event, guard, hash, lock, one, organization, revision, role, uuid, type Actor } from "./common";
 import { integrationPreflight } from "./integrations";
+import { savePhoto } from "./intake";
 import { activatePaidOrder, orderItemReadiness, priceSchema, readyOrder, templateSchema } from "./orders";
 import { assertItemNotFrozen, assertZonePurpose, requireSpace } from "./storage";
 
@@ -263,8 +264,9 @@ export async function setAddress(
   role(actor,"super_admin");
   await lock(db,"warehouse_default_address");
   const isDefault=data.is_default!==false;
+  let previousDefault:string|undefined;
   if(isDefault) {
-    await db.query("update warehouse_addresses set is_default=false where is_default");
+    previousDefault=(await db.query<{id:string}>("update warehouse_addresses set is_default=false where is_default returning id")).rows[0]?.id;
   }
   const a=await one<{id:string;is_default:boolean;active:boolean}>(
     db,
@@ -273,7 +275,8 @@ export async function setAddress(
      returning id,is_default,active`,
     [uuid(),data.address_zh,data.address_en,data.contact_name,data.contact_phone,isDefault]
   );
-  await audit(db,actor,isDefault?"set_default_address":"create_warehouse_address","warehouse_addresses",a.id,{is_default:a.is_default,active:a.active});
+  await audit(db,actor,isDefault?"set_default_address":"create_warehouse_address","warehouse_addresses",a.id,
+    {is_default:a.is_default,active:a.active,previous_default_address_id:previousDefault});
   return a;
 }
 
@@ -291,13 +294,13 @@ export async function updateWarehouseAddress(
     [id]
   );
   if(input.is_default===true) {
-    await db.query("update warehouse_addresses set is_default=false where is_default and id<>$1",[id]);
+    const previousDefault=(await db.query<{id:string}>("update warehouse_addresses set is_default=false where is_default and id<>$1 returning id",[id])).rows[0]?.id;
     const updated=await one<{id:string;is_default:boolean;active:boolean}>(
       db,
       "update warehouse_addresses set active=true,is_default=true where id=$1 returning id,is_default,active",
       [id]
     );
-    await audit(db,actor,"set_default_address","warehouse_addresses",id,{is_default:true,active:true});
+    await audit(db,actor,"set_default_address","warehouse_addresses",id,{is_default:true,active:true,previous_default_address_id:previousDefault});
     return updated;
   }
   if(input.active===false) {
@@ -542,15 +545,18 @@ export async function upsertOffer(db:DB,actor:Actor,input:{
   return {...offer,price_version:price.id,version:price.version};
 }
 export const orderCaseCategory=z.enum(["receipt_mismatch","measurement_dispute","return_info_incomplete","damage_or_loss","payment_refund"]);
-export async function reportIssue(db:DB,actor:Actor,subject:string,message:string,orderId?:string,category?:z.infer<typeof orderCaseCategory>) {
+export async function reportIssue(db:DB,actor:Actor,subject:string,message:string,orderId?:string,category?:z.infer<typeof orderCaseCategory>,parcelId?:string,photo?:Buffer) {
   const org=organization(actor);
   guard(!category||orderId,"ORDER_REQUIRED","Select an order for this type of support case.",422);
   if(orderId) await one(db,"select id from orders where id=$1 and org_id=$2",[orderId,org]);
+  if(parcelId) await one(db,"select id from package_advices where id=$1 and org_id=$2",[parcelId,org]);
   const id=uuid();
-  const ticket=await one(db,`insert into tickets(id,public_no,org_id,order_id,category,subject,next_action_at)
-    values($1,$2,$3,$4,$5,$6,now()+interval '24 hours') returning id,public_no,state`,
-    [id,code("C-"),org,orderId??null,category??"non_standard_quote",subject]);
-  await db.query("insert into ticket_events(id,ticket_id,actor_type,actor_id,kind,body) values($1,$2,'customer',$3,'message',$4)",[uuid(),id,actor.id,message]);
+  const ticket=await one(db,`insert into tickets(id,public_no,org_id,order_id,category,subject,next_action_at,details)
+    values($1,$2,$3,$4,$5,$6,now()+interval '24 hours',$7) returning id,public_no,state`,
+    [id,code("C-"),org,orderId??null,category??"non_standard_quote",subject,parcelId?{parcel_advice_id:parcelId}:{}]);
+  const mediaIds=photo?[(await savePhoto(db,actor,photo,"attachment")).id]:[];
+  await db.query("insert into ticket_events(id,ticket_id,actor_type,actor_id,kind,body,media_ids) values($1,$2,'customer',$3,'message',$4,$5)",
+    [uuid(),id,actor.id,message,mediaIds]);
   await audit(db,actor,"create_ticket","tickets",id);
   return ticket;
 }

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { Action, Empty, ErrorBlock, Field, FileInput, Form, MediaButton, Panel, request, stamp, Table, Tag, text, usd, useLoad, type Row } from "./ui";
+import { Action, Empty, ErrorBlock, Field, FileInput, Form, MediaButton, Panel, request, stamp, useWorkspaceStamp, Table, Tag, text, usd, useLoad, type Row } from "./ui";
 
 const status:Record<string,[string,string]>={
   open:["Open","待处理"],waiting_customer:["Awaiting your reply","待客户回复"],
@@ -16,6 +16,7 @@ const categories:Record<string,string>={
 const isOpen=(state:string)=>state!=="resolved"&&state!=="closed";
 
 function Conversation({events,staff=false}:{events:Row[];staff?:boolean}) {
+  const stamp=useWorkspaceStamp();
   if(!events.length)return <Empty>{staff?"暂无工单记录。":"There are no messages yet."}</Empty>;
   return <ol className="timeline case-conversation">{events.map(entry=><li key={entry.id}>
     <div className="row"><strong>{staff?entry.kind==="internal_note"?"内部备注":entry.kind==="state_change"?"操作记录":
@@ -27,13 +28,17 @@ function Conversation({events,staff=false}:{events:Row[];staff?:boolean}) {
   </li>)}</ol>;
 }
 export function CustomerCase({id,order}:{id:string;order?:string}) {
+  const stamp=useWorkspaceStamp();
   const api="/cases/"+id;
   const {data,error,reload}=useLoad(api+(order?"?"+new URLSearchParams({order}):""));
   const [sent,setSent]=useState<number>();
   return <>
     <div className="page-head"><Link href={order?"/orders/"+order:"/support"}>{order?"← Inspection order":"← Support"}</Link>
       <p className="eyebrow report-eyebrow">CLIENT WORKSPACE / SUPPORT</p><h1>{data?.subject??"Support case"}</h1>
-      {data&&<p><span className="code">{data.public_no}</span> · <Tag>{status[data.state]?.[0]}</Tag></p>}</div>
+      {data&&<div className="actions"><span className="code">{data.public_no}</span><Tag>{status[data.state]?.[0]}</Tag>
+        {data.order_number&&<Link className="code-btn" href={"/orders/"+data.order_number}>{data.order_number}</Link>}
+        {data.parcel&&<Link className="code-btn" href={"/parcels/"+data.parcel.id}>Parcel {data.parcel.tracking_norm??"details"}</Link>}
+      </div>}</div>
     {error&&<><ErrorBlock error={error}/><button type="button" onClick={reload}>Retry</button></>}
     {!error&&!data&&<p role="status">Loading your support case…</p>}
     {!error&&data&&<>
@@ -146,6 +151,7 @@ export function StaffTicket({id,actor}:{id:string;actor:Row}) {
           <div><dt>分类</dt><dd>{categories[data.category]??data.category}</dd></div>
           <div><dt>状态</dt><dd><Tag>{status[data.state]?.[1]}</Tag></dd></div>
           <div><dt>关联订单</dt><dd className="code">{data.order_number?<Link href={"/admin/orders/"+data.order_number}>{data.order_number}</Link>:"—"}</dd></div>
+          {data.parcel&&<div><dt>关联入库运单</dt><dd className="code">{data.parcel.tracking_norm??"运单号待核对"}</dd></div>}
           <div><dt>负责人</dt><dd>{data.assignee??"未领取"}</dd></div>
           <div><dt>下一处理时间</dt><dd>{stamp(data.next_action_at)}</dd></div>
           {data.inquiry&&<>

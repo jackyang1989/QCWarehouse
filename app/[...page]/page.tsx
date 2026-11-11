@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import { cookies } from "next/headers";
 import { notFound, redirect } from "next/navigation";
-import { actorForSession } from "../../packages/core/auth";
+import { actorForSession, customerPreferences } from "../../packages/core/auth";
+import { pool } from "../../packages/db";
 import { isDemo } from "../../packages/core/common";
 import { signInMethods } from "../../packages/core/integrations";
 import { customerDestination, resolvePortalRoute, withDestination } from "../../packages/core/portal-routes";
@@ -71,5 +72,6 @@ export default async function Page({params,searchParams}:{params:Promise<{page:s
         verify={search.verify==="1"} oauth={typeof search.oauth==="string"?search.oauth:undefined}/>}</AccessShell>;
   }
 
-  return <Portal path={path} target={target} route={route} actor={actor} demo={demo}/>;
+  const timeZone=route.area==="customer"&&actor?.kind==="customer"?(await customerPreferences(pool,actor)).timezone??undefined:undefined;
+  return <Portal path={path} target={target} route={route} actor={actor} demo={demo} timeZone={timeZone}/>;
 }

@@ -9,7 +9,19 @@ import { getIntakeContext, waybill } from "./intake";
 import { hasStaffAccess, staffAccess } from "./staff-access";
 import { effectiveDispatchCharge } from "./dispatch";
 
-export async function items(db:DB,actor:Actor) {
+const inventoryJoins=`from warehouse_items w
+    left join order_line_item_links a on a.item_id=w.id and a.unlinked_at is null
+    left join order_lines l on l.id=a.order_line_id left join orders o on o.id=l.order_id and o.org_id=w.org_id`;
+const awaitingItemInstructions=`o.state in ('report_ready','action_pending')
+    and w.custody_state in ('received','stored') and w.identity_state<>'quarantined'
+    and not exists(select 1 from disposition_requests d where d.item_id=w.id and d.state not in ('completed','cancelled'))
+    and not exists(select 1 from reference_samples r where r.item_id=w.id
+      and (r.state='pending_safe_storage' or (r.state='active' and r.expires_at>now())))`;
+const activeReference=`exists(select 1 from reference_samples r where r.item_id=w.id and r.org_id=w.org_id
+    and r.state='active' and r.expires_at>now())`;
+const awaitingOrInInspection=`o.state in ('awaiting_samples','samples_ready','queued','inspecting','qa_review')`;
+const itemFilters={all:"true",inspection:awaitingOrInInspection,handling:awaitingItemInstructions,reference:activeReference};
+export async function items(db:DB,actor:Actor,options?:{page:number;filter:keyof typeof itemFilters;code?:string}) {
   return (await db.query(`select w.id item_id,w.code,w.custody_state,w.revision,w.identity_state,w.condition_state,w.storage_until,w.received_at,
     p.code package_code,p.advice_id inbound_advice_id,
     (select t.tracking_norm from tracking_records t where t.package_id=p.id and t.direction='inbound' and t.closed_at is null order by t.generation desc limit 1) inbound_tracking_norm,
@@ -32,14 +44,33 @@ export async function items(db:DB,actor:Actor) {
     array(select d.id from disposition_requests d where d.item_id=w.id and d.state='requested'
       and d.action in ('to_forwarder','to_domestic_address','return_to_seller')
       and not exists(select 1 from dispatch_batch_items bi where bi.disposition_id=d.id and bi.released_at is null)) instructions
-    from warehouse_items w join packages p on p.id=w.package_id
-    left join order_line_item_links a on a.item_id=w.id and a.unlinked_at is null
+    ${inventoryJoins} join packages p on p.id=w.package_id
     left join expected_items e on e.id=a.expected_item_id
-    left join order_lines l on l.id=a.order_line_id left join orders o on o.id=l.order_id
     left join storage_locations sl on sl.id=w.location_id
-    where w.org_id=$1 and w.parent_item_id is null order by w.received_at desc limit 400`,[organization(actor)])).rows.map(w=>({
+    where w.org_id=$1 and w.parent_item_id is null and ($2::text is null or w.code=$2)
+      and (${itemFilters[options?.filter??"all"]})
+    order by w.received_at desc,w.id desc limit $3 offset $4`,[
+      organization(actor),options?.code??null,options?21:400,options?(options.page-1)*20:0,
+    ])).rows.map(w=>({
       ...w,allowed_actions:["stored","received"].includes(w.custody_state)&&w.identity_state!=="quarantined"?["request_disposition"]:[],
     }));
+}
+export async function customerInventory(db:DB,actor:Actor,page:number,filter:keyof typeof itemFilters,code?:string) {
+  const rows=(await items(db,actor,{page:code?1:page,filter:code?"all":filter,code})).map(({location_code,reference_sample,...row})=>{
+    if(!reference_sample) return {...row,reference_sample:null};
+    const {safe_location_code,...reference}=reference_sample;
+    return {...row,reference_sample:reference};
+  });
+  if(code) {
+    guard(rows[0],"NOT_FOUND","Item not found.",404);
+    return {rows,has_more:false};
+  }
+  const summary=await one(db,`select count(*)::int total,
+    count(*) filter (where ${awaitingOrInInspection})::int inspection,
+    count(*) filter (where ${awaitingItemInstructions})::int handling,
+    count(*) filter (where ${activeReference})::int reference
+    ${inventoryJoins} where w.org_id=$1 and w.parent_item_id is null`,[organization(actor)]);
+  return {rows:rows.slice(0,20),has_more:rows.length>20,summary};
 }
 export async function bills(db:DB,actor:Actor) {
   const org=organization(actor);
@@ -52,13 +83,17 @@ export async function bills(db:DB,actor:Actor) {
       else array(select o.public_no from charge_allocations a join orders o on o.id=a.order_id where a.charge_id=c.id) end order_numbers,
     d.batch_id,
     (select p.state from payments p where p.charge_item_id=c.id order by p.updated_at desc nulls last,p.id desc limit 1) latest_attempt_state,
-    (select p.provider_ref from payments p where p.id=c.applied_payment_id) paid_ref,
+    paid.provider_ref paid_ref,
+    coalesce(paid.provider='stripe' and paid.state in ('succeeded','partially_refunded','refunded')
+      and paid.provider_ref ~ '^cs_(live|test)_' and left(paid.provider_data->>'payment_intent',3)='pi_',false) receipt_available,
     (select min(a.at) from audit_events a where a.entity_type='charge_items' and a.entity_id=c.id and a.action='payment_confirmed') paid_at,
     coalesce(i.expires_at,d.expires_at,s.expires_at) expires_at,
     case when c.free_authorization is not null then 'FREE-AUTH' else null end receipt_summary,
     coalesce(i.revision,d.revision,s.revision) quote_revision
     from charge_items c left join inspection_quotes i on i.id=c.inspection_quote_id left join dispatch_quote_versions d on d.id=c.dispatch_quote_id
-    left join storage_quotes s on s.id=c.storage_quote_id where c.org_id=$1 order by c.id desc limit 200`,[org])).rows;
+    left join storage_quotes s on s.id=c.storage_quote_id
+    left join payments paid on paid.id=c.applied_payment_id and paid.charge_item_id=c.id
+    where c.org_id=$1 order by c.id desc limit 200`,[org])).rows;
 }
 export async function customerActions(db:DB,actor:Actor) {
   const org=organization(actor);
@@ -146,16 +181,27 @@ export async function listCustomerOrders(db:DB,actor:Actor,query:string,state:st
   return {rows:rows.slice(0,pageSize),has_more:rows.length>pageSize};
 }
 
-export async function customerDesk(db:DB,actor:Actor) {
+export async function customerDesk(db:DB,actor:Actor,includeItems=true) {
   const org=organization(actor);
   const orders=(await db.query(customerOrderSelect+" where o.org_id=$1 order by updated_at desc,o.id desc limit 200",[org])).rows;
-  const advices=(await db.query(`select a.id,a.address_snapshot,t.tracking_norm,t.carrier_code,t.transport_state,t.sync_state,p.state warehouse_state,
+  const advices=(await db.query(`select a.id,a.address_snapshot,t.tracking_norm,t.carrier_code,t.transport_state,t.sync_state,p.state warehouse_state,p.received_quantity,
     count(*) filter (where p.id is null) over()::int awaiting_check_in_count,
     count(*) filter (where p.id is not null) over()::int checked_in_count,
     array(select order_id from advice_orders where advice_id=a.id) order_ids,
-    array(select o.public_no from advice_orders ao join orders o on o.id=ao.order_id where ao.advice_id=a.id order by o.public_no) order_numbers
+    array(select o.public_no from advice_orders ao join orders o on o.id=ao.order_id where ao.advice_id=a.id order by o.public_no) order_numbers,
+    planned.item_count declared_item_count,planned.suppliers declared_suppliers
     from package_advices a
     join tracking_records t on t.advice_id=a.id and t.closed_at is null left join packages p on p.advice_id=a.id
+    left join lateral(select count(*)::int item_count,
+      array_agg(distinct nullif(e.declared_fields->>'supplier_alias','')) filter (where nullif(e.declared_fields->>'supplier_alias','') is not null) suppliers
+      from advice_orders ao join order_lines l on l.order_id=ao.order_id and l.org_id=ao.org_id
+      join expected_items e on e.order_line_id=l.id and e.in_scope
+      where ao.advice_id=a.id and ao.org_id=a.org_id
+        and upper(regexp_replace(e.declared_fields->>'tracking_no','[[:space:]]+','','g'))=t.tracking_norm
+        and not exists(select 1 from advice_orders other join tracking_records tr on tr.advice_id=other.advice_id
+          and tr.closed_at is null and tr.tracking_norm=t.tracking_norm
+          where other.order_id=ao.order_id and other.org_id=ao.org_id and other.advice_id<>a.id)
+    ) planned on true
     where a.org_id=$1 order by a.created_at desc limit 200`,[org])).rows;
   const shipments=(await db.query(`select s.id,s.batch_id,s.state,s.tracking_norm,s.carrier_code,s.shipped_at,b.action from shipments s join dispatch_batches b on b.id=s.batch_id
     where b.org_id=$1 and s.shipped_at is not null order by s.shipped_at desc limit 200`,[org])).rows;
@@ -228,17 +274,18 @@ export async function customerDesk(db:DB,actor:Actor) {
     (select count(*)::int from orders o where o.org_id=$1 and o.state not in ('draft','closed','cancelled')) active_inspections,
     (select count(*)::int from warehouse_items w where w.org_id=$1 and w.parent_item_id is null
       and w.custody_state in ('received','stored')) in_custody,
-    (select count(*)::int from warehouse_items w
-      join order_line_item_links a on a.item_id=w.id and a.unlinked_at is null
-      join order_lines l on l.id=a.order_line_id join orders o on o.id=l.order_id
-      where w.org_id=$1 and o.org_id=$1 and o.state in ('report_ready','action_pending') and w.parent_item_id is null
-      and w.custody_state in ('received','stored') and w.identity_state<>'quarantined'
-      and not exists(select 1 from disposition_requests d where d.item_id=w.id and d.state not in ('completed','cancelled'))
-      and not exists(select 1 from reference_samples r where r.item_id=w.id
-        and (r.state='pending_safe_storage' or (r.state='active' and r.expires_at>now())))) awaiting_instructions`,[org]);
+    (select count(*)::int ${inventoryJoins} where w.org_id=$1 and w.parent_item_id is null
+      and ${awaitingItemInstructions}) awaiting_instructions`,[org]);
   const summary={...counts,awaiting_check_in:advices[0]?.awaiting_check_in_count??0,checked_in:advices[0]?.checked_in_count??0,
     pending_quotes:(quotes[0]?.quote_count??0)+inspectionQuotes.length};
-  return {summary,orders,advices,shipments,quotes,inspectionQuotes,batches,active_batches,recent_destinations,reports,tickets,refunds,notices,references,profile:await receiving(db,actor.id),email_delivery:await customerEmailDeliveryStatus(db,actor),items:await items(db,actor),bills:await bills(db,actor)};
+  const profile=await receiving(db,actor.id);
+  const addressChange=(await db.query<{at:Date}>(`select e.at from audit_events e join customer_receiving_profiles p on p.user_id=$2
+    where e.entity_type='warehouse_addresses' and e.entity_id=$1 and e.action='set_default_address'
+      and e.after->>'previous_default_address_id' is not null and e.at>=p.created_at
+    order by e.at desc limit 1`,[profile.warehouse_address?.id??null,actor.id])).rows[0];
+  return {summary,orders,advices,shipments,quotes,inspectionQuotes,batches,active_batches,recent_destinations,reports,tickets,refunds,notices,references,
+    profile,warehouse_address_changed_at:addressChange?.at??null,email_delivery:await customerEmailDeliveryStatus(db,actor),
+    items:includeItems?await items(db,actor):[],bills:await bills(db,actor)};
 }
 export async function customerNotifications(db:DB,actor:Actor,unread=false,before:string|null=null,pageSize=50) {
   const org=organization(actor);

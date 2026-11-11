@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { useEffect } from "react";
-import { Action, Empty, ErrorBlock, Field, Form, Panel, Select, request, stamp, text, useLoad, usd, type Row } from "./ui";
+import { Action, Empty, ErrorBlock, Field, Form, Panel, Select, request, useWorkspaceStamp, text, useLoad, usd, type Row } from "./ui";
 
 export function ScopeReview({orderId,staff=false,onSave}:{orderId:string;staff?:boolean;onSave:()=>void}) {
+  const stamp=useWorkspaceStamp();
   const {data,error,reload}=useLoad("/orders/"+orderId+"/scope-revisions");
   const updated=()=>{reload();onSave();};
   useEffect(()=>{

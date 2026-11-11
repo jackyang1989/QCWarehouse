@@ -1149,8 +1149,9 @@ test("Postmark requires an accepted message response and never returns the real 
   assert.equal(fetch.mock.callCount(),2);
 });
 
-test("Stripe webhook enforces signature and mode before deduplicating and applying a payment",async t=>{
+test("Stripe webhook verifies and deduplicates payments and only exposes receipts for owned applied charges",async t=>{
   const {c,terms}=await signCustomer();
+  const {c:other}=await signCustomer();
   const {actor}=await c.fetch("/me");
   const offer=(await c.fetch("/catalog")).offers.find((o:{sku_code:string})=>o.sku_code==="apparel-inspection-1");
   const draft=await c.fetch("/orders",{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},"POST",201);
@@ -1161,6 +1162,10 @@ test("Stripe webhook enforces signature and mode before deduplicating and applyi
     terms_version_ids:terms.map((x:{id:string})=>x.id),acknowledgements});
   const chargeId=submission.charge.charge_item_id;
   const chargePath="/charges/"+chargeId+"/checkout";
+  const receiptPath="/charges/"+chargeId+"/receipt";
+  assert.equal((await c.fetch(receiptPath,undefined,"GET",404)).error.code,"RECEIPT_NOT_AVAILABLE");
+  await other.fetch(receiptPath,undefined,"GET",404);
+  await (await staffLogin("reviewer")).fetch(receiptPath,undefined,"GET",403);
   const {attempt_id}=await c.fetch(chargePath,{quote_revision:quote.revision});
   setFixtureEnv(t,{QCW_DEMO:"0",STRIPE_SECRET_KEY:"sk_test_fixture",STRIPE_WEBHOOK_SECRET:"whsec_fixture"});
   const webhookPath="/webhooks/stripe";
@@ -1184,6 +1189,32 @@ test("Stripe webhook enforces signature and mode before deduplicating and applyi
   assert.equal(order.items.length,1);
   const result=await pool.query("select id from payment_events where event_id=$1",[eventId]);
   assert.equal(result.rowCount,1);
+  const intentId=event.data.object.payment_intent;
+  const receiptUrl="https://pay.stripe.com/receipts/fixture";
+  const intent={id:intentId,status:"succeeded",livemode:false,amount_received:quote.amount_cents,currency:"usd",
+    metadata:event.data.object.metadata,latest_charge:{paid:true,livemode:false,amount:quote.amount_cents,currency:"usd",
+      payment_intent:intentId,receipt_url:receiptUrl}};
+  let providerPayload:unknown=intent;
+  const stripeFetch=t.mock.method(globalThis,"fetch",async(url:string,options:RequestInit)=>{
+    const requestUrl=new URL(url);
+    assert.equal(requestUrl.origin,"https://api.stripe.com");
+    assert.equal(requestUrl.pathname,"/v1/payment_intents/"+intentId);
+    assert.equal(requestUrl.searchParams.get("expand[0]"),"latest_charge");
+    assert.equal(options.method,"GET");
+    return Response.json(providerPayload);
+  });
+  await other.fetch(receiptPath,undefined,"GET",404);
+  assert.equal(stripeFetch.mock.callCount(),0);
+  assert.deepEqual(await c.fetch(receiptPath),{receipt_url:receiptUrl});
+  const desk=await c.fetch("/me/desk");
+  assert.equal(desk.bills.find((row:{charge_item_id:string})=>row.charge_item_id===chargeId).receipt_available,true);
+  assert(!JSON.stringify(desk).includes(receiptUrl));
+  for(const payload of [{...intent,metadata:{...intent.metadata,org_id:randomUUID()}},
+    {...intent,amount_received:intent.amount_received+1},
+    {...intent,latest_charge:{...intent.latest_charge,receipt_url:"https://example.invalid/receipt"}}]) {
+    providerPayload=payload;
+    assert.equal((await c.fetch(receiptPath,undefined,"GET",503)).error.code,"RECEIPT_UNAVAILABLE");
+  }
 });
 
 test("Kuaidi100 query stores English events and distinguishes provider rate limits from phone verification",async t=>{
@@ -1595,14 +1626,32 @@ test("public inquiries create support work without exposing guest or customer co
   assert.equal((await admin.fetch("/staff/tickets/"+signed.case_id)).inquiry.portal_reply,true);
 });
 
-test("support and customer can finish a case while internal notes stay private",async()=>{
-  const {c}=await signCustomer(),other=(await signCustomer()).c;
+test("support and customer can finish a parcel case while private notes and photos stay isolated",async()=>{
+  const {c,registration}=await signCustomer(),other=(await signCustomer()).c;
   const support=await staffLogin("reviewer"),admin=await staffLogin("admin"),receiver=await staffLogin("receiving");
   const staffId=(await support.fetch("/me")).actor.id;
   await pool.query("insert into staff_roles(user_id,role) values($1,'support')",[staffId]);
   try {
-    const created=await c.fetch("/me/cases",{subject:"Missing shipment detail",message:"Please check my shipping instruction."});
+    const tracking_no="SF"+randomUUID().slice(0,8).toUpperCase();
+    const parcel=await c.fetch("/me/parcels",{address_id:registration.warehouse_address.id,tracking_no,carrier_code:"sf"},"POST",201);
+    await other.fetch("/me/cases",{subject:"Wrong tenant",message:"Attempt to link an unowned parcel",parcel_id:parcel.id},"POST",404);
+    const attachment=await sharp({create:{width:40,height:40,channels:3,background:"#126a70"}}).png().toBuffer();
+    const photo=new Blob([new Uint8Array(attachment)],{type:"image/png"});
+    const opening=new FormData();
+    opening.set("subject","Missing shipment detail");
+    opening.set("message","Please check my shipping instruction.");
+    opening.set("parcel_id",parcel.id);
+    opening.set("photo",photo,"fixture.png");
+    const openingKey=randomUUID();
+    const created=await c.fetch("/me/cases",opening,"POST",200,openingKey);
+    assert.deepEqual(await c.fetch("/me/cases",opening,"POST",200,openingKey),created);
     const customerPath="/cases/"+created.id,staffPath="/staff/tickets/"+created.id,events=staffPath+"/events";
+    const opened=await c.fetch(customerPath);
+    assert.deepEqual(opened.parcel,{id:parcel.id,tracking_norm:tracking_no});
+    assert.deepEqual((await support.fetch(staffPath)).parcel,opened.parcel);
+    const initialPhoto=opened.events[0].media_ids[0];
+    assert((await support.fetch("/media/"+initialPhoto)).image.length>0);
+    await other.fetch("/media/"+initialPhoto,undefined,"GET",404);
     await other.fetch(customerPath,undefined,"GET",404);
     await other.fetch(customerPath+"/messages",{revision:1,body:"Unauthorized reply."},"POST",404);
     await c.fetch(staffPath,undefined,"GET",403);
@@ -1624,11 +1673,10 @@ test("support and customer can finish a case while internal notes stay private",
     assert(!JSON.stringify(detail).includes("Internal fixture"));
     assert(!(Object.hasOwn(detail,"assignee_id")));
     assert((await c.fetch("/actions")).rows.some((row:{id:string})=>row.id===created.id));
-    const attachment=await sharp({create:{width:40,height:40,channels:3,background:"#126a70"}}).png().toBuffer();
     const form=new FormData();
     form.set("revision",String(detail.revision));
     form.set("body","The seller gave me a new address.");
-    form.set("photo",new Blob([new Uint8Array(attachment)],{type:"image/png"}),"fixture.png");
+    form.set("photo",photo,"fixture.png");
     const replyKey=randomUUID();
     const replied=await c.fetch(customerPath+"/messages",form,"POST",200,replyKey);
     assert.deepEqual(await c.fetch(customerPath+"/messages",form,"POST",200,replyKey),replied);
@@ -4646,6 +4694,14 @@ test("admin governance, terms preview/publish, multi-warehouse address & calenda
   assert.equal(promotedAddr.is_default,true);
   const currentDefault=await c.fetch("/me/receiving-address");
   assert.equal(currentDefault.warehouse_address.id,candidateAddr.id);
+  const switchedAt=(await c.fetch("/me/desk")).warehouse_address_changed_at;
+  assert(switchedAt);
+  await admin.fetch(`/staff/admin/warehouse-addresses/${candidateAddr.id}`,{is_default:true});
+  assert.equal((await c.fetch("/me/desk")).warehouse_address_changed_at,switchedAt);
+  const newCustomer=(await signCustomer()).c;
+  const newDesk=await newCustomer.fetch("/me/desk");
+  assert.equal(newDesk.profile.warehouse_address.id,candidateAddr.id);
+  assert.equal(newDesk.warehouse_address_changed_at,null);
 
   // Cannot deactivate current default address without promoting another first
   const deactDefault=await admin.fetch(`/staff/admin/warehouse-addresses/${candidateAddr.id}`,{active:false},"POST",409);
@@ -6615,6 +6671,26 @@ test("a standalone 30-item inspection splits a documented defect, a reference sa
     }
     assert.equal((await c.fetch(path)).state,index<2?"awaiting_samples":"queued");
   }
+  const firstInventory=await c.fetch("/me/inventory?filter=inspection");
+  const parcels=(await c.fetch("/me/desk")).advices;
+  for(const number of tracking) {
+    const parcel=parcels.find((row:{tracking_norm:string})=>row.tracking_norm===number);
+    assert.equal(parcel.declared_item_count,10);
+    assert.deepEqual(parcel.declared_suppliers,["Fixture supplier"]);
+    assert.equal(parcel.received_quantity,10);
+  }
+  const secondInventory=await c.fetch("/me/inventory?filter=inspection&page=2");
+  assert.deepEqual(firstInventory.summary,{total:30,inspection:30,handling:0,reference:0});
+  assert.equal(firstInventory.has_more,true);
+  assert.equal(secondInventory.has_more,false);
+  assert.deepEqual(new Set([...firstInventory.rows,...secondInventory.rows].map(row=>row.item_id)),new Set(physical.map(item=>item.id)));
+  const laterCode=secondInventory.rows[0].code;
+  const exact=(await c.fetch("/me/inventory?code="+laterCode)).rows[0];
+  assert.equal(exact.code,laterCode);
+  assert(!("location_code" in exact));
+  assert.equal((await (await signCustomer()).c.fetch("/me/inventory?code="+laterCode,undefined,"GET",404)).error.code,"NOT_FOUND");
+  await receiver.fetch("/me/inventory",undefined,"GET",403);
+  await c.fetch("/me/inventory?filter=nonexistent",undefined,"GET",422);
   const {rows:tasks}=await pool.query<{id:string;revision:number;item_id:string}>(`select t.id,t.revision,a.item_id from inspection_tasks t
     join order_line_item_links a on a.id=t.assignment_id join order_lines l on l.id=t.order_line_id where l.order_id=$1`,[draft.id]);
   assert.equal(tasks.length,30);
@@ -6643,6 +6719,9 @@ test("a standalone 30-item inspection splits a documented defect, a reference sa
   for(let i=0;i<100;i++) {if(!await workOnce()) break;}
   const report=await c.fetch(path+"/report");
   assert.equal(report.snapshot.sections.length,30);
+  const {summary:readyInventory}=await c.fetch("/me/inventory?filter=handling");
+  assert.deepEqual(readyInventory,{total:30,inspection:0,handling:30,reference:0});
+  assert.equal((await c.fetch("/me/desk?include_items=0")).summary.awaiting_instructions,readyInventory.handling);
   const defect=report.snapshot.sections.flatMap((section:{results:object[]})=>section.results)
     .find((result:{item:string;status:string})=>result.item===physical[0].code&&result.status==="OBSERVED_ISSUE");
   assert.equal(defect.annotations[0].label,"Open seam");
@@ -6658,6 +6737,10 @@ test("a standalone 30-item inspection splits a documented defect, a reference sa
   const sealed=(await receiver.fetch("/staff/storage")).pending_reference_tasks.find((task:{item_id:string})=>task.item_id===physical[2].id);
   assert.equal((await receiver.fetch("/staff/storage/move",{item_id:physical[2].id,revision:sealed.item_revision,
     location_id:referenceZone.id,scanned_item_code:physical[2].code,scanned_location_code:referenceZone.code,seal_code:sealed.seal_code})).reference_activated,true);
+  const activeInventory=await c.fetch("/me/inventory?filter=reference");
+  assert.equal(activeInventory.summary.reference,1);
+  assert.deepEqual(activeInventory.rows.map(row=>row.item_id),[physical[2].id]);
+  assert(!("safe_location_code" in activeInventory.rows[0].reference_sample));
 
   for(const [instruction,item] of [[returned,physical[0]],[forwarded,physical[1]]]) {
     const batch=await c.fetch("/dispatch-batches",{disposition_ids:[instruction.id]},"POST",201);
@@ -6681,6 +6764,22 @@ test("a standalone 30-item inspection splits a documented defect, a reference sa
   assert((await c.fetch("/me/reference-samples")).items.some((item:{item_id:string;state:string})=>item.item_id===physical[2].id&&item.state==="active"));
   const charges=(await c.fetch("/me/billing")).charges.filter((charge:{order_ids:string[]})=>charge.order_ids.includes(draft.id));
   assert.equal(charges.filter((charge:{purpose:string;state:string})=>charge.purpose==="dispatch"&&charge.state==="paid").length,2);
+});
+
+test("customer display preferences are validated and stay with the authenticated account",async()=>{
+  const {c,registration}=await signCustomer();
+  const {c:other}=await signCustomer();
+  const unchanged=(await other.fetch("/me")).profile;
+  assert.equal((await c.fetch("/me",{timezone:"Not/AZone"},"PATCH",422)).error.code,"INVALID_TIMEZONE");
+  await c.fetch("/me",{display_name:"   "},"PATCH",422);
+  await c.fetch("/me",{user_id:randomUUID(),display_name:"Not allowed"},"PATCH",422);
+  await (await staffLogin("reviewer")).fetch("/me",{timezone:"UTC"},"PATCH",403);
+  const profile=await c.fetch("/me",{display_name:"  Fixture workshop  ",timezone:"Pacific/Honolulu"},"PATCH");
+  assert.deepEqual(profile,{display_name:"Fixture workshop",timezone:"Pacific/Honolulu"});
+  assert.deepEqual((await c.fetch("/me")).profile,profile);
+  assert.deepEqual((await other.fetch("/me")).profile,unchanged);
+  assert.equal((await c.fetch("/me/receiving-address")).receiving_code,registration.receiving_code);
+  assert.deepEqual(await c.fetch("/me",{timezone:null},"PATCH"),{...profile,timezone:null});
 });
 
 test("all core operations have a validated success response",assertCoreCoverage);

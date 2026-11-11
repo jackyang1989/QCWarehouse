@@ -339,6 +339,87 @@ paths:
                       const: true
                   additionalProperties: false
               additionalProperties: false
+  /me:
+    patch:
+      operationId: updateCustomerPreferences
+      summary: 更新当前客户昵称或显示时区
+      security:
+      - cookieSession: []
+      parameters: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              additionalProperties: false
+              properties:
+                display_name:
+                  type: [string, 'null']
+                  minLength: 1
+                  maxLength: 120
+                timezone:
+                  type: [string, 'null']
+                  minLength: 1
+                  maxLength: 80
+      responses:
+        '200':
+          description: Customer display preferences
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [display_name, timezone]
+                properties:
+                  display_name:
+                    type: [string, 'null']
+                  timezone:
+                    type: [string, 'null']
+        default:
+          description: See stable HTTP error codes in §7.2
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-roles:
+      - customer
+  /charges/{id}/receipt:
+    get:
+      operationId: chargeReceipt
+      summary: 读取本组织已入账付款的 Stripe 收据链接
+      security:
+      - cookieSession: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Private Stripe-hosted receipt
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                - receipt_url
+                properties:
+                  receipt_url:
+                    type: string
+                    format: uri
+        default:
+          description: Charge not owned, no eligible payment, or provider unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-roles:
+      - customer
   /charges/{id}/checkout:
     post:
       operationId: checkout

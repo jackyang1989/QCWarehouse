@@ -60,6 +60,9 @@ async function ticket(db:DB,actor:Actor,id:string,orderNumber:string|null,write=
 }
 export async function caseDetail(db:DB,actor:Actor,id:string,orderNumber:string|null) {
   const k=await ticket(db,actor,id,orderNumber);
+  const parcel=k.details.parcel_advice_id?(await db.query(`select a.id,t.tracking_norm from package_advices a
+    left join tracking_records t on t.advice_id=a.id and t.closed_at is null
+    where a.id::text=$1 and a.org_id=$2`,[k.details.parcel_advice_id,k.org_id])).rows[0]??null:null;
   const {rows:events}=await db.query(`select id,actor_type,kind,body,media_ids,created_at from ticket_events
     where ticket_id=$1 and ($2::boolean or kind='message') order by created_at,id`,[id,actor.kind==="staff"]);
   const recovery=actor.kind==="staff"?(await db.query(`select r.id,r.user_id,r.state,r.requested_by as support_reviewer_id,
@@ -95,7 +98,7 @@ export async function caseDetail(db:DB,actor:Actor,id:string,orderNumber:string|
     where u.status='active' and sr.role in ('support','super_admin')
     order by display_name,u.id`)).rows:[];
   return {id:k.id,public_no:k.public_no,subject:k.subject,category:k.category,state:k.state,revision:k.revision,
-    next_action_at:k.next_action_at,order_number:k.order_number,incident,
+    next_action_at:k.next_action_at,order_number:k.order_number,incident,...(parcel?{parcel}:{}),
     ...(actor.kind==="staff"?{assignee_id:k.assignee_id,assignee:k.assignee,account_recovery:recovery,staff_candidates:staffCandidates,
       ...(k.details.public_inquiry?{inquiry:{contact_email:k.details.contact_email,category:k.details.category_labels,
         sample_count:k.details.sample_count,portal_reply:!!k.org_id}}:{})}:{}),events};

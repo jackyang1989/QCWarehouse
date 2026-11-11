@@ -3,9 +3,10 @@
 import { useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Action, checked, Empty, ErrorBlock, Form, Panel, request, Select, stamp, Table, Tag, text, useLoad, type Row } from "./ui";
+import { Action, checked, Empty, ErrorBlock, Form, Panel, request, Select, stamp, useWorkspaceStamp, Table, Tag, text, useLoad, type Row } from "./ui";
 
 export function PublishedReports() {
+  const stamp=useWorkspaceStamp();
   const search=useSearchParams(),params=new URLSearchParams();
   for(const name of ["reference","version"]) {
     const value=search.get(name)?.trim();
@@ -47,6 +48,7 @@ export function PublishedReports() {
 }
 
 export function ReportShares({orderId,version}:{orderId:string;version:number}) {
+  const stamp=useWorkspaceStamp();
   const path="/orders/"+orderId+"/report/versions/"+version+"/shares";
   const {data,error,reload}=useLoad(path);
   const pending=useRef<{days:number;key:string}>(null);

@@ -8,14 +8,22 @@ import { PlatformIcon } from "./chrome";
 import { ApparelIllustration } from "./report-guide";
 import { CategoryTiles } from "./category-coverage";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { draftRecoveryKey, readDraftRecovery, removeDraftRecovery, writeDraftRecovery, type DraftEditor, type DraftRecovery } from "./draft-recovery";
 import { conditionMatches } from "../packages/core/template-conditions";
 import { customerDestination, legalPages, orderSections, type OrderSection, servicePages } from "../packages/core/portal-routes";
-import { Action, checked, CodeButton, Empty, ErrorBlock, Field, Form, MediaLightbox, ModalDrawer, Panel, Photo, request, RequestError, Select, stamp, Table, Tabs, Tag, text, useLoad, usd, type Row } from "./ui";
+import { Action, checked, CodeButton, Empty, ErrorBlock, Field, Form, MediaLightbox, ModalDrawer, Panel, Photo, request, RequestError, Select, useWorkspaceStamp, Table, Tabs, Tag, text, useLoad, usd, type Row } from "./ui";
 
 const acknowledged={scope_notice:"I understand which checks are included.",samples_not_batch:"These samples do not represent an entire production batch.",seller_refund_is_mine:"I handle any refund request directly with my seller.",no_certification:"The report is an inspection record and does not provide certification.",restricted_items:"My items comply with the restricted items policy."};
-const states:Record<string,string>={checked_in:"Received at warehouse",awaiting_warehouse:"Awaiting warehouse check-in",samples_ready:"Samples ready",pending_safe_storage:"Pending safe storage",draft:"Draft",awaiting_payment:"Awaiting payment",awaiting_samples:"Awaiting items",queued:"Ready for inspection",inspecting:"Inspection underway",qa_review:"Under review",report_ready:"Report ready",action_pending:"Awaiting disposition",cancelled:"Cancelled",closed:"Closed",on_hold:"On hold"};
-const label=(state:string|null|undefined)=>state?states[state]??state.replaceAll("_"," "):"—";
+const states:Record<string,string>={
+  checked_in:"Received at warehouse",awaiting_warehouse:"Awaiting warehouse check-in",samples_ready:"Samples ready",
+  pending_safe_storage:"Pending safe storage",draft:"Draft",awaiting_payment:"Awaiting payment",awaiting_samples:"Awaiting items",
+  queued:"Ready for inspection",inspecting:"Inspection underway",qa_review:"Under review",report_ready:"Report ready",
+  action_pending:"Awaiting disposition",cancelled:"Cancelled",closed:"Closed",on_hold:"On hold",stored:"In storage",
+  waiting_customer:"Awaiting your reply",waiting_internal:"With support",identity_unclear:"Parcel ownership review",
+  non_standard_quote:"General inquiry",not_due:"Not due",needs_verification:"Verification needed",needs_carrier:"Carrier needed",
+};
+const label=(state:string|null|undefined)=>state?states[state]??(state.charAt(0).toUpperCase()+state.slice(1).replaceAll("_"," ")):"—";
 const parcelLinkStates=["draft","awaiting_payment","awaiting_samples","on_hold"];
 const orderNext:Record<string,string>={
   draft:"Review the inspection scope and calculate a quote.",
@@ -474,7 +482,8 @@ const maximumDraftItems=300;
 const wizardPolicyKinds=["terms","privacy","restricted_items","report_notice"];
 const quoteTimeoutMs=15000;
 
-export function NewOrder() {
+export function NewOrder({customerId}:{customerId:string}) {
+  const stamp=useWorkspaceStamp();
   const {data,error}=useLoad("/catalog");
   const refs=useLoad("/me/reference-samples");
   const receiving=useLoad("/me/receiving-address");
@@ -549,10 +558,59 @@ export function NewOrder() {
     }
   }
 
-  const [draftLoadedNo,setDraftLoadedNo]=useState("");
+  const [recoveryKey,setRecoveryKey]=useState("");
+  const [recoveryReady,setRecoveryReady]=useState(false);
+  const [draftLoadFailed,setDraftLoadFailed]=useState(false);
+  const [conflict,setConflict]=useState<DraftRecovery|null>(null);
+  const [reviewingConflict,setReviewingConflict]=useState(false);
+  const originalEditor=useRef<string|null|undefined>(undefined);
+  const hasRecoveredEditor=useRef(false);
+  const serverEditor=useRef(false);
+
+  function restoreEditor(editor:DraftEditor) {
+    setStep(Math.min(editor.step,4));
+    setCategoryKey(editor.categoryKey);
+    setServiceKind(editor.serviceKind);
+    setSelectedOfferId(editor.selectedOfferId);
+    setTemplateVariant(editor.templateVariant);
+    setQty(editor.qty);
+    setManualQuoteMode(editor.manualQuoteMode);
+    setManualBatchQty(editor.manualBatchQty);
+    setManualQuoteReason(editor.manualQuoteReason);
+    setItemName(editor.itemName);
+    setSupplierRef(editor.supplierRef);
+    setBaseSku(editor.baseSku);
+    setBaseColor(editor.baseColor);
+    setBaseSize(editor.baseSize);
+    setBaseTrackingNo(editor.baseTrackingNo);
+    setProductLink(editor.productLink);
+    setToleranceMode(editor.toleranceMode);
+    setPointTolerances(editor.pointTolerances);
+    setReferenceId(editor.referenceId);
+    setSizeMismatchConfirmed(editor.sizeMismatchConfirmed);
+    setItemRows(editor.itemRows);
+    setNotes(editor.notes);
+    setAttachmentId(editor.attachmentId);
+    setAttachmentName(editor.attachmentName);
+    setExtraLines(editor.extraLines);
+  }
 
   useEffect(()=>{
+    if(!data) return;
+    let cancelled=false;
     const params=new URLSearchParams(location.search);
+    const requestedDraft=params.get("draft")?.trim()??"";
+    const key=draftRecoveryKey(customerId,requestedDraft||"new:"+String(params.get("offer")??""));
+    const local=readDraftRecovery(key);
+    setRecoveryKey(key);
+    if(!requestedDraft&&local) {
+      hasRecoveredEditor.current=true;
+      draftWrite.current=local.write;
+      restoreEditor(local.editor);
+      setSavedNotice("Recovered unsaved edits from this tab.");
+      setRecoveryReady(true);
+      return;
+    }
     const requestedOffer=params.get("offer")??"";
     if(data&&!requestedOffer&&!params.has("draft")) {
       const first=offers.find(o=>o.category_slug==="apparel"&&o.service==="inspection"&&templateVariantFor(o)==="tops")
@@ -576,19 +634,29 @@ export function NewOrder() {
         setQty(matched.service==="compare"?matched.rules.minimum:Math.max(1,matched.rules.minimum));
       }
     }
-    const requestedDraft=params.get("draft")?.trim()??"";
-    if(requestedDraft && data && draftLoadedNo!==requestedDraft) {
-      setDraftLoadedNo(requestedDraft);
+    if(requestedDraft) {
       (async()=>{
         try {
           setBusyMessage(`Loading draft ${requestedDraft}…`);
           const found=await request("/orders/by-number/"+encodeURIComponent(requestedDraft));
           const ord=await request("/orders/"+found.id);
+          if(cancelled) return;
           if(ord.state!=="draft") {
+            removeDraftRecovery(key);
             location.assign("/orders/"+ord.public_no);
             return;
           }
           setDraftOrder(ord);
+          serverEditor.current=true;
+          if(local&&!ord.manual_quote&&local.revision===ord.revision) {
+            hasRecoveredEditor.current=true;
+            draftWrite.current=local.write;
+            restoreEditor(local.editor);
+            serverEditor.current=false;
+            setSavedNotice("Recovered unsaved edits from this tab.");
+            return;
+          }
+          if(local&&!ord.manual_quote) setConflict(local);
           if(ord.customer_notes) setNotes(String(ord.customer_notes));
           const lines:Row[]=Array.isArray(ord.lines)?ord.lines:[];
           if(lines.length>0) {
@@ -665,13 +733,21 @@ export function NewOrder() {
             }
           }
         } catch(err) {
+          if(cancelled) return;
+          setDraftLoadFailed(true);
           setWizardError(err instanceof Error?err.message:"Could not load draft order.");
         } finally {
-          setBusyMessage("");
+          if(!cancelled) {
+            setBusyMessage("");
+            setRecoveryReady(true);
+          }
         }
       })();
+    } else {
+      setRecoveryReady(true);
     }
-  },[data,draftLoadedNo]);
+    return ()=>{cancelled=true;};
+  },[data,customerId]);
 
   const activeCategoryId=resolveCategoryId(categoryKey)??"";
   const categoryOffers=offers.filter(o=>o.category_id===activeCategoryId);
@@ -809,6 +885,26 @@ export function NewOrder() {
 
   const draftPayload={lines:allLines.map(({title,...line})=>line),customer_notes:notes.trim()};
   const fingerprint=JSON.stringify(draftPayload);
+  const editor:DraftEditor={step,categoryKey,serviceKind,selectedOfferId,templateVariant,qty,manualQuoteMode,manualBatchQty,manualQuoteReason,
+    itemName,supplierRef,baseSku,baseColor,baseSize,baseTrackingNo,productLink,toleranceMode,pointTolerances,referenceId,
+    sizeMismatchConfirmed,itemRows,notes,attachmentId,attachmentName,extraLines};
+  const editorContent=JSON.stringify({...editor,step:0});
+  useLayoutEffect(()=>{
+    if(!recoveryReady||draftLoadFailed||!recoveryKey) return;
+    if(originalEditor.current===undefined) {
+      originalEditor.current=hasRecoveredEditor.current?null:editorContent;
+      if(serverEditor.current) savedFingerprint.current=fingerprint;
+    }
+    if(conflict&&!reviewingConflict||submittedCharge||manualQuoteSubmitted) return;
+    if(editorContent===originalEditor.current) {
+      if(!draftWrite.current) removeDraftRecovery(recoveryKey);
+      return;
+    }
+    writeDraftRecovery(recoveryKey,{
+      revision:reviewingConflict?conflict!.revision:draftOrder?.revision??null,editor,write:draftWrite.current,
+    });
+  },[recoveryReady,recoveryKey,draftLoadFailed,editorContent,step,conflict,reviewingConflict,draftOrder,submittedCharge,manualQuoteSubmitted]);
+
   const quoteForCurrentDraft=serverQuote&&quotedFingerprint===fingerprint;
   const isQuoteExpired=Boolean(quoteForCurrentDraft&&(quoteExpired||Date.parse(serverQuote!.expires_at)<=Date.now()));
   const hasValidQuote=Boolean(quoteForCurrentDraft&&!isQuoteExpired&&serverQuote!.order_id===draftOrder?.id);
@@ -850,15 +946,56 @@ export function NewOrder() {
     }
   }
 
-  async function persistDraft(payload=draftPayload):Promise<Row> {
+  async function persistDraft(payload=draftPayload,confirmConflict=false):Promise<Row> {
+    if(!recoveryReady||draftLoadFailed) throw new Error("Reload the draft before saving.");
+    if(conflict&&(!reviewingConflict||!confirmConflict)) throw new Error("Review the versions and choose which edits to save.");
     checkDraftInputs(payload.lines);
     const input=JSON.stringify(payload);
-    if(draftOrder&&savedFingerprint.current===input) return draftOrder;
+    let record=draftOrder;
+    let key=recoveryKey;
+    if(record&&savedFingerprint.current===input) {
+      if(confirmConflict) {
+        removeDraftRecovery(key);
+        setConflict(null);
+        setReviewingConflict(false);
+      }
+      return record;
+    }
+    async function createDraft(body:typeof draftPayload,writeKey:string) {
+      const created=await request("/orders","POST",{
+        lines:body.lines,...(body.customer_notes?{customer_notes:body.customer_notes}:{}),
+      },writeKey);
+      if(!created.id||!created.public_no||!created.revision||created.state!=="draft") {
+        throw new Error("The draft could not be confirmed. Retry before proceeding.");
+      }
+      return created;
+    }
+    if(!record&&draftWrite.current&&draftWrite.current.fingerprint!==input) {
+      // An earlier create may have reached the server before its response was lost.
+      const pending=draftWrite.current;
+      try {
+        record=await createDraft(JSON.parse(pending.fingerprint),pending.key);
+      } catch(error) {
+        // A rejected payload cannot have created a draft.
+        if(!(error instanceof RequestError&&(error.status===400||error.status===422))) throw error;
+      }
+      draftWrite.current=null;
+      if(record) {
+        savedFingerprint.current=pending.fingerprint;
+        const numberedKey=draftRecoveryKey(customerId,record.public_no);
+        writeDraftRecovery(numberedKey,{revision:record.revision,editor,write:null});
+        removeDraftRecovery(key);
+        key=numberedKey;
+        setDraftOrder(record);
+        setRecoveryKey(key);
+        syncDraftUrl(record.public_no,step);
+      }
+    }
     if(draftWrite.current?.fingerprint!==input) draftWrite.current={fingerprint:input,key:crypto.randomUUID()};
-    const updated=await request(draftOrder?"/orders/"+draftOrder.id:"/orders",draftOrder?"PATCH":"POST",
-      draftOrder?{...payload,revision:draftOrder.revision}:{
-        lines:payload.lines,...(payload.customer_notes?{customer_notes:payload.customer_notes}:{}),
-      },draftWrite.current.key);
+    writeDraftRecovery(key,{revision:record?.revision??null,editor,write:draftWrite.current});
+    const updated=record
+      ?await request("/orders/"+record.id,"PATCH",{...payload,revision:record.revision},draftWrite.current.key)
+      :await createDraft(payload,draftWrite.current.key);
     if(!updated.id||!updated.public_no||!updated.revision||updated.state!=="draft") {
       throw new Error("The draft could not be confirmed. Retry before proceeding.");
     }
@@ -866,7 +1003,11 @@ export function NewOrder() {
     draftWrite.current=null;
     quoteWrite.current=null;
     setDraftOrder(updated);
-    setDraftLoadedNo(updated.public_no);
+    originalEditor.current=editorContent;
+    removeDraftRecovery(key);
+    setRecoveryKey(draftRecoveryKey(customerId,updated.public_no));
+    setConflict(null);
+    setReviewingConflict(false);
     syncDraftUrl(updated.public_no,step);
     return updated;
   }
@@ -879,17 +1020,19 @@ export function NewOrder() {
     setBusyMessage(message);
     try { return await action(); }
     catch(error) {
-      setWizardError(error instanceof Error&&error.name==="TimeoutError"?"The quote request timed out. Retry to continue.":
+      setWizardError(error instanceof RequestError&&error.code==="VERSION_CONFLICT"
+        ?"This draft changed in another window. Reload to review the saved draft and your edits.":
+        error instanceof Error&&error.name==="TimeoutError"?"The quote request timed out. Retry to continue.":
         error instanceof TypeError?"Connection interrupted. Check your connection and try again.":
         error instanceof Error?error.message:"Try again or contact Support.");
     }
     finally {inFlight.current=false;setBusyMessage("");}
   }
 
-  function saveDraftOnly() {
+  function saveDraftOnly(confirmConflict=false) {
     return runWizard("Saving draft…",async()=>{
       if(!currentLine) throw new Error("Choose an available service and quantity.");
-      const record=await persistDraft();
+      const record=await persistDraft(draftPayload,confirmConflict);
       setSavedNotice(`Draft ${record.public_no} saved.`);
     });
   }
@@ -936,7 +1079,7 @@ export function NewOrder() {
   }
 
   async function goToStep(targetStep:number) {
-    if(inFlight.current||targetStep<0||targetStep>5||targetStep>step+1) return;
+    if(inFlight.current||!recoveryReady||draftLoadFailed||targetStep<0||targetStep>5||targetStep>step+1) return;
     setWizardError("");
     if(targetStep<step) {
       if(step>=2&&step<=3&&itemName.trim()&&currentLine&&fingerprint!==savedFingerprint.current) {
@@ -1014,6 +1157,7 @@ export function NewOrder() {
         }
         throw error;
       }
+      removeDraftRecovery(recoveryKey);
       setSubmittedCharge(accepted.charge);
       if(accepted.order.state==="awaiting_payment") {
         try {
@@ -1029,7 +1173,7 @@ export function NewOrder() {
 
   const latestAutoSave=useRef<()=>void>(undefined);
   latestAutoSave.current=()=>{
-    if(inFlight.current||busyMessage||manualQuoteMode||!currentLine||!itemName.trim()||
+    if(inFlight.current||busyMessage||!recoveryReady||draftLoadFailed||conflict||!navigator.onLine||manualQuoteMode||!currentLine||!itemName.trim()||
       fingerprint===savedFingerprint.current||hasValidQuote) return;
     try {checkDraftInputs(allLines);} catch {return;}
     void saveDraftOnly();
@@ -1038,7 +1182,12 @@ export function NewOrder() {
     if(step!==2&&step!==3) return;
     const timer=setTimeout(()=>latestAutoSave.current?.(),1000);
     return ()=>clearTimeout(timer);
-  },[fingerprint,step]);
+  },[fingerprint,step,recoveryReady]);
+  useEffect(()=>{
+    function resumeSaving() {latestAutoSave.current?.();}
+    window.addEventListener("online",resumeSaving);
+    return ()=>window.removeEventListener("online",resumeSaving);
+  },[]);
 
   const stepLabels=[
     "Select Inspection",
@@ -1080,6 +1229,22 @@ export function NewOrder() {
     {!data&&!error&&<p role="status">Loading available inspection services…</p>}
     {data&&!offers.length&&<Empty>No inspection services are available for online booking. <Link href="/support">Contact support</Link>.</Empty>}
     {wizardError&&<ErrorBlock error={wizardError}/>}
+    {draftLoadFailed&&<button className="button" type="button" onClick={()=>location.reload()}>Reload saved draft</button>}
+    {conflict&&<div className="notice" role="status">
+      <strong>This draft changed in another window.</strong>
+      <p>{reviewingConflict?"Review your recovered edits, then choose Save Draft to apply them.":"The latest saved draft is open. Your unsaved edits are still in this tab."}</p>
+      <div className="actions">
+        {!reviewingConflict&&<button type="button" className="button" onClick={()=>{
+          draftWrite.current=null;
+          restoreEditor(conflict.editor);
+          setReviewingConflict(true);
+        }}>Review my unsaved edits</button>}
+        <button type="button" className="button" onClick={()=>{
+          removeDraftRecovery(recoveryKey);
+          location.reload();
+        }}>Keep latest saved draft</button>
+      </div>
+    </div>}
     {savedNotice&&!wizardError&&<div className="notice ok" role="status">{savedNotice}</div>}
     {busyMessage&&<div className="notice" role="status">{busyMessage}</div>}
 
@@ -1968,8 +2133,8 @@ export function NewOrder() {
             <button
               type="button"
               className="button sm"
-              disabled={Boolean(busyMessage)||manualQuoteMode||!validQuantity||Boolean(submittedCharge)}
-              onClick={()=>{saveDraftOnly().catch(()=>{});}}
+              disabled={Boolean(busyMessage)||!recoveryReady||draftLoadFailed||Boolean(conflict&&!reviewingConflict)||manualQuoteMode||!validQuantity||Boolean(submittedCharge)}
+              onClick={()=>void saveDraftOnly(reviewingConflict)}
             >
               {draftOrder?"Update Saved Draft":"Save Draft"}
             </button>
@@ -1978,7 +2143,10 @@ export function NewOrder() {
               className="button sm"
               disabled={Boolean(busyMessage)}
               onClick={()=>{
-                if(window.confirm("Start a new inspection? Any saved draft will remain in Orders.")) location.assign("/orders/new");
+                if(window.confirm("Start a new inspection? Any saved draft will remain in Orders.")) {
+                  removeDraftRecovery(recoveryKey);
+                  location.assign("/orders/new");
+                }
               }}
             >Reset Draft</button>
           </div>
@@ -2010,9 +2178,15 @@ function CustomerItemDrawer({
 }:{
   item:Row|null;onClose:()=>void;onOpenTracking?:(t:CustomerTrackingTarget)=>void;onOpenBatch?:(batchId:string)=>void;
 }) {
+  const stamp=useWorkspaceStamp();
   if(!item) return null;
   const disp=item.active_disposition??item.instruction;
-  const declared=item.declared_fields&&typeof item.declared_fields==="object"?Object.entries(item.declared_fields as Record<string,unknown>).filter(([,v])=>v!=null&&v!==""):[];
+  const declared=[
+    ["Product",item.declared_fields?.name],["Item code",item.declared_fields?.sample_code],
+    ["Supplier",item.declared_fields?.supplier_alias??item.declared_fields?.supplier_ref],
+    ["Color",item.declared_fields?.color_declared],["Size",item.declared_fields?.size_label],
+    ["Seller tracking",item.declared_fields?.tracking_no],
+  ].filter(([,value])=>typeof value==="string"&&value);
   return <ModalDrawer
     open={Boolean(item)}
     onClose={onClose}
@@ -2055,7 +2229,7 @@ function CustomerItemDrawer({
       {declared.length>0&&<div style={{marginTop:10}}>
         <small className="muted">Declared attributes</small>
         <div className="actions" style={{marginTop:4}}>
-          {declared.map(([k,v])=><Tag key={k} tone="outline">{k}: {typeof v==="object"?JSON.stringify(v):String(v)}</Tag>)}
+          {declared.map(([key,value])=><Tag key={key} tone="outline">{key} · {value}</Tag>)}
         </div>
       </div>}
     </div>
@@ -2067,6 +2241,7 @@ function CustomerBatchDrawer({
 }:{
   batchId:string|null;onClose:()=>void;onOpenTracking?:(t:CustomerTrackingTarget)=>void;onSaved?:()=>void;
 }) {
+  const stamp=useWorkspaceStamp();
   const view=useLoad(batchId?`/dispatch-batches/${batchId}`:null);
   const [removeIds,setRemoveIds]=useState<string[]>([]);
   const [amendNotice,setAmendNotice]=useState<string>();
@@ -2174,6 +2349,7 @@ function CustomerBatchDrawer({
 }
 
 export function OrderView({number,section}:{number:string;section?:OrderSection}) {
+  const stamp=useWorkspaceStamp();
   const returnedFromCheckout=useSearchParams().get("checkout")==="returned";
   const lookup=useLoad("/orders/by-number/"+number);
   const id=lookup.data?.id;
@@ -2433,6 +2609,7 @@ export function DemoCheckout({id}:{id:string}) {
   </div>;
 }
 export function ReportView({number,version}:{number:string;version?:number}) {
+  const stamp=useWorkspaceStamp();
   const l=useLoad("/orders/by-number/"+number),id=l.data?.id;
   const base=id?"/orders/"+id+"/report":null;
   const r=useLoad(base&&version?base+"/versions/"+version:base);
@@ -2469,7 +2646,7 @@ export function ReportView({number,version}:{number:string;version?:number}) {
       {id&&<ReportShares key={report.version} orderId={id} version={report.version}/>}
       {report.snapshot.sections.map((s:Row)=><Panel key={s.task_id} title={s.title}>
         <div className="actions">{[...new Set<string>((s.results??[]).map((result:Row)=>result.item).filter((code:string)=>code?.startsWith("S-")))]
-          .map(code=><Link className="code-btn" key={code} href={"/items#item-"+code}>{code}</Link>)}</div>
+          .map(code=><Link className="code-btn" key={code} href={"/items?item="+encodeURIComponent(code)}>{code}</Link>)}</div>
         {s.summary&&<p className="muted small">Expected items: {s.summary.expected_count} · Inspected: {s.summary.checked_count} · Observed issues: {s.summary.issue_count}</p>}
         <ReportSection section={s} results={s.results} grouped={["compare","reference_match"].includes(s.service)} showPhoto={showPhoto}/>
       </Panel>)}
@@ -2575,6 +2752,7 @@ function ReportSection({section,results,grouped,showPhoto}:{section:Row;results:
   </div>;
 }
 export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";id:string;embedded?:boolean}) {
+  const stamp=useWorkspaceStamp();
   const path=kind==="parcels"?"/me/parcels/":"/shipments/";
   const {data,error,reload}=useLoad(path+id+"/tracking?locale=en");
   const canVerify=kind==="parcels"&&data?.allowed_actions.includes("verify_tracking");
@@ -2588,6 +2766,7 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
     {data&&<Panel title={data.carrier??"Carrier pending"}><p className="code">{data.tracking_no}</p>
       <div className="actions"><Tag>{label(data.transport_state)}</Tag><Tag>{label(data.sync_state)}</Tag>
       {data.warehouse_state&&<Tag>Warehouse · {label(data.warehouse_state)}</Tag>}
+      {kind==="parcels"&&<Link className="button sm" href={"/support?parcel="+encodeURIComponent(id)}>Get help with this parcel</Link>}
       <button onClick={async()=>{
         setRefreshError(null);
         if(data.allowed_actions.includes("refresh_tracking")) {
@@ -2646,6 +2825,7 @@ function orderNextAction(o:Row):{label:string;href:string} {
   }
 }
 export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
+  const stamp=useWorkspaceStamp();
   const search=useSearchParams();
   const router=useRouter();
   const orderParams=new URLSearchParams();
@@ -2654,11 +2834,19 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     if(value) orderParams.set(key,value);
   }
   const orderList=useLoad(path==="/orders"?"/me/orders?"+orderParams:null);
+  const isItems=path==="/items";
+  const itemFilter=search.get("filter")??"all";
+  const itemPage=Number(search.get("page")??1);
+  const inventory=useLoad(isItems?`/me/inventory?${new URLSearchParams({filter:itemFilter,page:String(itemPage)})}`:null);
+  const [legacyItem,setLegacyItem]=useState<string|null>(null);
+  const requestedItem=search.get("item")??legacyItem;
+  const focusedItem=useLoad(isItems&&requestedItem?"/me/inventory?code="+encodeURIComponent(requestedItem):null);
+  const [handlingItems,setHandlingItems]=useState<Row[]>([]);
+  const [handlingNotice,setHandlingNotice]=useState("");
   const [parcelTab,setParcelTab]=useState("incoming");
-  const [itemFilter,setItemFilter]=useState("");
   const [addressCopied,setAddressCopied]=useState(false);
   const [createdCase,setCreatedCase]=useState<Row>();
-  const {data,error,reload}=useLoad("/me/desk"),carriers=useLoad("/carriers");
+  const {data,error,reload}=useLoad("/me/desk?include_items=0"),carriers=useLoad("/carriers");
   const homeActions=useLoad(path==="/account"?"/actions":null);
   const [next,setNext]=useState<string|null>(null);
   const [parcelOrder,setParcelOrder]=useState<string|null>(null);
@@ -2672,6 +2860,17 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   },[path]);
   const [batchIds,setBatchIds]=useState<string[]>([]);
   useEffect(()=>{
+    if(!isItems) return;
+    function readHash() {setLegacyItem(location.hash.match(/^#item-(S-[a-zA-Z0-9-]+)$/)?.[1]??null);}
+    readHash();
+    window.addEventListener("hashchange",readHash);
+    return ()=>window.removeEventListener("hashchange",readHash);
+  },[isItems]);
+  useEffect(()=>{
+    const item=focusedItem.data?.rows[0];
+    if(item) setItemTarget(item);
+  },[focusedItem.data]);
+  useEffect(()=>{
     if(!data)return;
     const id=location.hash.slice(1);
     if(/^(case|quote|charge|item)-[a-zA-Z0-9-]{1,64}$/.test(id)) document.getElementById(id)?.scrollIntoView({block:"start"});
@@ -2679,7 +2878,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   if(error)return <ErrorBlock error={error}/>;
   if(!data)return <p>Loading your account…</p>;
   const addr=data.profile.warehouse_address;
-  const isHome=path==="/account",isSecurity=path==="/account/security",isItems=path==="/items",isParcels=path==="/parcels",isBills=path==="/account/billing",isOrders=path==="/orders",isHelp=path==="/support";
+  const isHome=path==="/account",isSecurity=path==="/account/security",isParcels=path==="/parcels",isBills=path==="/account/billing",isOrders=path==="/orders",isHelp=path==="/support";
   const orders:Row[]=data.orders;
   const linkableOrders=orders.filter(order=>parcelLinkStates.includes(order.state));
   const visibleOrders:Row[]=isHome?orders.slice(0,5):orderList.data?.rows??[];
@@ -2690,11 +2889,16 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     else params.set("page",String(target));
     return "/orders"+(params.size?"?"+params:"");
   }
-  const pendingItems=data.items.filter((item:Row)=>needsHandling(item));
-  const visibleItems=data.items.filter((item:Row)=>!itemFilter||
-    itemFilter==="handling"&&needsHandling(item)||
-    itemFilter==="inspection"&&item.order_state&&!handlingStates.includes(item.order_state)||
-    itemFilter==="reference"&&item.reference_sample?.state==="active"&&!item.reference_sample.expired);
+  function inventoryHref(page:number,filter=itemFilter,item?:string) {
+    const params=new URLSearchParams();
+    if(page>1) params.set("page",String(page));
+    if(filter!=="all") params.set("filter",filter);
+    if(item) params.set("item",item);
+    return "/items"+(params.size?"?"+params:"");
+  }
+  function refreshInventory() {inventory.reload();reload();}
+  const visibleItems:Row[]=inventory.data?.rows??[];
+  const itemCounts=inventory.data?.summary;
   const parcelRows=data.advices.filter((parcel:Row)=>parcelTab==="attention"
     ?["needs_carrier","needs_verification"].includes(parcel.sync_state)||parcel.warehouse_state==="quarantined"
     :parcelTab==="received"?Boolean(parcel.warehouse_state):!parcel.warehouse_state);
@@ -2703,7 +2907,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     {isHome&&<>
       <div className="page-head row">
         <div><p className="eyebrow">MY WORKSPACE</p><h1>Workspace Overview</h1><p className="muted">Your active inspections, parcels, items awaiting instructions and permanent China warehouse receiving address.</p></div>
-        <div className="head-actions"><Link className="button sm" href="/account/security">Sign-in &amp; security</Link><Link className="button primary sm" href="/orders/new">+ Create Inspection</Link></div>
+        <div className="head-actions"><Link className="button sm" href="/account/security">Profile &amp; security</Link><Link className="button primary sm" href="/orders/new">+ Create Inspection</Link></div>
       </div>
       <div className="metric-strip" aria-label="Account summary">
         <Link className="metric" href="/orders"><span>Active Inspections</span><strong>{data.summary.active_inspections}</strong><small>Submitted inspections still open</small></Link>
@@ -2719,6 +2923,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
       </div>}
         <Panel title="China Warehouse Receiving Address" subtitle="Include your permanent receiving code on the seller’s shipping label."
           badge={demo?<Tag tone="yellow">Test address</Tag>:addr?<Tag tone="green">Current address</Tag>:undefined}>
+          {data.warehouse_address_changed_at&&<p className="notice" role="status">The warehouse address changed on {stamp(data.warehouse_address_changed_at)}. Use the current address below for new shipments.</p>}
           <div className="receiving-code"><span className="eyebrow">PERMANENT PERSONAL RECEIVING CODE</span><strong className="code">{data.profile.receiving_code}</strong></div>
           {addr?<>
             <div className="grid cols2" style={{marginBottom:12}}>
@@ -2807,6 +3012,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
           </div>,
           <div className="cell-stack">
             <div className="actions">{linkedNos.length?linkedNos.map((no:string)=><Link key={no} className="code-btn" href={"/orders/"+no}>{no}</Link>):<span className="muted">Unlinked</span>}</div>
+            {a.declared_item_count>0&&<small>{a.declared_item_count} expected {a.declared_item_count===1?"item":"items"}{a.declared_suppliers?.length?` · ${a.declared_suppliers.join(", ")}`:""}</small>}
             {candidates.length>0&&<details className="small">
               <summary style={{cursor:"pointer"}}>+ Link to order</summary>
               <Form label="Link" run={async f=>{
@@ -2817,7 +3023,9 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
               </Form>
             </details>}
           </div>,
-          label(a.warehouse_state??"awaiting_warehouse"),
+          <div className="cell-stack"><span>{label(a.warehouse_state??"awaiting_warehouse")}</span>
+            {a.received_quantity!=null&&<small>{a.received_quantity} recorded by warehouse</small>}
+          </div>,
           label(a.transport_state),
         ];
       })} empty="No parcels match this view."/>
@@ -2846,18 +3054,21 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     {isItems&&<><div className="page-head"><p className="eyebrow">Inventory &amp; handling</p><h1>Warehouse items</h1><p className="muted">Click any item code, tracking number or dispatch batch to inspect details, or submit batch handling instructions below.</p></div>
     <div className="metric-strip" aria-label="Items summary">
       {[
-        ["Warehouse items",data.items.length],
-        ["In inspection",data.items.filter((item:Row)=>item.order_state&&!handlingStates.includes(item.order_state)).length],
-        ["Awaiting instructions",pendingItems.length],
-        ["Active reference samples",(data.references??[]).filter((r:Row)=>r.state==="active"&&!r.expired).length],
+        ["Warehouse items",itemCounts?.total??"—"],
+        ["Awaiting or in inspection",itemCounts?.inspection??"—"],
+        ["Awaiting instructions",itemCounts?.handling??"—"],
+        ["Active reference samples",itemCounts?.reference??"—"],
       ].map(([name,value])=><div className="metric" key={name}><span>{name}</span><strong>{value}</strong></div>)}
     </div>
     <Panel title="Your items">
-      <label>Show items <select value={itemFilter} onChange={event=>setItemFilter(event.target.value)}>
-        <option value="">All items</option><option value="inspection">In inspection</option>
+      <label>Show items <select value={itemFilter} onChange={event=>router.push(inventoryHref(1,event.target.value),{scroll:false})}>
+        <option value="all">All items</option><option value="inspection">Awaiting or in inspection</option>
         <option value="handling">Awaiting instructions</option><option value="reference">Active Golden Samples</option>
       </select></label>
-      <Table headers={["Item","Inbound / Package","Order & inspection","Custody","Storage through","Reference / Dispatch","Shipping batch"]} rows={visibleItems.map((w:Row)=>[
+      {focusedItem.error&&<ErrorBlock error={focusedItem.error}/>}
+      {inventory.error&&<><ErrorBlock error={inventory.error}/><button className="button sm" onClick={inventory.reload}>Retry inventory</button></>}
+      {!inventory.data&&!inventory.error&&<p role="status">Loading items…</p>}
+      {!!visibleItems.length&&<Table headers={["Item","Inbound / Package","Order & inspection","Custody","Storage through","Reference / Dispatch","Next action"]} rows={visibleItems.map((w:Row)=>[
         <div className="cell-stack">
           <div id={"item-"+w.code}><CodeButton code={w.code} onClick={()=>setItemTarget(w)}/></div>
           {w.declared_fields?.name&&<small>{w.declared_fields.name} {[w.declared_fields.color_declared,w.declared_fields.size_label].filter(Boolean).join(" · ")}</small>}
@@ -2880,11 +3091,20 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
           {w.outbound_shipment?.id&&<small><CodeButton code={w.outbound_shipment.tracking_norm} onClick={()=>setTrackTarget({kind:"shipments",id:w.outbound_shipment.id,code:w.outbound_shipment.tracking_norm})}/></small>}
           {!w.reference_sample&&!w.active_batch_id&&!w.outbound_shipment?.id&&"—"}
         </div>,
-        w.instructions.length>0?w.instructions.map((i:string)=><label key={i} className="small"><input type="checkbox" checked={batchIds.includes(i)} onChange={e=>setBatchIds(xs=>e.target.checked?[...xs,i]:xs.filter(x=>x!==i))}/> Select for shipping</label>):(w.active_disposition?<Tag tone="outline">{label(w.active_disposition.action)}</Tag>:"—"),
-      ])}/>
-      {!data.items.length&&<Empty>Items will appear after physical warehouse intake and ownership verification.</Empty>}
-      {!!batchIds.length&&<Action primary run={async()=>{const b=await request("/dispatch-batches","POST",{disposition_ids:batchIds});await request("/dispatch-batches/"+b.batch_id+"/confirm","POST",{revision:b.revision});setBatchIds([]);reload();}}>Confirm selected items for quoting ({batchIds.length})</Action>}
-      {data.batches.map((b:Row)=><div key={b.id} className="notice row"><span>Draft shipping batch <strong className="code">#{b.id.slice(0,8)}</strong></span><div className="actions"><CodeButton code="Inspect / Amend" onClick={()=>setBatchTarget(b.id)}/><Action run={async()=>{await request("/dispatch-batches/"+b.id+"/confirm","POST",{revision:b.revision});reload();}}>Confirm draft batch</Action></div></div>)}
+        w.instructions.length>0?w.instructions.map((i:string)=><label key={i} className="small"><input type="checkbox" checked={batchIds.includes(i)} onChange={e=>setBatchIds(xs=>e.target.checked?[...xs,i]:xs.filter(x=>x!==i))}/> Select for shipping</label>):
+          w.active_disposition?<Tag tone="outline">{label(w.active_disposition.action)}</Tag>:canChooseHandling(w)?<label className="small">
+            <input type="checkbox" aria-label={`Select ${w.code} for handling`} checked={handlingItems.some(row=>row.item_id===w.item_id)}
+              onChange={e=>setHandlingItems(rows=>e.target.checked?[...rows,w]:rows.filter(row=>row.item_id!==w.item_id))}/> Select for handling
+          </label>:"—",
+      ])}/>}
+      {inventory.data&&!visibleItems.length&&<Empty>{itemCounts?.total?"No items match this view.":"Items will appear after physical warehouse intake and ownership verification."}</Empty>}
+      {inventory.data&&(itemPage>1||inventory.data.has_more)&&<nav className="actions" aria-label="Inventory pages">
+        {itemPage>1&&<Link className="button sm" href={inventoryHref(itemPage-1)} scroll={false}>Previous</Link>}
+        <span>Page {itemPage}</span>
+        {inventory.data.has_more&&<Link className="button sm" href={inventoryHref(itemPage+1)} scroll={false}>Next</Link>}
+      </nav>}
+      {!!batchIds.length&&<Action primary run={async()=>{const b=await request("/dispatch-batches","POST",{disposition_ids:batchIds});await request("/dispatch-batches/"+b.batch_id+"/confirm","POST",{revision:b.revision});setBatchIds([]);refreshInventory();}}>Confirm selected items for quoting ({batchIds.length})</Action>}
+      {data.batches.map((b:Row)=><div key={b.id} className="notice row"><span>Draft shipping batch <strong className="code">#{b.id.slice(0,8)}</strong></span><div className="actions"><CodeButton code="Inspect / Amend" onClick={()=>setBatchTarget(b.id)}/><Action run={async()=>{await request("/dispatch-batches/"+b.id+"/confirm","POST",{revision:b.revision});refreshInventory();}}>Confirm draft batch</Action></div></div>)}
     </Panel>
     {(data.active_batches??[]).length>0&&<Panel title="Dispatch batches" subtitle="Click any batch to view items, quotes, outbound tracking, or amend destination before carrier handover.">
       <Table headers={["Batch","Handling","Status","Items","Destination","Latest quote","Outbound waybills"]} rows={(data.active_batches??[]).map((b:Row)=>[
@@ -2901,10 +3121,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     </Panel>}
     <Panel title="Reference samples">
       <Table headers={["Item","Revision","Status","Valid through",""]} rows={(data.references??[]).map((r:Row)=>[
-        <CodeButton code={r.code??r.item_id} onClick={()=>{
-          const found=data.items.find((w:Row)=>w.item_id===r.item_id||w.code===r.code);
-          if(found) setItemTarget(found);
-        }}/>,`v${r.revision??1}`,
+        <Link className="code-btn" href={inventoryHref(itemPage,itemFilter,r.code)} scroll={false}>{r.code}</Link>,`v${r.revision??1}`,
         <Tag>{r.in_use?"Locked in comparison":r.state==="active"&&r.expired?"Expired":label(r.state)}</Tag>,
         stamp(r.expires_at),
         r.state==="active"&&!r.in_use?<Action run={async()=>{
@@ -2912,18 +3129,22 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
           const termsId=t.terms?.find((x:Row)=>x.kind==="terms")?.id;
           if(!termsId) throw new Error("Service terms are unavailable.");
           await request("/me/reference-samples/"+r.reference_id+"/release","POST",{terms_version_id:termsId,reason:"Customer released reference sample"});
-          reload();
+          refreshInventory();
         }}>Release reference</Action>:r.in_use?<small>In active comparison</small>:null,
       ])} empty="No reference samples reserved yet. Use the instruction form below to reserve a stored item as a reference sample."/>
     </Panel>
     <Panel title="Request handling for items">
-      <p className="muted">Select one or multiple warehouse items to return to the seller, forward to your shipping agent, extend storage, or reserve as a reference sample.</p>
-      <ItemInstructionForm
-        items={data.items.filter((w:Row)=>w.allowed_actions.includes("request_disposition")&&
-          (!w.order_state||handlingStates.includes(w.order_state))&&!w.active_disposition&&!w.reference_sample?.in_use)}
-        recentDestinations={data.recent_destinations??[]}
-        onSave={reload}
-      />
+      {handlingNotice&&<p className="notice ok" role="status">{handlingNotice}</p>}
+      {handlingItems.length?<>
+        <button className="button sm" type="button" onClick={()=>setHandlingItems([])}>Clear selection</button>
+        <ItemInstructionForm items={handlingItems} preselected recentDestinations={data.recent_destinations??[]}
+          onSave={recorded=>{
+            const ids=new Set(recorded.map(item=>item.item_id));
+            setHandlingItems(rows=>rows.filter(row=>!ids.has(row.item_id)));
+            setHandlingNotice("Instructions recorded for "+recorded.map(item=>item.code).join(", ")+".");
+            refreshInventory();
+          }}/>
+      </>:<Empty>Select eligible items above to request handling.</Empty>}
     </Panel></>}
     {isBills&&<><div className="page-head"><p className="eyebrow">Account services</p><h1>Billing</h1><p className="muted">Review shipping quotes, charges and refunds for your inspections.</p></div><Panel title="Quotes awaiting your approval">
       {data.quotes.map((quote:Row)=><FulfillmentQuote key={quote.id} quote={quote} onUpdate={reload} onOpenBatch={setBatchTarget}/>)}
@@ -2940,10 +3161,15 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         b.refunded_cents?usd(b.refunded_cents):"—",
         <Tag tone={b.state==="paid"?"green":b.state==="open"?"yellow":b.state==="void"?"gray":"blue"}>{
           b.refunded_cents>0?(b.refunded_cents>=b.amount_cents?"Refunded":"Partially refunded"):
-            b.paid_ref?.startsWith("demo_")?"Test payment confirmed":label(b.state)
+            /^(demo_|cs_test_)/.test(b.paid_ref??"")?"Test payment confirmed":label(b.state)
         }</Tag>,
         stamp(b.paid_at),
-        b.paid_ref?.startsWith("demo_")?<small>Test payment</small>:b.paid_ref?<details className="small"><summary className="code" title={b.paid_ref}>…{String(b.paid_ref).slice(-8)}</summary><span className="code" style={{overflowWrap:"anywhere"}}>{b.paid_ref}</span></details>:b.latest_attempt_state?label(b.latest_attempt_state):"—",
+        b.receipt_available?<Action run={async()=>{
+          const {receipt_url}=await request("/charges/"+b.charge_item_id+"/receipt");
+          location.assign(receipt_url);
+        }}>{b.paid_ref?.startsWith("cs_test_")?"View test receipt":"View Stripe receipt"}</Action>:
+          b.paid_ref?.startsWith("demo_")?<small>Test payment</small>:
+          b.paid_ref?<details className="small"><summary className="code" title={b.paid_ref}>…{String(b.paid_ref).slice(-8)}</summary><span className="code" style={{overflowWrap:"anywhere"}}>{b.paid_ref}</span></details>:b.latest_attempt_state?label(b.latest_attempt_state):"—",
         b.state==="open"&&b.expires_at&&Date.parse(b.expires_at)<=Date.now()
           ?(b.order_numbers?.[0]?<Link href={"/orders/"+b.order_numbers[0]+"/payment"}>Review expired quote</Link>:<span>Quote expired</span>)
           :b.state==="open"?<Action run={()=>goCheckout(b.charge_item_id,b.quote_revision)}>Pay</Action>:null
@@ -2959,10 +3185,14 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     </Panel></>}
     {isHelp&&<><div className="page-head"><p className="eyebrow">MY WORKSPACE · ACCOUNT</p><h1>Support</h1><p className="muted">Open a case about an order, parcel, report or payment, and follow the warehouse team&apos;s replies.</p></div>
       <Panel title="Open a support case">
-        <Form key={createdCase?.id} label="Submit case" run={async f=>{
-          const orderId=text(f,"order_id"),category=text(f,"category");
+        <Form key={createdCase?.id??search.get("parcel")} label="Submit case" run={async f=>{
+          const orderId=text(f,"order_id"),category=text(f,"category"),parcelId=text(f,"parcel_id");
           if(category&&!orderId) throw new Error("Select the related order for this issue type.");
-          const result=await request("/me/cases","POST",{subject:text(f,"subject"),message:text(f,"message"),...(orderId?{order_id:orderId}:{}),...(category?{category}:{})});
+          const photo=f.get("photo");
+          const result=await request("/me/cases","POST",photo instanceof File&&photo.size?f:{
+            subject:text(f,"subject"),message:text(f,"message"),...(orderId?{order_id:orderId}:{}),
+            ...(category?{category}:{}),...(parcelId?{parcel_id:parcelId}:{}),
+          });
           setCreatedCase(result);
           reload();
         }}>
@@ -2974,7 +3204,10 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
             {id:"payment_refund",label:"Payment or refund"},
           ]}/>
           <Select name="order_id" label="Related order (optional)" required={false} choices={orders.map(o=>({id:o.id,label:`${o.public_no} · ${label(o.state)}`}))}/>
+          <Select name="parcel_id" label="Related inbound parcel (optional)" required={false} value={search.get("parcel")??undefined}
+            choices={data.advices.map((parcel:Row)=>({id:parcel.id,label:parcel.tracking_norm}))}/>
           <Field name="subject" label="Subject"/><label>Message<textarea name="message" required maxLength={2000}/></label>
+          <Field name="photo" label="Evidence photo (optional)" type="file" required={false}/>
         </Form>
         {createdCase&&<p role="status">Case <Link href={"/support/cases/"+createdCase.id}>{createdCase.public_no}</Link> opened.</p>}
       </Panel>
@@ -2989,12 +3222,43 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         ])} empty="No support cases yet."/>
       </Panel></>}
     <CustomerTrackingDrawer target={trackTarget} onClose={()=>setTrackTarget(null)}/>
-    <CustomerItemDrawer item={itemTarget} onClose={()=>setItemTarget(null)} onOpenTracking={setTrackTarget} onOpenBatch={setBatchTarget}/>
+    <CustomerItemDrawer item={itemTarget} onClose={()=>{
+      setItemTarget(null);
+      if(requestedItem&&isItems) {
+        setLegacyItem(null);
+        router.replace(inventoryHref(itemPage),{scroll:false});
+      }
+    }} onOpenTracking={setTrackTarget} onOpenBatch={setBatchTarget}/>
     <CustomerBatchDrawer batchId={batchTarget} onClose={()=>setBatchTarget(null)} onOpenTracking={setTrackTarget} onSaved={reload}/>
   </>;
 }
 
+function ProfilePreferences() {
+  const {data,error,reload}=useLoad("/me");
+  const router=useRouter();
+  const [saved,setSaved]=useState(false);
+  return <Panel title="Display preferences">
+    {error&&<><ErrorBlock error={error}/><button className="button sm" onClick={reload}>Retry</button></>}
+    {!data&&!error&&<p role="status">Loading profile…</p>}
+    {data?.profile&&<Form key={JSON.stringify(data.profile)} label="Save display preferences" run={async fields=>{
+      setSaved(false);
+      await request("/me","PATCH",{display_name:text(fields,"display_name")||null,timezone:text(fields,"timezone")||null});
+      reload();
+      router.refresh();
+      setSaved(true);
+    }}>
+      <label>Display name<input name="display_name" defaultValue={data.profile.display_name??""} maxLength={120}/></label>
+      <label>Display time zone<input name="timezone" list="workspace-timezones" defaultValue={data.profile.timezone??""}
+        placeholder="Browser time zone" maxLength={80} aria-describedby="display-timezone-hint"/></label>
+      <datalist id="workspace-timezones"><option value="UTC"/>{Intl.supportedValuesOf("timeZone").map(zone=><option key={zone} value={zone}/>)}</datalist>
+      <small id="display-timezone-hint">Choose a time zone for workspace dates. Leave blank to use your browser’s setting.</small>
+    </Form>}
+    {saved&&<p className="notice ok" role="status">Display preferences saved.</p>}
+  </Panel>;
+}
+
 function AccountSecurity({receivingCode}:{receivingCode:string}) {
+  const stamp=useWorkspaceStamp();
   const identities=useLoad("/me/identities");
   const sessions=useLoad("/me/sessions");
   const [reauthChallenge,setReauthChallenge]=useState<{challenge_id:string;demo_code?:string}>();
@@ -3016,6 +3280,7 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
     </div>
     {(identities.error||sessions.error)&&<ErrorBlock error={identities.error||sessions.error}/>}
     {info?.status==="restricted"&&<div className="notice" role="alert"><strong>Account restricted:</strong> New orders, payments, and outbound instructions are temporarily paused while your existing orders and support cases remain accessible.</div>}
+    <ProfilePreferences/>
     <Panel title="Recent verification for sensitive changes">
       <p className="muted">Linking or removing sign-in methods, changing your primary email, revoking other sessions, or closing your account requires verification within the last 10 minutes.</p>
       {info?.reauthenticated?<p className="notice" role="status">Your session is verified for sensitive security actions.</p>:
@@ -3114,6 +3379,7 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
 }
 
 function FulfillmentQuote({quote,onUpdate,onOpenBatch}:{quote:Row;onUpdate?:()=>void;onOpenBatch?:(batchId:string)=>void}) {
+  const stamp=useWorkspaceStamp();
   const shipping=quote.purpose==="dispatch";
   const {snapshot}=quote;
   const purpose=shipping?({return_to_seller:"Return to seller",to_forwarder:"Send to freight forwarder",to_domestic_address:"Domestic delivery"} as Record<string,string>)[quote.action]:"Extend storage";
@@ -3146,10 +3412,9 @@ function FulfillmentQuote({quote,onUpdate,onOpenBatch}:{quote:Row;onUpdate?:()=>
 }
 
 const handlingStates=["report_ready","action_pending","cancelled","closed"];
-function needsHandling(item:Row) {
-  return ["report_ready","action_pending"].includes(item.order_state)&&item.allowed_actions.includes("request_disposition")
-    &&!item.active_disposition&&!(item.reference_sample?.state==="pending_safe_storage"||
-      item.reference_sample?.state==="active"&&!item.reference_sample.expired);
+function canChooseHandling(item:Row) {
+  return item.allowed_actions.includes("request_disposition")&&(!item.order_state||handlingStates.includes(item.order_state))&&
+    !item.active_disposition&&!item.reference_sample?.in_use&&item.reference_sample?.state!=="pending_safe_storage";
 }
 
 const actionTitles:Record<string,string>={
@@ -3174,12 +3439,13 @@ function customerActionHref(row:Row) {
   if(row.kind==="parcel") return "/parcels/"+row.id;
   if(row.kind==="quote"||row.kind==="charge") return "/account/billing#"+row.kind+"-"+row.id;
   if(row.kind==="scope") return base+"#scope-"+row.id;
-  if(row.kind==="reference"||row.kind==="storage") return "/items#item-"+row.reference;
+  if(row.kind==="reference"||row.kind==="storage") return "/items?item="+encodeURIComponent(row.reference);
   if(row.kind==="email") return "/account/security";
   return "/support/cases/"+row.id;
 }
 
 export function CustomerActions() {
+  const stamp=useWorkspaceStamp();
   const {data,error,reload}=useLoad("/actions");
   return <>
     <div className="page-head row"><div><p className="eyebrow">CLIENT WORKSPACE / ACTIONS</p><h1>Action required</h1>
@@ -3207,17 +3473,18 @@ function InboundParcelForm({address,carriers,orderId,orders=[],preferredOrder,on
         ...(carrier?{carrier_code:carrier}:{}),order_ids:order?[order]:[]});
       setSaved(tracking);onSave();
     }}><Field name="tracking" label="Seller’s tracking number"/>
-      <Select name="carrier" label="Carrier" required={false} choices={carriers.map(c=>({id:c.code,label:c.labels.en}))}/>
+      <Select name="carrier" label="Carrier (if known)" required={false} choices={carriers.map(c=>({id:c.code,label:c.labels.en}))}/>
       {!orderId&&<Select key={preferredOrder} name="order" label="Associate an order (optional)" required={false}
         value={orders.some(o=>o.id===preferredOrder)?preferredOrder??undefined:undefined}
         choices={orders.map(o=>({id:o.id,label:o.public_no}))}/>}
+      <small className="muted">Linked orders show suppliers and expected items when the tracking number matches the item declarations.</small>
     </Form>
     {saved&&<p className="notice" role="status">Registered seller tracking <strong className="code">{saved}</strong>.</p>}
   </>;
 }
 
-function ItemInstructionForm({items,orderId,storage=false,recentDestinations=[],onSave}:{
-  items:Row[];orderId?:string;storage?:boolean;recentDestinations?:Row[];onSave:()=>void;
+function ItemInstructionForm({items,orderId,storage=false,preselected=false,recentDestinations=[],onSave}:{
+  items:Row[];orderId?:string;storage?:boolean;preselected?:boolean;recentDestinations?:Row[];onSave:(recorded:Row[])=>void;
 }) {
   const terms=useLoad("/public/terms");
   const [action,setAction]=useState(storage?"retain":"return_to_seller");
@@ -3241,9 +3508,9 @@ function ItemInstructionForm({items,orderId,storage=false,recentDestinations=[],
   if(!items.length)return <Empty>No items are available for a new instruction.</Empty>;
   if(terms.error)return <ErrorBlock error={terms.error}/>;
   if(!termsId)return <p role="status">Waiting for the current service terms.</p>;
+  const chosen=preselected?items:items.filter(row=>selectedIds.includes(row.item_id));
   return <>
-    <Form key={formKey} label={storage?`Request storage extension${selectedIds.length>1?` (${selectedIds.length} items)`:""}`:`Save handling instruction${selectedIds.length>1?` (${selectedIds.length} items)`:""}`} run={async f=>{
-      const chosen=items.filter(row=>selectedIds.includes(row.item_id));
+    <Form key={formKey} label={(storage?"Request storage extension":"Save handling instruction")+(chosen.length>1?` (${chosen.length} items)`:"")} run={async f=>{
       if(!chosen.length||!checked(f,"agree"))throw new Error("Select at least one item and confirm the instruction.");
       const destination=needsDestination?{
         recipient:recipient.trim()||text(f,"recipient"),
@@ -3253,7 +3520,7 @@ function ItemInstructionForm({items,orderId,storage=false,recentDestinations=[],
       }:undefined;
       const deadline=text(f,"deadline");
       const retainDays=currentAction==="retain"?Number(text(f,"days")||30):undefined;
-      const recorded:string[]=[];
+      const recorded:Row[]=[];
       try {
         for(const item of chosen) {
           await request(orderId?"/orders/"+orderId+"/dispositions":"/me/items/"+item.item_id+"/dispositions","POST",{
@@ -3262,20 +3529,20 @@ function ItemInstructionForm({items,orderId,storage=false,recentDestinations=[],
           ...(currentAction==="return_to_seller"?{return_info:{requested_from_seller:true,customer_pays_shipping:true,
             ...(deadline?{deadline:new Date(deadline).toISOString()}:{})}}:{}),
           });
-          recorded.push(item.code);
+          recorded.push(item);
         }
       } catch(error) {
         if(recorded.length) {
-          setSavedNotice("Instructions recorded for "+recorded.join(", ")+".");
-          onSave();
+          setSavedNotice("Instructions recorded for "+recorded.map(item=>item.code).join(", ")+".");
+          onSave(recorded);
         }
         throw error;
       }
       setSavedNotice(`Recorded instruction for ${chosen.length} ${chosen.length===1?"item":"items"} (${chosen.map(c=>c.code).join(", ")}).`);
       setFormKey(k=>k+1);
-      onSave();
+      onSave(recorded);
     }}>
-      {items.length===1?(
+      {preselected?<p><strong>{items.length} selected</strong> · <span className="code">{items.map(item=>item.code).join(", ")}</span></p>:items.length===1?(
         <div><small className="muted">Selected item</small><div><strong className="code">{items[0].code}</strong></div></div>
       ):(
         <div>
@@ -3341,6 +3608,7 @@ function OrderHandling({
   onOpenItem?:(item:Row)=>void;
   onOpenBatch?:(batchId:string)=>void;
 }) {
+  const stamp=useWorkspaceStamp();
   const desk=useLoad("/me/desk");
   const [selected,setSelected]=useState<string[]>([]);
   const items:Row[]=order.items.filter((item:Row)=>item.item_id);
@@ -3403,6 +3671,7 @@ function OrderHandling({
 }
 
 export function OrderFulfillment({order,id,kind}:{order:string;id:string;kind:"quotes"|"shipments"}) {
+  const stamp=useWorkspaceStamp();
   const lookup=useLoad("/orders/by-number/"+order);
   const record=useLoad(lookup.data?"/orders/"+lookup.data.id+"/"+kind+"/"+id:null);
   const data=record.data;

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { CustomerActions, CustomerDesk, DemoCheckout, NewOrder, OrderFulfillment, OrderView, ReportView, TrackView } from "./customer";
 import { AdminDesk, LogisticsConfiguration, LogisticsDesk, StaffOrder, TaskView, WarehouseDesk, WarehouseDispatchBatch, WarehouseItemView, WarehousePackageView, WarehouseScan } from "./staff";
-import { Action, request, Tag } from "./ui";
+import { Action, request, Tag, WorkspaceTimeZone } from "./ui";
 import { Brand, PublicFooter, PublicHeader, QuickSwitch, SiteFooter, switchDemoPortal, WorkspaceNavigation } from "./chrome";
 import { FAQ } from "./faq";
 import { PublicInquiry } from "./public-inquiry";
@@ -15,6 +15,7 @@ import { CustomerCase, StaffTicket, StaffTicketQueue } from "./ticket-desk";
 import { ReportDesk, StaffReport } from "./report-desk";
 import { OperationsDesk } from "./operations-desk";
 import { PublishedReports } from "./report-sharing";
+import { clearCustomerDraftRecovery } from "./draft-recovery";
 import { AuditDesk } from "./audit-desk";
 import { NotificationInbox } from "./notifications";
 
@@ -22,7 +23,7 @@ import { canOpenStaffPage, customerDestination, customerTabs, staffHome, staffTa
 
 import type { Actor } from "../packages/core/common";
 
-export function Portal({path,target,route,actor:a,demo=false}:{path:string;target:string;route:PortalRoute;actor:Actor|null;demo?:boolean}) {
+export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:string;target:string;route:PortalRoute;actor:Actor|null;demo?:boolean;timeZone?:string}) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const menuToggle=useRef<HTMLButtonElement>(null);
   function closeMobileNavigation() {
@@ -94,7 +95,7 @@ export function Portal({path,target,route,actor:a,demo=false}:{path:string;targe
       </button>}
       <Link className={demo?"button":"button primary"} href={withDestination("/login",customerDestination(target))}>Sign in as a customer</Link>
     </div></section>;
-  else if(route.view==="new-order") content=<NewOrder/>;
+  else if(route.view==="new-order") content=<NewOrder key={a.id+target} customerId={a.id}/>;
   else if(route.view==="customer-actions") content=<CustomerActions/>;
   else if(route.view==="customer-case") content=<CustomerCase key={route.recordId??route.id} id={route.recordId??route.id} order={route.recordId?route.id:undefined}/>;
   else if((route.view==="order-quote"||route.view==="order-shipment")&&route.recordId) content=<OrderFulfillment key={route.recordId} order={route.id} id={route.recordId} kind={route.view==="order-quote"?"quotes":"shipments"}/>;
@@ -106,7 +107,7 @@ export function Portal({path,target,route,actor:a,demo=false}:{path:string;targe
   else if(route.view==="parcel"||route.view==="shipment") content=<TrackView kind={route.view==="parcel"?"parcels":"shipments"} id={route.id}/>;
   else content=<CustomerDesk path={path==="/billing"?"/account/billing":path} demo={demo}/>;
   const locale=isStaff?"zh-CN":"en";
-  const signOut=a?<Action run={async()=>{await request("/auth/logout","POST",{});location.assign(a.kind==="staff"?"/staff/login":"/login");}}>{a.kind==="staff"?"退出登录":"Sign out"}</Action>:undefined;
+  const signOut=a?<Action run={async()=>{await request("/auth/logout","POST",{});if(a.kind==="customer") clearCustomerDraftRecovery(a.id);location.assign(a.kind==="staff"?"/staff/login":"/login");}}>{a.kind==="staff"?"退出登录":"Sign out"}</Action>:undefined;
   const homeLink=a?.kind==="customer"?"/account":undefined;
   if(publicPage||!a||links.length===0) return <>
     <PublicHeader path={path} accountHref={homeLink} staff={a?.kind==="staff"} accountAction={a?.kind==="customer"?signOut:undefined} actor={a} demo={demo}/>
@@ -175,7 +176,7 @@ export function Portal({path,target,route,actor:a,demo=false}:{path:string;targe
             {(currentLink||parentLink)&&<><span aria-hidden="true">›</span>{currentLink?<strong>{currentLink[1]}</strong>:<Link href={parentLink[0]}>{parentLink[1]}</Link>}</>}
           </>}
         </nav>
-        {content}
+        <WorkspaceTimeZone value={timeZone}>{content}</WorkspaceTimeZone>
         <SiteFooter/>
       </main>
     </div>

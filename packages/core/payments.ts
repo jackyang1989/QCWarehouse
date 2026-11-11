@@ -1,7 +1,7 @@
 import Stripe from "stripe";
 import { pool, type DB } from "../db";
 import { appOrigin, requireCustomerActive, requireStaffMfa } from "./auth";
-import { audit, code, event, guard, hash, isDemo, lock, one, organization, role, uuid, type Actor } from "./common";
+import { Problem, audit, code, event, guard, hash, isDemo, lock, one, organization, role, uuid, type Actor } from "./common";
 import { stripeSettings } from "./integrations";
 import { activatePaidOrder, readyOrder } from "./orders";
 import { applyScopePositionsAndAdditions, computeOrderRefundStage, type ScopeAddition } from "./operations";
@@ -28,6 +28,38 @@ function stripe() {
   guard(key && mode && webhook,"STRIPE_UNAVAILABLE","Stripe checkout and webhook are not configured.",503);
   guard(mode!=="live" || liveEnabled,"LIVE_PAYMENTS_DISABLED","Live payments have not been enabled.",503);
   return new Stripe(key,{timeout:10000,maxNetworkRetries:1});
+}
+export async function chargeReceipt(actor:Actor,id:string) {
+  const org=organization(actor);
+  const payment=await one<{id:string|null;intent_id:string|null;amount_cents:number;currency:string;provider_ref:string|null}>(pool,`
+    select p.id,p.provider_data->>'payment_intent' intent_id,c.amount_cents,c.currency,p.provider_ref
+    from charge_items c left join payments p on p.id=c.applied_payment_id and p.charge_item_id=c.id
+      and p.provider='stripe' and p.state in ('succeeded','partially_refunded','refunded')
+    where c.id=$1 and c.org_id=$2`,[id,org]);
+  const {key,mode}=stripeSettings();
+  const intentId=payment.intent_id;
+  guard(payment.id&&intentId&&intentId.startsWith("pi_")&&/^cs_(live|test)_/.test(payment.provider_ref??""),
+    "RECEIPT_NOT_AVAILABLE","There is no Stripe receipt for this charge.",404);
+  guard(key&&mode&&payment.provider_ref?.startsWith(`cs_${mode}_`)&&!isDemo(),
+    "RECEIPT_UNAVAILABLE","The Stripe receipt is currently unavailable. Try again or contact Support.",503);
+  const api=new Stripe(key,{httpClient:Stripe.createFetchHttpClient(),timeout:10000,maxNetworkRetries:1});
+  let intent:Stripe.PaymentIntent;
+  try {
+    intent=await api.paymentIntents.retrieve(intentId,{expand:["latest_charge"]});
+  } catch {
+    throw new Problem("RECEIPT_UNAVAILABLE","The Stripe receipt is currently unavailable. Try again or contact Support.",503);
+  }
+  const charge=intent.latest_charge;
+  const receipt=charge&&typeof charge==="object"?charge.receipt_url:null;
+  const metadata=intent.metadata;
+  guard(intent.id===payment.intent_id&&intent.status==="succeeded"&&intent.livemode===(mode==="live")&&
+    intent.amount_received===payment.amount_cents&&intent.currency===payment.currency.toLowerCase()&&
+    metadata?.payment_id===payment.id&&metadata.charge_item_id===id&&metadata.org_id===org&&
+    charge&&typeof charge==="object"&&charge.paid&&charge.livemode===intent.livemode&&
+    charge.amount===intent.amount_received&&charge.currency===intent.currency&&
+    charge.payment_intent===intent.id&&receipt?.startsWith("https://pay.stripe.com/receipts/"),
+    "RECEIPT_UNAVAILABLE","The Stripe receipt could not be verified. Contact Support if the issue persists.",503);
+  return {receipt_url:receipt};
 }
 async function verifyCharge(db:DB,id:string,org:string,rev:number) {
   await lock(db,"org:"+org);

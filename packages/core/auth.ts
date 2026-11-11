@@ -246,6 +246,31 @@ export async function receiving(db: DB, userId: string) {
     from warehouse_addresses where is_default and active`,[profile.receiving_code])).rows[0] ?? null;
   return {user_id:userId,...profile,warehouse_address_status:address ? "available" : "pending",warehouse_address:address};
 }
+type CustomerPreferences={display_name:string|null;timezone:string|null};
+export async function customerPreferences(db:Pick<DB,"query">,actor:Actor) {
+  organization(actor);
+  return one<CustomerPreferences>(db,"select display_name,timezone from users where id=$1",[actor.id]);
+}
+export async function updateCustomerPreferences(db:DB,actor:Actor,input:Partial<CustomerPreferences>) {
+  organization(actor);
+  const name=input.display_name?.trim();
+  guard(input.display_name===null||input.display_name===undefined||Boolean(name),"INVALID_REQUEST","Enter a display name or leave it blank.",422);
+  const timezone=input.timezone;
+  if(timezone) {
+    guard(timezone==="UTC"||/^[A-Za-z_]+(?:\/[A-Za-z0-9_+\-]+)+$/.test(timezone),"INVALID_TIMEZONE","Choose a valid time zone.",422);
+    try {
+      new Intl.DateTimeFormat("en",{timeZone:timezone});
+    } catch {
+      throw new Problem("INVALID_TIMEZONE","Choose a valid time zone such as Europe/London.",422);
+    }
+  }
+  const profile=await one<CustomerPreferences>(db,`update users set
+    display_name=case when $2 then $3 else display_name end,
+    timezone=case when $4 then $5 else timezone end, updated_at=now()
+    where id=$1 returning display_name,timezone`,[actor.id,input.display_name!==undefined,name??null,timezone!==undefined,timezone??null]);
+  await audit(db,actor,"update_customer_preferences","users",actor.id,{fields:Object.keys(input)});
+  return profile;
+}
 export async function completeRegistration(secret:string,browser:string,termsIds:string[]) {
   return transaction(async db=>{
     const tokenHash=hash(secret);

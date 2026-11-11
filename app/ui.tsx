@@ -2,11 +2,11 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 export type Row=Record<string,any>;
 export class RequestError extends Error {
-  constructor(message:string,public code?:string) { super(message); }
+  constructor(message:string,public code?:string,public status?:number) { super(message); }
 }
 function browserCookie(key:string) {
   if(typeof document==="undefined") return "";
@@ -20,7 +20,7 @@ export async function request(path:string,method="GET",body?:unknown,idempotency
     ...(csrf?{"X-CSRF-Token":csrf}:{}),
   },...(body!==undefined?{body:form?body:JSON.stringify(body)}:{})});
   const data=await r.json().catch(()=>null);
-  if(!r.ok) throw new RequestError(data?.error?.message??"The request failed. Try again.",data?.error?.code);
+  if(!r.ok) throw new RequestError(data?.error?.message??"The request failed. Try again.",data?.error?.code,r.status);
   if(data===null) throw new RequestError("The server response could not be read. Try again.");
   return data;
 }
@@ -100,15 +100,20 @@ function useIsStaffLocale() {
   return isStaffPath(pathname);
 }
 export const usd=(c:number)=>new Intl.NumberFormat("en-US",{style:"currency",currency:"USD"}).format(c/100);
-export const stamp=(t?:string,zhOverride?:boolean)=>{
+export const stamp=(t?:string,zhOverride?:boolean,timeZone?:string)=>{
   if(!t)return "—";
   const d=new Date(t);
   if(Number.isNaN(d.getTime()))return "—";
   const zh=zhOverride??(typeof location!=="undefined"&&isStaffPath(location.pathname));
   return new Intl.DateTimeFormat(zh?"zh-CN":"en-US",{
-    year:"numeric",month:zh?"2-digit":"short",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false,
+    year:"numeric",month:zh?"2-digit":"short",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false,timeZone,
   }).format(d);
 };
+export const WorkspaceTimeZone=createContext<string|undefined>(undefined);
+export function useWorkspaceStamp() {
+  const timeZone=useContext(WorkspaceTimeZone);
+  return (date?:string)=>stamp(date,undefined,timeZone);
+}
 export const text=(f:FormData,k:string)=>String(f.get(k)??"").trim();
 export const checked=(f:FormData,k:string)=>f.get(k)==="on";
 
@@ -396,6 +401,14 @@ export function ModalDrawer({
   open:boolean;onClose:()=>void;title:ReactNode;subtitle?:ReactNode;centered?:boolean;footer?:ReactNode;children:ReactNode;
 }) {
   const zh=useIsStaffLocale();
+  const headingId=useId(),descriptionId=useId();
+  const closeButton=useRef<HTMLButtonElement>(null);
+  useEffect(()=>{
+    if(!open)return;
+    const previous=document.activeElement;
+    closeButton.current?.focus({preventScroll:true});
+    return ()=>{if(previous instanceof HTMLElement&&previous.isConnected) previous.focus({preventScroll:true});};
+  },[open]);
   useEffect(()=>{
     if(!open)return;
     const onKey=(e:KeyboardEvent)=>{if(e.key==="Escape")onClose();};
@@ -403,11 +416,23 @@ export function ModalDrawer({
     return ()=>document.removeEventListener("keydown",onKey);
   },[open,onClose]);
   if(!open)return null;
-  return <div className={"drawer-backdrop"+(centered?" centered":"")} role="dialog" aria-modal="true" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}>
-    <div className="drawer-panel">
+  return <div className={"drawer-backdrop"+(centered?" centered":"")} role="dialog" aria-modal="true"
+    aria-labelledby={headingId} aria-describedby={subtitle?descriptionId:undefined}
+    onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}>
+    <div className="drawer-panel" onKeyDown={event=>{
+      if(event.key!=="Tab") return;
+      const focusable=Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
+        'a[href], button, input, select, textarea, summary, [tabindex="0"]',
+      )).filter(element=>!element.matches(":disabled,[tabindex='-1']")&&element.getClientRects().length>0);
+      const first=focusable[0],last=focusable.at(-1);
+      if((event.shiftKey&&document.activeElement===first)||(!event.shiftKey&&document.activeElement===last)) {
+        event.preventDefault();
+        (event.shiftKey?last:first)?.focus();
+      }
+    }}>
       <div className="drawer-head">
-        <div><h2>{title}</h2>{subtitle&&<p>{subtitle}</p>}</div>
-        <button type="button" className="button sm" onClick={onClose}>{zh?"关闭":"Close"}</button>
+        <div><h2 id={headingId}>{title}</h2>{subtitle&&<p id={descriptionId}>{subtitle}</p>}</div>
+        <button type="button" className="button sm" ref={closeButton} onClick={onClose}>{zh?"关闭":"Close"}</button>
       </div>
       <div className="drawer-body">{children}</div>
       {footer&&<div className="drawer-foot">{footer}</div>}
