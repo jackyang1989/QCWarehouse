@@ -918,6 +918,9 @@ test("33 physical items from three parcels share one order, report and selective
   const storageCheckout=await c.fetch("/charges/"+storageFee.charge_item_id+"/checkout",{quote_revision:storage.revision});
   await c.fetch("/checkout/demo/"+storageCheckout.attempt_id,{});
   await c.fetch("/checkout/demo/"+storageCheckout.attempt_id,{});
+  const storageBill=(await c.fetch("/me/billing")).charges.find((row:{charge_item_id:string})=>row.charge_item_id===storageFee.charge_item_id);
+  assert.deepEqual(storageBill.order_ids,[draft.id]);
+  assert(storageBill.posted_at);
   const inventory=(await c.fetch("/me/desk")).items;
   const retainedNow=inventory.find((item:{item_id:string})=>item.item_id===retained);
   assert.equal(retainedNow.custody_state,"stored");
@@ -6938,6 +6941,35 @@ test("customer display preferences are validated and stay with the authenticated
   assert.deepEqual((await other.fetch("/me")).profile,unchanged);
   assert.equal((await c.fetch("/me/receiving-address")).receiving_code,registration.receiving_code);
   assert.deepEqual(await c.fetch("/me",{timezone:null},"PATCH"),{...profile,timezone:null});
+});
+
+test("billing uses business dates and resolves a historical charge within the owning account",async()=>{
+  const {c}=await signCustomer(),other=(await signCustomer()).c;
+  const {actor}=await c.fetch("/me");
+  const offer=(await c.fetch("/catalog")).offers.find((row:{sku_code:string})=>row.sku_code==="apparel-inspection-1");
+  const draft=await c.fetch("/orders",{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},"POST",201);
+  const quote=await c.fetch("/orders/"+draft.id+"/quotes",{revision:draft.revision},"POST",201);
+  await pool.query(`with quoted as (
+    insert into inspection_quotes(order_id,revision,line_snapshot,terms_snapshot,amount_cents,currency,accepted_at,expires_at)
+    select q.order_id,1000-i,q.line_snapshot,q.terms_snapshot,q.amount_cents,q.currency,now()-i*interval '1 day',now()-i*interval '1 day'+interval '30 minutes'
+    from inspection_quotes q cross join generate_series(1,205) i where q.id=$1 returning *
+  )
+  insert into charge_items(org_id,purpose,inspection_quote_id,amount_cents,currency,snapshot,voided_at)
+    select $2,'inspection',id,amount_cents,currency,jsonb_build_object('order_id',order_id,'quote_revision',revision),expires_at
+    from quoted`,[quote.id,actor.org]);
+  const regular=(await c.fetch("/me/billing")).charges as {charge_item_id:string;posted_at:string;order_ids:string[]}[];
+  assert.equal(regular.length,200);
+  assert(regular.every((row,index)=>index===0||Date.parse(regular[index-1].posted_at)>Date.parse(row.posted_at)));
+  assert(regular.every(row=>row.order_ids.length===1&&row.order_ids[0]===draft.id));
+  const historical=(await pool.query(`select c.id from charge_items c join inspection_quotes q on q.id=c.inspection_quote_id
+    where q.order_id=$1 order by q.accepted_at asc limit 1`,[draft.id])).rows[0].id;
+  assert(!regular.some(row=>row.charge_item_id===historical));
+  const focus="/me/desk?include_items=0&charge="+historical;
+  const selected=(await c.fetch(focus)).bills;
+  assert.equal(selected[0].charge_item_id,historical);
+  assert.deepEqual(selected[0].order_numbers,[draft.public_no]);
+  assert.equal(selected[0].state,"void");
+  assert.deepEqual((await other.fetch(focus)).bills,[]);
 });
 
 test("all core operations have a validated success response",assertCoreCoverage);

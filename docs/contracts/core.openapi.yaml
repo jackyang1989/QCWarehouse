@@ -2071,7 +2071,7 @@ paths:
   /me/billing:
     get:
       operationId: billing
-      summary: 按收费项列检查、合包运费和保管账目
+      summary: 按入账或报价接受时间倒序列检查、合包运费和保管收费
       security:
       - cookieSession: []
       parameters: []
@@ -3346,6 +3346,10 @@ components:
         batch_id:
           type: string
           format: uuid
+        posted_at:
+          type: string
+          format: date-time
+          description: 已入账收费的确认时间，或未入账收费的报价接受时间
         receipt_url:
           type: string
           format: uri

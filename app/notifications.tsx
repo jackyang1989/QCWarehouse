@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
+import { billingChargePath } from "../packages/core/portal-routes";
 import { Action, Empty, ErrorBlock, Panel, request, useWorkspaceStamp, Table, useLoad, type Row } from "./ui";
 
 const noticeTitles:Record<string,string>={
@@ -30,7 +31,7 @@ function UpdatesTable({notices,onRead}:{notices:Row[];onRead:()=>void}) {
         notice.item_code?"/items?item="+encodeURIComponent(notice.item_code):
         notice.shipment_id?"/shipments/"+notice.shipment_id:
         notice.advice_id?"/parcels/"+notice.advice_id:
-        notice.charge_id?"/account/billing#charge-"+notice.charge_id:
+        notice.charge_id?billingChargePath(notice.charge_id):
         notice.order_number?"/orders/"+notice.order_number+(notice.template==="quote.offered"?"#manual-quote-request":""):
         notice.template==="email.delivery_failed"?"/account":
         notice.template==="payment.confirmed"||notice.template==="dispatch.quoted"?"/account/billing":null;

@@ -171,6 +171,11 @@ export function customerDestination(path:string|null|undefined) {
   return url.pathname+url.search+url.hash;
 }
 
+export function billingChargePath(id:string) {
+  const charge=encodeURIComponent(id);
+  return "/account/billing?charge="+charge+"#charge-"+charge;
+}
+
 export function staffDestination(path:string|null|undefined,roles:readonly string[]) {
   const url=localPortalUrl(path);
   const route=url&&resolvePortalRoute(url.pathname);

@@ -72,28 +72,48 @@ export async function customerInventory(db:DB,actor:Actor,page:number,filter:key
     ${inventoryJoins} where w.org_id=$1 and w.parent_item_id is null`,[organization(actor)]);
   return {rows:rows.slice(0,20),has_more:rows.length>20,summary};
 }
-export async function bills(db:DB,actor:Actor) {
+const chargeOrderOriginsSql=`left join lateral(
+    select array_agg(related.id order by related.public_no) order_ids,
+      array_agg(related.public_no order by related.public_no) order_numbers
+    from (
+      select o.id,o.public_no from orders o where o.id=i.order_id and o.org_id=c.org_id
+      union
+      select o.id,o.public_no from charge_allocations a join orders o on o.id=a.order_id and o.org_id=c.org_id
+        where a.charge_id=c.id
+      union
+      select o.id,o.public_no from disposition_requests dr
+        join order_line_item_links a on a.item_id=dr.item_id and a.org_id=dr.org_id
+          and a.linked_at<=s.accepted_at and (a.unlinked_at is null or a.unlinked_at>s.accepted_at)
+        join order_lines l on l.id=a.order_line_id and l.org_id=a.org_id
+        join orders o on o.id=l.order_id and o.org_id=l.org_id
+        where dr.id=s.disposition_id and dr.org_id=c.org_id
+    ) related
+  ) linked on true`;
+
+export async function bills(db:DB,actor:Actor,focusedCharge:string|null=null) {
   const org=organization(actor);
   return (await db.query(`select c.id charge_item_id,c.purpose,c.amount_cents,c.currency,
     case when c.voided_at is not null then 'void' when c.applied_payment_id is not null or c.free_authorization is not null then 'paid'
       when exists(select 1 from payments p where p.charge_item_id=c.id and p.state='processing') then 'processing' else 'open' end state,
     coalesce((select sum(r.amount_cents)::int from refunds r join payments p on p.id=r.payment_id where p.charge_item_id=c.id and r.state='succeeded'),0) refunded_cents,
-    case when i.order_id is not null then array[i.order_id] else array(select a.order_id from charge_allocations a where a.charge_id=c.id) end order_ids,
-    case when i.order_id is not null then array(select o.public_no from orders o where o.id=i.order_id)
-      else array(select o.public_no from charge_allocations a join orders o on o.id=a.order_id where a.charge_id=c.id) end order_numbers,
+    coalesce(linked.order_ids,array[]::uuid[]) order_ids,coalesce(linked.order_numbers,array[]::text[]) order_numbers,
     d.batch_id,
     (select p.state from payments p where p.charge_item_id=c.id order by p.updated_at desc nulls last,p.id desc limit 1) latest_attempt_state,
     paid.provider_ref paid_ref,
     coalesce(paid.provider='stripe' and paid.state in ('succeeded','partially_refunded','refunded')
       and paid.provider_ref ~ '^cs_(live|test)_' and left(paid.provider_data->>'payment_intent',3)='pi_',false) receipt_available,
-    (select min(a.at) from audit_events a where a.entity_type='charge_items' and a.entity_id=c.id and a.action='payment_confirmed') paid_at,
+    confirmation.paid_at,
+    coalesce(confirmation.paid_at,i.accepted_at,d.accepted_at,s.accepted_at) posted_at,
     coalesce(i.expires_at,d.expires_at,s.expires_at) expires_at,
     case when c.free_authorization is not null then 'FREE-AUTH' else null end receipt_summary,
     coalesce(i.revision,d.revision,s.revision) quote_revision
     from charge_items c left join inspection_quotes i on i.id=c.inspection_quote_id left join dispatch_quote_versions d on d.id=c.dispatch_quote_id
     left join storage_quotes s on s.id=c.storage_quote_id
     left join payments paid on paid.id=c.applied_payment_id and paid.charge_item_id=c.id
-    where c.org_id=$1 order by c.id desc limit 200`,[org])).rows;
+    left join lateral(select min(a.at) paid_at from audit_events a
+      where a.entity_type='charge_items' and a.entity_id=c.id and a.action='payment_confirmed') confirmation on true
+    ${chargeOrderOriginsSql}
+    where c.org_id=$1 order by (c.id=$2::uuid) desc nulls last,posted_at desc nulls last,c.id desc limit 200`,[org,focusedCharge])).rows;
 }
 const currentOfferedManualQuote=`from manual_quote_requests m join orders o on o.id=m.order_id and o.revision=m.revision
     join inspection_quotes q on q.id=m.accepted_quote_id and q.order_id=o.id
@@ -188,7 +208,7 @@ export async function listCustomerOrders(db:DB,actor:Actor,query:string,state:st
   return {rows:rows.slice(0,pageSize),has_more:rows.length>pageSize};
 }
 
-export async function customerDesk(db:DB,actor:Actor,includeItems=true) {
+export async function customerDesk(db:DB,actor:Actor,includeItems=true,focusedCharge:string|null=null) {
   const org=organization(actor);
   const orders=(await db.query(customerOrderSelect+" where o.org_id=$1 order by updated_at desc,o.id desc limit 200",[org])).rows;
   const advices=(await db.query(`select a.id,a.address_snapshot,t.tracking_norm,t.carrier_code,t.transport_state,t.sync_state,p.state warehouse_state,p.received_quantity,
@@ -256,9 +276,12 @@ export async function customerDesk(db:DB,actor:Actor,includeItems=true) {
     coalesce((select max(e.created_at) from ticket_events e where e.ticket_id=k.id and e.kind<>'internal_note'),k.created_at) updated_at
     from tickets k left join orders o on o.id=k.order_id and o.org_id=k.org_id where k.org_id=$1 order by k.created_at desc limit 100`,[org])).rows;
   const refunds=(await db.query(`select r.id,r.amount_cents,r.state,r.created_at,c.purpose,
-    (select o.public_no from inspection_quotes iq join orders o on o.id=iq.order_id where iq.id=c.inspection_quote_id limit 1) order_no
+    o.public_no order_no,coalesce(linked.order_numbers,array[]::text[]) order_numbers
     from refunds r join payments p on p.id=r.payment_id join charge_items c on c.id=p.charge_item_id
-    where c.org_id=$1 order by r.created_at desc limit 100`,[org])).rows;
+    left join inspection_quotes i on i.id=c.inspection_quote_id left join orders o on o.id=i.order_id and o.org_id=c.org_id
+    left join storage_quotes s on s.id=c.storage_quote_id
+    ${chargeOrderOriginsSql}
+    where c.org_id=$1 order by r.created_at desc,r.id desc limit 100`,[org])).rows;
   const inspectionQuotes=(await db.query(`select q.id,q.amount_cents,q.currency,q.expires_at,o.public_no order_number
     ${currentOfferedManualQuote}
     order by q.expires_at,q.id`,[org])).rows;
@@ -290,7 +313,7 @@ export async function customerDesk(db:DB,actor:Actor,includeItems=true) {
     order by e.at desc limit 1`,[profile.warehouse_address?.id??null,actor.id])).rows[0];
   return {summary,orders,advices,shipments,quotes,inspectionQuotes,batches,active_batches,recent_destinations,reports,tickets,refunds,notices,references,
     profile,warehouse_address_changed_at:addressChange?.at??null,email_delivery:await customerEmailDeliveryStatus(db,actor),
-    items:includeItems?await items(db,actor):[],bills:await bills(db,actor)};
+    items:includeItems?await items(db,actor):[],bills:await bills(db,actor,focusedCharge)};
 }
 export async function customerNotifications(db:DB,actor:Actor,unread=false,before:string|null=null,pageSize=50) {
   const org=organization(actor);

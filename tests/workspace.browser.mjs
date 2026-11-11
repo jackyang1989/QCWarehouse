@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import sharp from "sharp";
 
 const { chromium } = await import(process.env.QCW_PLAYWRIGHT_MODULE ?? "playwright");
@@ -63,6 +64,17 @@ async function capture(page, name, width, heading) {
     }).slice(0,12));
     console.log("OVERFLOW",name,width,overflow,elements.join(" "));
   }
+  if(width<=767) {
+    const clipped=await page.locator(".workspace-customer .responsive-table:not(.report-comparison .responsive-table) td :is(.tag,.code-btn)")
+      .evaluateAll(elements=>elements.flatMap(element=>{
+        if(!element.getClientRects().length) return [];
+        const range=document.createRange();
+        range.selectNodeContents(element);
+        const cell=element.closest("td").getBoundingClientRect(),bounds=range.getBoundingClientRect();
+        return bounds.right>cell.right+1||bounds.left<cell.left-1?[element.textContent.trim()]:[];
+      }));
+    assert.deepEqual(clipped,[],name+" at "+width+" px clips a status or code inside a mobile table card.");
+  }
   await page.screenshot({path:join(out,name+"-"+width+".png"),fullPage:true,animations:"disabled"});
   entries.push({name,width,overflow});
 }
@@ -111,23 +123,26 @@ async function verifyDraftRecovery({context,page,call}, unrelated) {
   const notes=page.getByLabel(/Special/);
   const patchRoute="**/api/v1"+path;
   const interrupt=route=>route.request().method()==="PATCH"?route.abort("connectionreset"):route.continue();
-  await context.route(patchRoute,interrupt);
+  const offlineNote="Offline notes recovered after reload "+randomUUID().slice(0,8);
+  await page.route(patchRoute,interrupt);
   await context.setOffline(true);
-  await notes.fill("Offline notes recovered after reload");
-  await page.waitForFunction(()=>Object.values(sessionStorage).some(value=>value.includes("Offline notes recovered after reload")));
-  assert.notEqual((await call(path)).customer_notes,"Offline notes recovered after reload");
+  await page.waitForFunction(()=>!navigator.onLine);
+  await notes.fill(offlineNote);
+  await page.waitForFunction(note=>Object.values(sessionStorage).some(value=>value.includes(note)),offlineNote);
   const offline=await page.reload().catch(error=>error);
   assert.match(String(offline),/INTERNET_DISCONNECTED/);
+  assert.notEqual((await call(path)).customer_notes,offlineNote);
+  await page.unroute(patchRoute,interrupt);
   await context.setOffline(false);
   await page.goto(url);
   await ready(page,/Step 4/);
-  await page.waitForFunction(()=>document.querySelector("main textarea")?.value==="Offline notes recovered after reload");
-  assert.notEqual((await call(path)).customer_notes,"Offline notes recovered after reload");
-  await context.unroute(patchRoute,interrupt);
-  await page.getByRole("button",{name:"Update Saved Draft"}).click();
-  await page.getByText(new RegExp(`Draft ${initialDraft.public_no} saved`)).waitFor();
+  await page.waitForFunction(note=>document.querySelector("main textarea")?.value===note,offlineNote);
   saved=await call(path);
-  assert.equal(saved.customer_notes,"Offline notes recovered after reload");
+  for(let attempt=0;attempt<40&&saved.customer_notes!==offlineNote;attempt++) {
+    await delay(250);
+    saved=await call(path);
+  }
+  assert.equal(saved.customer_notes,offlineNote);
 
   const second=await context.newPage();
   await second.goto(url);
@@ -136,6 +151,7 @@ async function verifyDraftRecovery({context,page,call}, unrelated) {
   const otherText="Newer notes saved by the second tab";
   await page.route(patchRoute,interrupt);
   await notes.fill(localText);
+  await page.waitForFunction(note=>Object.values(sessionStorage).some(value=>value.includes(note)),localText);
   await second.getByLabel(/Special/).fill(otherText);
   await second.getByRole("button",{name:"Update Saved Draft"}).click();
   await second.getByText(new RegExp(`Draft ${initialDraft.public_no} saved`)).waitFor();
@@ -143,8 +159,13 @@ async function verifyDraftRecovery({context,page,call}, unrelated) {
   assert(newer.revision>saved.revision);
   assert.equal(newer.customer_notes,otherText);
   await page.unroute(patchRoute,interrupt);
-  await page.getByRole("button",{name:"Update Saved Draft"}).click();
-  await page.getByRole("alert").filter({hasText:/changed in another window/}).waitFor();
+  const conflict=page.getByText(/This draft changed in another window/);
+  if(!await conflict.isVisible()) {
+    try {await page.getByRole("button",{name:"Update Saved Draft"}).click({timeout:3000});}
+    catch(error) {if(!await conflict.isVisible()) throw error;}
+  }
+  await conflict.waitFor();
+  assert.equal((await call(path)).revision,newer.revision);
   await page.reload();
   await page.getByRole("button",{name:"Review my unsaved edits"}).waitFor();
   assert.equal(await notes.inputValue(),otherText);
@@ -262,7 +283,7 @@ try {
     const profile = await customer.call("/me/receiving-address");
     const otherProfile = await other.call("/me/receiving-address");
     assert.notEqual(profile.receiving_code,otherProfile.receiving_code);
-    await verifyDraftRecovery(other,customer);
+    if(process.env.QCW_BROWSER_WORKSPACE_ONLY!=="1") await verifyDraftRecovery(other,customer);
     if(process.env.QCW_BROWSER_RECOVERY_ONLY!=="1") await verifyWorkspace(customer,other,profile,otherProfile);
   }
 } finally {
@@ -364,6 +385,18 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
   assert.equal(ownCharges.length,1);
   await call(`/charges/${ownCharges[0].charge_item_id}/receipt`,{status:404});
   await other.call("/checkout/demo/"+attemptId,{body:{},status:404});
+  const chargeId=ownCharges[0].charge_item_id;
+  await page.goto("/orders/"+orderNumber+"/payment");
+  await page.getByRole("link",{name:"Open billing"}).click();
+  await page.waitForURL("**/account/billing?charge="+chargeId+"#charge-"+chargeId);
+  const chargeAnchor=page.locator("#charge-"+chargeId);
+  const focusedBill=page.getByRole("row").filter({has:chargeAnchor});
+  await focusedBill.getByText("Test payment confirmed").waitFor();
+  await page.waitForFunction(id=>document.activeElement?.id===id,"charge-"+chargeId);
+  await captureWizard(page,"billing-focused-charge","Billing");
+  await other.page.goto("/account/billing?charge="+chargeId);
+  await other.page.getByText("This charge is unavailable.").waitFor();
+  assert.equal(await other.page.locator("#charge-"+chargeId).count(),0);
 
   await page.goto("/account/security");
   await page.getByLabel("Display name").fill("Browser fixture name");

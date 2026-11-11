@@ -356,7 +356,10 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const current=actorRequired(actor);
     return json({actor:current,...(current.kind==="customer"?{profile:await customerPreferences(pool,current)}:{})});
   }
-  if(method==="GET" && path==="/me/desk") return json(await transaction(db=>customerDesk(db,actorRequired(actor),url.searchParams.get("include_items")!=="0")));
+  if(method==="GET" && path==="/me/desk") {
+    const charge=idSchema.nullable().parse(url.searchParams.get("charge"));
+    return json(await transaction(db=>customerDesk(db,actorRequired(actor),url.searchParams.get("include_items")!=="0",charge)));
+  }
   if(method==="GET" && path==="/me/email-delivery-status") return json(await transaction(db=>customerEmailDeliveryStatus(db,actorRequired(actor))));
   if(method==="GET" && path==="/me/privacy/export") return json(await transaction(db=>exportCustomerPrivacyData(db,actorRequired(actor))));
   if(method==="POST" && path==="/me/privacy/requests")
@@ -1128,6 +1131,7 @@ async function dispatch(db:DB,actor:Actor,id:string,op:string,b:Record<string,an
     case "billing": return {charges:(await bills(db,actor)).map(x=>({
       charge_item_id:x.charge_item_id,purpose:x.purpose,state:x.state,amount_cents:x.amount_cents,currency:x.currency,
       refunded_cents:x.refunded_cents,order_ids:x.order_ids,
+      ...(x.posted_at?{posted_at:x.posted_at}:{}),
       ...(x.batch_id?{batch_id:x.batch_id}:{}),
       ...(x.latest_attempt_state?{latest_attempt_state:x.latest_attempt_state}:{}),
     }))};

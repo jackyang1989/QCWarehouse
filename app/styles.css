@@ -1937,6 +1937,7 @@ button.option-card.disabled, .option-card.disabled {
 }
 
 .table-cell-label { display: none; }
+.billing-charge-anchor { scroll-margin-top: 88px; }
 @media (max-width: 767px) {
   .workspace-customer .metric-strip { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
   .workspace-customer .metric { padding: 12px; }
@@ -1967,6 +1968,12 @@ button.option-card.disabled, .option-card.disabled {
   .workspace-customer .responsive-table:not(.report-comparison .responsive-table) td:first-child {
     grid-column: 1 / -1;
     font-weight: 650;
+  }
+  .workspace-customer .responsive-table:not(.report-comparison .responsive-table) td :is(.tag,.code-btn) {
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: left;
   }
   .workspace-customer .responsive-table:not(.report-comparison .responsive-table) .table-cell-label {
     display: block;

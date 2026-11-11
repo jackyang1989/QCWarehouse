@@ -11,7 +11,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { draftRecoveryKey, readDraftRecovery, removeDraftRecovery, writeDraftRecovery, type DraftEditor, type DraftRecovery } from "./draft-recovery";
 import { conditionMatches } from "../packages/core/template-conditions";
-import { customerDestination, legalPages, orderSections, type OrderSection, servicePages } from "../packages/core/portal-routes";
+import { billingChargePath, customerDestination, legalPages, orderSections, type OrderSection, servicePages } from "../packages/core/portal-routes";
 import { Action, checked, CodeButton, Empty, ErrorBlock, Field, Form, MediaLightbox, ModalDrawer, Panel, Photo, request, RequestError, Select, useWorkspaceStamp, Table, Tabs, Tag, text, useLoad, usd, type Row } from "./ui";
 
 const acknowledged={scope_notice:"I understand which checks are included.",samples_not_batch:"These samples do not represent an entire production batch.",seller_refund_is_mine:"I handle any refund request directly with my seller.",no_certification:"The report is an inspection record and does not provide certification.",restricted_items:"My items comply with the restricted items policy."};
@@ -2487,7 +2487,7 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
         </>}
         {checkoutNotice&&(checkoutNotice.error?<ErrorBlock error={checkoutNotice.text}/>:<p role="status">{checkoutNotice.text}</p>)}
         <div className="actions"><button type="button" onClick={refreshPayment}>Refresh payment status</button>
-          <Link href={payment.data?.charge?"/account/billing#charge-"+payment.data.charge.id:"/account/billing"}>Open billing</Link></div>
+          <Link href={payment.data?.charge?billingChargePath(payment.data.charge.id):"/account/billing"}>Open billing</Link></div>
       </Panel>}
       {(!section||section==="payment")&&<Panel title="Inspection scope">
       {o.customer_notes&&<p className="muted">Notes: {o.customer_notes}</p>}
@@ -2862,11 +2862,12 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     if(value) orderParams.set(key,value);
   }
   const orderList=useLoad(path==="/orders"?"/me/orders?"+orderParams:null);
-  const isItems=path==="/items";
+  const isItems=path==="/items",isBills=path==="/account/billing";
   const itemFilter=search.get("filter")??"all";
   const itemPage=Number(search.get("page")??1);
   const inventory=useLoad(isItems?`/me/inventory?${new URLSearchParams({filter:itemFilter,page:String(itemPage)})}`:null);
   const [legacyItem,setLegacyItem]=useState<string|null>(null);
+  const [legacyCharge,setLegacyCharge]=useState<string|null>(null);
   const requestedItem=search.get("item")??legacyItem;
   const focusedItem=useLoad(isItems&&requestedItem?"/me/inventory?code="+encodeURIComponent(requestedItem):null);
   const [handlingItems,setHandlingItems]=useState<Row[]>([]);
@@ -2874,7 +2875,9 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   const [parcelTab,setParcelTab]=useState("incoming");
   const [addressCopied,setAddressCopied]=useState(false);
   const [createdCase,setCreatedCase]=useState<Row>();
-  const {data,error,reload}=useLoad("/me/desk?include_items=0"),carriers=useLoad("/carriers");
+  const requestedCharge=isBills?(search.get("charge")??legacyCharge)?.toLowerCase():undefined;
+  const {data,error,reload}=useLoad("/me/desk?include_items=0"+(requestedCharge?"&charge="+encodeURIComponent(requestedCharge):"")),carriers=useLoad("/carriers");
+  const focusedChargeAvailable=Boolean(requestedCharge&&data?.bills.some((bill:Row)=>bill.charge_item_id===requestedCharge));
   const homeActions=useLoad(path==="/account"?"/actions":null);
   const [next,setNext]=useState<string|null>(null);
   const [parcelOrder,setParcelOrder]=useState<string|null>(null);
@@ -2895,6 +2898,16 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     return ()=>window.removeEventListener("hashchange",readHash);
   },[isItems]);
   useEffect(()=>{
+    if(!isBills) return;
+    function readHash() {setLegacyCharge(location.hash.match(/^#charge-([a-f0-9-]{36})$/i)?.[1]??null);}
+    readHash();
+    window.addEventListener("hashchange",readHash);
+    return ()=>window.removeEventListener("hashchange",readHash);
+  },[isBills]);
+  useEffect(()=>{
+    if(focusedChargeAvailable) document.getElementById("charge-"+requestedCharge)?.focus();
+  },[focusedChargeAvailable,requestedCharge]);
+  useEffect(()=>{
     const item=focusedItem.data?.rows[0];
     if(item) setItemTarget(item);
   },[focusedItem.data]);
@@ -2906,7 +2919,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   if(error)return <ErrorBlock error={error}/>;
   if(!data)return <p>Loading your account…</p>;
   const addr=data.profile.warehouse_address;
-  const isHome=path==="/account",isSecurity=path==="/account/security",isParcels=path==="/parcels",isBills=path==="/account/billing",isOrders=path==="/orders",isHelp=path==="/support";
+  const isHome=path==="/account",isSecurity=path==="/account/security",isParcels=path==="/parcels",isOrders=path==="/orders",isHelp=path==="/support";
   const orders:Row[]=data.orders;
   const linkableOrders=orders.filter(order=>parcelLinkStates.includes(order.state));
   const visibleOrders:Row[]=isHome?orders.slice(0,5):orderList.data?.rows??[];
@@ -3182,8 +3195,9 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
       </div>)}
       {!data.quotes.length&&!data.inspectionQuotes.length&&<Empty>No new quotes.</Empty>}
     </Panel><Panel title="Payments & charges" subtitle="Inspection, shipping and storage charges. Payment is confirmed only after server-side verification.">
-      <Table headers={["Purpose","Order / Batch","Amount","Refunded","Status","Paid on","Details",""]} rows={data.bills.map((b:Row)=>[
-        <span id={"charge-"+b.charge_item_id}>{label(b.purpose)}</span>,
+      {requestedCharge&&!focusedChargeAvailable&&<p role="status">This charge is unavailable.</p>}
+      <Table headers={["Purpose","Order / Batch","Amount","Refunded","Status","Date","Details",""]} rows={data.bills.map((b:Row)=>[
+        <span id={"charge-"+b.charge_item_id} className="billing-charge-anchor" tabIndex={b.charge_item_id===requestedCharge?-1:undefined}>{label(b.purpose)}</span>,
         (b.order_numbers??[]).length?b.order_numbers.map((no:string)=><Link key={no} className="code-btn" href={"/orders/"+no}>{no}</Link>):b.batch_id?<CodeButton code={`Batch #${b.batch_id.slice(0,8)}`} onClick={()=>setBatchTarget(b.batch_id)}/>:"—",
         usd(b.amount_cents),
         b.refunded_cents?usd(b.refunded_cents):"—",
@@ -3191,7 +3205,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
           b.refunded_cents>0?(b.refunded_cents>=b.amount_cents?"Refunded":"Partially refunded"):
             /^(demo_|cs_test_)/.test(b.paid_ref??"")?"Test payment confirmed":label(b.state)
         }</Tag>,
-        stamp(b.paid_at),
+        stamp(b.posted_at),
         b.receipt_available?<Action run={async()=>{
           const {receipt_url}=await request("/charges/"+b.charge_item_id+"/receipt");
           location.assign(receipt_url);
@@ -3206,7 +3220,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
       <Table headers={["Requested","Purpose","Order","Amount","Status"]} rows={(data.refunds??[]).map((r:Row)=>[
         stamp(r.created_at),
         label(r.purpose),
-        r.order_no?<Link className="code-btn" href={"/orders/"+r.order_no}>{r.order_no}</Link>:"—",
+        r.order_numbers?.length?r.order_numbers.map((number:string)=><Link key={number} className="code-btn" href={"/orders/"+number}>{number}</Link>):"—",
         usd(r.amount_cents),
         <Tag tone={r.state==="succeeded"?"green":r.state==="failed"?"red":"yellow"}>{label(r.state)}</Tag>,
       ])} empty="No refunds have been issued."/>
@@ -3466,7 +3480,8 @@ function customerActionHref(row:Row) {
     return base+"/dispositions";
   }
   if(row.kind==="parcel") return "/parcels/"+row.id;
-  if(row.kind==="quote"||row.kind==="charge") return "/account/billing#"+row.kind+"-"+row.id;
+  if(row.kind==="charge") return billingChargePath(row.id);
+  if(row.kind==="quote") return "/account/billing#quote-"+row.id;
   if(row.kind==="scope") return base+"#scope-"+row.id;
   if(row.kind==="reference"||row.kind==="storage") return "/items?item="+encodeURIComponent(row.reference);
   if(row.kind==="email") return "/account/security";
