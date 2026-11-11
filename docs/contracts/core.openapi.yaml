@@ -424,6 +424,7 @@ paths:
     post:
       operationId: checkout
       summary: 创建或复用 Stripe Checkout 尝试
+      description: 报价过期后拒绝返回付款链接，包括已有会话及幂等重放。已付款或渠道正在处理时可返回相应状态。
       security:
       - cookieSession: []
       parameters:
@@ -446,6 +447,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Checkout'
+        '409':
+          description: 报价过期、收费已被替代、原支付尝试失效，或幂等键与请求不匹配
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         default:
           description: See stable HTTP error codes in §7.2
           content:

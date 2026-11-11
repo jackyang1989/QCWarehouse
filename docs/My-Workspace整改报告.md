@@ -78,7 +78,7 @@ flowchart TD
 | E2E-05 确认样 | 隔离 API 通过 | NEW 四步回归验证待封存、错误铅封拒绝、实物移入参考区、激活、站内通知及后续参考样匹配资格 |
 | E2E-06 检后退货 | 隔离 API 通过 | 在同一件实物上断言报告瑕疵标注和私有图像、客户退货授权、报价、付款、打包、承运商交接及原单运单。Chrome 另外验证客户证据与逐件处置入口。实仓交接 OPEN |
 | E2E-07 部分转运 | 隔离 API 通过 | 在同一个 30 件订单验证退货、已封存确认样和转运的独立实物状态，核对两个发运批次的各自报价、付款、承运商运单及关联账单 |
-| E2E-08 报价失败 | 隔离 Chrome 与 API 通过 | 失败保留服务端草稿，所有错误情况下禁用付款，Retry 返回真实 201，校验模板、价格、金额和有效期。隔离测试复验旧收费过期及原单重报 |
+| E2E-08 报价失败 | 隔离 Chrome 与 API 通过 | 失败保留服务端草稿，所有错误情况下禁用付款，Retry 返回真实 201，校验模板、价格、金额和有效期。隔离测试复验原单重报、过期报价拒绝返回旧会话链接、重复请求不能拿回缓存链接、创建会话跨过到期时间仍保留渠道记录，以及签名回调入账 |
 | E2E-09 数据隔离 | 隔离 Chrome 与 API 通过 | 两个客户，收件码和报价隔离，跨租户报告、PDF、包裹、工单、账单和逐件操作在相应接口被拦截。审核和质检使用各自真实角色会话 |
 | E2E-10 浏览器恢复 | 隔离 Chrome 与 API 通过 | 验证步骤刷新、列表前进后退、超时重试、支付双击和重放、会话失效跳转、未保存编辑断网刷新后恢复、服务端已创建但浏览器收不到响应时只建一份草稿、两标签页冲突后保留服务器最新版本并由用户选择是否保存浏览器编辑。跨设备读取已保存草稿沿用服务端版本守卫 |
 
@@ -95,7 +95,7 @@ flowchart TD
 ## OPEN 与 NEEDS_BUSINESS_DECISION
 
 - **NEEDS_BUSINESS_DECISION** 正式仓址、法律文本、正式类别/套餐、数量档时效与发布审批。当前批准目录与项目约定保持有效。复杂批量继续通过真实人工报价。
-- **NEEDS_BUSINESS_DECISION** Stripe 已打开的外部 Checkout 在报价到期后是否必须强制关闭。应用拒绝过期报价的提交及新建付款尝试。已受理的 Stripe 会话继续沿用现有恢复和晚到款核对。Stripe Checkout 创建时可配置的到期时间有 30 分钟下限，需业务确认会话撤销及晚到款处理方案，并在沙盒验收。[Stripe Checkout Session API](https://docs.stripe.com/api/checkout/sessions/create#create_checkout_session-expires_at)
+- **NEEDS_BUSINESS_DECISION** 客户已离开门户进入 Stripe 收银台时，报价到期如何关闭渠道端会话并处理在途或晚到款。门户已经拒绝发放过期报价的付款链接，涵盖已有会话和同键重放。Stripe 会话创建时可配置的到期时间有 30 分钟下限，渠道端撤销及晚到款处理仍需确认方案并在沙盒验收。[Stripe Checkout Session API](https://docs.stripe.com/api/checkout/sessions/create#create_checkout_session-expires_at)
 - **OPEN** 真实 Stripe 沙盒交易及托管收据、正式经营主体配置、Postmark/承运商和实仓硬件。收据链接根据已入账收费及 Stripe 返回的关联 Charge 读取。正式发票按规格 C.7 的 R2 决策跟踪。 [Stripe 托管收据](https://docs.stripe.com/receipts) · [Stripe Charge 对象](https://docs.stripe.com/api/charges/object)
 - **NEEDS_BUSINESS_DECISION** 未匹配和已归属包裹的原始外箱照片如何裁剪、复核及发布给客户。现有仓库入库照片含标签及可能的其他运单信息。客户可提交本人的包裹证明，复用工单私有附件。
 - **NEEDS_BUSINESS_DECISION** 既有确认样接口的精确库位字段属于 NEW 回归保护范围。新增库存列表与实物抽屉使用已裁剪的客户字段。若需停发旧字段，应同时更新受保护的调用契约及验收用例。
@@ -110,12 +110,13 @@ flowchart TD
 | `npm run check` | 0 | TypeScript 检查通过 |
 | `npm run build` | 0 | Next.js 生产构建通过 |
 | `python3 docs/contracts/check.py` | 0 | 44 个交易操作，174 个 TASK，69 张页面，111 个实施用例，46 个产品门禁 |
-| `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-final npm run test:integration` | 0 | 57/57，含 AUD-001–015、NEW-001–011、付款回调、收据归属和金额核对、库存分页与状态汇总、包裹工单与照片权限、地址轮换、资料持久化和原有履约全链 |
+| `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-final npm run test:integration` | 0 | 58/58，含 AUD-001–015、NEW-001–011、过期报价链接与 Stripe 会话恢复、付款回调、收据归属和金额核对、库存分页与状态汇总、包裹工单与照片权限、地址轮换、资料持久化和原有履约全链 |
 | `psql -h 127.0.0.1 -d qcw_workspace_contract -v ON_ERROR_STOP=1 -f docs/contracts/verify.sql` | 0 | 迁移 001–008 后在未播种的空库运行，关系断言通过 |
 | `node tests/workspace.browser.mjs` | 0 | Chrome 覆盖 1440、1280、1024、768、390 和 375 px，客户与两种员工角色，32 个页面或状态共 192 张截图，整页横向溢出为 0。另核对新客户八个模块的真实空状态 |
+| `QCW_BROWSER_NEW_CUSTOMER_ONLY=1 node tests/workspace.browser.mjs` | 0 | Checkout 修复后复跑新客户、报价、付款和重放，六种宽度共 36 张截图，整页横向溢出为 0 |
 | `npm run integrations:check` | 0 | 本机配置预检。Stripe、Postmark、快递100尚无可用的沙盒配置 |
 
-本机 Chrome 截图原图、视口断言与索引随验收包交付。日志文件名为 `qcw-workspace-acceptance-browser.log`、`qcw-workspace-followup-integration.log`、`qcw-workspace-followup-build.log` 和 `qcw-workspace-followup-relations.log`。日志和截图未纳入代码仓库。
+本机 Chrome 截图原图、视口断言与索引随验收包交付。全量浏览器日志为 `qcw-workspace-acceptance-browser.log`，Checkout 续验日志为 `qcw-workspace-checkout-expiry-integration.log`、`qcw-workspace-checkout-expiry-build.log` 和 `qcw-workspace-checkout-expiry-browser.log`。日志和截图未纳入代码仓库。
 
 运行 Chrome 测试时在隔离演示实例设置 `QCW_BROWSER_URL` 与 `QCW_BROWSER_EVIDENCE`。Playwright 可安装到临时目录，并以 `QCW_PLAYWRIGHT_MODULE` 指向它的入口。`QCW_BROWSER_FIXTURE_EMAIL` 使用集成库中有已发布报告、历史版本、入仓、出库和工单的 `@qcw.test` 账号，以保存非空页面。`QCW_BROWSER_INVENTORY_EMAIL` 使用至少 21 件待指示实物的夹具账号。跨页回归会为两件实物创建真实测试续存指令，请在独立数据库副本运行。`QCW_BROWSER_COMPARISON_EMAIL` 使用已有发布对比报告的客户夹具。脚本会为新客户走 OTP 和注册，现有隔离角色可用开发环境登录签发真实会话。
 

@@ -1,7 +1,7 @@
 import Stripe from "stripe";
-import { pool, type DB } from "../db";
+import { pool, transaction, type DB } from "../db";
 import { appOrigin, requireCustomerActive, requireStaffMfa } from "./auth";
-import { Problem, audit, code, event, guard, hash, isDemo, lock, one, organization, role, uuid, type Actor } from "./common";
+import { Problem, audit, code, event, guard, hash, idempotent, isDemo, lock, one, organization, role, uuid, type Actor } from "./common";
 import { stripeSettings } from "./integrations";
 import { activatePaidOrder, readyOrder } from "./orders";
 import { applyScopePositionsAndAdditions, computeOrderRefundStage, type ScopeAddition } from "./operations";
@@ -64,7 +64,7 @@ export async function chargeReceipt(actor:Actor,id:string) {
 async function verifyCharge(db:DB,id:string,org:string,rev:number) {
   await lock(db,"org:"+org);
   const fee=await one(db,`select c.*,coalesce(i.revision,d.revision,s.revision) quote_revision,
-    coalesce(i.expires_at,d.expires_at,s.expires_at)>now() quote_valid,o.is_test,o.public_no order_number
+    coalesce(i.expires_at,d.expires_at,s.expires_at)>clock_timestamp() quote_valid,o.is_test,o.public_no order_number
     from charge_items c left join inspection_quotes i on i.id=c.inspection_quote_id
     left join orders o on o.id=i.order_id left join dispatch_quote_versions d on d.id=c.dispatch_quote_id
     left join storage_quotes s on s.id=c.storage_quote_id where c.id=$1 and c.org_id=$2 for update of c`,[id,org]);
@@ -81,7 +81,14 @@ async function attempt(db:DB,id:string,amount:number) {
   return one(db,`insert into payments(id,charge_item_id,provider,amount_cents,state,idempotency_key)
     values($1::uuid,$2,'stripe',$3,'requires_payment',($1::uuid)::text) returning *`,[pid,id,amount]);
 }
-export async function checkout(db:DB,actor:Actor,id:string,rev:number) {
+type CheckoutResult={state:"requires_payment";attempt_id:string;checkout_url:string}|
+  {state:"processing"|"paid";charge_item_id:string};
+
+function requireCurrentQuote(valid:boolean) {
+  guard(valid,"QUOTE_EXPIRED","Request a new quote before continuing.");
+}
+
+async function prepareCheckout(db:DB,actor:Actor,id:string,rev:number):Promise<CheckoutResult> {
   await requireCustomerActive(db,actor);
   const org=organization(actor);
   const fee=await verifyCharge(db,id,org,rev);
@@ -89,18 +96,21 @@ export async function checkout(db:DB,actor:Actor,id:string,rev:number) {
   const open=await attempt(db,id,fee.amount_cents);
   if(open.state==="processing") return {state:"processing",charge_item_id:id};
   if(isDemo()) {
-    guard(fee.quote_valid,"QUOTE_EXPIRED","Request a new quote before continuing.");
+    requireCurrentQuote(fee.quote_valid);
     return {state:"requires_payment",attempt_id:open.id,checkout_url:appOrigin()+"/checkout/demo/"+open.id};
   }
   guard(!fee.is_test,"TEST_ORDER","Test orders use the isolated development checkout.");
   const api=stripe();
   if(open.provider_ref) {
     const session=await api.checkout.sessions.retrieve(open.provider_ref);
-    if(session.status==="open" && session.url) return {state:"requires_payment",attempt_id:open.id,checkout_url:session.url};
+    if(session.status==="open" && session.url) {
+      requireCurrentQuote(fee.quote_valid);
+      return {state:"requires_payment",attempt_id:open.id,checkout_url:session.url};
+    }
     if(session.status==="complete") return {state:"processing",charge_item_id:id};
     await db.query("update payments set state='canceled' where id=$1",[open.id]);
   }
-  guard(fee.quote_valid,"QUOTE_EXPIRED","Request a new quote before continuing.");
+  requireCurrentQuote(fee.quote_valid);
   const fresh=open.provider_ref?await attempt(db,id,fee.amount_cents):open;
   const returnPath=fee.order_number?"/orders/"+fee.order_number+"/payment":"/account/billing";
   const session=await api.checkout.sessions.create({
@@ -112,6 +122,25 @@ export async function checkout(db:DB,actor:Actor,id:string,rev:number) {
   guard(session.url,"STRIPE_UNAVAILABLE","Checkout could not be started.",503);
   await db.query("update payments set provider_ref=$2 where id=$1",[fresh.id,session.id]);
   return {state:"requires_payment",attempt_id:fresh.id,checkout_url:session.url};
+}
+
+export async function checkout(actor:Actor,id:string,rev:number,request:{scope:string;key:string}):Promise<CheckoutResult> {
+  const result=await transaction(db=>idempotent(db,request.scope,request.key,{quote_revision:rev},
+    ()=>prepareCheckout(db,actor,id,rev)));
+  if(result.state!=="requires_payment") return result;
+
+  // Keep the remote session reference if its creation crosses the quote deadline.
+  // Recheck every link, including successful responses replayed from an older request.
+  return transaction(async db=>{
+    await requireCustomerActive(db,actor);
+    const fee=await verifyCharge(db,id,organization(actor),rev);
+    if(fee.applied_payment_id||fee.free_authorization) return {state:"paid",charge_item_id:id};
+    const attempt=await one<{state:string}>(db,"select state from payments where id=$1 and charge_item_id=$2",[result.attempt_id,id]);
+    if(attempt.state==="processing") return {state:"processing",charge_item_id:id};
+    requireCurrentQuote(fee.quote_valid);
+    guard(attempt.state==="requires_payment","CHECKOUT_ATTEMPT_EXPIRED","Start a new payment attempt.");
+    return result;
+  });
 }
 async function applyPayment(db:DB,pid:string,providerRef:string,details:object) {
   const link=await one(db,`select c.org_id from payments p join charge_items c on c.id=p.charge_item_id where p.id=$1`,[pid]);

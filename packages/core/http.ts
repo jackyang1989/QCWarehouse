@@ -1100,7 +1100,6 @@ async function dispatch(db:DB,actor:Actor,id:string,op:string,b:Record<string,an
     case "issueManualQuote": return issueManualQuote(db,actor,id,b as Parameters<typeof issueManualQuote>[3]);
     case "submitOrder": return submitOrder(db,actor,id,b as Parameters<typeof submitOrder>[3]);
     case "orderPayment": return orderPayment(db,actor,id);
-    case "checkout": return checkout(db,actor,id,b.quote_revision);
     case "adviseParcel": return advise(db,actor,b as Parameters<typeof advise>[2]);
     case "lookupParcel": return lookup(db,actor,b as Parameters<typeof lookup>[2]);
     case "checkIn": return checkIn(db,actor,b as Parameters<typeof checkIn>[2]);
@@ -1181,6 +1180,10 @@ export async function handle(req:Request,path:string) {
     guard(a.kind==="customer"?op["x-roles"].includes("customer"):op["x-roles"].some(r=>a.roles.includes(r)),
       "FORBIDDEN","This action requires a different role.",403);
     if(op.operationId==="chargeReceipt") return json(await chargeReceipt(a,args[0]),status);
+    if(op.operationId==="checkout") {
+      guard(key,"INVALID_REQUEST","Provide an idempotency key.",422);
+      return json(await checkout(a,args[0],data.quote_revision,{scope:a.id+":"+req.method+":"+path,key}),status);
+    }
     return json(await transaction(db=>{
       const run=()=>dispatch(db,a,args[0]??"",op.operationId,data,req);
       return key?idempotent(db,a.id+":"+req.method+":"+path,key,data,run):run();

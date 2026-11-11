@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
 import sharp from "sharp";
 import Stripe from "stripe";
@@ -1081,6 +1082,87 @@ function setFixtureEnv(t:import("node:test").TestContext,values:Record<string,st
 function providerGet(path:string,query="",cookies="") {
   return handle(new Request(origin+"/api/v1"+path+query,{headers:{cookie:cookies}}),path);
 }
+
+test("checkout withholds expired links and retains Stripe sessions for payment reconciliation",async t=>{
+  const {c,terms}=await signCustomer();
+  const {actor}=await c.fetch("/me");
+  const offer=(await c.fetch("/catalog")).offers.find((o:{sku_code:string})=>o.sku_code==="apparel-inspection-1");
+  async function acceptedInspection(seconds:number) {
+    const draft=await c.fetch("/orders",{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},"POST",201);
+    const path="/orders/"+draft.id;
+    const quote=await c.fetch(path+"/quotes",{revision:draft.revision},"POST",201);
+    await pool.query("update inspection_quotes set expires_at=clock_timestamp()+make_interval(secs=>$2) where id=$1",[quote.id,seconds]);
+    const accepted=await c.fetch(path+"/submit",{revision:draft.revision,quote_id:quote.id,terms_version_ids:terms.map(term=>term.id),
+      acknowledgements:{scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true}});
+    await pool.query("update orders set is_test=false where id=$1",[draft.id]);
+    const chargeId=accepted.charge.charge_item_id;
+    return {path,quote,chargeId,checkoutPath:"/charges/"+chargeId+"/checkout",body:{quote_revision:quote.revision}};
+  }
+  const existing=await acceptedInspection(3);
+  let crossing:Awaited<ReturnType<typeof acceptedInspection>>|undefined;
+  setFixtureEnv(t,{QCW_DEMO:"0",STRIPE_SECRET_KEY:"sk_test_fixture",STRIPE_WEBHOOK_SECRET:"whsec_fixture"});
+  const CommonJsStripe:typeof Stripe=createRequire(import.meta.url)("stripe");
+  const sessionPrototypes=new Set([Stripe,CommonJsStripe].map(StripeClient=>
+    Object.getPrototypeOf(new StripeClient("sk_test_fixture").checkout.sessions)));
+  const remote=new Map<string,{id:string;status:"open"|"complete";url:string|null}>();
+  let retrieved=0;
+  async function waitForExpiry(quoteId:string) {
+    await pool.query("select pg_sleep(greatest(0,extract(epoch from expires_at-clock_timestamp()))+.02) from inspection_quotes where id=$1",[quoteId]);
+  }
+  for(const sessions of sessionPrototypes) {
+    t.mock.method(sessions,"create",async(params:Stripe.Checkout.SessionCreateParams)=>{
+      const id="cs_test_"+randomUUID();
+      const session={id,status:"open" as const,url:"https://checkout.stripe.com/c/pay/"+id};
+      remote.set(id,session);
+      if(crossing&&params.client_reference_id===crossing.chargeId) await waitForExpiry(crossing.quote.id);
+      return session;
+    });
+    t.mock.method(sessions,"retrieve",async(id:string)=>{
+      retrieved++;
+      assert(remote.has(id),"Look up only a session created for this fixture");
+      return remote.get(id);
+    });
+  }
+  const key=randomUUID();
+  const first=await c.fetch(existing.checkoutPath,existing.body,"POST",200,key);
+  assert.deepEqual(await c.fetch(existing.checkoutPath,existing.body,"POST",200,key),first);
+  const remoteId=[...remote.keys()][0];
+  assert.equal(first.checkout_url,remote.get(remoteId)?.url);
+  assert.equal(remote.size,1);
+
+  await waitForExpiry(existing.quote.id);
+  const repeated=await c.fetch(existing.checkoutPath,existing.body,"POST",409,key);
+  const resumed=await c.fetch(existing.checkoutPath,existing.body,"POST",409);
+  assert.equal(repeated.error.code,"QUOTE_EXPIRED");
+  assert.deepEqual(resumed,repeated);
+  assert.equal(retrieved,1);
+  assert.equal(remote.size,1);
+  assert.equal((await pool.query("select provider_ref,state from payments where id=$1",[first.attempt_id])).rows[0].state,"requires_payment");
+
+  remote.set(remoteId,{id:remoteId,status:"complete",url:null});
+  assert.deepEqual(await c.fetch(existing.checkoutPath,existing.body),{state:"processing",charge_item_id:existing.chargeId});
+  assert.equal((await c.fetch(existing.path)).state,"awaiting_payment");
+  const payload=JSON.stringify({id:"evt_fixture_"+randomUUID(),object:"event",livemode:false,type:"checkout.session.completed",
+    data:{object:{id:remoteId,payment_status:"paid",amount_total:existing.quote.amount_cents,currency:"usd",
+      payment_intent:"pi_fixture_"+randomUUID(),metadata:{payment_id:first.attempt_id,charge_item_id:existing.chargeId,org_id:actor.org}}}});
+  const webhook="/webhooks/stripe";
+  const signature=Stripe.webhooks.generateTestHeaderString({payload,secret:"whsec_fixture"});
+  const response=await handle(new Request(origin+"/api/v1"+webhook,{method:"POST",body:payload,headers:{"stripe-signature":signature}}),webhook);
+  assert.equal(response.status,200);
+  assert.equal((await c.fetch(existing.path)).state,"awaiting_samples");
+  assert.deepEqual(await c.fetch(existing.checkoutPath,existing.body,"POST",200,key),{state:"paid",charge_item_id:existing.chargeId});
+
+  process.env.QCW_DEMO="1";
+  try { crossing=await acceptedInspection(2); }
+  finally { process.env.QCW_DEMO="0"; }
+  const crossingKey=randomUUID();
+  const tooLate=await c.fetch(crossing.checkoutPath,crossing.body,"POST",409,crossingKey);
+  assert.equal(tooLate.error.code,"QUOTE_EXPIRED");
+  assert.deepEqual(await c.fetch(crossing.checkoutPath,crossing.body,"POST",409,crossingKey),tooLate);
+  const attempts=(await pool.query("select provider_ref,state from payments where charge_item_id=$1",[crossing.chargeId])).rows;
+  assert.deepEqual(attempts,[{provider_ref:[...remote.keys()][1],state:"requires_payment"}]);
+  assert.equal(remote.size,2);
+});
 
 test("Google and Microsoft authorization requests use PKCE and reject mismatched or replayed callbacks",async t=>{
   setFixtureEnv(t,{GOOGLE_CLIENT_ID:"google-fixture",GOOGLE_CLIENT_SECRET:"google-secret-fixture",
