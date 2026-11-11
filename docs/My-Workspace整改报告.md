@@ -129,9 +129,10 @@ flowchart TD
 | `QCW_BROWSER_NEW_CUSTOMER_ONLY=1 node tests/workspace.browser.mjs` | 0 | Checkout 修复后复跑新客户、报价、付款和重放，六种宽度共 36 张截图，整页横向溢出为 0 |
 | `QCW_BROWSER_MANUAL_QUOTE_ONLY=1 node tests/workspace.browser.mjs` | 0 | 草稿及原单付款的人工报价过期、员工队列、账单回原单确认并付款。六种宽度共 18 张截图，整页横向溢出为 0 |
 | `QCW_BROWSER_FULFILLMENT_ONLY=1 node tests/workspace.browser.mjs` | 0 | 发运和续存已接受报价过期、仓管重新报价、客户付款、跨租户读取拦截。六种宽度共 18 张截图，整页横向溢出为 0 |
+| `node tests/workspace.browser.mjs`（`65742cd`） | 0 | 在新隔离数据库副本上重新执行完整 Chrome 回归，草稿恢复与全页矩阵在同一次运行通过。六档宽度、33 个页面或状态、198 张原图，整页横向溢出为 0 |
 | `npm run integrations:check` | 0 | 本机配置预检。Stripe、Postmark、快递100尚无可用的沙盒配置 |
 
-本机 Chrome 截图原图、视口断言与索引随验收包 `qcw-workspace-delivery-screenshots-2026-11-12.zip` 交付。验收包含 `browser.log` 和 `draft-recovery.log`；独立续询日志为 `qcw-workspace-manual-renewal-browser.log`，最后一次集成、构建和关系校验日志为 `qcw-workspace-fulfillment-integration.log`、`qcw-workspace-fulfillment-build.log` 和 `qcw-workspace-fulfillment-relations.log`。日志和截图未纳入代码仓库。
+本机 Chrome 截图原图、视口断言与索引随最新验收包 `qcw-workspace-verified-65742cd.zip` 交付，共 198 张全页截图及 18 张履约重报截图。独立续询日志为 `qcw-workspace-manual-renewal-browser.log`，最后一次集成、构建和关系校验日志为 `qcw-workspace-fulfillment-integration.log`、`qcw-workspace-fulfillment-build.log` 和 `qcw-workspace-fulfillment-relations.log`。日志和截图未纳入代码仓库。
 
 运行 Chrome 测试时在隔离演示实例设置 `QCW_BROWSER_URL` 与 `QCW_BROWSER_EVIDENCE`。Playwright 可安装到临时目录，并以 `QCW_PLAYWRIGHT_MODULE` 指向它的入口。`QCW_BROWSER_FIXTURE_EMAIL` 使用集成库中有已发布报告、历史版本、入仓、出库和工单的 `@qcw.test` 账号，以保存非空页面。`QCW_BROWSER_INVENTORY_EMAIL` 使用至少 21 件待指示实物的夹具账号。跨页回归会为两件实物创建真实测试续存指令，请在独立数据库副本运行。`QCW_BROWSER_COMPARISON_EMAIL` 使用已有发布对比报告的客户夹具。脚本会为新客户走 OTP 和注册，现有隔离角色可用开发环境登录签发真实会话。
 
