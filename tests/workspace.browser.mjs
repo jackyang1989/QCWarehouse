@@ -109,21 +109,21 @@ async function verifyDraftRecovery({context,page,call}, unrelated) {
   await ready(page,/Step 4/);
   const url=page.url();
   const notes=page.getByLabel(/Special/);
+  const patchRoute="**/api/v1"+path;
+  const interrupt=route=>route.request().method()==="PATCH"?route.abort("connectionreset"):route.continue();
+  await context.route(patchRoute,interrupt);
   await context.setOffline(true);
   await notes.fill("Offline notes recovered after reload");
   await page.waitForFunction(()=>Object.values(sessionStorage).some(value=>value.includes("Offline notes recovered after reload")));
   assert.notEqual((await call(path)).customer_notes,"Offline notes recovered after reload");
   const offline=await page.reload().catch(error=>error);
   assert.match(String(offline),/INTERNET_DISCONNECTED/);
-  const patchRoute="**/api/v1"+path;
-  const interrupt=route=>route.request().method()==="PATCH"?route.abort("connectionreset"):route.continue();
-  await page.route(patchRoute,interrupt);
   await context.setOffline(false);
   await page.goto(url);
   await ready(page,/Step 4/);
   await page.waitForFunction(()=>document.querySelector("main textarea")?.value==="Offline notes recovered after reload");
   assert.notEqual((await call(path)).customer_notes,"Offline notes recovered after reload");
-  await page.unroute(patchRoute,interrupt);
+  await context.unroute(patchRoute,interrupt);
   await page.getByRole("button",{name:"Update Saved Draft"}).click();
   await page.getByText(new RegExp(`Draft ${initialDraft.public_no} saved`)).waitFor();
   saved=await call(path);
@@ -176,15 +176,95 @@ async function verifyEmptyWorkspace({page,call}) {
   console.log("PASS fresh customer empty states match PostgreSQL in eight workspace modules");
 }
 
+async function verifyManualQuoteRenewal({page,call,errors},other) {
+  const staff=await session("admin@qcw.test",true);
+  const {offers}=await call("/catalog");
+  const offer=offers.find(row=>row.sku_code==="apparel-inspection-1");
+  assert(offer);
+  const order=await call("/orders",{body:{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:101}]},status:201});
+  const path="/orders/"+order.id,view="/orders/"+order.public_no;
+  const terms=(await call("/public/terms")).terms.map(term=>term.id);
+  async function issue(seconds,amount_cents) {
+    const record=(await staff.call("/staff/admin/desk")).manualQuotes.find(row=>row.order_id===order.id);
+    assert(record);
+    return staff.call("/staff/orders/"+order.id+"/quotes",{status:201,body:{
+      revision:record.revision,reason:"Manual renewal browser fixture",expires_at:new Date(Date.now()+seconds*1000).toISOString(),
+      terms_version_ids:terms,lines:[{order_line_id:record.lines[0].id,amount_cents,business_days:7}],
+    }});
+  }
+  async function requestUpdate() {
+    await page.getByLabel("Describe your requirements").fill("Please update this quote for the same 101 items.");
+    await page.getByRole("button",{name:"Request updated manual quote"}).click();
+    await page.getByText(/Request received/).waitFor();
+  }
+  async function openAction(label) {
+    await page.goto("/actions");
+    const row=page.getByRole("row").filter({hasText:order.public_no}).filter({hasText:label});
+    await row.getByRole("link",{name:"Open"}).click();
+  }
+
+  await call(path+"/manual-quote-request",{body:{revision:order.revision,reason:"Review 101 items for manual pricing."}});
+  await issue(2,12700);
+  await page.goto(view);
+  await page.getByRole("button",{name:"Request updated manual quote"}).waitFor();
+  assert.equal(await page.getByRole("button",{name:"Accept quote and pay"}).count(),0);
+  await captureWizard(page,"manual-draft-expired",order.public_no);
+  await openAction("Request an updated inspection quote");
+  await page.waitForURL("**"+view+"#manual-quote-request");
+  await requestUpdate();
+  assert.equal((await call(path)).manual_quote.state,"requested");
+
+  await issue(10,12900);
+  await openAction("Review your inspection quote");
+  await page.getByRole("heading",{name:/\$129\.00.*expires/}).waitFor();
+  const policies=page.locator("form").filter({has:page.getByRole("button",{name:"Accept quote and pay"})});
+  for(const checkbox of await policies.getByRole("checkbox").all()) await checkbox.check();
+  await policies.getByRole("button",{name:"Accept quote and pay"}).click();
+  await page.waitForURL("**/checkout/demo/*");
+  await page.goto(view+"/payment");
+  await page.getByRole("button",{name:"Request updated manual quote"}).waitFor();
+  assert.equal(await page.getByRole("button",{name:"Resume payment"}).count(),0);
+  assert.equal(await page.getByRole("button",{name:"Review a new quote"}).count(),0);
+  assert.equal((await call(path)).manual_quote_renewable,true);
+  await captureWizard(page,"manual-payment-expired",order.public_no);
+  await requestUpdate();
+  assert.equal((await call(path)).manual_quote.state,"requested");
+  const pending=(await staff.call("/staff/admin/desk")).manualQuotes.find(row=>row.order_id===order.id);
+  assert(pending);
+  await staff.page.goto("/admin/dispositions#case-"+pending.id);
+  await staff.page.locator("#case-"+pending.id).getByRole("button",{name:"发送人工报价"}).waitFor();
+  const updated=await issue(120,13500);
+
+  await page.goto("/account/billing");
+  await page.getByRole("link",{name:"Review inspection quote"}).click();
+  await page.getByRole("heading",{name:/\$135\.00.*expires/}).waitFor();
+  assert.equal((await call(path)).manual_quote.id,updated.id);
+  await captureWizard(page,"manual-quote-renewed",order.public_no);
+  for(const checkbox of await policies.getByRole("checkbox").all()) await checkbox.check();
+  await policies.getByRole("button",{name:"Accept quote and pay"}).click();
+  await page.waitForURL("**/checkout/demo/*");
+  await page.getByRole("button",{name:"Confirm test payment"}).click();
+  await page.waitForURL("**"+view);
+  assert.equal((await call(path)).items.length,101);
+  assert.equal((await call(path+"/payment")).state,"paid");
+  await other.call(path+"/manual-quote-request",{status:404,body:{revision:order.revision,reason:"Other customer cannot renew."}});
+  assert.deepEqual(errors,[]);
+  assert.deepEqual(staff.errors,[]);
+  assert(entries.every(entry=>entry.overflow<=1),"A manual quote screenshot page has horizontal overflow.");
+  console.log("PASS manual quote expiry in draft and payment, staff renewal, same-order checkout and customer isolation");
+}
+
 try {
   const customer = await session();
   const other = await session();
-  const {page,call} = customer;
-  const profile = await call("/me/receiving-address");
-  const otherProfile = await other.call("/me/receiving-address");
-  assert.notEqual(profile.receiving_code,otherProfile.receiving_code);
-  await verifyDraftRecovery(other,customer);
-  if(process.env.QCW_BROWSER_RECOVERY_ONLY!=="1") await verifyWorkspace(customer,other,profile,otherProfile);
+  if(process.env.QCW_BROWSER_MANUAL_QUOTE_ONLY==="1") await verifyManualQuoteRenewal(customer,other);
+  else {
+    const profile = await customer.call("/me/receiving-address");
+    const otherProfile = await other.call("/me/receiving-address");
+    assert.notEqual(profile.receiving_code,otherProfile.receiving_code);
+    await verifyDraftRecovery(other,customer);
+    if(process.env.QCW_BROWSER_RECOVERY_ONLY!=="1") await verifyWorkspace(customer,other,profile,otherProfile);
+  }
 } finally {
   await writeFile(join(out,"viewports.json"),JSON.stringify(entries,null,2)+"\n");
   await browser.close();

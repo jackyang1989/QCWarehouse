@@ -6,6 +6,7 @@ import { consumeEmailWebhook, deliverEmailOnce, queueNotificationEmail } from ".
 import { cleanupStaleMediaUploads } from "./media";
 import { audit, guard, one, role, type Actor } from "./common";
 import { requireStaffMfa } from "./auth";
+import { eligibleManualQuoteOrderSql } from "./orders";
 import type { DB } from "../db";
 
 const businessEvents=["account.registered","report.render","refund.approved","package.received","order.ready","order.identity_mismatch","order.cancelled","dispatch.quoted","quote.offered","shipment.handed_over","shipment.return_received","payment.confirmed","report.published","report.amended","ticket.reply","tracking.exception_opened"];
@@ -26,6 +27,8 @@ function eventDedupeKey(j:{id:string;type:string;payload:Record<string,unknown>}
       return j.payload?.order_id?`order.cancelled:${j.payload.order_id}`:`outbox:${j.id}`;
     case "payment.confirmed":
       return j.payload?.charge_id?`payment.confirmed:${j.payload.charge_id}`:`outbox:${j.id}`;
+    case "quote.offered":
+      return j.payload?.quote_id?`quote.offered:${j.payload.quote_id}`:`outbox:${j.id}`;
     case "report.published":
       return j.payload?.order_id?`report.published:${j.payload.order_id}:${j.payload.version??1}`:`outbox:${j.id}`;
     case "report.amended":
@@ -78,7 +81,16 @@ export async function workOnce() {
             where u.status='active' and not exists(select 1 from warehouse_addresses where is_default and active)
             on conflict(dedupe_key) do update set read_at=null,created_at=now()`);
         }
-        const recipient=(await db.query(`select p.user_id from customer_receiving_profiles p where org_id=coalesce(
+        if(j.type==="quote.offered") {
+          const current=(await db.query<{id:string}>(`select q.id from orders o
+            join manual_quote_requests m on m.order_id=o.id and m.revision=o.revision
+            join inspection_quotes q on q.id=m.accepted_quote_id and q.order_id=o.id
+            where o.id=$1 and ($2::uuid is null or q.id=$2) and ${eligibleManualQuoteOrderSql}
+              and m.state='offered' and q.accepted_at is null and q.expires_at>now()`,
+          [j.payload.order_id,j.payload.quote_id??null])).rows[0];
+          j.payload={...j.payload,quote_id:current?.id};
+        }
+        const recipient=j.type==="quote.offered"&&!j.payload.quote_id?null:(await db.query(`select p.user_id from customer_receiving_profiles p where org_id=coalesce(
           (select org_id from orders where id=$1),(select org_id from packages where id=$2),
           (select org_id from dispatch_batches where id=$3),(select b.org_id from shipments s join dispatch_batches b on b.id=s.batch_id where s.id=$4),
           (select org_id from charge_items where id=$5),(select org_id from tracking_records where id=$6),$7::uuid)`,[j.payload.order_id??null,j.payload.package_id??null,

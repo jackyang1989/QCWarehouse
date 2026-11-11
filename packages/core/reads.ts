@@ -3,7 +3,7 @@ import { z } from "zod";
 import { guard, hash, one, organization, role, type Actor } from "./common";
 import { receiving } from "./auth";
 import { customerEmailDeliveryStatus } from "./email";
-import { orderAcceptsSampleAssignmentSql, orderDTO } from "./orders";
+import { eligibleManualQuoteOrderSql, expiredManualInspectionPaymentSql, orderAcceptsSampleAssignmentSql, orderDTO } from "./orders";
 import { orderShipments } from "./fulfillment-reads";
 import { getIntakeContext, waybill } from "./intake";
 import { hasStaffAccess, staffAccess } from "./staff-access";
@@ -95,6 +95,10 @@ export async function bills(db:DB,actor:Actor) {
     left join payments paid on paid.id=c.applied_payment_id and paid.charge_item_id=c.id
     where c.org_id=$1 order by c.id desc limit 200`,[org])).rows;
 }
+const currentOfferedManualQuote=`from manual_quote_requests m join orders o on o.id=m.order_id and o.revision=m.revision
+    join inspection_quotes q on q.id=m.accepted_quote_id and q.order_id=o.id
+    where o.org_id=$1 and ${eligibleManualQuoteOrderSql} and m.state='offered' and q.accepted_at is null and q.expires_at>now()`;
+
 export async function customerActions(db:DB,actor:Actor) {
   const org=organization(actor);
   const {rows}=await db.query(`select * from (
@@ -102,7 +106,7 @@ export async function customerActions(db:DB,actor:Actor) {
     from orders o where o.org_id=$1 and (
       (o.state='draft' and not exists(select 1 from manual_quote_requests m where m.order_id=o.id
         and m.revision=o.revision and m.state in ('requested','offered'))) or
-      (o.state='awaiting_payment' and not exists(
+      (o.state='awaiting_payment' and not (${expiredManualInspectionPaymentSql}) and not exists(
         select 1 from charge_items c join payments p on p.charge_item_id=c.id
         where c.inspection_quote_id::text=o.submission_snapshot->>'quote_id' and c.voided_at is null and p.state='processing')) or
       (o.state='awaiting_samples' and not exists(select 1 from advice_orders a where a.order_id=o.id and a.org_id=o.org_id)) or
@@ -114,9 +118,12 @@ export async function customerActions(db:DB,actor:Actor) {
         and not exists(select 1 from reference_samples r where r.item_id=w.id and (r.state='pending_safe_storage' or (r.state='active' and r.expires_at>now())))))
     )
     union all select q.id,'inspection_quote','manual_quote_ready',o.public_no,q.expires_at
-      from manual_quote_requests m join orders o on o.id=m.order_id and o.revision=m.revision
-      join inspection_quotes q on q.id=m.accepted_quote_id and q.order_id=o.id
-      where o.org_id=$1 and o.state='draft' and m.state='offered' and q.accepted_at is null and q.expires_at>now()
+      ${currentOfferedManualQuote}
+    union all select o.id,'inspection_quote','manual_quote_expired',o.public_no,null
+      from orders o left join manual_quote_requests m on m.order_id=o.id and m.revision=o.revision
+      left join inspection_quotes q on q.id=m.accepted_quote_id and q.order_id=o.id
+      where o.org_id=$1 and ((${eligibleManualQuoteOrderSql} and m.state='offered' and q.expires_at<=now())
+        or ((${expiredManualInspectionPaymentSql}) and m.id is null))
     union all select q.id,'quote',b.action,null,q.expires_at from dispatch_quote_versions q
       join dispatch_batches b on b.id=q.batch_id where b.org_id=$1 and b.state='quoted' and q.accepted_at is null and q.expires_at>now()
     union all select q.id,'quote','retain',w.code,q.expires_at from storage_quotes q
@@ -253,9 +260,7 @@ export async function customerDesk(db:DB,actor:Actor,includeItems=true) {
     from refunds r join payments p on p.id=r.payment_id join charge_items c on c.id=p.charge_item_id
     where c.org_id=$1 order by r.created_at desc limit 100`,[org])).rows;
   const inspectionQuotes=(await db.query(`select q.id,q.amount_cents,q.currency,q.expires_at,o.public_no order_number
-    from manual_quote_requests m join orders o on o.id=m.order_id and o.revision=m.revision
-    join inspection_quotes q on q.id=m.accepted_quote_id and q.order_id=o.id
-    where o.org_id=$1 and o.state='draft' and m.state='offered' and q.accepted_at is null and q.expires_at>now()
+    ${currentOfferedManualQuote}
     order by q.expires_at,q.id`,[org])).rows;
   const notices=(await customerNotifications(db,actor,false,null,5)).rows;
   const references=(await db.query(`select r.id reference_id,r.item_id,r.state,r.revision,r.condition_note,r.expires_at,
@@ -591,7 +596,7 @@ export async function adminDesk(db:DB,actor:Actor) {
       (select jsonb_agg(jsonb_build_object('id',l.id,'quantity',l.quantity,'title',s.title->>'zh-CN') order by l.id)
        from order_lines l join service_offers s on s.id=l.offer_id where l.order_id=r.order_id) lines
       from manual_quote_requests r join orders o on o.id=r.order_id and o.revision=r.revision
-      where o.state='draft' and r.state in ('requested','offered') order by r.due_at limit 100`)).rows:[],
+      where ${eligibleManualQuoteOrderSql} and r.state in ('requested','offered') order by r.due_at limit 100`)).rows:[],
     refunds:finance?(await db.query(`select r.id,r.payment_id,r.amount_cents,r.state,r.reason,r.revision,r.requested_by,
       r.provider_ref,r.source,c.purpose,o.public_no from refunds r join payments p on p.id=r.payment_id
       join charge_items c on c.id=p.charge_item_id left join inspection_quotes q on q.id=c.inspection_quote_id

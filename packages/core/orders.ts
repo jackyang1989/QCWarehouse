@@ -197,13 +197,33 @@ async function storeQuote(db:DB,id:string,snapshot:Awaited<ReturnType<typeof pri
     returning id,order_id,revision,line_snapshot,amount_cents,currency,expires_at`,
     [id,previous.n+1,JSON.stringify(snapshot),terms,snapshot.reduce((n,l)=>n+l.amount_cents,0),expires]);
 }
+
+export const expiredManualInspectionPaymentSql=`o.state='awaiting_payment' and exists(
+  select 1 from inspection_quotes q join charge_items c on c.inspection_quote_id=q.id and c.org_id=o.org_id
+  where q.order_id=o.id and q.id::text=o.submission_snapshot->>'quote_id'
+    and q.terms_snapshot ? 'manual_request_id' and q.accepted_at is not null and q.expires_at<=now()
+    and c.scope_revision_id is null and c.voided_at is null and c.applied_payment_id is null and c.free_authorization is null
+) and not exists(
+  select 1 from inspection_quotes q join charge_items c on c.inspection_quote_id=q.id and c.org_id=o.org_id
+  join payments p on p.charge_item_id=c.id where q.order_id=o.id and p.state='processing'
+)`;
+export const eligibleManualQuoteOrderSql=`(o.state='draft' or (${expiredManualInspectionPaymentSql}))`;
+
+async function canRenewManualInspection(db:DB,id:string,state:string) {
+  if(state!=="awaiting_payment") return false;
+  return (await one<{renewable:boolean}>(db,`select (${expiredManualInspectionPaymentSql}) renewable from orders o where o.id=$1`,[id])).renewable;
+}
+
 export async function requestManualQuote(db:DB,actor:Actor,id:string,rev:number,reason:string) {
   const order=await ownOrder(db,actor,id,true);
   revision(order.revision,rev);
-  guard(order.state==="draft","ORDER_NOT_EDITABLE","Manual quotes are available for draft orders.");
+  guard(order.state==="draft"||await canRenewManualInspection(db,id,order.state),"ORDER_NOT_EDITABLE",
+    "An updated manual quote is available after the current quote expires and pending payments are resolved.");
   await pricedLines(db,id,true);
-  const current=(await db.query(`select id,state from manual_quote_requests
-    where order_id=$1 and revision=$2 and state in ('requested','offered')`,[id,rev])).rows[0];
+  const current=(await db.query(`select r.id,r.state from manual_quote_requests r
+    left join inspection_quotes q on q.id=r.accepted_quote_id
+    where r.order_id=$1 and r.revision=$2
+      and (r.state='requested' or (r.state='offered' and q.expires_at>now() and q.accepted_at is null))`,[id,rev])).rows[0];
   if(current) return current;
   const req=await one(db,`insert into manual_quote_requests(id,org_id,order_id,revision,state,due_at,reason)
     values($1,$2,$3,$4,'requested',now()+interval '2 days',$5)
@@ -221,7 +241,8 @@ export async function issueManualQuote(db:DB,actor:Actor,id:string,input:ManualQ
   await lock(db,"org:"+initial.org_id);
   const order=await one(db,"select * from orders where id=$1 for update",[id]);
   revision(order.revision,input.revision);
-  guard(order.state==="draft","ORDER_NOT_EDITABLE","Only draft orders can receive manual quotes.");
+  guard(order.state==="draft"||await canRenewManualInspection(db,id,order.state),"ORDER_NOT_EDITABLE",
+    "This order is no longer eligible for a manual quote.");
   const request=await one(db,`select * from manual_quote_requests where order_id=$1 and revision=$2
     and state in ('requested','offered') for update`,[id,input.revision]);
   guard(!request.assignee_id || request.assignee_id===actor.id,"QUOTE_ASSIGNEE_REQUIRED","Another staff member owns this request.",403);
@@ -241,7 +262,7 @@ export async function issueManualQuote(db:DB,actor:Actor,id:string,input:ManualQ
   },expires);
   await db.query("update manual_quote_requests set assignee_id=$2,state='offered',accepted_quote_id=$3 where id=$1",[request.id,actor.id,quote.id]);
   await audit(db,actor,"issue_manual_quote","manual_quote_requests",request.id,{quote_id:quote.id,reason:input.reason});
-  await event(db,"quote.offered",{order_id:id});
+  await event(db,"quote.offered",{order_id:id,quote_id:quote.id});
   return quote;
 }
 export async function submitOrder(db:DB,actor:Actor,id:string,input:{revision:number;quote_id:string;terms_version_ids:string[];acknowledgements:object}) {
@@ -401,9 +422,13 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
     left join packages pkg on pkg.id=w.package_id
     where l.order_id=$1 order by l.id,e.position`,[id])).rows;
   const report=(await db.query("select published_version from reports where order_id=$1",[id])).rows[0];
-  const manual=(await db.query(`select r.state,q.id,q.order_id,q.revision,q.amount_cents,q.expires_at,q.line_snapshot
-    from manual_quote_requests r left join inspection_quotes q on q.id=r.accepted_quote_id and q.expires_at>now()
-    and q.accepted_at is null where r.order_id=$1 and r.revision=$2`,[id,order.revision])).rows[0];
+  const manualQuoteRenewable=await canRenewManualInspection(db,id,order.state);
+  const manual=(order.state==="draft"||manualQuoteRenewable)?(await db.query(`
+    select case when r.state='offered' and q.id is null then 'expired' else r.state end state,
+      q.id,q.order_id,q.revision,q.amount_cents,q.expires_at,q.line_snapshot
+    from manual_quote_requests r left join inspection_quotes q on q.id=r.accepted_quote_id
+      and q.expires_at>now() and q.accepted_at is null
+    where r.order_id=$1 and r.revision=$2`,[id,order.revision])).rows[0]:null;
   const parcels=(await db.query(`select ao.advice_id id,t.tracking_norm,t.carrier_code,t.transport_state,t.sync_state,p.code package_code,p.state warehouse_state
     from advice_orders ao join tracking_records t on t.advice_id=ao.advice_id and t.org_id=ao.org_id and t.closed_at is null
     left join packages p on p.id=t.package_id and p.org_id=ao.org_id
@@ -420,5 +445,6 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
   return {...orderDTO(order as Parameters<typeof orderDTO>[0]),price_cents:order.price_cents,
     customer_notes:order.customer_notes??null,held_at:order.held_at??null,held_from_state:order.held_from_state??null,hold_reason:order.hold_reason??null,
     created_at:order.created_at,report_published_at:order.report_published_at??null,closed_at:order.closed_at??null,paid_at:order.paid_at??null,samples_ready_at:order.samples_ready_at??null,sla_due_at:order.sla_due_at??null,
-    lines,items:rows,report_version:report?.published_version??null,manual_quote:manual??null,parcels,cases,shipments,quotes,consents};
+    lines,items:rows,report_version:report?.published_version??null,manual_quote:manual??null,manual_quote_renewable:manualQuoteRenewable,
+    parcels,cases,shipments,quotes,consents};
 }

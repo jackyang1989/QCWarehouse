@@ -13,7 +13,7 @@
 | 订单列表 | `/orders` | 服务端按订单号、状态、页码查询。按最新记录排序，显示逐件数量、质检状态、付款、报告及下一步。浏览器后退恢复筛选 | 以订单级状态汇总，逐件状态在详情 |
 | 订单详情 | `/orders/{publicNo}`，子页 `/payment`、`/parcels`、`/dispositions`、`/storage` | 展示创建、付款、到齐、报告发布、结案等已记录时间。原单支付恢复、实际到仓、范围、售后和逐件处置 | 暂停及异常按实际工单和状态展示，特定短少恢复见 E2E-04 |
 | 订单履约详情 | `/orders/{publicNo}/quotes/{id}`、`/orders/{publicNo}/shipments/{id}`、`/orders/{publicNo}/cases/{id}` | 报价版本、仓库交接、运单和工单使用原单与对象双重约束 | 有效正式运输价格及提供方联调 OPEN |
-| 待办 | `/actions` | 草稿、待支付、卖家追踪、正式人工报价、待选处置、物流验证、范围修订、参考样、续存及客户待回复工单有深链 | 泛化暂停不再单独计作客户待办。人工收件归属审核期间不暴露未匹配仓库对象 |
+| 待办 | `/actions` | 草稿、待支付、卖家追踪、人工报价确认与过期续询、待选处置、物流验证、范围修订、参考样、续存及客户待回复工单有深链 | 泛化暂停不再单独计作客户待办。人工收件归属审核期间不暴露未匹配仓库对象 |
 | 报告 | `/reports`、`/orders/{publicNo}/report`、`/orders/{publicNo}/report/versions/{n}` | 默认最新已发布，支持精确检索和查看历史。PDF 请求锁定同一版本。报告实物编号直达客户库存 | 公开分享沿用原开关，发布快照和私有证据隔离保留 |
 | 包裹 | `/parcels`、`/parcels/{id}`、`/shipments/{id}` | 登记运单、绑定本人订单、入仓与承运商状态分列、认领指定运单、出库追踪。列表按 Incoming、Received、Needs Attention、Outgoing 切换 | 通过已关联订单的逐件运单读取供应商和预计件数，与仓库记录数量分列。独立包裹的供应商和件数申报、原始外箱照发布规则 OPEN |
 | 实物 | `/items`，实物使用 `?item={code}` 打开抽屉，兼容 `#item-{code}` | 实物编号、所属委托、检查与保管状态。按实物提交不同去向，支持退商家、集运、续存和确认样。待封存状态独立展示 | 每页 20 件，统计与筛选来自全部本人库存。选择跨页保留，提交后回读真实逐件指令 |
@@ -63,6 +63,7 @@ flowchart TD
 | 大批量实物 | 原列表以已加载记录计算数量并截断。按本人库存分页查询并计算总量，以实物码授权打开报告关联物品 | 30 件跨两页分布、状态过滤、确认样及跨租户隔离。Chrome 两页选择提交真实续存指令 |
 | 客户支持 | 原包裹和工单分开，首条消息无法提交证据。工单现在可带已授权入库运单和首条私有照片 | Chrome 从真实包裹提单与查看关联，真实工单/照片数据库记录和跨租户拦截 |
 | 资料和地址 | 显示时区原来无写入端。客户设置持久化到现有用户字段，登录方式、邮箱和接收码照常使用。地址提示由真正的默认地址变更审计产生 | Chrome 保存与重开资料、订单日期显示。数据库核验过往包裹地址快照、换址、重复设置和新注册账户 |
+| 人工报价续询 | 原报价过期后旧申请仍挡住续询，超量订单接受报价后也不能用自动报价恢复。现可在原草稿或未付款原单续询，待办、账单、员工队列和通知按当前可用报价更新 | 隔离数据库核对过期、处理中付款守卫、旧收费金额留档及替换、跨客户隔离。Chrome 验证续询到同单付款 |
 | 移动端实物与报告 | 实物抽屉补可访问名称、初始焦点、键盘环绕和返回焦点，只展示客户可读属性。移动报告普通表改为带字段名的记录卡，样品比较保留横向对照表 | Chrome 从后续库存页打开实物、检查焦点，核对现版、历史版 PDF 与移动对比表 |
 
 ## 十类端到端回归
@@ -110,10 +111,11 @@ flowchart TD
 | `npm run check` | 0 | TypeScript 检查通过 |
 | `npm run build` | 0 | Next.js 生产构建通过 |
 | `python3 docs/contracts/check.py` | 0 | 44 个交易操作，174 个 TASK，69 张页面，111 个实施用例，46 个产品门禁 |
-| `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-final npm run test:integration` | 0 | 58/58，含 AUD-001–015、NEW-001–011、过期报价链接与 Stripe 会话恢复、付款回调、收据归属和金额核对、库存分页与状态汇总、包裹工单与照片权限、地址轮换、资料持久化和原有履约全链 |
+| `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-final npm run test:integration` | 0 | 59/59，含 AUD-001–015、NEW-001–011、人工报价过期续询、过期付款链接与 Stripe 会话恢复、付款回调、收据归属、库存与包裹、资料持久化和原有履约全链 |
 | `psql -h 127.0.0.1 -d qcw_workspace_contract -v ON_ERROR_STOP=1 -f docs/contracts/verify.sql` | 0 | 迁移 001–008 后在未播种的空库运行，关系断言通过 |
 | `node tests/workspace.browser.mjs` | 0 | Chrome 覆盖 1440、1280、1024、768、390 和 375 px，客户与两种员工角色，32 个页面或状态共 192 张截图，整页横向溢出为 0。另核对新客户八个模块的真实空状态 |
 | `QCW_BROWSER_NEW_CUSTOMER_ONLY=1 node tests/workspace.browser.mjs` | 0 | Checkout 修复后复跑新客户、报价、付款和重放，六种宽度共 36 张截图，整页横向溢出为 0 |
+| `QCW_BROWSER_MANUAL_QUOTE_ONLY=1 node tests/workspace.browser.mjs` | 0 | 草稿及原单付款的人工报价过期、员工队列、账单回原单确认并付款。六种宽度共 18 张截图，整页横向溢出为 0 |
 | `npm run integrations:check` | 0 | 本机配置预检。Stripe、Postmark、快递100尚无可用的沙盒配置 |
 
 本机 Chrome 截图原图、视口断言与索引随验收包交付。全量浏览器日志为 `qcw-workspace-acceptance-browser.log`，Checkout 续验日志为 `qcw-workspace-checkout-expiry-integration.log`、`qcw-workspace-checkout-expiry-build.log` 和 `qcw-workspace-checkout-expiry-browser.log`。日志和截图未纳入代码仓库。

@@ -1513,10 +1513,12 @@ export function NewOrder({customerId}:{customerId:string}) {
                   </button>
                 </div>
                 {manualQuoteSubmitted && (
-                  <div className="notice ok" style={{marginTop:12}}>
-                    <strong>Manual quote requested ({label(manualQuoteSubmitted.requestState)}):</strong> Draft order <span className="mono">{manualQuoteSubmitted.orderNo}</span> ({manualQuoteSubmitted.qty} items) is queued for operations pricing and turnaround review. You&apos;ll be notified when the quote is offered.{" "}
-                    <Link href={`/orders/${manualQuoteSubmitted.orderNo}`}>
-                      Track quote status in order →
+                  <div className="notice" style={{marginTop:12}}>
+                    {manualQuoteSubmitted.requestState==="expired"?"The manual quote has expired. Request an updated quote from this order.":
+                      manualQuoteSubmitted.requestState==="offered"?"Your manual quote is ready for review.":
+                      "Your request is with our team. We’ll notify you when the quote is ready."}{" "}
+                    <Link href={`/orders/${manualQuoteSubmitted.orderNo}#${manualQuoteSubmitted.requestState==="offered"?"inspection-quote":"manual-quote-request"}`}>
+                      Order {manualQuoteSubmitted.orderNo} ({manualQuoteSubmitted.qty} items) →
                     </Link>
                   </div>
                 )}
@@ -2367,9 +2369,30 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
   const [itemTarget,setItemTarget]=useState<Row|null>(null);
   const [batchTarget,setBatchTarget]=useState<string|null>(null);
   const o=detail.data;
-  const quote=o?.manual_quote?.id?o.manual_quote:calculatedQuote;
+  const manualQuote=o?.manual_quote;
+  const manualRenewal=o?.manual_quote_renewable;
+  const needsManualQuoteRenewal=manualQuote?.state==="expired"||Boolean(manualRenewal&&!manualQuote);
+  const quote=manualQuote?.id?manualQuote:manualRenewal?undefined:calculatedQuote;
   const paymentState=payment.data?.state;
   const refreshPayment=()=>{detail.reload();payment.reload();};
+  useEffect(()=>{
+    const target=location.hash.slice(1);
+    if(o?.id&&(target==="manual-quote-request"||target==="inspection-quote")) document.getElementById(target)?.scrollIntoView({block:"start"});
+  },[o?.id]);
+  useEffect(()=>{
+    if(!quote?.expires_at) return;
+    const expiry=Date.parse(quote.expires_at);
+    if(!Number.isFinite(expiry)) return;
+    const timer=setTimeout(()=>{setQuote(undefined);detail.reload();},Math.min(Math.max(0,expiry-Date.now()),2_147_483_647));
+    return ()=>clearTimeout(timer);
+  },[quote?.id,quote?.expires_at,detail.reload]);
+  useEffect(()=>{
+    if(paymentState!=="open"||!payment.data?.charge?.expires_at) return;
+    const remaining=Date.parse(payment.data.charge.expires_at)-Date.now();
+    if(!Number.isFinite(remaining)||remaining<=0) return;
+    const timer=setTimeout(()=>{payment.reload();detail.reload();},Math.min(remaining,2_147_483_647));
+    return ()=>clearTimeout(timer);
+  },[paymentState,payment.data?.charge?.expires_at,payment.reload,detail.reload]);
   useEffect(()=>{
     if(paymentState!=="processing"&&!((returnedFromCheckout||checkoutNotice&&!checkoutNotice.error)&&o?.state==="awaiting_payment"))return;
     const timer=setInterval(()=>{detail.reload();payment.reload();},15000);
@@ -2452,7 +2475,8 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
       {(section==="payment"||!section&&o.state==="awaiting_payment")&&<Panel title="Inspection payment">
         {payment.error?<ErrorBlock error={payment.error}/>:!payment.data?<p role="status">Loading the current charge…</p>:<>
           {payment.data.charge&&<p><strong>{usd(payment.data.charge.amount_cents)}</strong> · Quote {payment.data.charge.quote_revision}</p>}
-          {paymentState==="open"&&!checkoutNotice?.expired&&<Action primary run={()=>continuePayment(payment.data!.charge.id,payment.data!.charge.quote_revision)}>Resume payment</Action>}
+          {paymentState==="open"&&!checkoutNotice?.expired&&<Action primary run={()=>continuePayment(payment.data!.charge.id,payment.data!.charge.quote_revision)}>
+            {manualRenewal?"Check previous payment status":"Resume payment"}</Action>}
           {paymentState==="processing"&&<p role="status">Payment is processing. We will update the order after confirmation.</p>}
           {(paymentState==="expired"||checkoutNotice?.expired)&&<p>The quote has expired. Review a new quote for this order.</p>}
           {returnedFromCheckout&&paymentState==="open"&&<p role="status">Waiting for payment confirmation.</p>}
@@ -2492,12 +2516,16 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
         </div>)}
       </details>}
       {o.report_version&&<Link className="button primary" href={"/orders/"+number+"/report"}>Open inspection report</Link>}
-      {(o.state==="draft"||o.state==="awaiting_payment"&&(paymentState==="expired"||checkoutNotice?.expired))&&
+      {(o.state==="draft"||!manualRenewal&&o.state==="awaiting_payment"&&(paymentState==="expired"||checkoutNotice?.expired))&&
         <div className="actions"><Action primary run={async()=>setQuote(await request("/orders/"+id+"/quotes","POST",{revision:o.revision}))}>{o.state==="draft"?"Calculate quote":"Review a new quote"}</Action>
           {o.state==="draft"&&<Link className="button" href={"/orders/new?draft="+encodeURIComponent(number)}>Modify items or service in wizard</Link>}
         </div>}
-      {o.state==="draft"&&<details className="card"><summary>Need a manual quote?</summary>
-        {o.manual_quote?<p>Quote request · {o.manual_quote.state}</p>:<Form label="Request manual quote" run={async f=>{
+      {(o.state==="draft"||manualRenewal)&&<details className="card" id="manual-quote-request" open={manualQuote||manualRenewal?true:undefined}>
+        <summary>Manual inspection quote</summary>
+        {needsManualQuoteRenewal&&<p>The previous manual quote expired. Ask our team to update it for this order.</p>}
+        {manualQuote?.state==="requested"?<p role="status">Request received. We’ll notify you when the quote is ready.</p>:
+          manualQuote?.id?<p><a href="#inspection-quote">Review the current manual quote</a>.</p>:
+          <Form label={needsManualQuoteRenewal?"Request updated manual quote":"Request manual quote"} run={async f=>{
           await request("/orders/"+id+"/manual-quote-request","POST",{revision:o.revision,reason:text(f,"reason")});detail.reload();
         }}><Field label="Describe your requirements" name="reason"/></Form>}
       </details>}
@@ -3418,7 +3446,8 @@ function canChooseHandling(item:Row) {
 }
 
 const actionTitles:Record<string,string>={
-  manual_quote_ready:"Review your inspection quote",report_ready:"Choose how to handle inspected items",action_pending:"Choose how to handle inspected items",
+  manual_quote_ready:"Review your inspection quote",manual_quote_expired:"Request an updated inspection quote",
+  report_ready:"Choose how to handle inspected items",action_pending:"Choose how to handle inspected items",
   draft:"Continue inspection draft",awaiting_payment:"Review inspection payment",awaiting_samples:"Register seller tracking",
   return_to_seller:"Review seller return quote",to_forwarder:"Review forwarding quote",to_domestic_address:"Review domestic shipping quote",
   retain:"Review storage extension",needs_carrier:"Confirm parcel carrier",needs_verification:"Verify parcel tracking",waiting_customer:"Review support case",
@@ -3429,7 +3458,7 @@ const actionTitles:Record<string,string>={
 };
 function customerActionHref(row:Row) {
   const base="/orders/"+row.reference;
-  if(row.kind==="inspection_quote") return base+"#inspection-quote";
+  if(row.kind==="inspection_quote") return base+(row.state==="manual_quote_expired"?"#manual-quote-request":"#inspection-quote");
   if(row.kind==="order") {
     if(row.state==="draft") return "/orders/new?draft="+encodeURIComponent(row.reference);
     if(row.state==="awaiting_payment") return base+"/payment";

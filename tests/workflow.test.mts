@@ -1068,6 +1068,82 @@ test("staff quote is versioned, private and can activate 101 positions with expl
   assert.equal(count.n,0);
 });
 
+test("expired manual inspection quotes can be renewed on the same order without rewriting the accepted charge",async()=>{
+  const {c,terms}=await signCustomer(),other=(await signCustomer()).c;
+  const admin=await staffLogin("admin");
+  const offer=(await c.fetch("/catalog")).offers.find((row:{sku_code:string})=>row.sku_code==="apparel-inspection-1");
+  const order=await c.fetch("/orders",{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:101}]},"POST",201);
+  const path="/orders/"+order.id,requestPath=path+"/manual-quote-request";
+  const terms_version_ids=terms.map(term=>term.id);
+  const acknowledgements={scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true};
+  const actionStates=async()=>((await c.fetch("/actions")).rows as {reference:string;state:string}[])
+    .filter(row=>row.reference===order.public_no).map(row=>row.state);
+  const listedQuotes=async()=>((await c.fetch("/me/desk")).inspectionQuotes as {order_number:string;id:string}[])
+    .filter(row=>row.order_number===order.public_no).map(row=>row.id);
+  async function issue(revision:number,seconds:number,cents:number) {
+    const entry=(await admin.fetch("/staff/admin/desk")).manualQuotes.find((row:{order_id:string})=>row.order_id===order.id);
+    assert(entry);
+    assert.equal(entry.revision,revision);
+    return admin.fetch("/staff/orders/"+order.id+"/quotes",{
+      revision,reason:"Manual renewal fixture",expires_at:new Date(Date.now()+seconds*1000).toISOString(),terms_version_ids,
+      lines:[{order_line_id:entry.lines[0].id,amount_cents:cents,business_days:7}],
+    },"POST",201);
+  }
+  async function waitForExpiry(id:string) {
+    await pool.query("select pg_sleep(greatest(0,extract(epoch from expires_at-clock_timestamp()))+.02) from inspection_quotes where id=$1",[id]);
+  }
+  function accept(revision:number,quote_id:string,status=200) {
+    return c.fetch(path+"/submit",{revision,quote_id,terms_version_ids,acknowledgements},"POST",status);
+  }
+  const initialRequest={revision:order.revision,reason:"Inspect 101 samples"};
+  const request=await c.fetch(requestPath,initialRequest);
+  const first=await issue(order.revision,2,12700);
+  assert.deepEqual(await actionStates(),["manual_quote_ready"]);
+  assert.deepEqual(await listedQuotes(),[first.id]);
+  assert.equal((await c.fetch(requestPath,initialRequest)).state,"offered");
+  await waitForExpiry(first.id);
+  assert.equal((await c.fetch(path)).manual_quote.state,"expired");
+  assert.deepEqual(await actionStates(),["manual_quote_expired"]);
+  assert.deepEqual(await listedQuotes(),[]);
+  await accept(order.revision,first.id,409);
+  await other.fetch(requestPath,initialRequest,"POST",404);
+  assert.deepEqual(await c.fetch(requestPath,{...initialRequest,reason:"Refresh expired quote"}),{id:request.id,state:"requested"});
+  assert.deepEqual(await actionStates(),[]);
+
+  const second=await issue(order.revision,2,12900);
+  const accepted=await accept(order.revision,second.id);
+  const oldCharge=accepted.charge.charge_item_id;
+  const previousCheckout=await c.fetch("/charges/"+oldCharge+"/checkout",{quote_revision:second.revision});
+  const renew={revision:accepted.order.revision,reason:"Refresh previously accepted quote"};
+  assert.equal((await c.fetch(requestPath,renew,"POST",409)).error.code,"ORDER_NOT_EDITABLE");
+  await waitForExpiry(second.id);
+  await pool.query("update payments set state='processing' where id=$1",[previousCheckout.attempt_id]);
+  await c.fetch(requestPath,renew,"POST",409);
+  assert.equal((await c.fetch(path)).manual_quote_renewable,false);
+  await pool.query("update payments set state='canceled' where id=$1",[previousCheckout.attempt_id]);
+  assert.equal((await c.fetch(path)).manual_quote_renewable,true);
+  assert.deepEqual(await actionStates(),["manual_quote_expired"]);
+  assert.equal((await c.fetch(requestPath,renew)).state,"requested");
+  assert.deepEqual(await actionStates(),[]);
+
+  const third=await issue(accepted.order.revision,120,13500);
+  assert.equal((await c.fetch(path)).manual_quote.id,third.id);
+  assert.deepEqual(await actionStates(),["manual_quote_ready"]);
+  assert.deepEqual(await listedQuotes(),[third.id]);
+  for(let i=0;i<80&&await workOnce();i++) {/* Drain queued notifications. */}
+  const notices=(await pool.query("select payload->>'quote_id' id from notifications where order_id=$1 and template='quote.offered'",[order.id])).rows;
+  assert.deepEqual(notices,[{id:third.id}]);
+  const renewed=await accept(accepted.order.revision,third.id);
+  assert.equal(renewed.order.id,order.id);
+  assert.equal(renewed.charge.amount_cents,13500);
+  assert.deepEqual((await pool.query("select amount_cents,voided_at is not null superseded from charge_items where id=$1",[oldCharge])).rows,
+    [{amount_cents:12900,superseded:true}]);
+  assert.deepEqual(await listedQuotes(),[]);
+  const checkout=await c.fetch("/charges/"+renewed.charge.charge_item_id+"/checkout",{quote_revision:third.revision});
+  await c.fetch("/checkout/demo/"+checkout.attempt_id,{});
+  assert.equal((await c.fetch(path)).items.length,101);
+});
+
 function setFixtureEnv(t:import("node:test").TestContext,values:Record<string,string|undefined>) {
   const previous=Object.fromEntries(Object.keys(values).map(key=>[key,process.env[key]]));
   function apply(env:Record<string,string|undefined>) {

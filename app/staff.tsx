@@ -1199,7 +1199,7 @@ export function AdminDesk({actor,path}:{actor:Row;path:string}) {
   const {data,error,reload}=useLoad("/staff/admin/desk"),terms=useLoad("/public/terms");
   const [drawer,setDrawer]=useState<StaffObjectTarget|null>(null);
   useEffect(()=>{
-    if(!data||path!=="/admin/orders") return;
+    if(!data||!(path==="/admin/orders"||path==="/admin/dispositions")) return;
     function revealCase() {
       const id=location.hash.slice(1);
       if(!id.startsWith("case-")) return;
@@ -1242,7 +1242,7 @@ export function AdminDesk({actor,path}:{actor:Row;path:string}) {
   const canHandleOrders=activeLinks.some(([href])=>href==="/admin/orders");
   const queue=canHandleOrders?[
     ...data.claims.filter((c:Row)=>c.state==="open").map((c:Row)=>({number:c.public_no,action:"核验包裹归属",detail:c.tracking_no,href:"/admin/orders#case-"+c.id})),
-    ...data.manualQuotes.filter((q:Row)=>q.state==="requested").map((q:Row)=>({number:q.public_no,action:"人工报价",detail:q.reason,href:"/admin/orders#case-"+q.id})),
+    ...data.manualQuotes.filter((q:Row)=>q.state==="requested").map((q:Row)=>({number:q.public_no,action:"人工报价",detail:q.reason,href:"/admin/dispositions#case-"+q.id})),
   ].slice(0,8):[];
   const requestedRefunds=activeLinks.some(([href])=>href==="/admin/finance"||href==="/admin/refunds")?data.refunds.filter((r:Row)=>r.state==="requested").length:0;
   const pad2=(n:number)=>String(n).padStart(2,"0");

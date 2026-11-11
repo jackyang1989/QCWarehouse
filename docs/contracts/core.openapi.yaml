@@ -2484,6 +2484,7 @@ paths:
     post:
       operationId: issueManualQuote
       summary: 对本人负责的人工询价，锁定逐行金额、交期和到期时间后发客户确认
+      description: 可为当前草稿出价，也可处理同一订单上过期且尚未付款的人工报价续询。新报价需客户重新接受。
       security:
       - cookieSession: []
       parameters:

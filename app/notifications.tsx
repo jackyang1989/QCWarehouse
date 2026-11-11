@@ -31,7 +31,7 @@ function UpdatesTable({notices,onRead}:{notices:Row[];onRead:()=>void}) {
         notice.shipment_id?"/shipments/"+notice.shipment_id:
         notice.advice_id?"/parcels/"+notice.advice_id:
         notice.charge_id?"/account/billing#charge-"+notice.charge_id:
-        notice.order_number?"/orders/"+notice.order_number:
+        notice.order_number?"/orders/"+notice.order_number+(notice.template==="quote.offered"?"#manual-quote-request":""):
         notice.template==="email.delivery_failed"?"/account":
         notice.template==="payment.confirmed"||notice.template==="dispatch.quoted"?"/account/billing":null;
       const title=noticeTitles[notice.template]??"Account update";
