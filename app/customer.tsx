@@ -3213,7 +3213,10 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
           b.paid_ref?.startsWith("demo_")?<small>Test payment</small>:
           b.paid_ref?<details className="small"><summary className="code" title={b.paid_ref}>…{String(b.paid_ref).slice(-8)}</summary><span className="code" style={{overflowWrap:"anywhere"}}>{b.paid_ref}</span></details>:b.latest_attempt_state?label(b.latest_attempt_state):"—",
         b.state==="open"&&b.expires_at&&Date.parse(b.expires_at)<=Date.now()
-          ?(b.order_numbers?.[0]?<Link href={"/orders/"+b.order_numbers[0]+"/payment"}>Review expired quote</Link>:<span>Quote expired</span>)
+          ?(b.unresolved_payment?<span>Payment confirmation pending</span>:
+            b.purpose==="dispatch"&&b.batch_id?<CodeButton code="Review dispatch batch" onClick={()=>setBatchTarget(b.batch_id)}/>:
+            b.purpose==="storage"&&b.storage_item_code?<Link href={"/items?item="+encodeURIComponent(b.storage_item_code)}>Review stored item</Link>:
+            b.purpose==="inspection"&&b.order_numbers?.[0]?<Link href={"/orders/"+b.order_numbers[0]+"/payment"}>Review expired quote</Link>:<span>Quote expired</span>)
           :b.state==="open"?<Action run={()=>goCheckout(b.charge_item_id,b.quote_revision)}>Pay</Action>:null
       ])} empty="No charges yet."/>
     </Panel><Panel title="Refunds" subtitle="Platform fee refunds issued by QCWarehouse. Seller refunds are handled on your seller's platform and are not shown here.">
@@ -3422,6 +3425,16 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
 
 function FulfillmentQuote({quote,onUpdate,onOpenBatch}:{quote:Row;onUpdate?:()=>void;onOpenBatch?:(batchId:string)=>void}) {
   const stamp=useWorkspaceStamp();
+  const [expiredId,setExpiredId]=useState<string>();
+  useEffect(()=>{
+    if(quote.state!==undefined&&quote.state!=="open"&&quote.state!=="accepted") return;
+    const remaining=Date.parse(quote.expires_at)-Date.now();
+    if(remaining<=0||remaining>2_147_483_647) return;
+    const timer=setTimeout(()=>setExpiredId(quote.id),remaining);
+    return ()=>clearTimeout(timer);
+  },[quote.expires_at,quote.id,quote.state]);
+  const initialState=quote.state??"open";
+  const state=["open","accepted"].includes(initialState)&&(expiredId===quote.id||Date.parse(quote.expires_at)<=Date.now())?"expired":initialState;
   const shipping=quote.purpose==="dispatch";
   const {snapshot}=quote;
   const purpose=shipping?({return_to_seller:"Return to seller",to_forwarder:"Send to freight forwarder",to_domestic_address:"Domestic delivery"} as Record<string,string>)[quote.action]:"Extend storage";
@@ -3441,15 +3454,15 @@ function FulfillmentQuote({quote,onUpdate,onOpenBatch}:{quote:Row;onUpdate?:()=>
       ])}/>
       <p>Handling · {usd(snapshot.handling_cents)}</p>
     </>:<p>{snapshot.days} additional days · <span className="code">{Object.values(quote.item_codes).join(", ")}</span></p>}
-    {(quote.state===undefined||quote.state==="open")&&<Action primary run={async()=>{
+    {state==="open"&&<Action primary run={async()=>{
       const charge=await request("/quotes/"+quote.id+"/accept","POST",{revision:quote.revision});
       try {await goCheckout(charge.charge_item_id,quote.revision);} finally {onUpdate?.();}
     }}>Accept and pay</Action>}
-    {quote.state==="accepted"&&quote.charge_id&&<Action primary run={()=>goCheckout(quote.charge_id,quote.revision)}>Resume payment</Action>}
-    {quote.state==="processing"&&<p role="status">Payment is processing.</p>}
-    {quote.state==="paid"&&<Tag>Payment confirmed</Tag>}
-    {quote.state==="expired"&&<p className="notice">This quote has expired. Review the latest quote from your order when the warehouse issues it.</p>}
-    {quote.state==="inactive"&&<Empty>This quote is closed.</Empty>}
+    {state==="accepted"&&quote.charge_id&&<Action primary run={()=>goCheckout(quote.charge_id,quote.revision)}>Resume payment</Action>}
+    {state==="processing"&&<p role="status">Awaiting payment confirmation.</p>}
+    {state==="paid"&&<Tag>Payment confirmed</Tag>}
+    {state==="expired"&&<p className="notice">This quote has expired. Check <Link href="/account/billing">Billing</Link> for a new quote from the warehouse.</p>}
+    {state==="inactive"&&<Empty>This quote is closed. Check <Link href="/account/billing">Billing</Link> for current quotes.</Empty>}
   </article>;
 }
 

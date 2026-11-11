@@ -914,13 +914,69 @@ test("33 physical items from three parcels share one order, report and selective
   assert.equal(storageQuote.snapshot.days,30);
   assert.equal((await c.fetch(path+"/quotes/"+storage.quote_id)).purpose,"storage");
   assert.deepEqual(Object.keys(storageQuote.item_codes),[retained]);
-  const storageFee=await c.fetch("/quotes/"+storage.quote_id+"/accept",{revision:storage.revision});
-  const storageCheckout=await c.fetch("/charges/"+storageFee.charge_item_id+"/checkout",{quote_revision:storage.revision});
+  await pool.query("update storage_quotes set expires_at=now()+interval '2 seconds' where id=$1",[storage.quote_id]);
+  const previousFee=await c.fetch("/quotes/"+storage.quote_id+"/accept",{revision:storage.revision});
+  const previousStorageCheckout=await c.fetch("/charges/"+previousFee.charge_item_id+"/checkout",{quote_revision:storage.revision});
+  await pool.query("select pg_sleep(2)");
+  const storagePath=path+"/quotes/"+storage.quote_id;
+  const issueStorage="/staff/dispositions/"+retention.id+"/storage-quote";
+  const startPreviousStorage="/charges/"+previousFee.charge_item_id+"/checkout";
+  assert.equal((await c.fetch(storagePath)).state,"expired");
+  assert(!(await c.fetch("/actions")).rows.some(row=>row.id===previousFee.charge_item_id));
+  assert.equal((await c.fetch(startPreviousStorage,{quote_revision:storage.revision},"POST",409)).error.code,"QUOTE_EXPIRED");
+  const stripeSession="cs_test_"+randomUUID();
+  await pool.query("update payments set provider_ref=$2 where id=$1",[previousStorageCheckout.attempt_id,stripeSession]);
+  const {actor:storageOwner}=await c.fetch("/me");
+  async function sendStorageEvent(kind:string,paid:boolean) {
+    const keys=["QCW_DEMO","STRIPE_SECRET_KEY","STRIPE_WEBHOOK_SECRET"] as const;
+    const previous=keys.map(key=>process.env[key]);
+    try {
+      [process.env.QCW_DEMO,process.env.STRIPE_SECRET_KEY,process.env.STRIPE_WEBHOOK_SECRET]=["0","sk_test_fixture","whsec_fixture"];
+      const body=JSON.stringify({id:"evt_fixture_"+randomUUID(),object:"event",livemode:false,type:kind,data:{object:{
+        id:stripeSession,amount_total:previousFee.amount_cents,currency:"usd",payment_status:paid?"paid":"unpaid",
+        payment_intent:paid?"pi_fixture_"+randomUUID():null,metadata:{payment_id:previousStorageCheckout.attempt_id,
+          charge_item_id:previousFee.charge_item_id,org_id:storageOwner.org},
+      }}});
+      const signature=Stripe.webhooks.generateTestHeaderString({payload:body,secret:"whsec_fixture"});
+      const endpoint="/webhooks/stripe";
+      for(let i=0;i<2;i++) {
+        const response=await handle(new Request(origin+"/api/v1"+endpoint,{method:"POST",body,headers:{"stripe-signature":signature}}),endpoint);
+        assert.equal(response.status,200);
+      }
+    } finally {
+      for(const [index,key] of keys.entries()) {
+        if(previous[index]===undefined) delete process.env[key];
+        else process.env[key]=previous[index];
+      }
+    }
+  }
+  assert.equal((await c.fetch(storagePath)).state,"processing");
+  assert(!(await staff.fetch("/staff/desk")).retain.some(row=>row.id===retention.id));
+  await staff.fetch(issueStorage,{},"POST",409);
+  await sendStorageEvent("checkout.session.expired",false);
+  assert((await staff.fetch("/staff/desk")).retain.some(row=>row.id===retention.id&&row.renewal));
+  const renewed=await staff.fetch(issueStorage,{});
+  assert.equal(renewed.revision,storage.revision+1);
+  assert.equal(renewed.amount_cents,storage.amount_cents);
+  await staff.fetch(issueStorage,{},"POST",409);
+  assert.equal((await c.fetch(storagePath)).state,"inactive");
+  assert((await c.fetch("/actions")).rows.some(row=>row.id===renewed.quote_id&&row.kind==="quote"));
+  await other.fetch(path+"/quotes/"+renewed.quote_id,undefined,"GET",404);
+  for(let i=0;i<150;i++) {if(!await workOnce()) break;}
+  const storageNotices=(await pool.query("select dedupe_key from notifications where dedupe_key=any($1::text[])",[
+    ["storage.quoted:"+storage.quote_id,"storage.quoted:"+renewed.quote_id],
+  ])).rows;
+  assert.deepEqual(storageNotices,[{dedupe_key:"storage.quoted:"+renewed.quote_id}]);
+  const storageFee=await c.fetch("/quotes/"+renewed.quote_id+"/accept",{revision:renewed.revision});
+  const storageCheckout=await c.fetch("/charges/"+storageFee.charge_item_id+"/checkout",{quote_revision:renewed.revision});
   await c.fetch("/checkout/demo/"+storageCheckout.attempt_id,{});
   await c.fetch("/checkout/demo/"+storageCheckout.attempt_id,{});
+  await sendStorageEvent("checkout.session.async_payment_succeeded",true);
+  assert.equal((await pool.query("select count(*)::int n from tickets where category='payment_refund' and details->>'payment_id'=$1",[previousStorageCheckout.attempt_id])).rows[0].n,1);
   const storageBill=(await c.fetch("/me/billing")).charges.find((row:{charge_item_id:string})=>row.charge_item_id===storageFee.charge_item_id);
   assert.deepEqual(storageBill.order_ids,[draft.id]);
   assert(storageBill.posted_at);
+  assert.equal((await pool.query("select count(*)::int n from storage_periods where charge_id=any($1::uuid[])",[[previousFee.charge_item_id,storageFee.charge_item_id]])).rows[0].n,1);
   const inventory=(await c.fetch("/me/desk")).items;
   const retainedNow=inventory.find((item:{item_id:string})=>item.item_id===retained);
   assert.equal(retainedNow.custody_state,"stored");
@@ -6907,8 +6963,33 @@ test("a standalone 30-item inspection splits a documented defect, a reference sa
     const batch=await c.fetch("/dispatch-batches",{disposition_ids:[instruction.id]},"POST",201);
     const confirmed=await c.fetch("/dispatch-batches/"+batch.batch_id+"/confirm",{revision:batch.revision});
     const batchPath="/staff/dispatch-batches/"+batch.batch_id;
-    const quoted=await receiver.fetch(batchPath+"/quote",{revision:confirmed.revision,rate_version_id:desk.rates[0].id,
-      parcels:[{item_ids:[item.id],weight_g:540}]});
+    const quoteInput={revision:confirmed.revision,rate_version_id:desk.rates[0].id,parcels:[{item_ids:[item.id],weight_g:540}]};
+    let quoted=await receiver.fetch(batchPath+"/quote",quoteInput);
+    if(instruction.id===returned.id) {
+      const old=quoted;
+      await pool.query("update dispatch_quote_versions set expires_at=now()+interval '2 seconds' where id=$1",[old.quote_id]);
+      const stale=await c.fetch("/quotes/"+old.quote_id+"/accept",{revision:old.revision});
+      const attempt=await c.fetch("/charges/"+stale.charge_item_id+"/checkout",{quote_revision:old.revision});
+      await pool.query("select pg_sleep(2)");
+      const requestRenewal={...quoteInput,revision:old.revision};
+      const quotePath=path+"/quotes/"+old.quote_id;
+      assert.equal((await c.fetch(quotePath)).state,"expired");
+      assert(!(await c.fetch("/actions")).rows.some(row=>row.id===stale.charge_item_id));
+      await pool.query("update payments set state='processing' where id=$1",[attempt.attempt_id]);
+      assert.equal((await c.fetch(quotePath)).state,"processing");
+      assert.equal((await receiver.fetch(batchPath)).batch.renewable_quote,false);
+      await receiver.fetch(batchPath+"/quote",requestRenewal,"POST",409);
+      await pool.query("update payments set state='canceled' where id=$1",[attempt.attempt_id]);
+      assert.equal((await receiver.fetch(batchPath)).batch.renewable_quote,true);
+      const sameKey=randomUUID();
+      quoted=await receiver.fetch(batchPath+"/quote",requestRenewal,"POST",200,sameKey);
+      assert.deepEqual(await receiver.fetch(batchPath+"/quote",requestRenewal,"POST",200,sameKey),quoted);
+      assert.equal((await c.fetch(quotePath)).state,"inactive");
+      assert((await c.fetch("/actions")).rows.some(row=>row.id===quoted.quote_id));
+      const oldBill=(await c.fetch("/me/billing")).charges.find(row=>row.charge_item_id===stale.charge_item_id);
+      assert.equal(oldBill.state,"void");
+      assert.equal(oldBill.amount_cents,old.amount_cents);
+    }
     const charge=await c.fetch("/quotes/"+quoted.quote_id+"/accept",{revision:quoted.revision});
     const payment=await c.fetch("/charges/"+charge.charge_item_id+"/checkout",{quote_revision:quoted.revision});
     await c.fetch("/checkout/demo/"+payment.attempt_id,{});

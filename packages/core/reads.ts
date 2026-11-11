@@ -7,7 +7,7 @@ import { eligibleManualQuoteOrderSql, expiredManualInspectionPaymentSql, orderAc
 import { orderShipments } from "./fulfillment-reads";
 import { getIntakeContext, waybill } from "./intake";
 import { hasStaffAccess, staffAccess } from "./staff-access";
-import { effectiveDispatchCharge } from "./dispatch";
+import { effectiveDispatchCharge, pendingDispatchQuote, pendingStorageQuote, renewableFulfillmentQuote, unresolvedQuotePayment } from "./dispatch";
 
 const inventoryJoins=`from warehouse_items w
     left join order_line_item_links a on a.item_id=w.id and a.unlinked_at is null
@@ -97,7 +97,9 @@ export async function bills(db:DB,actor:Actor,focusedCharge:string|null=null) {
       when exists(select 1 from payments p where p.charge_item_id=c.id and p.state='processing') then 'processing' else 'open' end state,
     coalesce((select sum(r.amount_cents)::int from refunds r join payments p on p.id=r.payment_id where p.charge_item_id=c.id and r.state='succeeded'),0) refunded_cents,
     coalesce(linked.order_ids,array[]::uuid[]) order_ids,coalesce(linked.order_numbers,array[]::text[]) order_numbers,
-    d.batch_id,
+    d.batch_id, (select w.code from disposition_requests dr join warehouse_items w on w.id=dr.item_id and w.org_id=dr.org_id
+      where dr.id=s.disposition_id and dr.org_id=c.org_id) storage_item_code,
+    ${unresolvedQuotePayment} unresolved_payment,
     (select p.state from payments p where p.charge_item_id=c.id order by p.updated_at desc nulls last,p.id desc limit 1) latest_attempt_state,
     paid.provider_ref paid_ref,
     coalesce(paid.provider='stripe' and paid.state in ('succeeded','partially_refunded','refunded')
@@ -145,15 +147,16 @@ export async function customerActions(db:DB,actor:Actor) {
       where o.org_id=$1 and ((${eligibleManualQuoteOrderSql} and m.state='offered' and q.expires_at<=now())
         or ((${expiredManualInspectionPaymentSql}) and m.id is null))
     union all select q.id,'quote',b.action,null,q.expires_at from dispatch_quote_versions q
-      join dispatch_batches b on b.id=q.batch_id where b.org_id=$1 and b.state='quoted' and q.accepted_at is null and q.expires_at>now()
+      join dispatch_batches b on b.id=q.batch_id where b.org_id=$1 and ${pendingDispatchQuote}
     union all select q.id,'quote','retain',w.code,q.expires_at from storage_quotes q
       join disposition_requests d on d.id=q.disposition_id join warehouse_items w on w.id=d.item_id and w.org_id=d.org_id
-      where d.org_id=$1 and d.state='requested' and q.accepted_at is null and q.expires_at>now()
+      where d.org_id=$1 and ${pendingStorageQuote}
     union all select c.id,'charge',c.purpose,null,coalesce(q.expires_at,s.expires_at,iq.expires_at) from charge_items c
       left join dispatch_quote_versions q on q.id=c.dispatch_quote_id left join storage_quotes s on s.id=c.storage_quote_id
       left join inspection_quotes iq on iq.id=c.inspection_quote_id
       where c.org_id=$1 and (c.purpose in ('dispatch','storage') or (c.purpose='inspection' and c.scope_revision_id is not null))
       and c.voided_at is null and c.applied_payment_id is null and c.free_authorization is null
+      and (c.scope_revision_id is not null or coalesce(q.expires_at,s.expires_at,iq.expires_at)>now())
       and not exists(select 1 from payments p where p.charge_item_id=c.id and p.state='processing')
     union all select t.advice_id,'parcel',t.sync_state,t.tracking_norm,null from tracking_records t
       where t.org_id=$1 and t.direction='inbound' and t.advice_id is not null and t.closed_at is null
@@ -236,10 +239,10 @@ export async function customerDesk(db:DB,actor:Actor,includeItems=true,focusedCh
     select q.id,q.revision,q.amount_cents,q.expires_at,'dispatch' purpose,q.batch_id,b.action,
     q.snapshot, (select jsonb_object_agg(w.id::text,w.code) from dispatch_batch_items bi join warehouse_items w
       on w.id=bi.item_id and w.org_id=bi.org_id where bi.batch_id=b.id and bi.org_id=b.org_id) item_codes
-    from dispatch_quote_versions q join dispatch_batches b on b.id=q.batch_id where b.org_id=$1 and b.state='quoted' and q.accepted_at is null and q.expires_at>now()
+    from dispatch_quote_versions q join dispatch_batches b on b.id=q.batch_id where b.org_id=$1 and ${pendingDispatchQuote}
     union all select q.id,q.revision,q.amount_cents,q.expires_at,'storage',null,d.action,q.snapshot,jsonb_build_object(w.id::text,w.code)
     from storage_quotes q join disposition_requests d on d.id=q.disposition_id join warehouse_items w on w.id=d.item_id and w.org_id=d.org_id
-    where d.org_id=$1 and d.state='requested' and q.accepted_at is null and q.expires_at>now()
+    where d.org_id=$1 and ${pendingStorageQuote}
     ) pending order by expires_at,id limit 100`,[org])).rows;
   const batches=(await db.query("select id,state,revision,action from dispatch_batches where org_id=$1 and state='draft' limit 100",[org])).rows;
   const active_batches=(await db.query(`select b.id,b.state,b.revision,b.action,b.destination_snapshot,
@@ -472,14 +475,14 @@ export async function warehouseItem(db:DB,actor:Actor,code:string) {
 }
 const warehouseBatches=`select b.id,b.revision,b.state,b.action,b.destination_snapshot,q.id quote_id,q.snapshot,
   q.revision quote_revision,q.amount_cents,q.expires_at,q.accepted_at,
-  q.expires_at<=now() and q.accepted_at is null renewable_quote,
+  b.state='quoted' and ${renewableFulfillmentQuote} renewable_quote,
   (select jsonb_agg(jsonb_build_object('id',w.id,'code',w.code) order by w.code)
     from dispatch_batch_items bi join warehouse_items w on w.id=bi.item_id and w.org_id=bi.org_id
     where bi.batch_id=b.id and bi.released_at is null) items,
   array(select si.item_id from shipment_items si where si.batch_id=b.id) packed_item_ids
   from dispatch_batches b left join lateral(
     select * from dispatch_quote_versions q where q.batch_id=b.id order by revision desc limit 1
-  ) q on true`;
+  ) q on true left join charge_items c on c.dispatch_quote_id=q.id`;
 const activeLocations="select id,code from storage_locations where active order by code";
 const activeRates="select id,version from shipping_rate_versions where effective_at<=now() order by version desc";
 export const dispatchQueueStates=["weighing","payment","packing","handover","shipped","returned","blocked"] as const;
@@ -495,9 +498,10 @@ export async function warehouseDispatchQueue(db:DB,actor:Actor,state:typeof disp
         where dq.batch_id=b.id and ${effectiveDispatchCharge}) paid,
       exists(select 1 from dispatch_batch_items i left join shipment_items si on si.batch_id=i.batch_id and si.item_id=i.item_id
         where i.batch_id=b.id and i.released_at is null and si.item_id is null) needs_packing,
-      b.state,(q.expires_at<=now() and q.accepted_at is null) renewable
-    from dispatch_batches b left join lateral(select expires_at,accepted_at from dispatch_quote_versions
+      b.state,${renewableFulfillmentQuote} renewable
+    from dispatch_batches b left join lateral(select id,expires_at,accepted_at from dispatch_quote_versions
       where batch_id=b.id order by revision desc limit 1) q on true
+    left join charge_items c on c.dispatch_quote_id=q.id
     left join lateral(select count(*) filter (where sh.state='packed')::int packed,
       count(*) filter (where sh.shipped_at is not null)::int shipped,
       count(*) filter (where exists(select 1 from shipment_return_items sr where sr.shipment_id=sh.id))::int returns,
@@ -564,8 +568,11 @@ export async function warehouseDesk(db:DB,actor:Actor) {
     array(select item_id from shipment_return_items where shipment_id=s.id) returned_item_ids from shipments s join dispatch_batches b on b.id=s.batch_id
     order by s.shipped_at desc nulls first limit 100`)).rows:[];
   const rates=canShip?(await db.query(activeRates)).rows:[];
-  const retain=canShip?(await db.query(`select d.id,w.code from disposition_requests d join warehouse_items w on w.id=d.item_id
-    where d.action='retain' and d.state='requested' and not exists(select 1 from storage_quotes q where q.disposition_id=d.id)`)).rows:[];
+  const retain=canShip?(await db.query(`select d.id,w.code,q.id is not null renewal,d.return_info->'days' days
+    from disposition_requests d join warehouse_items w on w.id=d.item_id
+    left join lateral(select id,expires_at,accepted_at from storage_quotes where disposition_id=d.id order by revision desc limit 1) q on true
+    left join charge_items c on c.storage_quote_id=q.id
+    where d.action='retain' and d.state='requested' and (q.id is null or ${renewableFulfillmentQuote})`)).rows:[];
   return {packages,items,locations,tasks,reports,batches,shipments,rates,retain};
 }
 export async function adminDesk(db:DB,actor:Actor) {

@@ -66,6 +66,7 @@ flowchart TD
 | 客户支持 | 原包裹和工单分开，首条消息无法提交证据。工单现在可带已授权入库运单和首条私有照片 | Chrome 从真实包裹提单与查看关联，真实工单/照片数据库记录和跨租户拦截 |
 | 资料和地址 | 显示时区原来无写入端。客户设置持久化到现有用户字段，登录方式、邮箱和接收码照常使用。地址提示由真正的默认地址变更审计产生 | Chrome 保存与重开资料、订单日期显示。数据库核验过往包裹地址快照、换址、重复设置和新注册账户 |
 | 人工报价续询 | 原报价过期后旧申请仍挡住续询，超量订单接受报价后也不能用自动报价恢复。现可在原草稿或未付款原单续询，待办、账单、员工队列和通知按当前可用报价更新 | 隔离数据库核对过期、处理中付款守卫、旧收费金额留档及替换、跨客户隔离。Chrome 验证续询到同单付款 |
+| 运费与续存重报 | 已接受的履约报价过期后，客户详情仍提供付款，仓管也不能在原对象续报。现由原发运队列或续存队列重新出具版本，旧收费保留历史。渠道会话未决时继续等待核对，账单及待办只提供有效报价，续存出价有站内通知 | 隔离数据库核对签名会话到期、重复与迟到款对账、报价通知去重及一次续存入账；Chrome 验证仓管出价和客户在同一批次或指令上付款 |
 | 移动端实物与报告 | 实物抽屉补可访问名称、初始焦点、键盘环绕和返回焦点，只展示客户可读属性。移动报告普通表改为带字段名的记录卡，样品比较保留横向对照表 | Chrome 从后续库存页打开实物、检查焦点，核对现版、历史版 PDF 与移动对比表 |
 
 ## 十类端到端回归
@@ -107,6 +108,13 @@ flowchart TD
 - **OPEN** 原项目数据库配置经只读连接预检返回 `ENOENT`。恢复项目数据库连接后才能核对正式目录、客户数据及历史草稿。集成和截图使用隔离副本。供应商配置预检也确认 Stripe 沙盒、Postmark 和快递100未配置。
 - 续验责任与恢复条件：环境维护方恢复原项目数据库的授权连接；支付、邮件和物流集成负责人在隔离环境配置各自的供应商测试接入；仓库验收人提供可实际扫描、收货和交接的测试单与设备；业务负责人确认正式地址、条款、目录、交期、晚到款、包裹证据发布和工单规则后，按各原 TASK 继续验收。
 
+| 外部续验 | 开始条件 | 应留存的证据 |
+| --- | --- | --- |
+| 原数据核对 | 原项目数据库恢复，使用授权只读连接 | 记录目录发布版本、订单和草稿数量、关联报价与发布报告版本。只保存核对计数和差异，不导出客户收件信息或私有证据。 |
+| Stripe 沙盒 | 独立实例关闭 `QCW_DEMO`，预检显示 `stripe.mode=test`、`checkoutConfigured=true`、`liveEnabled=false`，测试 webhook 指向该实例 | 在 `/orders/new` 获取真实报价并用测试付款，核对订单、收费、回调重放、托管收据、退款；让测试会话到期后核对回调、重报价资格及旧费用留档。 |
+| 邮件及物流 | Postmark 测试发送方、内部收件地址；快递100测试权限、HTTPS 回调和授权测试运单 | 按 TASK-146/151/169 核对邮件送达与退信、站内通知仍可见、轨迹查询/回调、校验电话和承运商签收不改变仓库实收。 |
+| 实仓 | 仓库验收人、隔离测试订单、标签/扫码设备及明确交接安排 | 按 E2E-01–07 记录实际扫码、收货、补件、封存、证据、装箱及交接；比对订单、实物、报告与账单，生产出库仍走原授权。 |
+
 ## 复现与证据
 
 | 命令 | 退出码 | 结果 |
@@ -114,16 +122,19 @@ flowchart TD
 | `npm run check` | 0 | TypeScript 检查通过 |
 | `npm run build` | 0 | Next.js 生产构建通过 |
 | `python3 docs/contracts/check.py` | 0 | 44 个交易操作，174 个 TASK，69 张页面，111 个实施用例，46 个产品门禁 |
-| `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-final npm run test:integration` | 0 | 60/60，含 AUD-001–015、NEW-001–011、人工报价过期续询、过期付款链接与 Stripe 会话恢复、付款回调、账单历史与收据归属、库存与包裹、资料持久化和原有履约全链 |
+| `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-final npm run test:integration` | 0 | 60/60，含 AUD-001–015、NEW-001–011、人工报价续询、运费与续存重报、过期付款链接、Stripe 会话恢复和签名回调、账单与收据归属、库存与包裹、资料持久化及原有履约全链 |
 | `psql -h 127.0.0.1 -d qcw_workspace_contract -v ON_ERROR_STOP=1 -f docs/contracts/verify.sql` | 0 | 迁移 001–008 后在未播种的空库运行，关系断言通过 |
 | `QCW_BROWSER_WORKSPACE_ONLY=1 node tests/workspace.browser.mjs` | 0 | 最终 Chrome 复验覆盖 1440、1280、1024、768、390 和 375 px，客户与两种员工角色，33 个页面或状态共 198 张截图，整页横向溢出为 0。核对窄屏编号和状态、新客户八个模块的真实空状态、收费焦点及隔离 |
 | `QCW_BROWSER_RECOVERY_ONLY=1 node tests/workspace.browser.mjs` | 0 | 创建响应丢失后重放、断网刷新、恢复联网后服务端保存、双标签页冲突和人工确认后保存。分别断言离线无写入、重连后写入和禁止覆盖较新版本 |
 | `QCW_BROWSER_NEW_CUSTOMER_ONLY=1 node tests/workspace.browser.mjs` | 0 | Checkout 修复后复跑新客户、报价、付款和重放，六种宽度共 36 张截图，整页横向溢出为 0 |
 | `QCW_BROWSER_MANUAL_QUOTE_ONLY=1 node tests/workspace.browser.mjs` | 0 | 草稿及原单付款的人工报价过期、员工队列、账单回原单确认并付款。六种宽度共 18 张截图，整页横向溢出为 0 |
+| `QCW_BROWSER_FULFILLMENT_ONLY=1 node tests/workspace.browser.mjs` | 0 | 发运和续存已接受报价过期、仓管重新报价、客户付款、跨租户读取拦截。六种宽度共 18 张截图，整页横向溢出为 0 |
 | `npm run integrations:check` | 0 | 本机配置预检。Stripe、Postmark、快递100尚无可用的沙盒配置 |
 
-本机 Chrome 截图原图、视口断言与索引随验收包 `qcw-workspace-delivery-screenshots-2026-11-12.zip` 交付。验收包含 `browser.log` 和 `draft-recovery.log`；独立续询日志为 `qcw-workspace-manual-renewal-browser.log`，最后一次集成、构建和关系校验日志为 `qcw-workspace-billing-integration.log`、`qcw-workspace-billing-build.log` 和 `qcw-workspace-billing-relations.log`。日志和截图未纳入代码仓库。
+本机 Chrome 截图原图、视口断言与索引随验收包 `qcw-workspace-delivery-screenshots-2026-11-12.zip` 交付。验收包含 `browser.log` 和 `draft-recovery.log`；独立续询日志为 `qcw-workspace-manual-renewal-browser.log`，最后一次集成、构建和关系校验日志为 `qcw-workspace-fulfillment-integration.log`、`qcw-workspace-fulfillment-build.log` 和 `qcw-workspace-fulfillment-relations.log`。日志和截图未纳入代码仓库。
 
 运行 Chrome 测试时在隔离演示实例设置 `QCW_BROWSER_URL` 与 `QCW_BROWSER_EVIDENCE`。Playwright 可安装到临时目录，并以 `QCW_PLAYWRIGHT_MODULE` 指向它的入口。`QCW_BROWSER_FIXTURE_EMAIL` 使用集成库中有已发布报告、历史版本、入仓、出库和工单的 `@qcw.test` 账号，以保存非空页面。`QCW_BROWSER_INVENTORY_EMAIL` 使用至少 21 件待指示实物的夹具账号。跨页回归会为两件实物创建真实测试续存指令，请在独立数据库副本运行。`QCW_BROWSER_COMPARISON_EMAIL` 使用已有发布对比报告的客户夹具。脚本会为新客户走 OTP 和注册，现有隔离角色可用开发环境登录签发真实会话。
+
+履约重报模式使用与本机应用一致的 `QCW_BROWSER_DATABASE_URL`（仅接受 `127.0.0.1` 上的 `qcw_test-*`）和有至少两件待指示实物的 `QCW_BROWSER_INVENTORY_EMAIL`，缩短新建测试报价的有效期以复现真实过期。截图原图及日志位于 `qcw-workspace-fulfillment-browser` 和 `qcw-workspace-fulfillment-browser.log`。
 
 验收状态及回退见 [开发排期与任务台账](开发排期与任务台账.md)。提交号可用 `git log -1 -- docs/My-Workspace整改报告.md` 核对。

@@ -328,6 +328,16 @@ export async function calculateShippingPreview(
   const total_cents=handling_cents+parcels.reduce((n,p)=>n+p.amount_cents,0);
   return {rate_version_id:rate.id,rate_version:rate.version,version:rate.version,zone:input.zone??"default",handling_cents,parcels,total_cents};
 }
+export const unresolvedQuotePayment=`exists(select 1 from payments p where p.charge_item_id=c.id and (
+  p.state in ('processing','succeeded','partially_refunded','refunded') or
+  (p.state='requires_payment' and p.provider_ref is not null)))`;
+export const renewableFulfillmentQuote=`coalesce(q.expires_at<=now() and (q.accepted_at is null or (
+  c.id is not null and c.applied_payment_id is null and c.free_authorization is null and not (${unresolvedQuotePayment})
+)),false)`;
+export const latestDispatchQuote=`not exists(select 1 from dispatch_quote_versions newer where newer.batch_id=q.batch_id and newer.revision>q.revision)`;
+export const latestStorageQuote=`not exists(select 1 from storage_quotes newer where newer.disposition_id=q.disposition_id and newer.revision>q.revision)`;
+export const pendingDispatchQuote=`b.state='quoted' and q.accepted_at is null and q.expires_at>now() and ${latestDispatchQuote}`;
+export const pendingStorageQuote=`d.state='requested' and q.accepted_at is null and q.expires_at>now() and ${latestStorageQuote}`;
 export async function quoteBatch(
   db:DB,
   actor:Actor,
@@ -338,11 +348,14 @@ export async function quoteBatch(
   manualReason?:string
 ) {
   role(actor,"warehouse_admin","super_admin");
+  const owner=await one<{org_id:string}>(db,"select org_id from dispatch_batches where id=$1",[id]);
+  await lock(db,"org:"+owner.org_id);
   const b=await lockBatch(db,id);
   revision(b.revision,rev);
-  const expired=b.state==="quoted"&&(await one(db,`select accepted_at is null and expires_at<=now() renewable
-    from dispatch_quote_versions where batch_id=$1 order by revision desc limit 1`,[id])).renewable;
-  guard(b.state==="confirmed"||expired,"BATCH_UNAVAILABLE","Quote a confirmed batch or replace an expired, unaccepted quote.");
+  const previous=b.state==="quoted"?await one<{renewable:boolean;charge_id:string|null}>(db,`select ${renewableFulfillmentQuote} renewable,c.id charge_id
+    from dispatch_quote_versions q left join charge_items c on c.dispatch_quote_id=q.id
+    where q.batch_id=$1 order by q.revision desc limit 1`,[id]):null;
+  guard(b.state==="confirmed"||previous?.renewable,"BATCH_UNAVAILABLE","Quote a confirmed batch or replace an expired quote with no unresolved payment.");
   const items=(await db.query("select item_id from dispatch_batch_items where batch_id=$1 and released_at is null",[id])).rows.map(r=>r.item_id);
   guard(parcels.length<=50 && sameItems(parcels.flatMap(p=>p.item_ids),items),"PACK_MISMATCH","The quote must cover the exact authorized items.");
   const rate=await one(db,"select * from shipping_rate_versions where id=$1 and effective_at<=now()",[rateId]);
@@ -369,6 +382,7 @@ export async function quoteBatch(
   const total=r.handling_cents+planned.reduce((n,p)=>n+p.amount_cents,0);
   const nextQuoteRev=(await one<{n:number}>(db,"select coalesce(max(revision),0)::int+1 n from dispatch_quote_versions where batch_id=$1",[id])).n;
   const nextBatchRev=Math.max(rev+1,nextQuoteRev);
+  if(previous?.charge_id) await voidExpiredFulfillmentCharge(db,actor,previous.charge_id);
   const q=await one(db,`insert into dispatch_quote_versions(batch_id,revision,rate_version_id,snapshot,amount_cents,expires_at)
     values($1,$2,$3,$4,$5,now()+interval '72 hours') returning id as quote_id,revision,amount_cents`,
     [id,nextBatchRev,rateId,{parcels:planned,handling_cents:r.handling_cents,destination:b.destination_snapshot,...(manualReason?{manual_reason:manualReason.trim()}:{})},total]);
@@ -376,6 +390,10 @@ export async function quoteBatch(
   await audit(db,actor,"quote_batch","dispatch_batches",id,{quote_id:q.quote_id,revision:q.revision});
   await event(db,"dispatch.quoted",{batch_id:id,quote_id:q.quote_id});
   return q;
+}
+async function voidExpiredFulfillmentCharge(db:DB,actor:Actor,id:string) {
+  const {rowCount}=await db.query("update charge_items set voided_at=now() where id=$1 and voided_at is null",[id]);
+  if(rowCount) await audit(db,actor,"void_expired_fulfillment_charge","charge_items",id);
 }
 export async function acceptQuote(db:DB,actor:Actor,id:string,rev:number) {
   const org=organization(actor);await lock(db,"org:"+org);
@@ -385,7 +403,8 @@ export async function acceptQuote(db:DB,actor:Actor,id:string,rev:number) {
     const storage=await one(db,`select q.*,q.expires_at>now() valid,d.state,d.org_id from storage_quotes q join disposition_requests d
       on d.id=q.disposition_id where q.id=$1 and d.org_id=$2 for update of q,d`,[id,org]);
     revision(storage.revision,rev);
-    guard(storage.valid && !storage.accepted_at && storage.state==="requested","QUOTE_EXPIRED","Review the current quote.");
+    const latest=(await one<{id:string}>(db,"select id from storage_quotes where disposition_id=$1 order by revision desc limit 1",[storage.disposition_id])).id;
+    guard(storage.valid && !storage.accepted_at && storage.state==="requested" && id===latest,"QUOTE_EXPIRED","Review the current quote.");
     await db.query("update storage_quotes set accepted_at=now() where id=$1",[id]);
     return one(db,`insert into charge_items(org_id,purpose,storage_quote_id,amount_cents,currency,snapshot) values($1,'storage',$2,$3,'USD',$4)
       returning id as charge_item_id,amount_cents,currency`,[org,id,storage.amount_cents,storage.snapshot]);
@@ -409,20 +428,25 @@ export async function acceptQuote(db:DB,actor:Actor,id:string,rev:number) {
 }
 export async function storageQuote(db:DB,actor:Actor,id:string,input?:{days?:number}) {
   role(actor,"warehouse_admin","super_admin");
+  const owner=await one<{org_id:string}>(db,"select org_id from disposition_requests where id=$1",[id]);
+  await lock(db,"org:"+owner.org_id);
   const d=await one(db,"select * from disposition_requests where id=$1 and action='retain' and state='requested' for update",[id]);
-  const existing=(await db.query<{id:string;revision:number;valid:boolean;accepted_at:Date|null}>(
-    "select id,revision,expires_at>now() valid,accepted_at from storage_quotes where disposition_id=$1 order by revision desc limit 1",
+  const existing=(await db.query<{revision:number;renewable:boolean;charge_id:string|null}>(
+    `select q.revision,${renewableFulfillmentQuote} renewable,c.id charge_id from storage_quotes q
+     left join charge_items c on c.storage_quote_id=q.id where q.disposition_id=$1 order by q.revision desc limit 1`,
     [id]
   )).rows[0];
-  guard(!existing || (!existing.valid && !existing.accepted_at),"QUOTE_ACTIVE","An active storage quote already exists for this request.");
+  guard(!existing || existing.renewable,"QUOTE_ACTIVE","This request already has a valid quote or an unresolved payment.");
   const days=input?.days ?? (typeof d.return_info?.days==="number"?Number(d.return_info.days):30);
   guard(Number.isInteger(days) && days>=1 && days<=365,"INVALID_STORAGE_DAYS","Choose a valid storage extension period.",422);
   const price=await one<{value:unknown}>(db,"select value from app_config where key='storage.daily_cents'");
   const amount=z.number().int().positive().parse(price.value)*days;
   const nextRev=(existing?.revision??0)+1;
+  if(existing?.charge_id) await voidExpiredFulfillmentCharge(db,actor,existing.charge_id);
   const q=await one(db,`insert into storage_quotes(disposition_id,revision,snapshot,amount_cents,expires_at)
     values($1,$2,$3,$4,now()+interval '72 hours') returning id as quote_id,revision,amount_cents`,[id,nextRev,{days},amount]);
   await audit(db,actor,"quote_storage","disposition_requests",id,{revision:nextRev,days});
+  await event(db,"storage.quoted",{org_id:d.org_id,item_id:d.item_id,quote_id:q.quote_id});
   return q;
 }
 

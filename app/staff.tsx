@@ -463,7 +463,7 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
     {current==="dispatch"&&<>
       {canShip?<><DispatchQueue onOpenDrawer={setDrawer}/>
       {!!data.retain.length&&<Panel title="续存报价">
-        {data.retain.map((i:Row)=><p key={i.id}><CodeButton code={i.code} onClick={()=>setDrawer({kind:"item",ref:i.code})}/> <Action run={async()=>{await request("/staff/dispositions/"+i.id+"/storage-quote","POST",{});reload();}}>生成 30 天报价</Action></p>)}
+        {data.retain.map((i:Row)=><p key={i.id}><CodeButton code={i.code} onClick={()=>setDrawer({kind:"item",ref:i.code})}/> {typeof i.days==="number"?`客户申请 ${i.days} 天 · `:""}<Action run={async()=>{await request("/staff/dispositions/"+i.id+"/storage-quote","POST",{});reload();}}>{i.renewal?"重新报价":"生成续存报价"}</Action></p>)}
       </Panel>}</>:<Panel title="出库待办"><p className="muted">当前演示角色无出库交接权限，请切换为“仓管”或“超级管理员”查看并操作发运批次。</p></Panel>}
     </>}
     <StaffObjectDrawer target={drawer} onClose={()=>setDrawer(null)}/>
@@ -619,10 +619,10 @@ export function WarehouseDispatchBatch({id}:{id:string}) {
         {b.quote_id&&<p>报价版本 {b.quote_revision} · {usd(b.amount_cents)} · 到期 {stamp(b.expires_at)}</p>}
       </Panel>
       {(b.state==="confirmed"||b.renewable_quote)&&<Panel title="称重与逐包报价">
-        {b.renewable_quote&&<p className="notice">旧报价已过期，客户未接受。请按实际包裹重新报价。</p>}
+        {b.renewable_quote&&<p className="notice">旧报价已过期，且无待核对的付款。请按实际包裹重新报价。</p>}
         <DispatchQuoteForm key={b.revision} batch={b} rates={data.rates} reload={reload}/>
       </Panel>}
-      {b.state==="quoted"&&<p className="notice">等待客户接受报价及付款确认。</p>}
+      {b.state==="quoted"&&!b.renewable_quote&&<p className="notice">等待客户接受报价或渠道确认付款。</p>}
       {b.state==="paid"&&<Panel title="待装箱包裹">
         {b.snapshot.parcels.filter((p:Row)=>p.item_ids.every((itemId:string)=>!b.packed_item_ids.includes(itemId))).map((p:Row)=>
           <PackParcel key={b.quote_id+"-"+p.item_ids.join("-")} batch={b} parcel={p} reload={reload}/>)}

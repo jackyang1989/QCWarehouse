@@ -1406,6 +1406,7 @@ paths:
     post:
       operationId: quoteBatch
       summary: 校验逐包重量与成员，按批次出版本报价
+      description: 已过期的报价可在原批次重报。原报价已接受时须无已入账或待核对付款，旧收费作废且保留历史快照；客户重新确认新报价。
       security:
       - cookieSession: []
       parameters:

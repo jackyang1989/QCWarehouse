@@ -16,6 +16,7 @@ const noticeTitles:Record<string,string>={
   "order.identity_mismatch":"Action required: Sample identity mismatch detected",
   "order.cancelled":"Inspection cancelled",
   "dispatch.quoted":"Your shipping quote is ready",
+  "storage.quoted":"Your storage extension quote is ready",
   "quote.offered":"A manual inspection quote is ready",
   "shipment.handed_over":"Your parcel has been handed to the carrier",
   "shipment.return_received":"Returned items have been received at the warehouse",
@@ -28,6 +29,7 @@ function UpdatesTable({notices,onRead}:{notices:Row[];onRead:()=>void}) {
     {notices.length?<Table headers={["Update","Received","Status",""]} rows={notices.map(notice=>{
       const href=notice.case_id?"/support/cases/"+notice.case_id:
         notice.report_version&&notice.order_number?"/orders/"+notice.order_number+"/report/versions/"+notice.report_version:
+        notice.template==="storage.quoted"?"/account/billing":
         notice.item_code?"/items?item="+encodeURIComponent(notice.item_code):
         notice.shipment_id?"/shipments/"+notice.shipment_id:
         notice.advice_id?"/parcels/"+notice.advice_id:

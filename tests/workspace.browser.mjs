@@ -275,10 +275,85 @@ async function verifyManualQuoteRenewal({page,call,errors},other) {
   console.log("PASS manual quote expiry in draft and payment, staff renewal, same-order checkout and customer isolation");
 }
 
+async function verifyFulfillmentRenewal(other) {
+  const dbUrl=new URL(process.env.QCW_BROWSER_DATABASE_URL??"");
+  assert(["postgres:","postgresql:"].includes(dbUrl.protocol)&&dbUrl.hostname==="127.0.0.1"&&
+    /^\/qcw_test-[a-z0-9-]+$/.test(dbUrl.pathname),"Use an isolated local test database for expiry fixtures.");
+  assert(process.env.QCW_BROWSER_INVENTORY_EMAIL?.endsWith("@qcw.test"));
+  const {Client}=await import("pg");
+  const db=new Client({connectionString:dbUrl.href});
+  await db.connect();
+  try {
+    const buyer=await session(process.env.QCW_BROWSER_INVENTORY_EMAIL,false,true);
+    const staff=await session("receiving@qcw.test",true);
+    const {page,call}=buyer;
+    const [item,stored]=(await call("/me/inventory?filter=handling")).rows.filter(row=>row.order_id);
+    assert(item&&stored);
+    const terms=(await call("/public/terms")).terms.find(term=>term.kind==="terms").id;
+    const instruction=await call(`/orders/${item.order_id}/dispositions`,{status:201,body:{
+      action:"to_forwarder",item_id:item.item_id,terms_version_id:terms,
+      destination:{recipient:"Test Forwarder",address:"Isolated test fixture",phone:"00000000000",member_code:"QCW-TEST"},
+    }});
+    const retention=await call(`/orders/${stored.order_id}/dispositions`,{status:201,body:{action:"retain",item_id:stored.item_id,days:45,terms_version_id:terms}});
+    const batch=await call("/dispatch-batches",{status:201,body:{disposition_ids:[instruction.id]}});
+    const confirmed=await call(`/dispatch-batches/${batch.batch_id}/confirm`,{body:{revision:batch.revision}});
+    const dispatchPath=`/staff/dispatch-batches/${batch.batch_id}`;
+    const storagePath=`/staff/dispositions/${retention.id}/storage-quote`;
+    const rates=(await staff.call("/staff/desk")).rates;
+    const shipping=await staff.call(dispatchPath+"/quote",{body:{revision:confirmed.revision,rate_version_id:rates[0].id,
+      parcels:[{item_ids:[item.item_id],weight_g:500}]}});
+    const storage=await staff.call(storagePath,{body:{}});
+    for(const [table,q] of [["dispatch_quote_versions",shipping],["storage_quotes",storage]]) {
+      const fixture=await db.query(`update ${table} set expires_at=now()+interval '3 seconds' where id=$1 and accepted_at is null returning id`,[q.quote_id]);
+      assert.equal(fixture.rowCount,1,"The app must use the same isolated database as the expiry fixture.");
+      await call(`/quotes/${q.quote_id}/accept`,{body:{revision:q.revision}});
+    }
+    await delay(3100);
+    for(const [name,row,q] of [["dispatch-expired",item,shipping],["storage-expired",stored,storage]]) {
+      await page.goto(`/orders/${row.order_no}/quotes/${q.quote_id}`);
+      await page.getByText("This quote has expired.",{exact:false}).waitFor();
+      assert.equal(await page.getByRole("button",{name:"Resume payment"}).count(),0);
+      await captureWizard(page,name,"Fulfillment quote");
+    }
+    await staff.page.goto(`/wh/dispatch/${batch.batch_id}`);
+    await staff.page.getByText("旧报价已过期，且无待核对的付款。请按实际包裹重新报价。",{exact:true}).waitFor();
+    await staff.page.locator('input[name="weight-1"]').fill("650");
+    await staff.page.getByRole("button",{name:"提交称重并自动生成报价"}).click();
+    await staff.page.getByText("等待客户接受报价或渠道确认付款。",{exact:true}).waitFor();
+    await staff.page.goto("/wh/dispatch");
+    const storageRow=staff.page.locator("p").filter({has:staff.page.getByRole("button",{name:stored.code,exact:true})});
+    await storageRow.getByRole("button",{name:"重新报价",exact:true}).click();
+    await storageRow.waitFor({state:"hidden"});
+    const renewed=(await call("/me/desk?include_items=0")).quotes.filter(q=>q.item_codes?.[item.item_id]||q.item_codes?.[stored.item_id]);
+    assert.equal(renewed.length,2);
+    await other.call(`/orders/${item.order_id}/quotes/${renewed.find(q=>q.purpose==="dispatch").id}`,{status:404});
+    await page.goto("/account/billing");
+    await captureWizard(page,"fulfillment-quotes-renewed","Billing");
+    for(const q of renewed) {
+      const card=page.locator("#quote-"+q.id);
+      await card.getByRole("button",{name:"Accept and pay"}).click();
+      await page.waitForURL("**/checkout/demo/*");
+      await page.getByRole("button",{name:"Confirm test payment"}).click();
+      await page.waitForURL("**/account/billing");
+    }
+    for(const q of renewed) {
+      const row=q.purpose==="dispatch"?item:stored;
+      const paid=await call(`/orders/${row.order_id}/quotes/${q.id}`);
+      assert.equal(paid.state,"paid");
+      assert.equal(paid.amount_cents,q.amount_cents);
+    }
+    assert.deepEqual(buyer.errors,[]);
+    assert.deepEqual(staff.errors,[]);
+    assert(entries.every(entry=>entry.overflow<=1));
+    console.log("PASS customer expiry, warehouse re-quote, customer payment, and cross-tenant quote isolation");
+  } finally {await db.end();}
+}
+
 try {
   const customer = await session();
   const other = await session();
-  if(process.env.QCW_BROWSER_MANUAL_QUOTE_ONLY==="1") await verifyManualQuoteRenewal(customer,other);
+  if(process.env.QCW_BROWSER_FULFILLMENT_ONLY==="1") await verifyFulfillmentRenewal(other);
+  else if(process.env.QCW_BROWSER_MANUAL_QUOTE_ONLY==="1") await verifyManualQuoteRenewal(customer,other);
   else {
     const profile = await customer.call("/me/receiving-address");
     const otherProfile = await other.call("/me/receiving-address");
