@@ -4,7 +4,7 @@ import { guard, hash, one, organization, role, type Actor } from "./common";
 import { receiving } from "./auth";
 import { customerEmailDeliveryStatus } from "./email";
 import { eligibleManualQuoteOrderSql, expiredManualInspectionPaymentSql, orderAcceptsSampleAssignmentSql, orderDTO } from "./orders";
-import { orderShipments } from "./fulfillment-reads";
+import { declaredItemTracking, orderInboundRegistration, orderShipments } from "./fulfillment-reads";
 import { getIntakeContext, waybill } from "./intake";
 import { scopeSupplementForOrder, scopeSupplementState } from "./scope-payment";
 import { hasStaffAccess, staffAccess } from "./staff-access";
@@ -126,13 +126,13 @@ export async function customerActions(db:DB,actor:Actor) {
   const org=organization(actor);
   const {rows}=await db.query(`select * from (
     select o.id,'order' kind,o.state,o.public_no reference,null::timestamptz due_at
-    from orders o where o.org_id=$1 and (
+    from orders o ${orderInboundRegistration} where o.org_id=$1 and (
       (o.state='draft' and not exists(select 1 from manual_quote_requests m where m.order_id=o.id
         and m.revision=o.revision and m.state in ('requested','offered'))) or
       (o.state='awaiting_payment' and not (${expiredManualInspectionPaymentSql}) and not exists(
         select 1 from charge_items c join payments p on p.charge_item_id=c.id
         where c.inspection_quote_id::text=o.submission_snapshot->>'quote_id' and c.voided_at is null and p.state='processing')) or
-      (o.state='awaiting_samples' and not exists(select 1 from advice_orders a where a.order_id=o.id and a.org_id=o.org_id)) or
+      inbound_registration.parcel_registration_due or
       (o.state in ('report_ready','action_pending') and exists(
         select 1 from order_lines l join order_line_item_links a on a.order_line_id=l.id and a.unlinked_at is null
         join warehouse_items w on w.id=a.item_id and w.org_id=o.org_id
@@ -198,7 +198,7 @@ export async function customerActions(db:DB,actor:Actor) {
 const customerOrderSelect=`select o.id,o.public_no,o.state,o.revision,o.price_cents,o.created_at,
     greatest(o.updated_at,o.paid_at,o.samples_ready_at,o.report_published_at,o.closed_at,o.held_at,
       (select max(a.at) from audit_events a where a.entity_type='orders' and a.entity_id=o.id)) updated_at,
-    o.sla_due_at,${scopeSupplementForOrder} scope_payment,
+    o.sla_due_at,${scopeSupplementForOrder} scope_payment,inbound_registration.parcel_registration_due,
     (select coalesce(sum(l.quantity),0)::int from order_lines l where l.order_id=o.id) item_count,
     (select s.title->>'en' from order_lines l join service_offers s on s.id=l.offer_id where l.order_id=o.id order by l.id limit 1) service_title,
     (select st.code from order_lines l join service_offers s on s.id=l.offer_id join service_types st on st.id=s.service_type_id where l.order_id=o.id order by l.id limit 1) service_code,
@@ -208,7 +208,7 @@ const customerOrderSelect=`select o.id,o.public_no,o.state,o.revision,o.price_ce
       when iq.expires_at<=now() then 'expired' else 'open' end
      from charge_items c join inspection_quotes iq on iq.id=c.inspection_quote_id
      where iq.order_id=o.id and iq.id::text=o.submission_snapshot->>'quote_id' and c.voided_at is null limit 1) payment_state
-    from orders o`;
+    from orders o ${orderInboundRegistration}`;
 
 export async function listCustomerOrders(db:DB,actor:Actor,query:string,state:string,page:number) {
   const pageSize=20;
@@ -234,7 +234,7 @@ export async function customerDesk(db:DB,actor:Actor,includeItems=true,focusedCh
       from advice_orders ao join order_lines l on l.order_id=ao.order_id and l.org_id=ao.org_id
       join expected_items e on e.order_line_id=l.id and e.in_scope
       where ao.advice_id=a.id and ao.org_id=a.org_id
-        and upper(regexp_replace(e.declared_fields->>'tracking_no','[[:space:]]+','','g'))=t.tracking_norm
+        and ${declaredItemTracking}=t.tracking_norm
         and not exists(select 1 from advice_orders other join tracking_records tr on tr.advice_id=other.advice_id
           and tr.closed_at is null and tr.tracking_norm=t.tracking_norm
           where other.order_id=ao.order_id and other.org_id=ao.org_id and other.advice_id<>a.id)

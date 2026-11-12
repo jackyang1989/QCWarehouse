@@ -541,6 +541,8 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
   await page.getByLabel(/Default supplier/).fill("Supplier A");
   await page.getByLabel("Item 2 supplier").fill("Supplier B");
   await page.getByLabel(/Default color/).fill("Black");
+  const declaredWaybills=Array.from({length:2},()=>"SF"+randomUUID().slice(0,8).toUpperCase());
+  for(const [index,waybill] of declaredWaybills.entries()) await page.getByLabel(`Item ${index+1} waybill`).fill(waybill);
   assert.equal(await page.getByLabel("Item 2 color").inputValue(),"Black");
   await captureWizard(page,"wizard-items",/Step 3/);
   await nextStep(page);
@@ -614,6 +616,47 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
   assert.equal((await call(orderPath)).state,"awaiting_samples");
   assert.equal((await call(orderPath+"/payment")).state,"paid");
   assert.equal((await call("/checkout/demo/"+attemptId,{body:{}})).order_number,orderNumber);
+  await page.goto("/actions");
+  const registrationAction=page.getByRole("row").filter({hasText:orderNumber});
+  await registrationAction.getByRole("link",{name:"Open"}).click();
+  await page.waitForURL(`**/orders/${orderNumber}/parcels`);
+  const declaredTracking=page.getByLabel("Use a tracking number declared in this order");
+  const sf=(await call("/carriers")).carriers.find(carrier=>carrier.code==="sf");
+  for(const [index,waybill] of declaredWaybills.entries()) {
+    await declaredTracking.selectOption(waybill);
+    assert.equal(await page.getByLabel("Seller’s tracking number").inputValue(),waybill);
+    if(index===1&&process.env.QCW_BROWSER_NEW_CUSTOMER_ONLY==="1") {
+      await captureWizard(page,"order-parcels-registration-pending",/Register new seller tracking for this order/);
+    }
+    await page.getByLabel("Carrier (if known)").selectOption("sf");
+    await page.getByRole("button",{name:"Add inbound parcel"}).click();
+    await page.getByRole("status").filter({hasText:waybill}).waitFor();
+    await declaredTracking.locator(`option[value="${waybill}"]`).waitFor({state:"detached"});
+    await page.getByRole("row").filter({has:page.getByRole("button",{name:waybill,exact:true})})
+      .getByRole("cell",{name:sf.labels.en,exact:true}).waitFor();
+    const current=await call(orderPath);
+    assert.deepEqual(current.unregistered_waybills.map(row=>row.tracking_no),declaredWaybills.slice(index+1));
+    assert.equal(current.parcels.find(row=>row.tracking_norm===waybill).warehouse_state,null);
+    const actions=await call("/actions");
+    assert.equal(actions.rows.some(row=>row.id===order.id&&row.state==="awaiting_samples"),index===0);
+  }
+  const firstParcel=(await call(orderPath)).parcels.find(parcel=>parcel.tracking_norm===declaredWaybills[0]);
+  await page.goto("/parcels/"+firstParcel.id);
+  await page.getByText("Correct tracking number or carrier before check-in",{exact:true}).click();
+  assert(sf.phone_rule.required);
+  const phone=page.getByLabel(sf.format_hint,{exact:true});
+  await phone.waitFor();
+  if(process.env.QCW_BROWSER_NEW_CUSTOMER_ONLY==="1") await captureWizard(page,"parcel-correction-phone","Tracking details");
+  const correctedWaybill="SF"+randomUUID().slice(0,8).toUpperCase();
+  await page.getByLabel("Corrected tracking number").fill(correctedWaybill);
+  await page.getByLabel("Reason for correction").fill("Seller confirmed a replacement label.");
+  await phone.fill(sf.phone_rule.format==="last4"?"1234":"13800000000");
+  await page.getByRole("button",{name:"Save corrected tracking"}).click();
+  await page.getByRole("status").filter({hasText:correctedWaybill}).waitFor();
+  assert.equal((await call(orderPath)).parcel_registration_due,false);
+  await page.goto("/orders/"+orderNumber);
+  await page.getByRole("link",{name:"Track inbound parcels",exact:true}).waitFor();
+  if(process.env.QCW_BROWSER_NEW_CUSTOMER_ONLY==="1") await captureWizard(page,"order-parcels-registration-complete",orderNumber);
   const ownCharges=(await call("/me/billing")).charges.filter(charge=>charge.order_ids.includes(order.id));
   assert.equal(ownCharges.length,1);
   await call(`/charges/${ownCharges[0].charge_item_id}/receipt`,{status:404});

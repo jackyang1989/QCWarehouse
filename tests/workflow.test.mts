@@ -6976,6 +6976,7 @@ test("a ten-item shortage stays frozen until the case is resolved and all ten it
 
 test("a standalone 30-item inspection splits a documented defect, a reference sample and forwarding",async()=>{
   const {c,terms,registration}=await signCustomer();
+  const other=(await signCustomer()).c;
   const receiver=await staffLogin("receiving");
   const inspector=await staffLogin("inspector");
   const reviewer=await staffLogin("reviewer");
@@ -6985,20 +6986,55 @@ test("a standalone 30-item inspection splits a documented defect, a reference sa
   const items=Array.from({length:30},(_,index)=>({
     sample_code:"BATCH-"+String(index+1).padStart(2,"0"),
     supplier_alias:"Fixture supplier",
-    size_label:"M",color_declared:"Navy",tracking_no:tracking[Math.floor(index/10)],
+    size_label:"M",color_declared:"Navy",tracking_no:index===0?tracking[0].replace("SF","sf "):tracking[Math.floor(index/10)],
   }));
   const {draft,quote}=await createAndPay(c,[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:30,items}],terms);
   assert.equal(quote.amount_cents,offer.rules.unit_cents*30);
   const path="/orders/"+draft.id;
   const positions=(await c.fetch(path)).items;
+  const pendingWaybills=async (remaining:string[])=>{
+    const detail=await c.fetch(path);
+    assert.deepEqual(detail.unregistered_waybills,[...remaining].sort().map(tracking_no=>({tracking_no,item_count:10})));
+    assert.equal(detail.parcel_registration_due,remaining.length>0);
+    const list=await c.fetch("/me/orders?q="+draft.public_no);
+    assert.equal(list.rows[0].parcel_registration_due,detail.parcel_registration_due);
+    const actions=await c.fetch("/actions");
+    assert.equal(actions.rows.some(row=>row.id===draft.id&&row.state==="awaiting_samples"),detail.parcel_registration_due);
+  };
+  await pendingWaybills(tracking);
+  await other.fetch(path,undefined,"GET",404);
+  assert(!(await other.fetch("/actions")).rows.some(row=>row.id===draft.id));
+  const existingAdvice=await c.fetch("/me/parcels",{address_id:registration.warehouse_address.id,
+    tracking_no:tracking[1],carrier_code:"sf",order_ids:[]},"POST",201);
+  await pendingWaybills(tracking);
   const desk=await receiver.fetch("/staff/desk");
   const receiving=desk.locations.find((row:{code:string})=>row.code==="R-01");
   const referenceZone=desk.locations.find((row:{code:string})=>row.code==="A-04-02-03");
   const physical:{id:string;code:string}[]=[];
   for(const [index,tracking_no] of tracking.entries()) {
-    const advice=await c.fetch("/me/parcels",{address_id:registration.warehouse_address.id,tracking_no,
+    const advice=index===1?existingAdvice:await c.fetch("/me/parcels",{address_id:registration.warehouse_address.id,tracking_no,
       carrier_code:"sf",order_ids:[draft.id]},"POST",201);
-    const pkg=await receiver.fetch("/staff/intake/check-in",{tracking_no,advice_id:advice.id,carrier_code:"sf",
+    if(index===1) await c.fetch(`/me/parcels/${advice.id}/link-order`,{order_id:draft.id});
+    await pendingWaybills(tracking.slice(index+1));
+    const carrier_code=index===0?"zto":"sf";
+    if(index===0) {
+      const correct=`/me/parcels/${advice.id}/correct`;
+      const correction={revision:1,carrier_code:"sf",tracking_no:"SF"+randomUUID().slice(0,8),reason:"Seller updated the parcel label."};
+      assert.equal((await c.fetch(correct,correction,"POST",422)).error.code,"TRACKING_VERIFICATION_REQUIRED");
+      await other.fetch(correct,{...correction,phone:"13800000000"},"POST",404);
+      const corrected=await c.fetch(correct,{...correction,phone:"13800000000"});
+      const trackingRecord=(await pool.query("select source_phone_ciphertext from tracking_records where id=$1",[corrected.tracking_id])).rows[0];
+      assert(trackingRecord.source_phone_ciphertext);
+      assert(!String(trackingRecord.source_phone_ciphertext).includes("13800000000"));
+      assert(!JSON.stringify(corrected).includes("13800000000"));
+      await pendingWaybills(tracking.slice(1));
+      await c.fetch(correct,{revision:corrected.revision,carrier_code,tracking_no,reason:"Seller confirmed the original number."});
+    }
+    const registered=(await c.fetch(path)).parcels.find(row=>row.id===advice.id);
+    assert.equal(registered.warehouse_state,null);
+    const catalogCarrier=(await c.fetch("/carriers")).carriers.find(row=>row.code===carrier_code);
+    assert.equal(registered.carrier_name,catalogCarrier.labels.en);
+    const pkg=await receiver.fetch("/staff/intake/check-in",{tracking_no,advice_id:advice.id,carrier_code,
       outer_media_ids:[await receiver.photo("intake_outer")]},"POST",201);
     const batch=Array.from({length:10},()=>({code:"S-"+randomUUID(),location_id:receiving.id}));
     const intake=await receiver.fetch("/staff/packages/"+pkg.id+"/items",{revision:pkg.revision,items:batch},"POST",201);

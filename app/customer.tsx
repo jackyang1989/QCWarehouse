@@ -28,7 +28,7 @@ const parcelLinkStates=["draft","awaiting_payment","awaiting_samples","on_hold"]
 const orderNext:Record<string,string>={
   draft:"Review the inspection scope and calculate a quote.",
   awaiting_payment:"Review or resume the inspection payment.",
-  awaiting_samples:"Add the seller’s tracking number. Inspection starts after all commissioned items are received and identified.",
+  awaiting_samples:"Inspection starts after all commissioned items are received and identified.",
   queued:"The items are ready and the order is waiting for an inspector.",
   inspecting:"The warehouse is checking the commissioned items.",
   qa_review:"The report is undergoing independent review.",
@@ -2439,7 +2439,8 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
         </Panel>}
         <Panel title="Register new seller tracking for this order">
           {receiving.error||carriers.error?<ErrorBlock error={receiving.error||carriers.error}/>:!receiving.data?<p role="status">Loading the receiving address…</p>:
-            <InboundParcelForm address={receiving.data.warehouse_address} carriers={carriers.data?.carriers??[]} orderId={o.id} onSave={()=>{detail.reload();desk.reload();}}/>}
+            <InboundParcelForm address={receiving.data.warehouse_address} carriers={carriers.data?.carriers??[]} orderId={o.id}
+              pendingWaybills={o.unregistered_waybills} onSave={()=>{detail.reload();desk.reload();}}/>}
         </Panel>
       </>}
       {(section==="dispositions"||section==="storage")&&<OrderHandling
@@ -2455,11 +2456,13 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
           scopePayment.state==="expired"?"Renew the supplemental quote for your accepted scope change.":"Complete the supplemental payment before the scope change takes effect."}</p></div>
         <div className="actions"><Link className="button primary sm" href={scopePaymentHref}>Review scope charge</Link></div>
       </div>}
-      {!section&&!scopePayment&&orderNext[o.state]&&<div className="order-next"><div><span className="eyebrow">NEXT STEP</span><p>{orderNext[o.state]}</p></div>
+      {!section&&!scopePayment&&orderNext[o.state]&&<div className="order-next"><div><span className="eyebrow">NEXT STEP</span><p>
+        {o.state==="awaiting_samples"&&o.parcel_registration_due&&"Register the seller’s tracking for this order. "}{orderNext[o.state]}
+      </p></div>
         <div className="actions">
           {o.state==="awaiting_payment"&&<Link className="button primary sm" href={base+"/payment"}>Review payment</Link>}
           {o.state==="draft"&&<Link className="button primary sm" href={"/orders/new?draft="+encodeURIComponent(number)}>Edit in step-by-step wizard</Link>}
-          {o.state==="awaiting_samples"&&<Link className="button primary sm" href={base+"/parcels"}>Register seller tracking</Link>}
+          {o.state==="awaiting_samples"&&<Link className="button primary sm" href={base+"/parcels"}>{o.parcel_registration_due?"Register seller tracking":"Track inbound parcels"}</Link>}
           {["report_ready","action_pending","cancelled"].includes(o.state)&&<Link className="button primary sm" href={base+"/dispositions"}>Open item instructions</Link>}
         </div>
       </div>}
@@ -2560,7 +2563,7 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
     {section==="parcels"&&<Panel title="Inbound parcels linked to this order">
       <Table headers={["Seller tracking number","Carrier","Sync status","Carrier status","Warehouse intake",""]} rows={o.parcels.map((p:Row)=>[
         <CodeButton code={p.tracking_norm} onClick={()=>setTrackTarget({kind:"parcels",id:p.id,code:p.tracking_norm})}/>,
-        p.carrier_code??"—",
+        p.carrier_name??"—",
         p.sync_state?label(p.sync_state):"—",
         label(p.transport_state),
         p.warehouse_state?`${label(p.warehouse_state)}${p.package_code?` (${p.package_code})`:""}`:"Awaiting physical receipt",
@@ -2797,6 +2800,10 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
   const verificationPath=path+id+"/tracking-verification";
   const verification=useLoad(canVerify||canCorrect?verificationPath:null),carriers=useLoad(canVerify||canCorrect?"/carriers":null);
   const [refreshError,setRefreshError]=useState<string|null>(null);
+  const [correctedTracking,setCorrectedTracking]=useState<string>();
+  const [correctionCarrier,setCorrectionCarrier]=useState("");
+  const selectedCarrier=correctionCarrier||verification.data?.carrier_code||"";
+  const labelPhoneHint=carriers.data?.carriers.find((carrier:Row)=>carrier.code===selectedCarrier)?.format_hint;
   useEffect(()=>{const timer=setInterval(reload,60000);return ()=>clearInterval(timer);},[reload]);
   return <>{!embedded&&<div className="page-head"><p className="eyebrow">Warehouse / Tracking</p><h1>Tracking details</h1><p className="muted">Follow carrier events and the warehouse’s own handling status.</p></div>}{error&&<ErrorBlock error={error}/>}{refreshError&&<ErrorBlock error={refreshError}/>}
     {!data&&!error&&<p role="status">Loading carrier tracking…</p>}
@@ -2830,19 +2837,29 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
         <Field name="phone" label="Phone used on this shipping label, if required by the carrier" required={false} type="tel"/>
       </Form>}
       {canCorrect&&verification.data&&<details className="top-gap"><summary>Correct tracking number or carrier before check-in</summary>
-        <Form label="Save corrected tracking" run={async f=>{
-          await request(path+id+"/correct","POST",{
+        {carriers.error?<ErrorBlock error={carriers.error}/>:!carriers.data?<p role="status">Loading carriers…</p>:
+        <Form key={data.tracking_id} label="Save corrected tracking" run={async f=>{
+          const phone=text(f,"phone");
+          const corrected=await request(path+id+"/correct","POST",{
             revision:verification.data?.revision,
-            carrier_code:text(f,"carrier_code")||verification.data?.carrier_code,
+            carrier_code:text(f,"carrier_code"),
             tracking_no:text(f,"tracking_no"),
             reason:text(f,"reason"),
+            ...(phone?{phone}:{}),
           });
+          setCorrectedTracking(corrected.tracking_no);
+          setCorrectionCarrier("");
           verification.reload();reload();
         }}>
-          <Select name="carrier_code" label="Carrier" value={verification.data.carrier_code??""} choices={(carriers.data?.carriers??[]).map((c:Row)=>({id:c.code,label:c.labels.en}))}/>
+          <label>Carrier<select name="carrier_code" value={selectedCarrier} required onChange={e=>setCorrectionCarrier(e.target.value)}>
+            <option value="">Choose a carrier</option>
+            {carriers.data.carriers.map((carrier:Row)=><option key={carrier.code} value={carrier.code}>{carrier.labels.en}</option>)}
+          </select></label>
           <Field name="tracking_no" label="Corrected tracking number" value={data.tracking_no}/>
           <Field name="reason" label="Reason for correction"/>
-        </Form>
+          {labelPhoneHint&&<Field key={selectedCarrier} name="phone" label={labelPhoneHint} type="tel"/>}
+        </Form>}
+        {correctedTracking&&<p className="notice ok" role="status">Tracking updated to <strong className="code">{correctedTracking}</strong>.</p>}
       </details>}
       <p className="muted small">Carrier data updated {stamp(data.last_success_at)}</p>
       {data.events.length?<ol className="timeline">{data.events.map((e:Row)=><li key={e.id}><small>{stamp(e.occurred_at)}</small><br/>{e.text}</li>)}</ol>:<Empty>English carrier events will appear when verified tracking data is available.</Empty>}
@@ -2856,7 +2873,7 @@ function orderNextAction(o:Row):{label:string;href:string} {
   switch(o.state) {
     case "draft": return {label:"Resume wizard",href:"/orders/new?draft="+encodeURIComponent(o.public_no)};
     case "awaiting_payment": return {label:"Complete payment",href:base+"/payment"};
-    case "awaiting_samples": return {label:"Register seller tracking",href:base+"/parcels"};
+    case "awaiting_samples": return {label:o.parcel_registration_due?"Register seller tracking":"Track inbound parcels",href:base+"/parcels"};
     case "report_ready":
     case "action_pending": return {label:"Choose item handling",href:base+"/dispositions"};
     case "on_hold": return {label:"Review hold reason",href:base};
@@ -3564,10 +3581,12 @@ export function CustomerActions() {
   </>;
 }
 
-function InboundParcelForm({address,carriers,orderId,orders=[],preferredOrder,onSave}:{
-  address:Row|null;carriers:Row[];orderId?:string;orders?:Row[];preferredOrder?:string|null;onSave:()=>void;
+function InboundParcelForm({address,carriers,orderId,orders=[],preferredOrder,pendingWaybills=[],onSave}:{
+  address:Row|null;carriers:Row[];orderId?:string;orders?:Row[];preferredOrder?:string|null;
+  pendingWaybills?:{tracking_no:string;item_count:number}[];onSave:()=>void;
 }) {
   const [saved,setSaved]=useState<string>();
+  const [trackingInput,setTrackingInput]=useState("");
   if(!address)return <Empty>The warehouse address is awaiting configuration.</Empty>;
   return <>
     <Form key={saved} label="Add inbound parcel" run={async f=>{
@@ -3575,8 +3594,17 @@ function InboundParcelForm({address,carriers,orderId,orders=[],preferredOrder,on
       const tracking=text(f,"tracking");
       await request("/me/parcels","POST",{address_id:address.id,tracking_no:tracking,
         ...(carrier?{carrier_code:carrier}:{}),order_ids:order?[order]:[]});
-      setSaved(tracking);onSave();
-    }}><Field name="tracking" label="Seller’s tracking number"/>
+      setSaved(tracking);setTrackingInput("");onSave();
+    }}>
+      {pendingWaybills.length>0&&<label>Use a tracking number declared in this order
+        <select value={pendingWaybills.some(entry=>entry.tracking_no===trackingInput)?trackingInput:""} onChange={e=>setTrackingInput(e.target.value)}>
+          <option value="">Enter tracking manually</option>
+          {pendingWaybills.map(entry=><option key={entry.tracking_no} value={entry.tracking_no}>
+            {entry.tracking_no} · {entry.item_count} {entry.item_count===1?"item":"items"}
+          </option>)}
+        </select>
+      </label>}
+      <label>Seller’s tracking number<input name="tracking" required value={trackingInput} onChange={e=>setTrackingInput(e.target.value)}/></label>
       <Select name="carrier" label="Carrier (if known)" required={false} choices={carriers.map(c=>({id:c.code,label:c.labels.en}))}/>
       {!orderId&&<Select key={preferredOrder} name="order" label="Associate an order (optional)" required={false}
         value={orders.some(o=>o.id===preferredOrder)?preferredOrder??undefined:undefined}

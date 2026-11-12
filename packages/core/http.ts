@@ -158,7 +158,13 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     return json({status:"ok"});
   }
   if(method==="GET" && path==="/catalog") return json({offers:await transaction(catalog)});
-  if(method==="GET" && path==="/carriers") return json({carriers:(await pool.query("select code,labels from carriers where enabled order by code")).rows});
+  if(method==="GET" && path==="/carriers") return json({carriers:(await pool.query(`select code,labels,
+    jsonb_build_object('required',coalesce(phone_rule->>'required'='true',false),
+      'format',case when phone_rule->>'format'='last4' then 'last4' else 'full' end) phone_rule,
+    case when phone_rule->>'required'='true' then
+      case when phone_rule->>'format'='last4' then 'Last four digits of the phone number on the shipping label'
+        else 'Phone number on the shipping label' end end format_hint
+    from carriers where enabled order by code`)).rows});
   if(method==="GET" && path==="/public/terms") return json({terms:await transaction(db=>currentTerms(db,["terms","privacy","restricted_items","report_notice"]))});
   const policy=path.match(/^\/public\/terms\/(terms|privacy|restricted_items|report_notice)$/);
   if(method==="GET"&&policy) {
@@ -753,7 +759,8 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     (db,a)=>refreshTracking(db,a,idSchema.parse(shipmentRefresh[1]),"shipment"),202);
   const parcelCorrect=path.match(/^\/me\/parcels\/([a-f0-9-]{36})\/correct$/i);
   if(parcelCorrect && method==="POST") return extraWrite(req,path,actor,z.object({
-    revision:revSchema,carrier_code:z.string().min(1).max(40),tracking_no:z.string().min(5).max(80),reason:z.string().trim().min(4).max(1000)
+    revision:revSchema,carrier_code:z.string().min(1).max(40),tracking_no:z.string().min(5).max(80),
+    reason:z.string().trim().min(4).max(1000),phone:z.string().max(30).optional()
   }),(db,a,b)=>correctCustomerParcelTracking(db,a,idSchema.parse(parcelCorrect[1]),b));
   const staffCorrect=path.match(/^\/staff\/tracking\/([a-f0-9-]{36})\/correct$/i);
   if(staffCorrect && method==="POST") return extraWrite(req,path,actor,z.object({

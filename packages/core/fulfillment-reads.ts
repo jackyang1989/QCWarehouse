@@ -6,6 +6,39 @@ const relatedItems=`select a.item_id,a.linked_at,a.unlinked_at
   from order_line_item_links a join order_lines l on l.id=a.order_line_id
   where l.order_id=$1 and a.org_id=$2`;
 
+export const declaredItemTracking=`upper(regexp_replace(coalesce(e.declared_fields->>'declared_tracking_no',
+  e.declared_fields->>'tracking_no',e.declared_fields->>'waybill',e.declared_fields->>'source_tracking_no',''),'[[:space:]]+','','g'))`;
+
+export const orderInboundRegistration=`left join lateral (
+  with registered as (
+    select t.tracking_norm from advice_orders ao join tracking_records active
+      on active.advice_id=ao.advice_id and active.org_id=ao.org_id and active.direction='inbound' and active.closed_at is null
+    join tracking_records t on t.advice_id=active.advice_id and t.org_id=active.org_id and t.direction='inbound'
+      and (t.id=active.id or t.sync_state='superseded')
+    where o.state='awaiting_samples' and ao.order_id=o.id and ao.org_id=o.org_id
+    union
+    select t.tracking_norm from order_lines l join order_line_item_links a
+      on a.order_line_id=l.id and a.org_id=l.org_id and a.unlinked_at is null
+    join expected_items assigned on assigned.id=a.expected_item_id and assigned.in_scope
+    join warehouse_items w on w.id=a.item_id and w.org_id=a.org_id
+    join tracking_records t on t.package_id=w.package_id and t.org_id=w.org_id
+      and t.direction='inbound' and t.closed_at is null
+    where o.state='awaiting_samples' and l.order_id=o.id and l.org_id=o.org_id
+  ), pending as (
+    select declared.tracking_no,count(*)::int item_count
+    from order_lines l join expected_items e on e.order_line_id=l.id and e.in_scope
+    cross join lateral (values (${declaredItemTracking})) declared(tracking_no)
+    where o.state='awaiting_samples' and l.order_id=o.id and l.org_id=o.org_id
+      and declared.tracking_no ~ '^[A-Z0-9-]{5,64}$'
+      and not exists(select 1 from order_line_item_links a where a.expected_item_id=e.id and a.org_id=l.org_id and a.unlinked_at is null)
+      and not exists(select 1 from registered r where r.tracking_norm=declared.tracking_no)
+    group by declared.tracking_no
+  )
+  select o.state='awaiting_samples' and (count(*)>0 or not exists(select 1 from registered)) parcel_registration_due,
+    coalesce(jsonb_agg(to_jsonb(pending) order by tracking_no),'[]'::jsonb) unregistered_waybills
+  from pending
+) inbound_registration on true`;
+
 export async function orderShipments(db:DB,orderId:string,org:string,shipmentId:string|null=null) {
   return (await db.query(`with related as (${relatedItems})
     select s.id,s.batch_id,s.carrier_code,s.state,s.tracking_norm,s.shipped_at,s.weight_g,b.action,b.destination_snapshot,

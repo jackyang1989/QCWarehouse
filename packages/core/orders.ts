@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { DB } from "../db";
 import { currentTerms, requireCustomerActive, requireTerms } from "./auth";
 import { audit, code, event, guard, isDemo, lock, one, organization, revision, role, uuid, type Actor } from "./common";
-import { orderQuotes, orderShipments } from "./fulfillment-reads";
+import { orderInboundRegistration, orderQuotes, orderShipments } from "./fulfillment-reads";
 import { scopeSupplementForOrder } from "./scope-payment";
 
 export const checkSchema = z.object({
@@ -422,8 +422,10 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
     left join warehouse_items w on w.id=a.item_id
     left join packages pkg on pkg.id=w.package_id
     where l.order_id=$1 order by l.id,e.position`,[id])).rows;
-  const progress=await one(db,`select r.published_version,${scopeSupplementForOrder} scope_payment
-    from orders o left join reports r on r.order_id=o.id where o.id=$1 and o.org_id=$2`,[id,order.org_id]);
+  const progress=await one(db,`select r.published_version,${scopeSupplementForOrder} scope_payment,
+    inbound_registration.parcel_registration_due,inbound_registration.unregistered_waybills
+    from orders o left join reports r on r.order_id=o.id ${orderInboundRegistration}
+    where o.id=$1 and o.org_id=$2`,[id,order.org_id]);
   const manualQuoteRenewable=await canRenewManualInspection(db,id,order.state);
   const manual=(order.state==="draft"||manualQuoteRenewable)?(await db.query(`
     select case when r.state='offered' and q.id is null then 'expired' else r.state end state,
@@ -431,9 +433,11 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
     from manual_quote_requests r left join inspection_quotes q on q.id=r.accepted_quote_id
       and q.expires_at>now() and q.accepted_at is null
     where r.order_id=$1 and r.revision=$2`,[id,order.revision])).rows[0]:null;
-  const parcels=(await db.query(`select ao.advice_id id,t.tracking_norm,t.carrier_code,t.transport_state,t.sync_state,p.code package_code,p.state warehouse_state
+  const parcels=(await db.query(`select ao.advice_id id,t.tracking_norm,t.carrier_code,c.labels->>'en' carrier_name,
+    t.transport_state,t.sync_state,p.code package_code,p.state warehouse_state
     from advice_orders ao join tracking_records t on t.advice_id=ao.advice_id and t.org_id=ao.org_id and t.closed_at is null
     left join packages p on p.id=t.package_id and p.org_id=ao.org_id
+    left join carriers c on c.code=t.carrier_code
     where ao.order_id=$1 and ao.org_id=$2 order by t.tracking_norm`,[id,order.org_id])).rows;
   const cases=(await db.query(`select id,public_no,subject,state from tickets
     where order_id=$1 and org_id=$2 order by created_at desc limit 50`,[id,order.org_id])).rows;
@@ -448,5 +452,6 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
     customer_notes:order.customer_notes??null,held_at:order.held_at??null,held_from_state:order.held_from_state??null,hold_reason:order.hold_reason??null,
     created_at:order.created_at,report_published_at:order.report_published_at??null,closed_at:order.closed_at??null,paid_at:order.paid_at??null,samples_ready_at:order.samples_ready_at??null,sla_due_at:order.sla_due_at??null,
     lines,items:rows,report_version:progress.published_version??null,scope_payment:progress.scope_payment,manual_quote:manual??null,manual_quote_renewable:manualQuoteRenewable,
+    parcel_registration_due:progress.parcel_registration_due,unregistered_waybills:progress.unregistered_waybills,
     parcels,cases,shipments,quotes,consents};
 }

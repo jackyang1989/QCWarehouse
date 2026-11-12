@@ -130,6 +130,14 @@ export async function verificationState(db:DB,actor:Actor,id:string) {
   return one(db,`select t.revision,t.carrier_code,t.sync_state from tracking_records t
     where t.advice_id=$1 and t.org_id=$2 and t.closed_at is null`,[id,org]);
 }
+async function shippingLabelPhone(db:DB,carrierCode:string,value?:string) {
+  const {phone_rule:rule}=await one(db,"select phone_rule from carriers where code=$1 and enabled",[carrierCode]);
+  if(!rule?.required) return null;
+  const phone=value?.replace(/[ -]/g,"");
+  guard(phone&&(rule.format==="last4"?/^\d{4}$/:/^\+?\d{7,20}$/).test(phone),
+    "TRACKING_VERIFICATION_REQUIRED","Enter the phone verification used on this shipping label.",422);
+  return encryptSecret(phone);
+}
 export async function verifyTracking(db:DB,actor:Actor,id:string,input:{revision:number;carrier_code:string;phone?:string}) {
   const org=organization(actor);
   await lock(db,"org:"+org);
@@ -139,17 +147,13 @@ export async function verifyTracking(db:DB,actor:Actor,id:string,input:{revision
   revision(t.revision,input.revision);
   guard(["needs_carrier","needs_verification"].includes(t.sync_state) && (!t.carrier_code || t.carrier_code===input.carrier_code),
     "TRACKING_VERIFICATION_UNAVAILABLE","This tracking record cannot be changed here.");
-  await validCarrier(db,input.carrier_code);
-  const carrier=await one(db,"select phone_rule from carriers where code=$1",[input.carrier_code]);
-  const phone=input.phone?.replace(/[ -]/g,"");
-  guard(!carrier.phone_rule.required || phone && (carrier.phone_rule.format==="last4"?/^\d{4}$/:/^\+?\d{7,20}$/).test(phone),
-    "TRACKING_VERIFICATION_REQUIRED","Enter the phone verification used on this shipping label.",422);
+  const phone=await shippingLabelPhone(db,input.carrier_code,input.phone);
   const conflicts=await db.query(`select 1 from tracking_records where closed_at is null and tracking_norm=$1
     and (carrier_code is null or carrier_code=$2) and id<>$3`,[t.tracking_norm,input.carrier_code,t.id]);
   guard(!conflicts.rowCount,"TRACKING_REVIEW_REQUIRED","This tracking number requires staff verification.");
   await db.query(`update tracking_records set carrier_code=$2,source_phone_ciphertext=$3,
     sync_state='pending',next_query_at=now(),revision=revision+1 where id=$1`,
-    [t.id,input.carrier_code,carrier.phone_rule.required&&phone?encryptSecret(phone):null]);
+    [t.id,input.carrier_code,phone]);
   await db.query(`update tracking_subscriptions set next_retry_at=now(),attempt_count=0
     where tracker_id=$1 and status in ('failed','unknown')`,[t.id]);
   await audit(db,actor,"verify_tracking","tracking_records",t.id,{carrier:input.carrier_code});
@@ -222,11 +226,7 @@ export async function correctCustomerParcelTracking(
   const t=await one(db,"select * from tracking_records where advice_id=$1 and org_id=$2 and closed_at is null for update",[adviceId,org]);
   revision(t.revision,input.revision);
   guard(!t.package_id,"PARCEL_ALREADY_RECEIVED","Checked-in parcels require warehouse staff verification to amend.");
-  await validCarrier(db,input.carrier_code);
-  const carrier=await one(db,"select phone_rule from carriers where code=$1",[input.carrier_code]);
-  const phone=input.phone?.replace(/[ -]/g,"");
-  guard(!carrier.phone_rule?.required || phone && (carrier.phone_rule.format==="last4"?/^\d{4}$/:/^\+?\d{7,20}$/).test(phone),
-    "TRACKING_VERIFICATION_REQUIRED","Enter the phone verification used on this shipping label.",422);
+  const phone=await shippingLabelPhone(db,input.carrier_code,input.phone);
   const conflicts=await db.query(`select 1 from tracking_records where closed_at is null and tracking_norm=$1
     and (carrier_code is null or carrier_code=$2) and id<>$3`,[norm,input.carrier_code,t.id]);
   guard(!conflicts.rowCount,"TRACKING_REVIEW_REQUIRED","This tracking number requires staff verification.");
@@ -234,7 +234,7 @@ export async function correctCustomerParcelTracking(
   const next=await one<{id:string;generation:number;revision:number}>(db,`insert into tracking_records(
     org_id,direction,advice_id,carrier_code,tracking_norm,generation,supersedes_id,source_phone_ciphertext,transport_state,sync_state,next_query_at,revision
   ) values($1,'inbound',$2,$3,$4,$5,$6,$7,'unknown','pending',now(),1) returning id,generation,revision`,
-  [org,adviceId,input.carrier_code,norm,t.generation+1,t.id,carrier.phone_rule?.required&&phone?encryptSecret(phone):null]);
+  [org,adviceId,input.carrier_code,norm,t.generation+1,t.id,phone]);
   await event(db,"tracking.corrected",{tracker_id:next.id,supersedes_id:t.id,advice_id:adviceId});
   await audit(db,actor,"correct_parcel_tracking","tracking_records",next.id,{supersedes_id:t.id,tracking_norm:norm,carrier_code:input.carrier_code});
   return {tracking_id:next.id,generation:next.generation,revision:next.revision,tracking_no:norm,carrier_code:input.carrier_code,sync_state:"pending"};
