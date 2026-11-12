@@ -349,10 +349,82 @@ async function verifyFulfillmentRenewal(other) {
   } finally {await db.end();}
 }
 
+async function verifyScopeRenewal({page,call,errors},other) {
+  const target=new URL(process.env.QCW_BROWSER_DATABASE_URL??"");
+  assert(["postgres:","postgresql:"].includes(target.protocol)&&target.hostname==="127.0.0.1"&&
+    /^\/qcw_test-[a-z0-9-]+$/.test(target.pathname),"Use an isolated local test database for expiry fixtures.");
+  const {Client}=await import("pg");
+  const db=new Client({connectionString:target.href});
+  await db.connect();
+  try {
+    const {actor}=await call("/me");
+    const offer=(await call("/catalog")).offers.find(row=>row.sku_code==="apparel-inspection-1");
+    const draft=await call("/orders",{status:201,body:{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]}});
+    const order=`/orders/${draft.id}`;
+    const quote=await call(order+"/quotes",{status:201,body:{revision:draft.revision}});
+    const {terms}=await call("/public/terms");
+    const initial=await call(order+"/submit",{body:{revision:draft.revision,quote_id:quote.id,terms_version_ids:terms.map(row=>row.id),
+      acknowledgements:{scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true}}});
+    const checkout=await call(`/charges/${initial.charge.charge_item_id}/checkout`,{body:{quote_revision:quote.revision}});
+    await call(`/checkout/demo/${checkout.attempt_id}`,{body:{}});
+    const scopes=order+"/scope-revisions";
+    const view=await call(scopes);
+    const proposal=await call(order+"/scope-additions",{status:201,body:{revision:view.order.revision,reason:"Inspect one additional item.",
+      positions:view.positions.map(row=>row.id),additions:[{order_line_id:view.positions[0].line_id,count:1}]}});
+    const expiredQuote=randomUUID(),oldCharge=randomUUID(),oldScope=proposal.scope_revision_id;
+    const seeded=await db.query(`with accepted as (
+      update scope_revisions set accepted_at=now()-interval '1 hour',accepted_by=$2 where id=$1 returning *
+    ), quoted as (
+      insert into inspection_quotes(id,order_id,revision,line_snapshot,terms_snapshot,amount_cents,currency,expires_at,accepted_at)
+      select $3,s.order_id,(select max(revision)+1 from inspection_quotes where order_id=s.order_id),o.submission_snapshot->'lines',
+        jsonb_build_object('scope_revision_id',s.id,'order_revision',o.revision),s.adjustment_cents,'USD',now()-interval '30 minutes',s.accepted_at
+      from accepted s join orders o on o.id=s.order_id returning *
+    ) insert into charge_items(id,org_id,purpose,inspection_quote_id,scope_revision_id,amount_cents,currency,snapshot)
+      select $4,$5,'inspection',id,$1,amount_cents,currency,jsonb_build_object('scope_revision_id',$1::uuid,'quote_revision',revision)
+      from quoted`,[oldScope,actor.id,expiredQuote,oldCharge,actor.org]);
+    assert.equal(seeded.rowCount,1,"The app and browser fixtures must use the same isolated database.");
+    await db.query(`insert into order_blocks(id,order_id,reason,object_key,opened_at)
+      values($1,$2,'scope_payment_pending',$3,now())`,[randomUUID(),draft.id,oldScope]);
+    await page.goto("/account/billing");
+    const billRow=page.getByRole("row").filter({has:page.locator("#charge-"+oldCharge)});
+    await billRow.getByRole("link",{name:"Review scope charge"}).click();
+    const oldUrl=`/orders/${draft.public_no}#scope-${oldScope}`;
+    await page.waitForURL(baseURL+oldUrl);
+    const oldCard=page.locator("#scope-"+oldScope);
+    await oldCard.getByText(/This payment quote has expired/).waitFor();
+    await page.getByText("Renew the supplemental quote for your accepted scope change.",{exact:true}).waitFor();
+    assert.equal(await oldCard.getByRole("button",{name:/^Pay supplemental charge/}).count(),0);
+    await page.goto("/actions");
+    await page.getByRole("row").filter({hasText:"Renew supplemental inspection quote"}).getByRole("link",{name:"Open"}).click();
+    await page.waitForURL(baseURL+oldUrl);
+    await captureWizard(page,"scope-payment-expired",/Inspection scope & sample discrepancies/);
+    page.once("dialog",dialog=>dialog.accept());
+    await oldCard.getByRole("button",{name:"Confirm and renew supplemental quote"}).click();
+    await oldCard.getByText("The charge for this version is closed.").waitFor();
+    const replacement=(await call(scopes)).proposals.find(row=>row.id!==oldScope);
+    const newUrl=`/orders/${draft.public_no}#scope-${replacement.id}`;
+    await page.waitForURL(baseURL+newUrl);
+    await page.getByText("Complete the supplemental payment before the scope change takes effect.",{exact:true}).waitFor();
+    assert.equal(replacement.supplemental_charge.amount_cents,proposal.adjustment_cents);
+    await captureWizard(page,"scope-payment-renewed",/Inspection scope & sample discrepancies/);
+    await other.call(scopes,{status:404});
+    await page.locator("#scope-"+replacement.id).getByRole("button",{name:/^Pay supplemental charge/}).click();
+    await page.waitForURL("**/checkout/demo/*");
+    await page.getByRole("button",{name:"Confirm test payment"}).click();
+    await page.waitForURL(baseURL+newUrl);
+    await page.locator("#scope-"+replacement.id).getByText("Supplemental payment confirmed.").waitFor();
+    assert.equal((await call(order)).items.length,2);
+    assert.deepEqual(errors,[]);
+    assert(entries.every(entry=>entry.overflow<=1));
+    console.log("PASS expired scope charge, billing and action links, reconfirmation, exact checkout return and customer isolation");
+  } finally {await db.end();}
+}
+
 try {
   const customer = await session();
   const other = await session();
-  if(process.env.QCW_BROWSER_FULFILLMENT_ONLY==="1") await verifyFulfillmentRenewal(other);
+  if(process.env.QCW_BROWSER_SCOPE_ONLY==="1") await verifyScopeRenewal(customer,other);
+  else if(process.env.QCW_BROWSER_FULFILLMENT_ONLY==="1") await verifyFulfillmentRenewal(other);
   else if(process.env.QCW_BROWSER_MANUAL_QUOTE_ONLY==="1") await verifyManualQuoteRenewal(customer,other);
   else {
     const profile = await customer.call("/me/receiving-address");

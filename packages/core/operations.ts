@@ -1,9 +1,11 @@
 import { z } from "zod";
 import type { DB } from "../db";
+import { requireCustomerActive } from "./auth";
 import { audit, code, event, guard, hash, lock, one, organization, revision, role, uuid, type Actor } from "./common";
 import { integrationPreflight } from "./integrations";
 import { savePhoto } from "./intake";
 import { activatePaidOrder, orderItemReadiness, priceSchema, readyOrder, templateSchema } from "./orders";
+import { scopeSupplementState } from "./scope-payment";
 import { assertItemNotFrozen, assertZonePurpose, requireSpace } from "./storage";
 
 export async function computeOrderRefundStage(
@@ -800,10 +802,10 @@ export async function scopeReview(db:DB,actor:Actor,id:string) {
     (select jsonb_build_object(
       'id',c.id,'amount_cents',c.amount_cents,'quote_revision',q.revision,'expires_at',q.expires_at,
       'paid',c.applied_payment_id is not null or c.free_authorization is not null,
-      'voided',c.voided_at is not null
+      'voided',c.voided_at is not null,'state',${scopeSupplementState}
     ) from charge_items c join inspection_quotes q on q.id=c.inspection_quote_id
       where c.scope_revision_id=s.id limit 1) supplemental_charge
-    from scope_revisions s where s.order_id=$1 order by s.revision desc`,[id,order.state,order.revision])).rows;
+    from scope_revisions s join orders o on o.id=s.order_id where s.order_id=$1 order by s.revision desc`,[id,order.state,order.revision])).rows;
   return {order,positions,proposals};
 }
 
@@ -838,6 +840,50 @@ export async function applyScopePositionsAndAdditions(
   }
 }
 
+async function createSupplementalScopeCharge(db:DB,actor:Actor,orderId:string,scopeId:string,orderRevision:number,
+  amountCents:number,lineSnapshot:unknown) {
+  const org=organization(actor);
+  const nextQuote=await one<{n:number}>(db,"select coalesce(max(revision),0)::int+1 n from inspection_quotes where order_id=$1",[orderId]);
+  const quote=await one<{id:string;revision:number}>(db,`insert into inspection_quotes
+    (id,order_id,revision,line_snapshot,terms_snapshot,amount_cents,currency,expires_at,accepted_at)
+    values($1,$2,$3,$4,$5,$6,'USD',now()+interval '30 minutes',now()) returning id,revision`,
+  [uuid(),orderId,nextQuote.n,JSON.stringify(lineSnapshot),JSON.stringify({scope_revision_id:scopeId,order_revision:orderRevision}),amountCents]);
+  const charge=await one<{id:string}>(db,`insert into charge_items
+    (id,org_id,purpose,inspection_quote_id,scope_revision_id,amount_cents,currency,snapshot)
+    values($1,$2,'inspection',$3,$4,$5,'USD',$6) returning id`,
+  [uuid(),org,quote.id,scopeId,amountCents,{order_id:orderId,scope_revision_id:scopeId,quote_revision:quote.revision}]);
+  await db.query(`insert into order_blocks(id,order_id,reason,object_key,opened_at)
+    values($1,$2,'scope_payment_pending',$3,now())
+    on conflict(order_id,reason,object_key) where resolved_at is null do nothing`,[uuid(),orderId,scopeId]);
+  return charge.id;
+}
+
+export async function renewScopeSupplement(db:DB,actor:Actor,id:string,chargeId:string) {
+  const org=organization(actor);
+  await requireCustomerActive(db,actor);
+  await lock(db,"org:"+org);
+  const row=await one(db,`select s.*,o.revision order_revision,c.amount_cents,q.line_snapshot,
+    ${scopeSupplementState} payment_state
+    from scope_revisions s join orders o on o.id=s.order_id
+    join charge_items c on c.scope_revision_id=s.id and c.org_id=o.org_id
+    join inspection_quotes q on q.id=c.inspection_quote_id and q.order_id=o.id
+    where s.id=$1 and o.org_id=$2 and c.id=$3 for update of s,o,c`,[id,org,chargeId]);
+  guard(row.payment_state==="expired"&&row.adjustment_cents>0&&row.adjustment_cents===row.amount_cents,
+    "SCOPE_UNAVAILABLE","This scope charge cannot be renewed. Check its current payment status.");
+  const replacement=await one<{id:string}>(db,`insert into scope_revisions
+    (id,order_id,revision,previous_snapshot,proposed_snapshot,reason,adjustment_cents,accepted_at,accepted_by)
+    select $1,s.order_id,(select max(revision)+1 from scope_revisions where order_id=s.order_id),
+      s.previous_snapshot,s.proposed_snapshot,s.reason,s.adjustment_cents,now(),$2
+    from scope_revisions s where s.id=$3 returning id`,[uuid(),actor.id,id]);
+  const newCharge=await createSupplementalScopeCharge(db,actor,row.order_id,replacement.id,row.order_revision,row.amount_cents,row.line_snapshot);
+  await db.query("update charge_items set voided_at=now() where id=$1",[chargeId]);
+  await db.query(`update order_blocks set resolved_at=now() where order_id=$1 and reason='scope_payment_pending'
+    and object_key=$2 and resolved_at is null`,[row.order_id,id]);
+  await audit(db,actor,"renew_scope_supplement","orders",row.order_id,
+    {previous_scope_revision_id:id,previous_charge_item_id:chargeId,scope_revision_id:replacement.id,charge_item_id:newCharge});
+  return {scope_revision_id:replacement.id,state:"awaiting_supplemental_payment"};
+}
+
 export async function acceptScope(db:DB,actor:Actor,id:string,rev:number) {
   const org=organization(actor);
   await lock(db,"org:"+org);
@@ -858,35 +904,8 @@ export async function acceptScope(db:DB,actor:Actor,id:string,rev:number) {
   const additions=(Array.isArray(row.proposed_snapshot.additions)?row.proposed_snapshot.additions:[]) as ScopeAddition[];
   if(row.adjustment_cents>0) {
     await db.query("update scope_revisions set accepted_at=now(),accepted_by=$2 where id=$1",[id,actor.id]);
-    const nextQuote=await one<{n:number}>(db,"select coalesce(max(revision),0)::int+1 n from inspection_quotes where order_id=$1",[row.order_id]);
-    const quote=await one<{id:string;revision:number;expires_at:string}>(
-      db,
-      `insert into inspection_quotes(id,order_id,revision,line_snapshot,terms_snapshot,amount_cents,currency,expires_at,accepted_at)
-       values($1,$2,$3,$4,$5,$6,'USD',now()+interval '30 minutes',now())
-       returning id,revision,expires_at`,
-      [
-        uuid(),
-        row.order_id,
-        nextQuote.n,
-        JSON.stringify(row.submission_snapshot?.lines??[]),
-        JSON.stringify({scope_revision_id:id,order_revision:row.order_revision}),
-        row.adjustment_cents,
-      ]
-    );
-    const charge=await one<{id:string}>(
-      db,
-      `insert into charge_items(id,org_id,purpose,inspection_quote_id,scope_revision_id,amount_cents,currency,snapshot)
-       values($1,$2,'inspection',$3,$4,$5,'USD',$6)
-       returning id`,
-      [uuid(),org,quote.id,id,row.adjustment_cents,{order_id:row.order_id,scope_revision_id:id,quote_revision:quote.revision}]
-    );
-    await db.query(
-      `insert into order_blocks(id,order_id,reason,object_key,opened_at)
-       values($1,$2,'scope_payment_pending',$3,now())
-       on conflict(order_id,reason,object_key) where resolved_at is null do nothing`,
-      [uuid(),row.order_id,id]
-    );
-    await audit(db,actor,"accept_upward_scope","orders",row.order_id,{scope_revision_id:id,charge_item_id:charge.id,amount_cents:row.adjustment_cents});
+    const chargeId=await createSupplementalScopeCharge(db,actor,row.order_id,id,row.order_revision,row.adjustment_cents,row.submission_snapshot?.lines??[]);
+    await audit(db,actor,"accept_upward_scope","orders",row.order_id,{scope_revision_id:id,charge_item_id:chargeId,amount_cents:row.adjustment_cents});
     return {
       scope_revision_id:id,
       state:"awaiting_supplemental_payment",

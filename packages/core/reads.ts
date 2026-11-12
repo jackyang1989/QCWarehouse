@@ -6,6 +6,7 @@ import { customerEmailDeliveryStatus } from "./email";
 import { eligibleManualQuoteOrderSql, expiredManualInspectionPaymentSql, orderAcceptsSampleAssignmentSql, orderDTO } from "./orders";
 import { orderShipments } from "./fulfillment-reads";
 import { getIntakeContext, waybill } from "./intake";
+import { scopeSupplementForOrder, scopeSupplementState } from "./scope-payment";
 import { hasStaffAccess, staffAccess } from "./staff-access";
 import { effectiveDispatchCharge, pendingDispatchQuote, pendingStorageQuote, renewableFulfillmentQuote, unresolvedQuotePayment } from "./dispatch";
 
@@ -97,7 +98,7 @@ export async function bills(db:DB,actor:Actor,focusedCharge:string|null=null) {
       when exists(select 1 from payments p where p.charge_item_id=c.id and p.state='processing') then 'processing' else 'open' end state,
     coalesce((select sum(r.amount_cents)::int from refunds r join payments p on p.id=r.payment_id where p.charge_item_id=c.id and r.state='succeeded'),0) refunded_cents,
     coalesce(linked.order_ids,array[]::uuid[]) order_ids,coalesce(linked.order_numbers,array[]::text[]) order_numbers,
-    d.batch_id, (select w.code from disposition_requests dr join warehouse_items w on w.id=dr.item_id and w.org_id=dr.org_id
+    d.batch_id,c.scope_revision_id, (select w.code from disposition_requests dr join warehouse_items w on w.id=dr.item_id and w.org_id=dr.org_id
       where dr.id=s.disposition_id and dr.org_id=c.org_id) storage_item_code,
     ${unresolvedQuotePayment} unresolved_payment,
     (select p.state from payments p where p.charge_item_id=c.id order by p.updated_at desc nulls last,p.id desc limit 1) latest_attempt_state,
@@ -151,12 +152,11 @@ export async function customerActions(db:DB,actor:Actor) {
     union all select q.id,'quote','retain',w.code,q.expires_at from storage_quotes q
       join disposition_requests d on d.id=q.disposition_id join warehouse_items w on w.id=d.item_id and w.org_id=d.org_id
       where d.org_id=$1 and ${pendingStorageQuote}
-    union all select c.id,'charge',c.purpose,null,coalesce(q.expires_at,s.expires_at,iq.expires_at) from charge_items c
+    union all select c.id,'charge',c.purpose,null,coalesce(q.expires_at,s.expires_at) from charge_items c
       left join dispatch_quote_versions q on q.id=c.dispatch_quote_id left join storage_quotes s on s.id=c.storage_quote_id
-      left join inspection_quotes iq on iq.id=c.inspection_quote_id
-      where c.org_id=$1 and (c.purpose in ('dispatch','storage') or (c.purpose='inspection' and c.scope_revision_id is not null))
+      where c.org_id=$1 and c.purpose in ('dispatch','storage')
       and c.voided_at is null and c.applied_payment_id is null and c.free_authorization is null
-      and (c.scope_revision_id is not null or coalesce(q.expires_at,s.expires_at,iq.expires_at)>now())
+      and coalesce(q.expires_at,s.expires_at)>now()
       and not exists(select 1 from payments p where p.charge_item_id=c.id and p.state='processing')
     union all select t.advice_id,'parcel',t.sync_state,t.tracking_norm,null from tracking_records t
       where t.org_id=$1 and t.direction='inbound' and t.advice_id is not null and t.closed_at is null
@@ -166,6 +166,13 @@ export async function customerActions(db:DB,actor:Actor) {
     union all select s.id,'scope','scope_review',o.public_no,null from scope_revisions s join orders o on o.id=s.order_id
       where o.org_id=$1 and o.state='awaiting_samples' and s.accepted_at is null
       and s.previous_snapshot->>'order_revision'=o.revision::text
+    union all select scope_id,'scope',case when payment_state='expired' then 'scope_payment_expired' else 'scope_payment_due' end,
+      public_no,case when payment_state='open' then expires_at end from (
+        select s.id scope_id,o.public_no,q.expires_at,${scopeSupplementState} payment_state
+        from scope_revisions s join orders o on o.id=s.order_id
+        join charge_items c on c.scope_revision_id=s.id and c.org_id=o.org_id
+        join inspection_quotes q on q.id=c.inspection_quote_id and q.order_id=o.id where o.org_id=$1
+      ) supplemental where payment_state in ('open','expired')
     union all select e.id,'email',e.delivery_state,null,null from user_emails e
       where e.user_id=$2 and e.is_primary and e.delivery_state in ('bounced','complained')
     union all select r.id,'reference',
@@ -191,7 +198,7 @@ export async function customerActions(db:DB,actor:Actor) {
 const customerOrderSelect=`select o.id,o.public_no,o.state,o.revision,o.price_cents,o.created_at,
     greatest(o.updated_at,o.paid_at,o.samples_ready_at,o.report_published_at,o.closed_at,o.held_at,
       (select max(a.at) from audit_events a where a.entity_type='orders' and a.entity_id=o.id)) updated_at,
-    o.sla_due_at,
+    o.sla_due_at,${scopeSupplementForOrder} scope_payment,
     (select coalesce(sum(l.quantity),0)::int from order_lines l where l.order_id=o.id) item_count,
     (select s.title->>'en' from order_lines l join service_offers s on s.id=l.offer_id where l.order_id=o.id order by l.id limit 1) service_title,
     (select st.code from order_lines l join service_offers s on s.id=l.offer_id join service_types st on st.id=s.service_type_id where l.order_id=o.id order by l.id limit 1) service_code,

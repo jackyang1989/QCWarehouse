@@ -20,6 +20,7 @@ import { adminDesk, bills, customerActions, customerDesk, customerInventory, cus
 import { staffAccess } from "./staff-access";
 import { customerDestination, withDestination } from "./portal-routes";
 import { orderFulfillmentRecord } from "./fulfillment-reads";
+import { renewScopeSupplement } from "./operations";
 import { canReadCasePhoto, caseDetail, createPublicInquiry, customerTicketMessage, inquiryCategories, publicInquiry, replyToCase, staffTicketEvent, staffTicketQueue, writeStaffTicket } from "./tickets";
 import { approveDisposalCase, approveIncidentResolution, approveStocktake, createDisposalCase, createIncident, createLocations, createStocktake, customerReadIncident, customerRespondIncident, executeDisposalCase, listIncidents, listOverdueAndRestrictedQueue, listStocktakes, locationBatchSchema, locationMaster, proposeIncidentResolution, resolveIncidentCompensation, scanStocktakeItem, setLocationActive, storageMovementDesk, submitStocktake } from "./storage";
 import { acceptScope, approveCapability, cancelOrder, computeOrderRefundStage, configureLegalEntity, convertOrderToTwo, createCapability, createCategory, createTermsVersion, evaluateLaunchReadiness, exportCustomerPrivacyData, extendOrderArrival, holdOrder, moveItem, newTemplate, orderCaseCategory, publishSkuPrice, publishTemplate, publishTermsVersion, recordLaunchSignoff, recordRecoveryDrill, recordRehearsalRun, reportIssue, requestCustomerPrivacyAction, requestOrderAfterSales, respondOrderMismatch, resumeOrder, revokeCapability, scopeProposal, scopeReview, setAddress, setDisposalExecutionSwitch, setOfferEnabled, staffSchemas, systemHealthAndBackupCheck, updateBusinessCalendar, updateCategoryStatus, updateWarehouseAddress, upsertOffer } from "./operations";
@@ -1141,6 +1142,7 @@ async function dispatch(db:DB,actor:Actor,id:string,op:string,b:Record<string,an
     case "approveRefund": return refundApprove(db,actor,id,b.revision,hash(getCookie(req,"session")));
     case "proposeScope": return scopeProposal(db,actor,id,b as Parameters<typeof scopeProposal>[3]);
     case "acceptScope": return acceptScope(db,actor,id,b.revision);
+    case "renewScopeSupplement": return renewScopeSupplement(db,actor,id,b.charge_item_id);
     case "amendReport": return amendReport(db,actor,id,amendReportInput.parse(b));
     case "editReportRevision": return editReportRevision(db,actor,id,revisionChanges.parse(b));
     case "submitReportRevision": return submitReportRevision(db,actor,id,b.revision);

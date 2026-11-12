@@ -3,6 +3,7 @@ import type { DB } from "../db";
 import { currentTerms, requireCustomerActive, requireTerms } from "./auth";
 import { audit, code, event, guard, isDemo, lock, one, organization, revision, role, uuid, type Actor } from "./common";
 import { orderQuotes, orderShipments } from "./fulfillment-reads";
+import { scopeSupplementForOrder } from "./scope-payment";
 
 export const checkSchema = z.object({
   key:z.string().min(1).max(80), label:z.string().min(1).max(120), zh:z.string().min(1).max(120),
@@ -421,7 +422,8 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
     left join warehouse_items w on w.id=a.item_id
     left join packages pkg on pkg.id=w.package_id
     where l.order_id=$1 order by l.id,e.position`,[id])).rows;
-  const report=(await db.query("select published_version from reports where order_id=$1",[id])).rows[0];
+  const progress=await one(db,`select r.published_version,${scopeSupplementForOrder} scope_payment
+    from orders o left join reports r on r.order_id=o.id where o.id=$1 and o.org_id=$2`,[id,order.org_id]);
   const manualQuoteRenewable=await canRenewManualInspection(db,id,order.state);
   const manual=(order.state==="draft"||manualQuoteRenewable)?(await db.query(`
     select case when r.state='offered' and q.id is null then 'expired' else r.state end state,
@@ -445,6 +447,6 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
   return {...orderDTO(order as Parameters<typeof orderDTO>[0]),price_cents:order.price_cents,
     customer_notes:order.customer_notes??null,held_at:order.held_at??null,held_from_state:order.held_from_state??null,hold_reason:order.hold_reason??null,
     created_at:order.created_at,report_published_at:order.report_published_at??null,closed_at:order.closed_at??null,paid_at:order.paid_at??null,samples_ready_at:order.samples_ready_at??null,sla_due_at:order.sla_due_at??null,
-    lines,items:rows,report_version:report?.published_version??null,manual_quote:manual??null,manual_quote_renewable:manualQuoteRenewable,
+    lines,items:rows,report_version:progress.published_version??null,scope_payment:progress.scope_payment,manual_quote:manual??null,manual_quote_renewable:manualQuoteRenewable,
     parcels,cases,shipments,quotes,consents};
 }

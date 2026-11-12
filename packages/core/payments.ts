@@ -5,6 +5,7 @@ import { Problem, audit, code, event, guard, hash, idempotent, isDemo, lock, one
 import { stripeSettings } from "./integrations";
 import { activatePaidOrder, readyOrder } from "./orders";
 import { applyScopePositionsAndAdditions, computeOrderRefundStage, type ScopeAddition } from "./operations";
+import { inspectionScopePath } from "./portal-routes";
 const refundApprovalMfaMinutes=15;
 
 export async function orderPayment(db:DB,actor:Actor,id:string) {
@@ -112,12 +113,14 @@ async function prepareCheckout(db:DB,actor:Actor,id:string,rev:number):Promise<C
   }
   requireCurrentQuote(fee.quote_valid);
   const fresh=open.provider_ref?await attempt(db,id,fee.amount_cents):open;
-  const returnPath=fee.order_number?"/orders/"+fee.order_number+"/payment":"/account/billing";
+  const inspectionPayment=fee.order_number&&!fee.scope_revision_id;
+  const returnPath=inspectionPayment?"/orders/"+fee.order_number+"/payment":
+    fee.order_number&&fee.scope_revision_id?inspectionScopePath(fee.order_number,fee.scope_revision_id):"/account/billing";
   const session=await api.checkout.sessions.create({
     mode:"payment",client_reference_id:id,metadata:{payment_id:fresh.id,charge_item_id:id,org_id:org},
     payment_intent_data:{metadata:{payment_id:fresh.id,charge_item_id:id,org_id:org}},
     line_items:[{quantity:1,price_data:{currency:"usd",unit_amount:fee.amount_cents,product_data:{name:`QC Warehouse · ${fee.purpose}`}}}],
-    success_url:appOrigin()+returnPath+(fee.order_number?"?checkout=returned":""),cancel_url:appOrigin()+returnPath,
+    success_url:appOrigin()+returnPath+(inspectionPayment?"?checkout=returned":""),cancel_url:appOrigin()+returnPath,
   },{idempotencyKey:fresh.id});
   guard(session.url,"STRIPE_UNAVAILABLE","Checkout could not be started.",503);
   await db.query("update payments set provider_ref=$2 where id=$1",[fresh.id,session.id]);
@@ -217,7 +220,7 @@ export async function demoPay(db:DB,actor:Actor,id:string) {
   guard(isDemo(),"NOT_FOUND","Checkout not found.",404);
   const org=organization(actor);
   await lock(db,"org:"+org);
-  const p=await one(db,`select p.*,o.public_no order_number,coalesce(q.expires_at,d.expires_at,s.expires_at)>now() quote_valid
+  const p=await one(db,`select p.*,o.public_no order_number,c.scope_revision_id,coalesce(q.expires_at,d.expires_at,s.expires_at)>now() quote_valid
     from payments p join charge_items c on c.id=p.charge_item_id
     left join inspection_quotes q on q.id=c.inspection_quote_id left join orders o on o.id=q.order_id and o.org_id=c.org_id
     left join dispatch_quote_versions d on d.id=c.dispatch_quote_id left join storage_quotes s on s.id=c.storage_quote_id
@@ -225,7 +228,7 @@ export async function demoPay(db:DB,actor:Actor,id:string) {
   guard(["requires_payment","succeeded"].includes(p.state),"PAYMENT_UNAVAILABLE","This checkout has ended.");
   guard(p.state==="succeeded"||p.quote_valid,"QUOTE_EXPIRED","Request a new quote before continuing.");
   await applyPayment(db,id,"demo_"+id,{demo:true,payment_intent:"pi_demo_"+id});
-  return {state:"paid",...(p.order_number?{order_number:p.order_number}:{})};
+  return {state:"paid",...(p.order_number?{order_number:p.order_number}:{}),...(p.scope_revision_id?{scope_revision_id:p.scope_revision_id}:{})};
 }
 export function verifyStripe(raw:string,signature:string) {
   const {webhook,mode}=stripeSettings();

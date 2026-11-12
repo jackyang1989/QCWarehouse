@@ -9,6 +9,19 @@ export function ScopeReview({orderId,staff=false,onSave}:{orderId:string;staff?:
   const {data,error,reload}=useLoad("/orders/"+orderId+"/scope-revisions");
   const updated=()=>{reload();onSave();};
   useEffect(()=>{
+    const deadlines=(data?.proposals??[]).flatMap((p:Row)=>p.supplemental_charge?.state==="open"
+      ?[Date.parse(p.supplemental_charge.expires_at)]:[]);
+    const remaining=Math.min(...deadlines)-Date.now();
+    if(!Number.isFinite(remaining)||remaining<=0)return;
+    const timer=setTimeout(()=>{reload();onSave();},remaining+50);
+    return ()=>clearTimeout(timer);
+  },[data,onSave,reload]);
+  useEffect(()=>{
+    if(!data?.proposals.some((p:Row)=>p.supplemental_charge?.state==="processing"))return;
+    const timer=setInterval(()=>{reload();onSave();},15000);
+    return ()=>clearInterval(timer);
+  },[data,onSave,reload]);
+  useEffect(()=>{
     if(!data)return;
     const anchor=location.hash.slice(1);
     if(anchor.startsWith("scope-")&&data.proposals.some((p:Row)=>"scope-"+p.id===anchor))
@@ -83,7 +96,19 @@ export function ScopeReview({orderId,staff=false,onSave}:{orderId:string;staff?:
         {p.accepted_at&&<p>{staff?"接受时间":"Accepted"} {stamp(p.accepted_at)}</p>}
         {p.refund_case&&<p><Link href={(staff?"/admin/tickets/":"/support/cases/")+p.refund_case.id}>
           {staff?"查看退款审核工单":"View refund review case"}</Link></p>}
-        {!staff&&p.supplemental_charge&&!p.supplemental_charge.paid&&!p.supplemental_charge.voided&&<Action primary run={async()=>{
+        {p.supplemental_charge?.state==="processing"&&<p role="status">{staff?"等待渠道确认补款。":"Awaiting confirmation of your supplemental payment."}</p>}
+        {p.supplemental_charge?.state==="paid"&&<p role="status">{staff?"补款已确认。":"Supplemental payment confirmed."}</p>}
+        {p.supplemental_charge?.state==="inactive"&&<p className="muted">{staff?"此版本补款已关闭。":"The charge for this version is closed."}</p>}
+        {!staff&&p.supplemental_charge?.state==="expired"&&<>
+          <p>This payment quote has expired. Confirm the same inspection scope and fee to receive a new payment quote.</p>
+          <Action primary run={async()=>{
+            if(!window.confirm(`Confirm the same inspection scope and supplemental fee of ${usd(p.supplemental_charge.amount_cents)}?`))return;
+            const renewed=await request("/scope-revisions/"+p.id+"/renew-payment","POST",{charge_item_id:p.supplemental_charge.id});
+            history.replaceState(history.state,"","#scope-"+renewed.scope_revision_id);
+            updated();
+          }}>Confirm and renew supplemental quote</Action>
+        </>}
+        {!staff&&p.supplemental_charge?.state==="open"&&<Action primary run={async()=>{
           const res=await request("/charges/"+p.supplemental_charge.id+"/checkout","POST",{quote_revision:p.supplemental_charge.quote_revision});
           if(res.checkout_url) location.assign(res.checkout_url);
           else updated();

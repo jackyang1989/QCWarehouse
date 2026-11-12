@@ -11,7 +11,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { draftRecoveryKey, readDraftRecovery, removeDraftRecovery, writeDraftRecovery, type DraftEditor, type DraftRecovery } from "./draft-recovery";
 import { conditionMatches } from "../packages/core/template-conditions";
-import { billingChargePath, customerDestination, legalPages, orderSections, type OrderSection, servicePages } from "../packages/core/portal-routes";
+import { billingChargePath, customerDestination, inspectionScopePath, legalPages, orderSections, type OrderSection, servicePages } from "../packages/core/portal-routes";
 import { Action, checked, CodeButton, Empty, ErrorBlock, Field, Form, MediaLightbox, ModalDrawer, Panel, Photo, request, RequestError, Select, useWorkspaceStamp, Table, Tabs, Tag, text, useLoad, usd, type Row } from "./ui";
 
 const acknowledged={scope_notice:"I understand which checks are included.",samples_not_batch:"These samples do not represent an entire production batch.",seller_refund_is_mine:"I handle any refund request directly with my seller.",no_certification:"The report is an inspection record and does not provide certification.",restricted_items:"My items comply with the restricted items policy."};
@@ -2374,6 +2374,8 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
   const needsManualQuoteRenewal=manualQuote?.state==="expired"||Boolean(manualRenewal&&!manualQuote);
   const quote=manualQuote?.id?manualQuote:manualRenewal?undefined:calculatedQuote;
   const paymentState=payment.data?.state;
+  const scopePayment=o?.scope_payment;
+  const scopePaymentHref=scopePayment?inspectionScopePath(number,scopePayment.id):undefined;
   const refreshPayment=()=>{detail.reload();payment.reload();};
   useEffect(()=>{
     const target=location.hash.slice(1);
@@ -2448,7 +2450,12 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
         onOpenItem={setItemTarget}
         onOpenBatch={setBatchTarget}
       />}
-      {!section&&orderNext[o.state]&&<div className="order-next"><div><span className="eyebrow">NEXT STEP</span><p>{orderNext[o.state]}</p></div>
+      {!section&&scopePaymentHref&&<div className="order-next">
+        <div><span className="eyebrow">NEXT STEP</span><p>{scopePayment.state==="processing"?"We're waiting for confirmation of your supplemental payment.":
+          scopePayment.state==="expired"?"Renew the supplemental quote for your accepted scope change.":"Complete the supplemental payment before the scope change takes effect."}</p></div>
+        <div className="actions"><Link className="button primary sm" href={scopePaymentHref}>Review scope charge</Link></div>
+      </div>}
+      {!section&&!scopePayment&&orderNext[o.state]&&<div className="order-next"><div><span className="eyebrow">NEXT STEP</span><p>{orderNext[o.state]}</p></div>
         <div className="actions">
           {o.state==="awaiting_payment"&&<Link className="button primary sm" href={base+"/payment"}>Review payment</Link>}
           {o.state==="draft"&&<Link className="button primary sm" href={"/orders/new?draft="+encodeURIComponent(number)}>Edit in step-by-step wizard</Link>}
@@ -2457,7 +2464,8 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
         </div>
       </div>}
       {!section&&<div className="metric-strip" aria-label="Order progress summary">
-        <Link className="metric" href={base+"/payment"}><span>Payment</span><strong>{paymentState?label(paymentState):label(o.state)}</strong><small>{payment.data?.charge?usd(payment.data.charge.amount_cents):"Inspection fee"}</small></Link>
+        {scopePaymentHref?<Link className="metric" href={scopePaymentHref}><span>Supplemental payment</span><strong>{scopePaymentLabels[scopePayment.state]}</strong><small>{usd(scopePayment.amount_cents)}</small></Link>:
+          <Link className="metric" href={base+"/payment"}><span>Payment</span><strong>{paymentState?label(paymentState):label(o.state)}</strong><small>{payment.data?.charge?usd(payment.data.charge.amount_cents):"Inspection fee"}</small></Link>}
         <Link className="metric" href={base+"/parcels"}><span>Inbound Parcels</span><strong>{o.parcels.length}</strong><small>{o.parcels.filter((p:Row)=>p.warehouse_state).length} checked in at warehouse</small></Link>
         <Link className="metric" href={base+"/dispositions"}><span>Warehouse Items</span><strong>{o.items.filter((i:Row)=>i.item_id).length} / {o.items.length}</strong><small>Identified physical items</small></Link>
         <Link className="metric" href={o.report_version?base+"/report":base}><span>Inspection Report</span><strong>{o.report_version?`v${o.report_version}`:"Pending"}</strong><small>{o.report_version?"Published & ready":"Awaiting completion"}</small></Link>
@@ -2632,7 +2640,8 @@ export function DemoCheckout({id}:{id:string}) {
     {data?.demo?<><p>Confirm this test payment.</p>
       <Action primary run={async()=>{
         const result=await request("/checkout/demo/"+id,"POST",{});
-        location.assign(result.order_number?"/orders/"+result.order_number:"/account/billing");
+        location.assign(result.order_number&&result.scope_revision_id?inspectionScopePath(result.order_number,result.scope_revision_id):
+          result.order_number?"/orders/"+result.order_number:"/account/billing");
       }}>Confirm test payment</Action></>:error?<ErrorBlock error={error}/>:data?<Empty>Checkout is unavailable.</Empty>:<p role="status">Loading checkout…</p>}
   </div>;
 }
@@ -2840,8 +2849,10 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
     </Panel>}
   </>;
 }
+const scopePaymentLabels:Record<string,string>={open:"Payment due",expired:"Quote expired",processing:"Processing"};
 function orderNextAction(o:Row):{label:string;href:string} {
   const base="/orders/"+o.public_no;
+  if(o.scope_payment) return {label:"Review scope charge",href:inspectionScopePath(o.public_no,o.scope_payment.id)};
   switch(o.state) {
     case "draft": return {label:"Resume wizard",href:"/orders/new?draft="+encodeURIComponent(o.public_no)};
     case "awaiting_payment": return {label:"Complete payment",href:base+"/payment"};
@@ -3017,7 +3028,8 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         const orderLink=<Link className="code" href={"/orders/"+o.public_no}>{o.public_no}</Link>;
         return isHome?[orderLink,service,statusCell,next]:[
           orderLink,service,statusCell,
-          o.payment_state?<Tag tone={o.payment_state==="paid"?"green":o.payment_state==="processing"?"yellow":"outline"}>{label(o.payment_state)}</Tag>:o.state==="draft"?<span className="muted small">Not submitted</span>:"—",
+          o.scope_payment?<Tag tone="yellow">{scopePaymentLabels[o.scope_payment.state]}</Tag>:
+            o.payment_state?<Tag tone={o.payment_state==="paid"?"green":o.payment_state==="processing"?"yellow":"outline"}>{label(o.payment_state)}</Tag>:o.state==="draft"?<span className="muted small">Not submitted</span>:"—",
           o.report_version?<Link className="code-btn" href={`/orders/${o.public_no}/report`}>v{o.report_version}</Link>:<span className="muted small">Pending</span>,
           stamp(o.updated_at??o.created_at),
           next,
@@ -3197,7 +3209,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     </Panel><Panel title="Payments & charges" subtitle="Inspection, shipping and storage charges. Payment is confirmed only after server-side verification.">
       {requestedCharge&&!focusedChargeAvailable&&<p role="status">This charge is unavailable.</p>}
       <Table headers={["Purpose","Order / Batch","Amount","Refunded","Status","Date","Details",""]} rows={data.bills.map((b:Row)=>[
-        <span id={"charge-"+b.charge_item_id} className="billing-charge-anchor" tabIndex={b.charge_item_id===requestedCharge?-1:undefined}>{label(b.purpose)}</span>,
+        <span id={"charge-"+b.charge_item_id} className="billing-charge-anchor" tabIndex={b.charge_item_id===requestedCharge?-1:undefined}>{b.scope_revision_id?"Supplemental inspection":label(b.purpose)}</span>,
         (b.order_numbers??[]).length?b.order_numbers.map((no:string)=><Link key={no} className="code-btn" href={"/orders/"+no}>{no}</Link>):b.batch_id?<CodeButton code={`Batch #${b.batch_id.slice(0,8)}`} onClick={()=>setBatchTarget(b.batch_id)}/>:"—",
         usd(b.amount_cents),
         b.refunded_cents?usd(b.refunded_cents):"—",
@@ -3212,6 +3224,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         }}>{b.paid_ref?.startsWith("cs_test_")?"View test receipt":"View Stripe receipt"}</Action>:
           b.paid_ref?.startsWith("demo_")?<small>Test payment</small>:
           b.paid_ref?<details className="small"><summary className="code" title={b.paid_ref}>…{String(b.paid_ref).slice(-8)}</summary><span className="code" style={{overflowWrap:"anywhere"}}>{b.paid_ref}</span></details>:b.latest_attempt_state?label(b.latest_attempt_state):"—",
+        b.scope_revision_id&&b.order_numbers?.[0]?<Link href={inspectionScopePath(b.order_numbers[0],b.scope_revision_id)}>Review scope charge</Link>:
         b.state==="open"&&b.expires_at&&Date.parse(b.expires_at)<=Date.now()
           ?(b.unresolved_payment?<span>Payment confirmation pending</span>:
             b.purpose==="dispatch"&&b.batch_id?<CodeButton code="Review dispatch batch" onClick={()=>setBatchTarget(b.batch_id)}/>:
@@ -3482,6 +3495,7 @@ const actionTitles:Record<string,string>={
   bounced:"We couldn't deliver email to this address",complained:"We couldn't deliver email to this address",
   reference_expired:"Update expired reference sample",reference_conflict:"Resolve reference sample in use before shipping",
   storage_expiring:"Storage expiring soon — choose handling or extend",storage_expired:"Storage expired — choose handling or extend",
+  scope_review:"Review inspection scope",scope_payment_due:"Review supplemental inspection payment",scope_payment_expired:"Renew supplemental inspection quote",
 };
 function customerActionHref(row:Row) {
   const base="/orders/"+row.reference;
@@ -3495,7 +3509,7 @@ function customerActionHref(row:Row) {
   if(row.kind==="parcel") return "/parcels/"+row.id;
   if(row.kind==="charge") return billingChargePath(row.id);
   if(row.kind==="quote") return "/account/billing#quote-"+row.id;
-  if(row.kind==="scope") return base+"#scope-"+row.id;
+  if(row.kind==="scope") return inspectionScopePath(row.reference,row.id);
   if(row.kind==="reference"||row.kind==="storage") return "/items?item="+encodeURIComponent(row.reference);
   if(row.kind==="email") return "/account/security";
   return "/support/cases/"+row.id;
@@ -3512,7 +3526,7 @@ export function CustomerActions() {
     {!data&&!error&&<p role="status">Loading actions…</p>}
     {data&&!error&&<Panel title="Your next actions"><Table headers={["Action","Reference","Due",""]} rows={data.rows.map((row:Row)=>{
       const href=customerActionHref(row);
-      return [row.kind==="scope"?"Review inspection scope":actionTitles[row.state]??"Review action",row.reference?<span className="code">{row.reference}</span>:"—",stamp(row.due_at),<Link href={href}>Open</Link>];
+      return [actionTitles[row.state]??"Review action",row.reference?<span className="code">{row.reference}</span>:"—",stamp(row.due_at),<Link href={href}>Open</Link>];
     })} empty="You’re all caught up. New actions will appear here when an order, parcel, quote or case needs your input."/></Panel>}
   </>;
 }

@@ -1714,6 +1714,94 @@ test("a paid scope revision and independently approved refund remain isolated an
   }
 });
 
+test("expired supplemental inspection payments renew the same scope and reconcile late funds once",async t=>{
+  const {c,terms}=await signCustomer(),other=(await signCustomer()).c;
+  const {actor}=await c.fetch("/me");
+  const offer=(await c.fetch("/catalog")).offers.find(row=>row.sku_code==="apparel-inspection-1");
+  const {draft,submitted}=await createAndPay(c,[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}],terms);
+  const path="/orders/"+draft.id;
+  const orderScope=await c.fetch(path+"/scope-revisions");
+  const scope=await c.fetch(path+"/scope-additions",{revision:orderScope.order.revision,reason:"Inspect one additional item.",
+    positions:orderScope.positions.map(position=>position.id),additions:[{order_line_id:orderScope.positions[0].line_id,count:1}]},"POST",201);
+  const quoteId=randomUUID(),chargeId=randomUUID(),attemptId=randomUUID(),remote="cs_test_"+randomUUID();
+  // Recreate an already expired, accepted snapshot without editing a frozen quote.
+  await pool.query(`with accepted as (
+    update scope_revisions set accepted_at=now()-interval '1 hour',accepted_by=$2 where id=$1 returning *
+  ), quoted as (
+    insert into inspection_quotes(id,order_id,revision,line_snapshot,terms_snapshot,amount_cents,currency,expires_at,accepted_at)
+    select $3,s.order_id,(select max(revision)+1 from inspection_quotes where order_id=s.order_id),o.submission_snapshot->'lines',
+      jsonb_build_object('scope_revision_id',s.id,'order_revision',o.revision),s.adjustment_cents,'USD',now()-interval '30 minutes',s.accepted_at
+    from accepted s join orders o on o.id=s.order_id returning *
+  ) insert into charge_items(id,org_id,purpose,inspection_quote_id,scope_revision_id,amount_cents,currency,snapshot)
+    select $4,$5,'inspection',id,$1,amount_cents,currency,jsonb_build_object('scope_revision_id',$1::uuid,'quote_revision',revision)
+    from quoted`,[scope.scope_revision_id,actor.id,quoteId,chargeId,actor.org]);
+  await pool.query(`insert into order_blocks(id,order_id,reason,object_key,opened_at)
+    values($1,$2,'scope_payment_pending',$3,now())`,[randomUUID(),draft.id,scope.scope_revision_id]);
+  await pool.query(`insert into payments(id,charge_item_id,provider,amount_cents,state,provider_ref,idempotency_key)
+    values($1,$2,'stripe',$3,'requires_payment',$4,$5)`,[attemptId,chargeId,scope.adjustment_cents,remote,attemptId]);
+  const renewPath="/scope-revisions/"+scope.scope_revision_id+"/renew-payment",renewBody={charge_item_id:chargeId};
+  const readScope=async (id:string)=>(await c.fetch(path+"/scope-revisions")).proposals.find(row=>row.id===id);
+  const getActions=async ()=>(await c.fetch("/actions")).rows.filter(row=>row.kind==="scope");
+  assert.equal((await readScope(scope.scope_revision_id)).supplemental_charge.state,"processing");
+  assert.deepEqual(await getActions(),[]);
+  await c.fetch(renewPath,renewBody,"POST",409);
+  await other.fetch(renewPath,renewBody,"POST",404);
+  await (await staffLogin("admin")).fetch(renewPath,renewBody,"POST",403);
+
+  setFixtureEnv(t,{STRIPE_SECRET_KEY:"sk_test_fixture",STRIPE_WEBHOOK_SECRET:"whsec_fixture",QCW_DEMO:"1"});
+  async function webhook(type:string,paid:boolean) {
+    const body=JSON.stringify({id:"evt_fixture_"+randomUUID(),object:"event",livemode:false,type,data:{object:{id:remote,
+      amount_total:scope.adjustment_cents,currency:"usd",payment_status:paid?"paid":"unpaid",
+      payment_intent:paid?"pi_fixture_"+randomUUID():null,metadata:{payment_id:attemptId,charge_item_id:chargeId,org_id:actor.org},
+    }}});
+    const signature=Stripe.webhooks.generateTestHeaderString({payload:body,secret:"whsec_fixture"});
+    process.env.QCW_DEMO="0";
+    try {
+      for(let i=0;i<2;i++) {
+        const response=await handle(new Request(origin+"/api/v1/webhooks/stripe",{method:"POST",body,
+          headers:{"stripe-signature":signature}}),"/webhooks/stripe");
+        assert.equal(response.status,200);
+      }
+    } finally {process.env.QCW_DEMO="1";}
+  }
+  await webhook("checkout.session.expired",false);
+  const expired=await readScope(scope.scope_revision_id);
+  assert.equal(expired.supplemental_charge.state,"expired");
+  assert.equal((await c.fetch(path)).scope_payment.state,"expired");
+  assert.equal((await c.fetch("/me/orders")).rows.find(row=>row.id===draft.id).scope_payment.id,scope.scope_revision_id);
+  assert.deepEqual((await getActions()).map(row=>[row.id,row.state]),[[scope.scope_revision_id,"scope_payment_expired"]]);
+  assert.equal((await c.fetch("/charges/"+chargeId+"/checkout",{quote_revision:expired.supplemental_charge.quote_revision},"POST",409)).error.code,"QUOTE_EXPIRED");
+  const key=randomUUID();
+  const renewals=await Promise.all([1,2].map(()=>c.fetch(renewPath,renewBody,"POST",200,key)));
+  assert.deepEqual(renewals[0],renewals[1]);
+  const newScope=await readScope(renewals[0].scope_revision_id);
+  assert.equal(newScope.revision,expired.revision+1);
+  assert.equal(newScope.adjustment_cents,expired.adjustment_cents);
+  assert.deepEqual(newScope.proposed_positions,expired.proposed_positions);
+  assert.deepEqual(newScope.proposed_additions,expired.proposed_additions);
+  assert.equal((await readScope(expired.id)).supplemental_charge.state,"inactive");
+  assert.equal(newScope.supplemental_charge.state,"open");
+  await c.fetch(renewPath,renewBody,"POST",409);
+  assert.equal((await c.fetch(path)).items.length,1);
+  assert.deepEqual((await getActions()).map(row=>[row.id,row.state]),[[newScope.id,"scope_payment_due"]]);
+  const newCharge=newScope.supplemental_charge;
+  const payment=await c.fetch("/charges/"+newCharge.id+"/checkout",{quote_revision:newCharge.quote_revision});
+  const confirmed=await c.fetch("/checkout/demo/"+payment.attempt_id,{});
+  assert.equal(confirmed.scope_revision_id,newScope.id);
+  await c.fetch("/checkout/demo/"+payment.attempt_id,{});
+  await webhook("checkout.session.async_payment_succeeded",true);
+  assert.equal((await c.fetch(path)).items.length,2);
+  assert.equal((await c.fetch(path)).price_cents,submitted.charge.amount_cents+scope.adjustment_cents);
+  assert.equal((await readScope(newScope.id)).supplemental_charge.state,"paid");
+  assert.equal((await c.fetch(path)).scope_payment,null);
+  assert.deepEqual(await getActions(),[]);
+  assert.equal((await pool.query("select count(*)::int n from order_blocks where order_id=$1 and reason='scope_payment_pending' and resolved_at is null",[draft.id])).rows[0].n,0);
+  assert.equal((await pool.query("select count(*)::int n from tickets where details->>'payment_id'=$1",[attemptId])).rows[0].n,1);
+  const bills=(await c.fetch("/me/desk?include_items=0")).bills;
+  assert(bills.some(row=>row.charge_item_id===chargeId&&row.state==="void"&&row.amount_cents===scope.adjustment_cents));
+  assert(bills.some(row=>row.charge_item_id===newCharge.id&&row.scope_revision_id===newScope.id&&row.state==="paid"));
+});
+
 test("staff order filters preserve precise pagination, dates, email and test boundaries",async()=>{
   const {c,email}=await signCustomer(),admin=await staffLogin("admin"),receiver=await staffLogin("receiving");
   const offer=(await c.fetch("/catalog")).offers.find((row:{service:string})=>row.service==="inspection");

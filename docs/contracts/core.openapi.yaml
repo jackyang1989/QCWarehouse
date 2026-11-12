@@ -2369,6 +2369,60 @@ paths:
                   type: integer
                   minimum: 1
               additionalProperties: false
+  /scope-revisions/{id}/renew-payment:
+    post:
+      operationId: renewScopeSupplement
+      summary: 客户在原订单确认相同范围及差额，为已过期的补款建立新版本
+      security:
+      - cookieSession: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [scope_revision_id, state]
+                properties:
+                  scope_revision_id:
+                    type: string
+                    format: uuid
+                  state:
+                    const: awaiting_supplemental_payment
+                additionalProperties: false
+        default:
+          description: See stable HTTP error codes in §7.2
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-roles:
+      - customer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [charge_item_id]
+              properties:
+                charge_item_id:
+                  type: string
+                  format: uuid
+              additionalProperties: false
   /orders/{id}/report/versions/{n}/pdf:
     get:
       operationId: reportPDF

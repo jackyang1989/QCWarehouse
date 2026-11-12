@@ -176,6 +176,10 @@ export function billingChargePath(id:string) {
   return "/account/billing?charge="+charge+"#charge-"+charge;
 }
 
+export function inspectionScopePath(orderNumber:string,scopeId:string) {
+  return "/orders/"+encodeURIComponent(orderNumber)+"#scope-"+encodeURIComponent(scopeId);
+}
+
 export function staffDestination(path:string|null|undefined,roles:readonly string[]) {
   const url=localPortalUrl(path);
   const route=url&&resolvePortalRoute(url.pathname);
