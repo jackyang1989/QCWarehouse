@@ -1313,13 +1313,13 @@ export function NewOrder({customerId}:{customerId:string}) {
               const isServiceAvailable=matchingOffers.length>0;
               const unitPrices=matchingOffers.map(o=>o.rules.unit_cents).filter((x):x is number=>x!=null);
               const pkgPrices=matchingOffers.map(o=>o.rules.package_cents).filter((x):x is number=>x!=null);
+              const lowestUnit=Math.min(...unitPrices),highestUnit=Math.max(...unitPrices);
+              const lowestPackage=Math.min(...pkgPrices),highestPackage=Math.max(...pkgPrices);
               const priceText=unitPrices.length>0
-                ?`${usd(Math.min(...unitPrices))} / item`
-                :pkgPrices.length>1
-                  ?`${usd(Math.min(...pkgPrices))}–${usd(Math.max(...pkgPrices))} / set`
-                  :pkgPrices.length===1
-                    ?`${usd(pkgPrices[0])} / set`
-                    :"Available";
+                ?`${lowestUnit<highestUnit?"From ":""}${usd(lowestUnit)} / item`
+                :pkgPrices.length>0
+                  ?`${usd(lowestPackage)}${lowestPackage<highestPackage?"–"+usd(highestPackage):""} / set`
+                  :isServiceAvailable?"Quote on request":"Not available";
               const isSelected=serviceKind===card.service;
               return <button
                 key={card.service}
@@ -2873,6 +2873,20 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     if(value) orderParams.set(key,value);
   }
   const orderList=useLoad(path==="/orders"?"/me/orders?"+orderParams:null);
+  const caseParams=new URLSearchParams();
+  for(const key of ["q","state","page"]) {
+    const value=search.get(key);
+    if(value)caseParams.set(key,value);
+  }
+  const caseList=useLoad(path==="/support"?"/me/cases?"+caseParams:null);
+  function supportPage(page:number) {
+    const params=new URLSearchParams(caseParams);
+    if(page>1)params.set("page",String(page));
+    else params.delete("page");
+    const parcel=search.get("parcel");
+    if(parcel)params.set("parcel",parcel);
+    return "/support"+(params.size?"?"+params:"");
+  }
   const isItems=path==="/items",isBills=path==="/account/billing";
   const itemFilter=search.get("filter")??"all";
   const itemPage=Number(search.get("page")??1);
@@ -3252,7 +3266,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
             ...(category?{category}:{}),...(parcelId?{parcel_id:parcelId}:{}),
           });
           setCreatedCase(result);
-          reload();
+          caseList.reload();
         }}>
           <Select name="category" label="Issue type" required={false} choices={[
             {id:"receipt_mismatch",label:"Received items do not match"},
@@ -3270,14 +3284,33 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         {createdCase&&<p role="status">Case <Link href={"/support/cases/"+createdCase.id}>{createdCase.public_no}</Link> opened.</p>}
       </Panel>
       <Panel title="My support cases">
-        <Table headers={["Case","Subject","Issue type","Order","Status","Last update"]} rows={data.tickets.map((t:Row)=>[
+        <form action="/support" method="get" className="form inline-form" key={caseParams.get("q")+":"+caseParams.get("state")}>
+          {search.get("parcel")&&<input type="hidden" name="parcel" value={search.get("parcel")!}/>}
+          <Field name="q" label="Case or order number" required={false} value={caseParams.get("q")??""}/>
+          <label>Case status<select name="state" defaultValue={caseParams.get("state")??""}>
+            <option value="">All statuses</option><option value="open">Open</option>
+            <option value="waiting_customer">Awaiting your reply</option><option value="waiting_internal">With support</option>
+            <option value="resolved">Resolved</option><option value="closed">Closed</option>
+          </select></label>
+          <button type="submit" className="button">Find cases</button>
+        </form>
+        {caseList.error&&<><ErrorBlock error={caseList.error}/><button type="button" onClick={caseList.reload}>Retry</button></>}
+        {!caseList.error&&!caseList.data&&<p role="status">Loading support cases…</p>}
+        {!caseList.error&&caseList.data&&<Table headers={["Case","Subject","Issue type","Order","Status","Last update"]} rows={caseList.data.rows.map((t:Row)=>[
           <Link className="code" id={"case-"+t.id} href={"/support/cases/"+t.id}>{t.public_no}</Link>,
           t.subject,
           t.category?label(t.category):"General",
           t.order_no?<Link className="code-btn" href={"/orders/"+t.order_no}>{t.order_no}</Link>:"—",
-          <Tag tone={t.state==="waiting_customer"?"yellow":t.state==="closed"||t.state==="resolved"?"gray":"blue"}>{t.state==="waiting_customer"?"Awaiting your reply":label(t.state)}</Tag>,
+          <Tag tone={t.state==="waiting_customer"?"yellow":t.state==="closed"||t.state==="resolved"?"gray":"blue"}>
+            {t.state==="waiting_customer"?"Awaiting your reply":t.state==="waiting_internal"?"With support":label(t.state)}
+          </Tag>,
           stamp(t.updated_at??t.created_at),
-        ])} empty="No support cases yet."/>
+        ])} empty={caseParams.get("q")||caseParams.get("state")?"No support cases match these filters.":"No support cases yet."}/>}
+        {caseList.data&&(caseList.data.page>1||caseList.data.has_more)&&<nav className="actions" aria-label="Support case pages">
+          {caseList.data.page>1&&<Link className="button sm" href={supportPage(caseList.data.page-1)}>Previous</Link>}
+          <span>Page {caseList.data.page}</span>
+          {caseList.data.has_more&&<Link className="button sm" href={supportPage(caseList.data.page+1)}>Next</Link>}
+        </nav>}
       </Panel></>}
     <CustomerTrackingDrawer target={trackTarget} onClose={()=>setTrackTarget(null)}/>
     <CustomerItemDrawer item={itemTarget} onClose={()=>{

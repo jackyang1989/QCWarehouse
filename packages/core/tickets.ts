@@ -13,6 +13,11 @@ export const publicInquiry=z.object({
   description:z.string().trim().min(1).max(1000),
 });
 export const customerTicketMessage=z.object({revision:version,body});
+export const customerCaseQuery=z.object({
+  q:z.string().trim().max(80).default(""),
+  state:z.enum(["open","waiting_customer","waiting_internal","resolved","closed"]).optional(),
+  page:z.coerce.number().int().min(1).max(10000).default(1),
+});
 export const staffTicketEvent=z.discriminatedUnion("kind",[
   z.object({kind:z.literal("claim"),revision:version}),
   z.object({kind:z.literal("assign"),revision:version,assignee_id:z.uuid().nullable(),body:body.optional()}),
@@ -110,6 +115,18 @@ export async function canReadCasePhoto(db:DB,actor:Actor,id:string) {
   const match=await db.query(`select 1 from ticket_events e join tickets k on k.id=e.ticket_id
     where $1=any(e.media_ids) and ($2::boolean or k.org_id=$3 and e.kind='message') limit 1`,[id,staff,org]);
   return !!match.rowCount;
+}
+
+export async function customerCaseHistory(db:DB,actor:Actor,{q,state,page}:z.infer<typeof customerCaseQuery>) {
+  const pageSize=20;
+  const {rows}=await db.query(`select k.id,k.public_no,k.subject,k.category,k.state,k.created_at,o.public_no order_no,
+      greatest(k.created_at,k.resolved_at,(select max(e.created_at) from ticket_events e
+        where e.ticket_id=k.id and e.kind='message')) updated_at
+    from tickets k left join orders o on o.id=k.order_id and o.org_id=k.org_id
+    where k.org_id=$1 and ($2::text is null or k.state=$2)
+      and ($3='' or strpos(upper(k.public_no),upper($3))>0 or strpos(upper(o.public_no),upper($3))>0)
+    order by updated_at desc,k.id desc limit $4 offset $5`,[organization(actor),state??null,q,pageSize+1,(page-1)*pageSize]);
+  return {rows:rows.slice(0,pageSize),page,has_more:rows.length>pageSize};
 }
 export async function staffTicketQueue(
   db:DB,

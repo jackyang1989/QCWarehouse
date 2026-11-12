@@ -21,7 +21,7 @@ import { staffAccess } from "./staff-access";
 import { customerDestination, withDestination } from "./portal-routes";
 import { orderFulfillmentRecord } from "./fulfillment-reads";
 import { renewScopeSupplement } from "./operations";
-import { canReadCasePhoto, caseDetail, createPublicInquiry, customerTicketMessage, inquiryCategories, publicInquiry, replyToCase, staffTicketEvent, staffTicketQueue, writeStaffTicket } from "./tickets";
+import { canReadCasePhoto, caseDetail, createPublicInquiry, customerCaseHistory, customerCaseQuery, customerTicketMessage, inquiryCategories, publicInquiry, replyToCase, staffTicketEvent, staffTicketQueue, writeStaffTicket } from "./tickets";
 import { approveDisposalCase, approveIncidentResolution, approveStocktake, createDisposalCase, createIncident, createLocations, createStocktake, customerReadIncident, customerRespondIncident, executeDisposalCase, listIncidents, listOverdueAndRestrictedQueue, listStocktakes, locationBatchSchema, locationMaster, proposeIncidentResolution, resolveIncidentCompensation, scanStocktakeItem, setLocationActive, storageMovementDesk, submitStocktake } from "./storage";
 import { acceptScope, approveCapability, cancelOrder, computeOrderRefundStage, configureLegalEntity, convertOrderToTwo, createCapability, createCategory, createTermsVersion, evaluateLaunchReadiness, exportCustomerPrivacyData, extendOrderArrival, holdOrder, moveItem, newTemplate, orderCaseCategory, publishSkuPrice, publishTemplate, publishTermsVersion, recordLaunchSignoff, recordRecoveryDrill, recordRehearsalRun, reportIssue, requestCustomerPrivacyAction, requestOrderAfterSales, respondOrderMismatch, resumeOrder, revokeCapability, scopeProposal, scopeReview, setAddress, setDisposalExecutionSwitch, setOfferEnabled, staffSchemas, systemHealthAndBackupCheck, updateBusinessCalendar, updateCategoryStatus, updateWarehouseAddress, upsertOffer } from "./operations";
 import { createReportShare, listPublishedReports, listReportShares, readSharedPhoto, readSharedReport, reportSharingEnabled, revokeReportShare, shareInput, shareTokenPattern } from "./report-shares";
@@ -811,6 +811,10 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   const manual=path.match(/^\/orders\/([a-f0-9-]{36})\/manual-quote-request$/i);
   if(method==="POST" && manual) return extraWrite(req,path,actor,z.object({revision:revSchema,reason:z.string().trim().min(4).max(1200)}),
     (db,a,b)=>requestManualQuote(db,a,idSchema.parse(manual[1]),b.revision,b.reason));
+  if(method==="GET" && path==="/me/cases") {
+    const query=customerCaseQuery.parse(Object.fromEntries(url.searchParams));
+    return json(await transaction(db=>customerCaseHistory(db,actorRequired(actor),query)));
+  }
   if(method==="POST" && path==="/me/cases") {
     const schema=z.object({subject:z.string().trim().min(2).max(150),message:z.string().trim().min(2).max(2000),
       order_id:idSchema.optional(),category:orderCaseCategory.optional(),parcel_id:idSchema.optional()});

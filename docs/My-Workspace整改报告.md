@@ -2,7 +2,7 @@
 
 2026-11-11 至 2026-11-12 · 基线 `34d66aa` · 续做基线 `f972f2b` · 本地工程验收
 
-本轮续接已有七个未提交文件中的客户工作台改动。原 `.env` 指向的开发库和测试库共用一个已经不存在的本地 socket。验证改用本机 PostgreSQL 的独立数据库，分别执行空库关系校验、全量集成及 Chrome。目录、仓址、凭证、运单、图片、支付和角色账号均为隔离夹具。测试未触发外部实物操作或真实交易。
+本轮续接已有七个未提交文件中的客户工作台改动。原 `.env` 指向的开发库和测试库共用一个已经不存在的本地 socket。`.env` 保持原配置，验证使用本机 PostgreSQL 的独立数据库，分别执行空库关系校验、全量集成及 Chrome。目录、仓址、凭证、运单、图片、支付和角色账号均为隔离夹具。测试未触发外部实物操作或真实交易。
 
 ## 实际路由与页面审查
 
@@ -19,7 +19,7 @@
 | 实物 | `/items`，实物使用 `?item={code}` 打开抽屉，兼容 `#item-{code}` | 实物编号、所属委托、检查与保管状态。按实物提交不同去向，支持退商家、集运、续存和确认样。待封存状态独立展示 | 每页 20 件，统计与筛选来自全部本人库存。选择跨页保留，提交后回读真实逐件指令 |
 | 账单 | `/account/billing`，兼容 `/billing`，用 `?charge={id}` 定位具体收费 | 分开待确认报价、收费和退款。按入账或报价接受时间展示，区分测试付款。订单、待办或通知可直接定位本人历史收费。退货、发运和续存收费显示其关联订单 | Stripe 沙盒及正式主体收据验收 OPEN |
 | 通知 | `/account/notifications`，兼容 `/notifications` | 所属对象深链，已读写回，未读计数、游标分页。付款、入库、报告和封存使用现有事件去重键 | 邮件与实际承运商事件联调 OPEN |
-| 支持 | `/support`、`/support/cases/{id}` | 创建真实工单、显示工单号、历史及公开对话、客户回复及证据附件。内部备注经过服务端过滤 | 可从本人包裹进入工单，创建时附照片，客户与授权客服可查看。客户自行关闭或重新开启 NEEDS_BUSINESS_DECISION |
+| 支持 | `/support`、`/support/cases/{id}` | 创建工单、按工单号或订单号查找、按状态筛选并分页。旧工单有公开回复时排到前面，详情支持公开对话、客户回复及证据附件 | 可从本人包裹进入工单，创建时附照片，客户与授权客服可查看。客户自行关闭或重新开启 NEEDS_BUSINESS_DECISION |
 | 账户安全 | `/account/security` | 邮箱、登录方式、设备、敏感操作重新认证、导出与账户关闭。永久码显示于账户与安全页面 | 可编辑昵称与显示时区，服务端验证并应用于工作台日期。语言与通知偏好未有对应设置工作流 |
 | 测试收银台 | `/checkout/demo/{id}` | 隔离模式确认真实数据库收费记录。付款后回到原检验订单。客户隔离与重复确认由服务端验证 | Stripe 沙盒及正式验收 OPEN |
 
@@ -51,6 +51,7 @@ flowchart TD
 | 404 后停在报价计算 | HEAD 创建草稿得到 `id`，向导读取了 `created.order_id`，随后 GET `/api/v1/orders/undefined`。真正报价为 `POST /api/v1/orders/{id}/quotes`，接收 `revision`，需客户会话、同源 CSRF 及幂等键，成功返回 201。编辑时备注字段亦与 OpenAPI 有差异 | 从创建或编辑 DTO 直接取得 ID 和 revision，省去中间 GET。新建省略空备注，PATCH 支持保留和清空。报价超时、HTTP 错误和过期分别反馈，Retry 继续同一草稿。正式报价失败的 Review 不展示旧估价 |
 | 服装检查点混用 | 通用演示模板保存基础项目及带 `applies_if` 的专项点。历史客户端直接列 Offer 内容，显示范围没有复用仓库条件。专项 Offer 和三件通用对比的数量条件也不同 | 依据已发布模板元数据绑定，不以 SKU 字符串推断模板。预览与仓库复用条件规则。草稿可附带已审阅模板版本，旧版冲突和专项品类不符被服务器拒绝 |
 | 15 mm 自动公差 | HEAD 把输入初始为 15，保存为 `tolerances.dimension_mm`。报告判定读取带检查点、最小值、最大值和单位的数组。旧字段并未提供有效逐点判定 | 默认只记录实测。逐点填写目标值和公差，单位沿用模板。已发布报告和历史订单原值不变 |
+| 服务卡最低价 | 视觉复验发现第一步从目录取最低单价后直接展示为每件价格。默认已选模板的单价可能更高，摘要据此计算 | 有不同有效单价时显示 `From`。套餐根据有效报价显示固定价或区间，未开放服务标为不可用。摘要仍按当前模板与数量估算 |
 | 双六步导航和摘要操作拥挤 | HEAD 同时有 New Inspection 专属侧栏和正文进度组件。HEAD 源码可确认摘要、页头、报价区存在重叠操作语义。历史截图的第二份摘要实例没有独立部署证据 | 删除向导侧栏及跨组件步骤事件。统一步骤编号，保留唯一摘要与保存入口，重置需确认。Chrome 断言唯一进度和摘要 |
 | 共享页头和窄表格 | 初次 Chrome 矩阵测到演示页头把退出按钮挤出视口，通知和账单内容在手机出现严重断词 | 调整客户页头断点，保留账户退出和移动导航。客户密集表格以字段卡片显示。报告比较表保留可横向滚动的列 |
 | 出库批次运单入口失效 | 客户批次读取返回运单字符串和扁平报价字段，组件将其当成带 ID 的对象和嵌套报价。Chrome 暴露出缺失 React key，按钮也拿不到运单对象 | 服务端增加已交接运单 ID 与号码，保留原字段兼容。列表用正确的报价字段，运单打开真实客户物流详情 |
@@ -64,6 +65,7 @@ flowchart TD
 | 窄屏卡片文字 | 375 px 实拍发现付款状态和长实物编号在卡片内被截断，即使整页宽度正常。客户状态和编号现在可在各自单元格内换行 | 复核 375 px 原图；Chrome 在移动截图同时检查状态和编号的文本边界，比较报告保留可滚动对照表 |
 | 大批量实物 | 原列表以已加载记录计算数量并截断。按本人库存分页查询并计算总量，以实物码授权打开报告关联物品 | 30 件跨两页分布、状态过滤、确认样及跨租户隔离。Chrome 两页选择提交真实续存指令 |
 | 客户支持 | 原包裹和工单分开，首条消息无法提交证据。工单现在可带已授权入库运单和首条私有照片 | Chrome 从真实包裹提单与查看关联，真实工单/照片数据库记录和跨租户拦截 |
+| 工单历史 | 原列表只读取最近创建的 100 条，旧工单的新回复可能被遗漏。客户列表现按客户可见更新排序，可按状态和工单号或订单号查找，每页 20 条 | 隔离库验证 101 条分页、相同时间稳定排序、旧工单公开回复后前移、内部备注不改变排序及跨客户不可见。Chrome 验证翻页、详情、返回和筛选 |
 | 资料和地址 | 显示时区原来无写入端。客户设置持久化到现有用户字段，登录方式、邮箱和接收码照常使用。地址提示由真正的默认地址变更审计产生 | Chrome 保存与重开资料、订单日期显示。数据库核验过往包裹地址快照、换址、重复设置和新注册账户 |
 | 人工报价续询 | 原报价过期后旧申请仍挡住续询，超量订单接受报价后也不能用自动报价恢复。现可在原草稿或未付款原单续询，待办、账单、员工队列和通知按当前可用报价更新 | 隔离数据库核对过期、处理中付款守卫、旧收费金额留档及替换、跨客户隔离。Chrome 验证续询到同单付款 |
 | 运费与续存重报 | 已接受的履约报价过期后，客户详情仍提供付款，仓管也不能在原对象续报。现由原发运队列或续存队列重新出具版本，旧收费保留历史。渠道会话未决时继续等待核对，账单及待办只提供有效报价，续存出价有站内通知 | 隔离数据库核对签名会话到期、重复与迟到款对账、报价通知去重及一次续存入账；Chrome 验证仓管出价和客户在同一批次或指令上付款 |
@@ -106,7 +108,7 @@ flowchart TD
 - **NEEDS_BUSINESS_DECISION** 既有确认样接口的精确库位字段属于 NEW 回归保护范围。新增库存列表与实物抽屉使用已裁剪的客户字段。若需停发旧字段，应同时更新受保护的调用契约及验收用例。
 - **NEEDS_BUSINESS_DECISION** 客户是否可主动关闭或重开工单，以及质检、索赔、退款和认领关联工单的限制。现有规则由授权客服结案，客户在开放工单内回复。
 - **OPEN** 未委托包裹没有独立的供应商或逐件申报字段。已关联订单的预计数据从在范围内的逐件申报读取。全站切换语言与通知偏好无现成客户设置工作流，待确认支持范围。
-- **OPEN** 原项目数据库配置经只读连接预检返回 `ENOENT`。恢复项目数据库连接后才能核对正式目录、客户数据及历史草稿。集成和截图使用隔离副本。供应商配置预检也确认 Stripe 沙盒、Postmark 和快递100未配置。
+- **OPEN** 原项目数据库配置经只读连接预检返回 `ENOENT`。当前 PostgreSQL 实例没有原配置的 `qcw_dev`。已有 `qcw_test-workspace-final` 的只读核对得到 77 单、50 个包裹、134 件实物、12 份已发布报告和 91 个用户，所有主邮箱记录均属于 `@qcw.test`。该库是隔离测试快照，正式目录、历史草稿及原客户数据仍待以原项目连接核对。本轮续验使用单独的测试库和浏览器副本。Stripe 沙盒、Postmark 和快递100未配置。
 - 续验责任与恢复条件：环境维护方恢复原项目数据库的授权连接；支付、邮件和物流集成负责人在隔离环境配置各自的供应商测试接入；仓库验收人提供可实际扫描、收货和交接的测试单与设备；业务负责人确认正式地址、条款、目录、交期、晚到款、包裹证据发布和工单规则后，按各原 TASK 继续验收。
 
 | 外部续验 | 开始条件 | 应留存的证据 |
@@ -122,24 +124,30 @@ flowchart TD
 | --- | --- | --- |
 | `npm run check` | 0 | TypeScript 检查通过 |
 | `npm run build` | 0 | Next.js 生产构建通过 |
-| `python3 docs/contracts/check.py` | 0 | 44 个交易操作，174 个 TASK，69 张页面，111 个实施用例，46 个产品门禁 |
-| `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-final npm run test:integration` | 0 | 60/60，含 AUD-001–015、NEW-001–011、人工报价续询、运费与续存重报、过期付款链接、Stripe 会话恢复和签名回调、账单与收据归属、库存与包裹、资料持久化及原有履约全链 |
-| `psql -h 127.0.0.1 -d qcw_workspace_contract -v ON_ERROR_STOP=1 -f docs/contracts/verify.sql` | 0 | 迁移 001–008 后在未播种的空库运行，关系断言通过 |
-| `QCW_BROWSER_WORKSPACE_ONLY=1 node tests/workspace.browser.mjs` | 0 | 最终 Chrome 复验覆盖 1440、1280、1024、768、390 和 375 px，客户与两种员工角色，33 个页面或状态共 198 张截图，整页横向溢出为 0。核对窄屏编号和状态、新客户八个模块的真实空状态、收费焦点及隔离 |
+| `python3 docs/contracts/check.py` | 0 | 45 个交易操作，174 个 TASK，69 张页面，111 个实施用例，46 个产品门禁 |
+| `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-scope npm run test:integration` | 0 | 62/62，含 AUD-001–015、NEW-001–011、人工报价续询、运费与续存重报、范围补款、Stripe 签名回调、账单与收据归属、资料持久化、工单历史和原有履约全链 |
+| `psql -h 127.0.0.1 -d qcw_test-workspace-continuation-relations -v ON_ERROR_STOP=1 -f docs/contracts/verify.sql` | 0 | 迁移 001–008 后在未播种的空库运行，关系断言通过 |
+| `QCW_BROWSER_WORKSPACE_ONLY=1 node tests/workspace.browser.mjs` | 1 | 新客户、报价恢复、隔离付款和重放、跨页实物处置断言通过，采集 157 张原图后在等待 390 px 订单详情导航完成时超时。原图和逐图断言保留 |
+| `QCW_BROWSER_RESUME_MATRIX=1 node tests/workspace.browser.mjs` | 0 | 在同一隔离副本补齐 41 张。完整矩阵覆盖 1440、1280、1024、768、390 和 375 px，33 个页面或状态共 198 张截图，整页横向溢出为 0。移动导航、历史 PDF、客户隔离及审核员和质检员的角色隔离通过 |
 | `QCW_BROWSER_RECOVERY_ONLY=1 node tests/workspace.browser.mjs` | 0 | 创建响应丢失后重放、断网刷新、恢复联网后服务端保存、双标签页冲突和人工确认后保存。分别断言离线无写入、重连后写入和禁止覆盖较新版本 |
-| `QCW_BROWSER_NEW_CUSTOMER_ONLY=1 node tests/workspace.browser.mjs` | 0 | Checkout 修复后复跑新客户、报价、付款和重放，六种宽度共 36 张截图，整页横向溢出为 0 |
+| `QCW_BROWSER_WORKSPACE_ONLY=1 QCW_BROWSER_NEW_CUSTOMER_ONLY=1 node tests/workspace.browser.mjs` | 0 | 最终复跑新客户、目录起价、报价、付款和重放。六档共 48 张替换工作台对应原图，整页横向溢出为 0 |
 | `QCW_BROWSER_MANUAL_QUOTE_ONLY=1 node tests/workspace.browser.mjs` | 0 | 草稿及原单付款的人工报价过期、员工队列、账单回原单确认并付款。六种宽度共 18 张截图，整页横向溢出为 0 |
 | `QCW_BROWSER_FULFILLMENT_ONLY=1 node tests/workspace.browser.mjs` | 0 | 发运和续存已接受报价过期、仓管重新报价、客户付款、跨租户读取拦截。六种宽度共 18 张截图，整页横向溢出为 0 |
 | `node tests/workspace.browser.mjs`（`65742cd`） | 0 | 在新隔离数据库副本上重新执行完整 Chrome 回归，草稿恢复与全页矩阵在同一次运行通过。六档宽度、33 个页面或状态、198 张原图，整页横向溢出为 0 |
 | `QCW_BROWSER_SCOPE_ONLY=1 node tests/workspace.browser.mjs` | 0 | 范围补款过期、账单与待办深链、重新确认、付款回跳、跨客户隔离。六种宽度共 12 张原图，整页横向溢出为 0 |
+| `QCW_BROWSER_SUPPORT_ONLY=1 node tests/workspace.browser.mjs` | 0 | 工单翻页、按编号和状态筛选、返回历史及跨客户隔离。六种宽度共 6 张原图，整页横向溢出为 0 |
 | `npm run integrations:check` | 0 | 本机配置预检。Stripe、Postmark、快递100尚无可用的沙盒配置 |
 
-本机 Chrome 截图原图、视口断言与索引随最新验收包 `qcw-workspace-verified-65742cd.zip` 交付，共 198 张全页截图及 18 张履约重报截图。独立续询日志为 `qcw-workspace-manual-renewal-browser.log`，最后一次集成、构建和关系校验日志为 `qcw-workspace-fulfillment-integration.log`、`qcw-workspace-fulfillment-build.log` 和 `qcw-workspace-fulfillment-relations.log`。日志和截图未纳入代码仓库。
+本机 Chrome 截图原图、视口断言、命令日志及 `index.html` 位于本轮持久交付目录 `qcwarehouse-acceptance-2026-11-12`。验收包和索引包含 198 张工作台全页截图、12 张范围补款、6 张工单历史、18 张人工报价续询及 18 张发运和续存重报截图，五组整页横向溢出均为 0。截图工具按页面可见加载状态等待，对长报告分段捕获并拼接为完整原图。验收包保留前次捕获超时及磁盘空间不足的诊断日志。截图和日志未纳入代码仓库。
 
 运行 Chrome 测试时在隔离演示实例设置 `QCW_BROWSER_URL` 与 `QCW_BROWSER_EVIDENCE`。Playwright 可安装到临时目录，并以 `QCW_PLAYWRIGHT_MODULE` 指向它的入口。`QCW_BROWSER_FIXTURE_EMAIL` 使用集成库中有已发布报告、历史版本、入仓、出库和工单的 `@qcw.test` 账号，以保存非空页面。`QCW_BROWSER_INVENTORY_EMAIL` 使用至少 21 件待指示实物的夹具账号。跨页回归会为两件实物创建真实测试续存指令，请在独立数据库副本运行。`QCW_BROWSER_COMPARISON_EMAIL` 使用已有发布对比报告的客户夹具。脚本会为新客户走 OTP 和注册，现有隔离角色可用开发环境登录签发真实会话。
 
-履约重报模式使用与本机应用一致的 `QCW_BROWSER_DATABASE_URL`（仅接受 `127.0.0.1` 上的 `qcw_test-*`）和有至少两件待指示实物的 `QCW_BROWSER_INVENTORY_EMAIL`，缩短新建测试报价的有效期以复现真实过期。截图原图及日志位于 `qcw-workspace-fulfillment-browser` 和 `qcw-workspace-fulfillment-browser.log`。
+履约重报模式使用与本机应用一致的 `QCW_BROWSER_DATABASE_URL`（仅接受 `127.0.0.1` 上的 `qcw_test-*`）和有至少两件待指示实物的 `QCW_BROWSER_INVENTORY_EMAIL`，缩短新建测试报价的有效期以复现真实过期。范围补款回归同样只在浏览器副本缩短测试快照的有效期。
 
-范围补款回归使用新建的 `qcw_test-workspace-scope`，完整集成 61/61 通过，类型检查、构建、45 个 OpenAPI 操作和空库关系检查均退出 0。Chrome 用该库的独立副本及同样的 `QCW_BROWSER_DATABASE_URL` 参数写入过期测试快照。日志和 12 张原图位于 `qcw-workspace-scope-integration.log`、`qcw-workspace-scope-build.log`、`qcw-workspace-scope-relations.log`、`qcw-workspace-scope-browser.log` 与 `qcw-workspace-scope-browser`。
+最新全量集成在 `qcw_test-workspace-scope` 执行。Chrome 使用该库的独立副本，专项复验使用 `qcw_test-workspace-continuation-visual`，完整页面矩阵使用 `qcw_test-workspace-continuation-chrome-final`。两次续验均保留已有 `qcw_test-workspace-final` 快照。本地预览 `http://localhost:3000/` 由 `qcw_workspace_local` 提供演示数据。
+
+集成库的箱包、家居及鞋类使用测试能力审批。截图中的可售状态由该目录产生。正式可售品类仍以原项目已发布目录为准。
+
+验收期间本机 PostgreSQL 重新启动，浏览器副本一度因 `outbox_events_pkey` 冲突拒绝注册。注册事务回滚，随后用新测试客户从 OTP、同意当前条款到领码重新验证，注册和收件资料请求均返回 200。该复验未修改注册逻辑、数据库结构或原库配置。
 
 验收状态及回退见 [开发排期与任务台账](开发排期与任务台账.md)。提交号可用 `git log -1 -- docs/My-Workspace整改报告.md` 核对。

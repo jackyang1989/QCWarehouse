@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import sharp from "sharp";
 
+sharp.cache(false);
 const { chromium } = await import(process.env.QCW_PLAYWRIGHT_MODULE ?? "playwright");
 const baseURL = process.env.QCW_BROWSER_URL ?? "http://localhost:3411";
 const origin = new URL(baseURL).origin;
@@ -12,8 +13,21 @@ assert(["localhost","127.0.0.1"].includes(new URL(origin).hostname), "Use a loca
 const out = process.env.QCW_BROWSER_EVIDENCE;
 assert(out, "Set QCW_BROWSER_EVIDENCE to an evidence directory.");
 await mkdir(out, {recursive:true});
-const browser = await chromium.launch({channel:"chrome",headless:true});
-const entries = [];
+const widths = [1440,1280,1024,768,390,375];
+const resumeMatrix = process.env.QCW_BROWSER_RESUME_MATRIX === "1";
+const entries = resumeMatrix?JSON.parse(await readFile(join(out,"viewports.json"),"utf8")):[];
+if(resumeMatrix) {
+  assert(process.env.QCW_BROWSER_FIXTURE_EMAIL?.endsWith("@qcw.test"));
+  assert(process.env.QCW_BROWSER_INVENTORY_EMAIL?.endsWith("@qcw.test"));
+  assert.notEqual(process.env.QCW_BROWSER_FIXTURE_EMAIL,process.env.QCW_BROWSER_INVENTORY_EMAIL);
+  for(const {name,width,overflow} of entries) {
+    assert(/^[a-z0-9-]+$/.test(name)&&widths.includes(width)&&overflow<=1);
+    await access(join(out,`${name}-${width}.png`));
+  }
+}
+const captured = (name,width) => entries.some(entry=>entry.name===name&&entry.width===width);
+const missingViewports = name => widths.some(width=>!captured(name,width));
+const browser = await chromium.launch({channel:"chrome",headless:true,args:["--disk-cache-size=16777216"]});
 
 async function session(email = randomUUID()+"@qcw.test", staff = false, existingFixture = false) {
   const context = await browser.newContext({baseURL,viewport:{width:1440,height:1000}});
@@ -51,10 +65,33 @@ async function session(email = randomUUID()+"@qcw.test", staff = false, existing
 const nextStep = page => page.getByRole("button",{name:/^Continue|Save & Review/}).click();
 const ready = (page, name) => page.getByRole("heading",{name}).first().waitFor();
 
+async function screenshotPage(page,path,width) {
+  const height=await page.evaluate(()=>document.documentElement.scrollHeight);
+  if(height<=12000) {
+    await page.screenshot({path,fullPage:true,animations:"disabled"});
+    return;
+  }
+  const chrome=await page.context().newCDPSession(page);
+  try {
+    const pieces=[];
+    const tileHeight=4096;
+    for(let y=0;y<height;y+=tileHeight) {
+      const result=await chrome.send("Page.captureScreenshot",{format:"png",captureBeyondViewport:true,
+        clip:{x:0,y,width,height:Math.min(tileHeight,height-y),scale:1}});
+      pieces.push({input:Buffer.from(result.data,"base64"),left:0,top:y});
+    }
+    await sharp({create:{width,height,channels:3,background:"#ffffff"}}).composite(pieces).png().toFile(path);
+  } finally {await chrome.detach();}
+}
+
 async function capture(page, name, width, heading) {
   await ready(page,heading);
-  await page.waitForLoadState("networkidle");
-  await page.evaluate(async()=>{await document.fonts.ready; window.scrollTo({top:0,behavior:"instant"});});
+  await page.getByText(/^Loading(?:\s.+)?…$/).filter({visible:true}).first().waitFor({state:"hidden"});
+  await page.evaluate(async()=>{
+    await document.fonts.ready;
+    window.scrollTo({top:0,behavior:"instant"});
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  });
   const overflow = await page.evaluate(()=>document.documentElement.scrollWidth-innerWidth);
   if(overflow>1) {
     const elements=await page.evaluate(()=>[...document.querySelectorAll("body *")].flatMap(element=>{
@@ -75,12 +112,13 @@ async function capture(page, name, width, heading) {
       }));
     assert.deepEqual(clipped,[],name+" at "+width+" px clips a status or code inside a mobile table card.");
   }
-  await page.screenshot({path:join(out,name+"-"+width+".png"),fullPage:true,animations:"disabled"});
+  await screenshotPage(page,join(out,name+"-"+width+".png"),width);
   entries.push({name,width,overflow});
 }
 
 async function captureWizard(page, name, heading) {
-  for(const width of [1440,1280,1024,768,390,375]) {
+  for(const width of widths) {
+    if(captured(name,width)) continue;
     await page.setViewportSize({width,height:1000});
     await capture(page,name,width,heading);
   }
@@ -133,6 +171,7 @@ async function verifyDraftRecovery({context,page,call}, unrelated) {
   assert.match(String(offline),/INTERNET_DISCONNECTED/);
   assert.notEqual((await call(path)).customer_notes,offlineNote);
   await page.unroute(patchRoute,interrupt);
+  await page.goto("about:blank");
   await context.setOffline(false);
   await page.goto(url);
   await ready(page,/Step 4/);
@@ -144,37 +183,43 @@ async function verifyDraftRecovery({context,page,call}, unrelated) {
   }
   assert.equal(saved.customer_notes,offlineNote);
 
+  const first=await context.newPage();
   const second=await context.newPage();
-  await second.goto(url);
-  await ready(second,/Step 4/);
+  for(const tab of [first,second]) {
+    await tab.goto(url);
+    await ready(tab,/Step 4/);
+    await tab.waitForFunction(note=>document.querySelector("main textarea")?.value===note,offlineNote);
+  }
+  const localNotes=first.getByLabel(/Special/);
   const localText="Unsaved notes from the first tab";
   const otherText="Newer notes saved by the second tab";
-  await page.route(patchRoute,interrupt);
-  await notes.fill(localText);
-  await page.waitForFunction(note=>Object.values(sessionStorage).some(value=>value.includes(note)),localText);
+  await first.route(patchRoute,interrupt);
+  await localNotes.fill(localText);
+  await first.waitForFunction(note=>Object.values(sessionStorage).some(value=>value.includes(note)),localText);
   await second.getByLabel(/Special/).fill(otherText);
   await second.getByRole("button",{name:"Update Saved Draft"}).click();
   await second.getByText(new RegExp(`Draft ${initialDraft.public_no} saved`)).waitFor();
   const newer=await call(path);
   assert(newer.revision>saved.revision);
   assert.equal(newer.customer_notes,otherText);
-  await page.unroute(patchRoute,interrupt);
-  const conflict=page.getByText(/This draft changed in another window/);
+  await first.unroute(patchRoute,interrupt);
+  const conflict=first.getByText(/This draft changed in another window/);
   if(!await conflict.isVisible()) {
-    try {await page.getByRole("button",{name:"Update Saved Draft"}).click({timeout:3000});}
+    try {await first.getByRole("button",{name:"Update Saved Draft"}).click({timeout:3000});}
     catch(error) {if(!await conflict.isVisible()) throw error;}
   }
   await conflict.waitFor();
   assert.equal((await call(path)).revision,newer.revision);
-  await page.reload();
-  await page.getByRole("button",{name:"Review my unsaved edits"}).waitFor();
-  assert.equal(await notes.inputValue(),otherText);
-  await page.getByRole("button",{name:"Review my unsaved edits"}).click();
-  assert.equal(await notes.inputValue(),localText);
+  await first.reload();
+  await first.getByRole("button",{name:"Review my unsaved edits"}).waitFor();
+  assert.equal(await localNotes.inputValue(),otherText);
+  await first.getByRole("button",{name:"Review my unsaved edits"}).click();
+  assert.equal(await localNotes.inputValue(),localText);
   assert.equal((await call(path)).revision,newer.revision);
-  await page.getByRole("button",{name:"Update Saved Draft"}).click();
-  await page.getByText(new RegExp(`Draft ${initialDraft.public_no} saved`)).waitFor();
+  await first.getByRole("button",{name:"Update Saved Draft"}).click();
+  await first.getByText(new RegExp(`Draft ${initialDraft.public_no} saved`)).waitFor();
   assert.equal((await call(path)).customer_notes,localText);
+  await first.close();
   await second.close();
   console.log("PASS draft request replay after response loss, offline reload, two-tab revision conflict and explicit save");
 }
@@ -420,10 +465,43 @@ async function verifyScopeRenewal({page,call,errors},other) {
   } finally {await db.end();}
 }
 
+async function verifySupportHistory({page,call,errors},other) {
+  const history=[];
+  for(let index=0;index<21;index++) {
+    history.push(await call("/me/cases",{body:{subject:`Support history fixture ${index+1}`,message:"A message in the local support history fixture."}}));
+  }
+  const oldest=history[0];
+  await page.goto("/support");
+  const pager=page.getByRole("navigation",{name:"Support case pages"});
+  await pager.getByRole("link",{name:"Next"}).click();
+  await page.waitForURL("**/support?page=2");
+  const oldLink=page.getByRole("link",{name:oldest.public_no,exact:true});
+  await oldLink.waitFor();
+  await captureWizard(page,"support-history-page-two","My support cases");
+  await oldLink.click();
+  await ready(page,"Support history fixture 1");
+  await page.goBack();
+  await oldLink.waitFor();
+  await page.getByLabel("Case or order number").fill(oldest.public_no.toLowerCase());
+  await page.getByLabel("Case status").selectOption("open");
+  await page.getByRole("button",{name:"Find cases"}).click();
+  await page.waitForURL(url=>url.searchParams.get("q")===oldest.public_no.toLowerCase()&&url.searchParams.get("state")==="open");
+  await oldLink.waitFor();
+  assert.equal(await page.getByRole("row").count(),2);
+  assert.equal((await other.call("/me/cases?q="+oldest.public_no)).rows.length,0);
+  await other.page.goto("/support?q="+oldest.public_no);
+  await other.page.getByText("No support cases match these filters.").waitFor();
+  assert.deepEqual(errors,[]);
+  assert(entries.every(entry=>entry.overflow<=1));
+  console.log("PASS support history pagination, case search, browser back, and customer isolation");
+}
+
 try {
-  const customer = await session();
-  const other = await session();
-  if(process.env.QCW_BROWSER_SCOPE_ONLY==="1") await verifyScopeRenewal(customer,other);
+  const customer = await session(resumeMatrix?process.env.QCW_BROWSER_FIXTURE_EMAIL:undefined,false,resumeMatrix);
+  const other = await session(resumeMatrix?process.env.QCW_BROWSER_INVENTORY_EMAIL:undefined,false,resumeMatrix);
+  if(resumeMatrix) await verifyWorkspaceViews(customer,other);
+  else if(process.env.QCW_BROWSER_SUPPORT_ONLY==="1") await verifySupportHistory(customer,other);
+  else if(process.env.QCW_BROWSER_SCOPE_ONLY==="1") await verifyScopeRenewal(customer,other);
   else if(process.env.QCW_BROWSER_FULFILLMENT_ONLY==="1") await verifyFulfillmentRenewal(other);
   else if(process.env.QCW_BROWSER_MANUAL_QUOTE_ONLY==="1") await verifyManualQuoteRenewal(customer,other);
   else {
@@ -434,8 +512,8 @@ try {
     if(process.env.QCW_BROWSER_RECOVERY_ONLY!=="1") await verifyWorkspace(customer,other,profile,otherProfile);
   }
 } finally {
-  await writeFile(join(out,"viewports.json"),JSON.stringify(entries,null,2)+"\n");
   await browser.close();
+  await writeFile(join(out,"viewports.json"),JSON.stringify(entries,null,2)+"\n");
 }
 
 async function verifyWorkspace(customer,other,profile,otherProfile) {
@@ -447,6 +525,14 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
   assert.equal(await page.getByRole("navigation",{name:"Inspection setup steps"}).count(),1);
   assert.equal(await page.locator(".wizard-side").count(),1);
   assert.equal(await page.getByRole("radio",{name:/Electronics/}).isDisabled(),true);
+  const {offers}=await call("/catalog");
+  const apparelPrices=offers.filter(offer=>offer.category_slug==="apparel"&&offer.service==="inspection")
+    .map(offer=>offer.rules.unit_cents).filter(Number.isFinite);
+  const lowestPrice=Math.min(...apparelPrices);
+  assert(lowestPrice<Math.max(...apparelPrices),"The apparel fixture must have different per-item prices.");
+  const formattedPrice=new Intl.NumberFormat("en-US",{style:"currency",currency:"USD"}).format(lowestPrice/100);
+  await page.getByRole("radio",{name:/Product Inspection/}).getByText(`From ${formattedPrice} / item`,{exact:true}).waitFor();
+  if(process.env.QCW_BROWSER_NEW_CUSTOMER_ONLY==="1") await captureWizard(page,"new-inspection",/Step 1/);
   await nextStep(page);
   await page.getByLabel("Inspection template").selectOption("leggings");
   await captureWizard(page,"wizard-configure",/Step 2/);
@@ -607,9 +693,13 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
     assert(entries.every(entry=>entry.overflow<=1),"A screenshot page has horizontal overflow.");
     return;
   }
+  await verifyWorkspaceViews(customer,other);
+}
 
+async function verifyWorkspaceViews(customer,other) {
   const fixtureEmail = process.env.QCW_BROWSER_FIXTURE_EMAIL;
   const fixture = fixtureEmail?await session(fixtureEmail,false,true):customer;
+  if(fixture!==customer) await customer.page.close();
   const desk = await fixture.call("/me/desk");
   const published = (await fixture.call("/me/reports?latest=1")).rows[0];
   const caseId = desk.tickets[0]?.id;
@@ -640,7 +730,7 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
   if(orderQuote) paths.push(["order-quote","/orders/"+chosenOrder.public_no+"/quotes/"+orderQuote,/Fulfillment quote/]);
   if(orderShipment) paths.push(["order-shipment","/orders/"+chosenOrder.public_no+"/shipments/"+orderShipment,/Shipment details/]);
 
-  if(process.env.QCW_BROWSER_COMPARISON_EMAIL) {
+  if(process.env.QCW_BROWSER_COMPARISON_EMAIL&&missingViewports("report-comparison")) {
     const comparison=await session(process.env.QCW_BROWSER_COMPARISON_EMAIL,false,true);
     const candidates=(await comparison.call("/me/reports?latest=1")).rows;
     let compared;
@@ -656,6 +746,7 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
     const scrolls=await comparison.page.locator(".report-comparison .table-wrap").first().evaluate(table=>table.scrollWidth>table.clientWidth);
     assert(scrolls,"The side-by-side report should remain horizontally scrollable inside its mobile comparison table.");
     assert.deepEqual(comparison.errors,[]);
+    await comparison.context.close();
   }
 
   const outbound=desk.active_batches.flatMap(batch=>batch.outbound_shipments)[0];
@@ -667,7 +758,7 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
     await fixture.page.keyboard.press("Escape");
   }
 
-  if(process.env.QCW_BROWSER_INVENTORY_EMAIL) {
+  if(process.env.QCW_BROWSER_INVENTORY_EMAIL&&missingViewports("inventory-item")) {
     const inventory=process.env.QCW_BROWSER_INVENTORY_EMAIL===fixtureEmail?fixture:await session(process.env.QCW_BROWSER_INVENTORY_EMAIL,false,true);
     const results=await inventory.call("/me/inventory?filter=handling");
     const {page:itemsPage}=inventory;
@@ -693,22 +784,26 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
     await other.call("/me/inventory?code="+later.code,{status:404});
     await itemsPage.keyboard.press("Escape");
     assert.deepEqual(inventory.errors,[]);
+    if(inventory!==fixture) await inventory.context.close();
     console.log("PASS paginated inventory, cross-page item selection, two persisted handling instructions and exact item ownership");
   }
 
-  for(const width of [1440,1280,1024,768,390,375]) {
+  for(const width of widths) {
     await fixture.page.setViewportSize({width,height:1000});
     for(const [name,path,heading] of paths) {
-      await fixture.page.goto(path);
-      await capture(fixture.page,name,width,heading);
+      if(captured(name,width)) continue;
+      await fixture.page.goto(path,{waitUntil:"domcontentloaded"});
+      try {await capture(fixture.page,name,width,heading);}
+      catch(error) {throw new Error(`Capture failed for ${name} at ${width} px`,{cause:error});}
       if(name==="order-parcels"&&["closed","cancelled"].includes(chosenOrder.state)) {
         assert.equal(await fixture.page.getByRole("button",{name:"Add inbound parcel"}).count(),0);
       }
     }
   }
-  await fixture.page.goto("/orders/new");
+  await fixture.page.goto("/orders/new",{waitUntil:"domcontentloaded"});
+  await fixture.page.getByRole("radio",{name:/Apparel.*Available now/}).waitFor();
   await fixture.page.getByRole("button",{name:"Open workspace menu"}).click();
-  assert.equal(await fixture.page.locator(".workspace-sidebar").getByRole("link",{name:"Reports",exact:true}).isVisible(),true);
+  await fixture.page.locator(".workspace-sidebar").getByRole("link",{name:"Reports",exact:true}).waitFor();
   await fixture.page.locator(".workspace-sidebar").getByRole("link",{name:"Orders",exact:true}).click();
   await fixture.page.waitForURL("**/orders");
   await fixture.page.getByRole("button",{name:"Open workspace menu"}).waitFor();
@@ -725,7 +820,7 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
     const older=current.versions.find(version=>version.state==="superseded");
     if(older) {
       const olderPath=`/orders/${published.order_id}/report/versions/${older.version}`;
-      await fixture.page.goto(`/orders/${published.order_number}/report/versions/${older.version}`);
+      await fixture.page.goto(`/orders/${published.order_number}/report/versions/${older.version}`,{waitUntil:"domcontentloaded"});
       await fixture.page.getByText(/This is a historical report/).waitFor();
       const olderPdf=await fixture.call(olderPath+"/pdf");
       assert.equal(olderPdf.version,older.version);

@@ -2023,6 +2023,40 @@ test("support and customer can finish a parcel case while private notes and phot
   }
 });
 
+test("support history reaches older cases and sorts only by customer-visible activity",async()=>{
+  const {c}=await signCustomer(),other=(await signCustomer()).c;
+  const admin=await staffLogin("admin"),{actor}=await c.fetch("/me");
+  const offer=(await c.fetch("/catalog")).offers.find(row=>row.sku_code==="apparel-inspection-1");
+  const order=await c.fetch("/orders",{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},"POST",201);
+  const privateCase=await other.fetch("/me/cases",{subject:"Other customer case",message:"Other customer support message"});
+  const oldId=randomUUID(),oldNumber="C-"+randomUUID().slice(0,8).toUpperCase();
+  await pool.query(`insert into tickets(id,public_no,org_id,order_id,category,subject,created_at)
+    values($1,$2,$3,$4,'payment_refund','Old customer case',now()-interval '1 year')`,[oldId,oldNumber,actor.org,order.id]);
+  await pool.query(`insert into tickets(id,public_no,org_id,category,subject,created_at)
+    select gen_random_uuid(),'C-'||upper(substr(gen_random_uuid()::text,1,12)),$1,'payment_refund',
+      'Support history fixture '||n,now()-interval '1 day' from generate_series(1,100) n`,[actor.org]);
+  const events=`/staff/tickets/${oldId}/events`;
+  await admin.fetch(events,{kind:"internal_note",revision:1,body:"Private staff investigation"});
+  const first=await c.fetch("/me/cases"),last=await c.fetch("/me/cases?page=6");
+  assert.equal(first.rows.length,20);
+  assert.equal(first.has_more,true);
+  assert.deepEqual(last.rows.map(row=>row.id),[oldId]);
+  assert.equal(last.has_more,false);
+  assert.equal(new Set([first,...await Promise.all([2,3,4,5,6].map(page=>c.fetch("/me/cases?page="+page)))].flatMap(page=>page.rows.map(row=>row.id))).size,101);
+  assert.deepEqual((await c.fetch("/me/cases?q="+order.public_no.toLowerCase())).rows.map(row=>row.id),[oldId]);
+  assert.deepEqual((await c.fetch("/me/cases?q="+privateCase.public_no)).rows,[]);
+  assert.deepEqual((await other.fetch("/me/cases?q="+oldNumber)).rows,[]);
+  await admin.fetch("/me/cases",undefined,"GET",403);
+  await c.fetch("/me/cases?page=0",undefined,"GET",422);
+  await admin.fetch(events,{kind:"reply",revision:2,body:"Please confirm the invoice details.",reply_by:new Date(Date.now()+86400000).toISOString()});
+  const active=await c.fetch("/me/cases?state=waiting_customer");
+  assert.deepEqual(active.rows.map(row=>row.id),[oldId]);
+  const caseAfterReply=(await c.fetch("/me/cases")).rows[0];
+  assert.equal(caseAfterReply.id,oldId);
+  assert(!JSON.stringify(caseAfterReply).includes("Private staff investigation"));
+  assert.deepEqual((await c.fetch("/cases/"+oldId)).events.map(event=>event.body),["Please confirm the invoice details."]);
+});
+
 test("notification history paginates equal timestamps and keeps unread state and cursors private",async()=>{
   const {c,registration}=await signCustomer(),other=await signCustomer();
   const foreignCase=await other.c.fetch("/me/cases",{subject:"Private fixture",message:"Do not expose the case through notifications."});
