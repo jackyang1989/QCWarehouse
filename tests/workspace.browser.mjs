@@ -348,12 +348,46 @@ async function verifyFulfillmentRenewal(other) {
     const shipping=await staff.call(dispatchPath+"/quote",{body:{revision:confirmed.revision,rate_version_id:rates[0].id,
       parcels:[{item_ids:[item.item_id],weight_g:500}]}});
     const storage=await staff.call(storagePath,{body:{}});
+    const verifyNotices=process.env.QCW_BROWSER_QUOTE_NOTICE_CHECK==="1";
+    async function openQuoteNotice(id) {
+      await page.goto("/account/notifications");
+      await page.locator(`a[href="/account/billing?quote=${id}#quote-${id}"]`).click();
+      await page.waitForURL(url=>url.searchParams.get("quote")===id);
+      const card=page.locator("#quote-"+id);
+      await card.waitFor();
+      assert.equal(await card.count(),1);
+      await page.waitForFunction(id=>document.activeElement?.id===id,"quote-"+id);
+      return card;
+    }
+    if(verifyNotices) {
+      let ready=false;
+      for(let attempt=0;attempt<40&&!ready;attempt++) {
+        const {rows}=await call("/me/notifications");
+        ready=[shipping,storage].every(quote=>rows.some(row=>row.quote_id===quote.quote_id));
+        if(!ready) await delay(250);
+      }
+      assert(ready,"Both quote notifications must be delivered by the isolated Worker.");
+      const card=await openQuoteNotice(shipping.quote_id);
+      await card.getByRole("button",{name:"Accept and pay"}).waitFor();
+      await captureWizard(page,"notification-quote-open","Fulfillment quote");
+    }
     for(const [table,q] of [["dispatch_quote_versions",shipping],["storage_quotes",storage]]) {
       const fixture=await db.query(`update ${table} set expires_at=now()+interval '3 seconds' where id=$1 and accepted_at is null returning id`,[q.quote_id]);
       assert.equal(fixture.rowCount,1,"The app must use the same isolated database as the expiry fixture.");
       await call(`/quotes/${q.quote_id}/accept`,{body:{revision:q.revision}});
     }
     await delay(3100);
+    if(verifyNotices) {
+      const card=await openQuoteNotice(storage.quote_id);
+      await card.getByText(/This quote has expired/).waitFor();
+      assert.equal(await card.getByRole("button",{name:"Resume payment"}).count(),0);
+      const {charge_id}=await call("/quotes/"+storage.quote_id);
+      const chargeRow=page.getByRole("row").filter({has:page.locator("#charge-"+charge_id)});
+      await chargeRow.getByText("Expired",{exact:true}).waitFor();
+      assert.equal(await chargeRow.getByRole("button",{name:"Pay",exact:true}).count(),0);
+      await other.call("/quotes/"+storage.quote_id,{status:404});
+      await captureWizard(page,"notification-quote-expired","Fulfillment quote");
+    }
     for(const [name,row,q] of [["dispatch-expired",item,shipping],["storage-expired",stored,storage]]) {
       await page.goto(`/orders/${row.order_no}/quotes/${q.quote_id}`);
       await page.getByText("This quote has expired.",{exact:false}).waitFor();

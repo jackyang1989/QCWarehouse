@@ -176,6 +176,11 @@ export function billingChargePath(id:string) {
   return "/account/billing?charge="+charge+"#charge-"+charge;
 }
 
+export function billingQuotePath(id:string) {
+  const quote=encodeURIComponent(id);
+  return "/account/billing?quote="+quote+"#quote-"+quote;
+}
+
 export function inspectionScopePath(orderNumber:string,scopeId:string) {
   return "/orders/"+encodeURIComponent(orderNumber)+"#scope-"+encodeURIComponent(scopeId);
 }

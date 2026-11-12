@@ -862,6 +862,8 @@ test("33 physical items from three parcels share one order, report and selective
   assert.equal(splitQuote.revision,originalQuote.revision+1);
   const scopedQuote=path+"/quotes/"+splitQuote.quote_id;
   assert.equal((await c.fetch(scopedQuote)).state,"open");
+  assert.deepEqual(await c.fetch("/quotes/"+splitQuote.quote_id),await c.fetch(scopedQuote));
+  await other.fetch("/quotes/"+splitQuote.quote_id,undefined,"GET",404);
   await c.fetch("/orders/"+separate.id+"/quotes/"+splitQuote.quote_id,undefined,"GET",404);
   await other.fetch(scopedQuote,undefined,"GET",404);
   const savedQuote=(await c.fetch("/me/desk")).quotes.find((q:{id:string})=>q.id===splitQuote.quote_id);
@@ -873,6 +875,8 @@ test("33 physical items from three parcels share one order, report and selective
   assert.deepEqual(Object.keys(savedQuote.item_codes).sort(),selected.slice().sort());
   assert((await c.fetch("/actions")).rows.some((action:{id:string})=>action.id===splitQuote.quote_id));
   assert(!(await other.fetch("/me/desk")).quotes.some((q:{id:string})=>q.id===splitQuote.quote_id));
+  for(let i=0;i<150;i++) {if(!await workOnce()) break;}
+  assert((await c.fetch("/me/notifications")).rows.some(row=>row.template==="dispatch.quoted"&&row.quote_id===splitQuote.quote_id));
   const charge=await c.fetch("/quotes/"+splitQuote.quote_id+"/accept",{revision:splitQuote.revision});
   assert(!(await c.fetch("/actions")).rows.some((action:{id:string})=>action.id===splitQuote.quote_id));
   assert((await c.fetch("/actions")).rows.some((action:{id:string})=>action.id===charge.charge_item_id));
@@ -922,6 +926,7 @@ test("33 physical items from three parcels share one order, report and selective
   const issueStorage="/staff/dispositions/"+retention.id+"/storage-quote";
   const startPreviousStorage="/charges/"+previousFee.charge_item_id+"/checkout";
   assert.equal((await c.fetch(storagePath)).state,"expired");
+  assert.deepEqual(await c.fetch("/quotes/"+storage.quote_id),await c.fetch(storagePath));
   assert(!(await c.fetch("/actions")).rows.some(row=>row.id===previousFee.charge_item_id));
   assert.equal((await c.fetch(startPreviousStorage,{quote_revision:storage.revision},"POST",409)).error.code,"QUOTE_EXPIRED");
   const stripeSession="cs_test_"+randomUUID();
@@ -962,15 +967,23 @@ test("33 physical items from three parcels share one order, report and selective
   assert.equal((await c.fetch(storagePath)).state,"inactive");
   assert((await c.fetch("/actions")).rows.some(row=>row.id===renewed.quote_id&&row.kind==="quote"));
   await other.fetch(path+"/quotes/"+renewed.quote_id,undefined,"GET",404);
+  await other.fetch("/quotes/"+renewed.quote_id,undefined,"GET",404);
+  await staff.fetch("/quotes/"+renewed.quote_id,undefined,"GET",403);
   for(let i=0;i<150;i++) {if(!await workOnce()) break;}
   const storageNotices=(await pool.query("select dedupe_key from notifications where dedupe_key=any($1::text[])",[
     ["storage.quoted:"+storage.quote_id,"storage.quoted:"+renewed.quote_id],
   ])).rows;
   assert.deepEqual(storageNotices,[{dedupe_key:"storage.quoted:"+renewed.quote_id}]);
+  assert((await c.fetch("/me/notifications")).rows.some(row=>row.template==="storage.quoted"&&row.quote_id===renewed.quote_id));
+  const foreignUser=(await other.fetch("/me")).actor.id,foreignNotice=randomUUID();
+  await pool.query(`insert into notifications(id,user_id,template,locale,payload,dedupe_key)
+    values($1,$2,'storage.quoted','en',$3,$4)`,[foreignNotice,foreignUser,{quote_id:renewed.quote_id},"isolation:"+foreignNotice]);
+  assert.equal((await other.fetch("/me/notifications")).rows.find(row=>row.id===foreignNotice).quote_id,null);
   const storageFee=await c.fetch("/quotes/"+renewed.quote_id+"/accept",{revision:renewed.revision});
   const storageCheckout=await c.fetch("/charges/"+storageFee.charge_item_id+"/checkout",{quote_revision:renewed.revision});
   await c.fetch("/checkout/demo/"+storageCheckout.attempt_id,{});
   await c.fetch("/checkout/demo/"+storageCheckout.attempt_id,{});
+  assert.equal((await c.fetch("/quotes/"+renewed.quote_id)).state,"paid");
   await sendStorageEvent("checkout.session.async_payment_succeeded",true);
   assert.equal((await pool.query("select count(*)::int n from tickets where category='payment_refund' and details->>'payment_id'=$1",[previousStorageCheckout.attempt_id])).rows[0].n,1);
   const storageBill=(await c.fetch("/me/billing")).charges.find((row:{charge_item_id:string})=>row.charge_item_id===storageFee.charge_item_id);

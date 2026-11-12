@@ -53,7 +53,7 @@ export async function orderShipments(db:DB,orderId:string,org:string,shipmentId:
     order by s.shipped_at desc,s.id`,[orderId,org,shipmentId])).rows;
 }
 
-export async function orderQuotes(db:DB,orderId:string,org:string,quoteId:string|null=null) {
+async function fulfillmentQuotes(db:DB,orderId:string|null,org:string,quoteId:string|null) {
   return (await db.query(`with related as (${relatedItems}), quotes as (
     select q.id,q.revision,q.amount_cents,q.expires_at,q.accepted_at,'dispatch' purpose,b.action,b.id batch_id,q.snapshot,b.state parent_state,
       (select jsonb_object_agg(w.id::text,w.code) from dispatch_batch_items bi join warehouse_items w
@@ -61,19 +61,19 @@ export async function orderQuotes(db:DB,orderId:string,org:string,quoteId:string
       c.id charge_id,c.applied_payment_id,c.free_authorization,c.voided_at,${latestDispatchQuote} current_quote,${unresolvedQuotePayment} unresolved_payment
     from dispatch_quote_versions q join dispatch_batches b on b.id=q.batch_id
       left join charge_items c on c.dispatch_quote_id=q.id and c.org_id=b.org_id
-    where b.org_id=$2 and ($3::uuid is null or q.id=$3) and exists(
+    where b.org_id=$2 and ($3::uuid is null or q.id=$3) and ($1::uuid is null or exists(
       select 1 from dispatch_batch_items bi join related a on a.item_id=bi.item_id
       join disposition_requests d on d.id=bi.disposition_id
       where bi.batch_id=b.id and a.linked_at<=(d.authorization_snapshot->>'authorized_at')::timestamptz
-      and (a.unlinked_at is null or a.unlinked_at>(d.authorization_snapshot->>'authorized_at')::timestamptz))
+      and (a.unlinked_at is null or a.unlinked_at>(d.authorization_snapshot->>'authorized_at')::timestamptz)))
     union all select q.id,q.revision,q.amount_cents,q.expires_at,q.accepted_at,'storage',d.action,null::uuid batch_id,q.snapshot,d.state,
       jsonb_build_object(w.id::text,w.code),c.id,c.applied_payment_id,c.free_authorization,c.voided_at,${latestStorageQuote},${unresolvedQuotePayment}
     from storage_quotes q join disposition_requests d on d.id=q.disposition_id
       join warehouse_items w on w.id=d.item_id and w.org_id=d.org_id
       left join charge_items c on c.storage_quote_id=q.id and c.org_id=d.org_id
-    where d.org_id=$2 and ($3::uuid is null or q.id=$3) and exists(select 1 from related a where a.item_id=d.item_id
+    where d.org_id=$2 and ($3::uuid is null or q.id=$3) and ($1::uuid is null or exists(select 1 from related a where a.item_id=d.item_id
       and a.linked_at<=(d.authorization_snapshot->>'authorized_at')::timestamptz
-      and (a.unlinked_at is null or a.unlinked_at>(d.authorization_snapshot->>'authorized_at')::timestamptz))
+      and (a.unlinked_at is null or a.unlinked_at>(d.authorization_snapshot->>'authorized_at')::timestamptz)))
   ) select id,revision,amount_cents,expires_at,accepted_at,purpose,action,batch_id,snapshot,item_codes,charge_id,
     case when applied_payment_id is not null or free_authorization is not null then 'paid'
       when voided_at is not null or not current_quote then 'inactive'
@@ -84,6 +84,16 @@ export async function orderQuotes(db:DB,orderId:string,org:string,quoteId:string
       when purpose='dispatch' and parent_state='quoted' or purpose='storage' and parent_state='requested' then 'open'
       else 'inactive' end state
     from quotes order by expires_at desc,id`,[orderId,org,quoteId])).rows;
+}
+
+export async function orderQuotes(db:DB,orderId:string,org:string,quoteId:string|null=null) {
+  return fulfillmentQuotes(db,orderId,org,quoteId);
+}
+
+export async function customerFulfillmentQuote(db:DB,actor:Actor,id:string) {
+  const [quote]=await fulfillmentQuotes(db,null,organization(actor),id);
+  guard(quote,"NOT_FOUND","Quote not found.",404);
+  return quote;
 }
 
 export async function orderFulfillmentRecord(db:DB,actor:Actor,orderId:string,kind:"quotes"|"shipments",recordId:string) {

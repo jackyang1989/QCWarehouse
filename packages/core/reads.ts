@@ -349,6 +349,12 @@ export async function customerNotifications(db:DB,actor:Actor,unread=false,befor
     coalesce((select p.advice_id from packages p where p.id::text=n.payload->>'package_id' and p.org_id=$2),
       (select tr.advice_id from tracking_records tr where tr.id::text=n.payload->>'tracker_id' and tr.org_id=$2)) advice_id,
     (select c.id from charge_items c where c.id::text=n.payload->>'charge_id' and c.org_id=$2) charge_id,
+    case n.template
+      when 'dispatch.quoted' then (select q.id from dispatch_quote_versions q join dispatch_batches b on b.id=q.batch_id
+        where q.id::text=n.payload->>'quote_id' and b.org_id=$2)
+      when 'storage.quoted' then (select q.id from storage_quotes q join disposition_requests d on d.id=q.disposition_id
+        where q.id::text=n.payload->>'quote_id' and d.org_id=$2)
+    end quote_id,
     (select w.code from warehouse_items w where w.id::text=n.payload->>'item_id' and w.org_id=$2) item_code
   from batch n left join orders o on o.id=n.order_id and o.org_id=$2
   order by n.created_at desc nulls last,n.id desc`,[actor.id,org,unread,before,pageSize+1]);

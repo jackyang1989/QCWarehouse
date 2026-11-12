@@ -172,3 +172,9 @@ flowchart TD
 续做基线 `f18ea8b`。后台独立批准后写入 `approved_awaiting_customer`，旧工单页面用 `customer_pending` 判断表单，导致客户无法在工单中提交决策。旧待办依赖 `tickets.state`，普通回复会把工单转给客服而提前移除决策待办。现在事故状态统一决定表单和待办，批准时沿用工单通知 Worker。未批准的方案金额和摘要不在客户端发布。实际赔付凭证与客户接受、服务费退款分别显示。
 
 `npm run check`、`npm run build`、`python3 docs/contracts/check.py`、空库关系校验及 `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-incident-followup npm run test:integration` 均退出 0，集成 62/62。`QCW_BROWSER_INCIDENT_ONLY=1 node tests/workspace.browser.mjs` 在独立库 `qcw_test-workspace-incident-browser` 退出 0，覆盖仓库、独立审核和两个客户角色，确认审批前无金额、普通回复不清待办、接受后待赔付及录入测试凭证后显示已登记。六档 24 张原图无整页横向溢出，原图、索引及命令日志位于 `qcwarehouse-incident-followup`。正式赔付条款及外部核验仍按原门禁跟踪。
+
+## 履约报价通知续验
+
+续做基线 `638cd6b`。发运和续存通知原先跳到账单首页，旧报价过期后也从待确认列表消失。现按当前客户组织核对通知中的报价 ID，进入账单并定位该份原报价。待办复用同一链接。原单报价和账单详情复用服务端状态，历史报价保留金额、实物和报价版本。账单的待支付记录根据报价有效期和渠道确认状态显示过期或处理中，过期时不再提供付款入口。
+
+`npm run check`、`npm run build`、`python3 docs/contracts/check.py`、空库关系校验及 `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-quote-notice npm run test:integration` 均退出 0，集成 62/62。验证真实通知、旧版本读取、跨客户及工作人员读取拦截和账单快照。`QCW_BROWSER_FULFILLMENT_ONLY=1 QCW_BROWSER_QUOTE_NOTICE_CHECK=1 node tests/workspace.browser.mjs` 在独立库 `qcw_test-workspace-quote-notice-browser` 运行真实 Worker 与 Chrome，验证通知打开、焦点、过期状态、原单重报价、隔离付款和回读。六档 30 张原图及日志位于 `qcwarehouse-quote-notice-followup`。

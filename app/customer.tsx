@@ -11,7 +11,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { draftRecoveryKey, readDraftRecovery, removeDraftRecovery, writeDraftRecovery, type DraftEditor, type DraftRecovery } from "./draft-recovery";
 import { conditionMatches } from "../packages/core/template-conditions";
-import { billingChargePath, customerDestination, inspectionScopePath, legalPages, orderSections, type OrderSection, servicePages } from "../packages/core/portal-routes";
+import { billingChargePath, billingQuotePath, customerDestination, inspectionScopePath, legalPages, orderSections, type OrderSection, servicePages } from "../packages/core/portal-routes";
 import { Action, checked, CodeButton, Empty, ErrorBlock, Field, Form, MediaLightbox, ModalDrawer, Panel, Photo, request, RequestError, Select, useWorkspaceStamp, Table, Tabs, Tag, text, useLoad, usd, type Row } from "./ui";
 
 const acknowledged={scope_notice:"I understand which checks are included.",samples_not_batch:"These samples do not represent an entire production batch.",seller_refund_is_mine:"I handle any refund request directly with my seller.",no_certification:"The report is an inspection record and does not provide certification.",restricted_items:"My items comply with the restricted items policy."};
@@ -2918,8 +2918,11 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   const [addressCopied,setAddressCopied]=useState(false);
   const [createdCase,setCreatedCase]=useState<Row>();
   const requestedCharge=isBills?(search.get("charge")??legacyCharge)?.toLowerCase():undefined;
+  const requestedQuote=isBills?search.get("quote")?.toLowerCase():undefined;
+  const focusedQuote=useLoad(requestedQuote?"/quotes/"+encodeURIComponent(requestedQuote):null);
   const {data,error,reload}=useLoad("/me/desk?include_items=0"+(requestedCharge?"&charge="+encodeURIComponent(requestedCharge):"")),carriers=useLoad("/carriers");
   const focusedChargeAvailable=Boolean(requestedCharge&&data?.bills.some((bill:Row)=>bill.charge_item_id===requestedCharge));
+  const focusedQuoteAvailable=Boolean(data&&requestedQuote&&focusedQuote.data?.id===requestedQuote);
   const homeActions=useLoad(path==="/account"?"/actions":null);
   const [next,setNext]=useState<string|null>(null);
   const [parcelOrder,setParcelOrder]=useState<string|null>(null);
@@ -2950,6 +2953,9 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     if(focusedChargeAvailable) document.getElementById("charge-"+requestedCharge)?.focus();
   },[focusedChargeAvailable,requestedCharge]);
   useEffect(()=>{
+    if(focusedQuoteAvailable) document.getElementById("quote-"+requestedQuote)?.focus();
+  },[focusedQuoteAvailable,requestedQuote]);
+  useEffect(()=>{
     const item=focusedItem.data?.rows[0];
     if(item) setItemTarget(item);
   },[focusedItem.data]);
@@ -2963,6 +2969,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   const addr=data.profile.warehouse_address;
   const isHome=path==="/account",isSecurity=path==="/account/security",isParcels=path==="/parcels",isOrders=path==="/orders",isHelp=path==="/support";
   const orders:Row[]=data.orders;
+  const otherQuotes:Row[]=isBills?data.quotes.filter((quote:Row)=>quote.id!==requestedQuote):[];
   const linkableOrders=orders.filter(order=>parcelLinkStates.includes(order.state));
   const visibleOrders:Row[]=isHome?orders.slice(0,5):orderList.data?.rows??[];
   const page=Number(orderParams.get("page")??1);
@@ -3230,39 +3237,49 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
           }}/>
       </>:<Empty>Select eligible items above to request handling.</Empty>}
     </Panel></>}
-    {isBills&&<><div className="page-head"><p className="eyebrow">Account services</p><h1>Billing</h1><p className="muted">Review shipping quotes, charges and refunds for your inspections.</p></div><Panel title="Quotes awaiting your approval">
-      {data.quotes.map((quote:Row)=><FulfillmentQuote key={quote.id} quote={quote} onUpdate={reload} onOpenBatch={setBatchTarget}/>)}
+    {isBills&&<><div className="page-head"><p className="eyebrow">Account services</p><h1>Billing</h1><p className="muted">Review shipping quotes, charges and refunds for your inspections.</p></div>
+      {requestedQuote&&<Panel title="Fulfillment quote">
+        {focusedQuote.error?<><ErrorBlock error={focusedQuote.error}/><button type="button" onClick={focusedQuote.reload}>Retry</button></>:
+          !focusedQuote.data?<p role="status">Loading fulfillment quote…</p>:
+          <FulfillmentQuote quote={focusedQuote.data} focused onUpdate={()=>{reload();focusedQuote.reload();}} onOpenBatch={setBatchTarget}/>}
+      </Panel>}
+    <Panel title="Quotes awaiting your approval">
+      {otherQuotes.map(quote=><FulfillmentQuote key={quote.id} quote={quote} onUpdate={reload} onOpenBatch={setBatchTarget}/>)}
       {data.inspectionQuotes.map((quote:Row)=><div className="card row" key={quote.id}>
         <div><strong>Inspection · {quote.order_number}</strong><p>{usd(quote.amount_cents)} · Valid until {stamp(quote.expires_at)}</p></div>
         <Link className="button" href={"/orders/"+quote.order_number+"#inspection-quote"}>Review inspection quote</Link>
       </div>)}
-      {!data.quotes.length&&!data.inspectionQuotes.length&&<Empty>No new quotes.</Empty>}
+      {!otherQuotes.length&&!data.inspectionQuotes.length&&<Empty>{focusedQuote.data?.state==="open"?"No other quotes to approve.":"No new quotes."}</Empty>}
     </Panel><Panel title="Payments & charges" subtitle="Inspection, shipping and storage charges. Payment is confirmed only after server-side verification.">
       {requestedCharge&&!focusedChargeAvailable&&<p role="status">This charge is unavailable.</p>}
-      <Table headers={["Purpose","Order / Batch","Amount","Refunded","Status","Date","Details",""]} rows={data.bills.map((b:Row)=>[
-        <span id={"charge-"+b.charge_item_id} className="billing-charge-anchor" tabIndex={b.charge_item_id===requestedCharge?-1:undefined}>{b.scope_revision_id?"Supplemental inspection":label(b.purpose)}</span>,
-        (b.order_numbers??[]).length?b.order_numbers.map((no:string)=><Link key={no} className="code-btn" href={"/orders/"+no}>{no}</Link>):b.batch_id?<CodeButton code={`Batch #${b.batch_id.slice(0,8)}`} onClick={()=>setBatchTarget(b.batch_id)}/>:"—",
-        usd(b.amount_cents),
-        b.refunded_cents?usd(b.refunded_cents):"—",
-        <Tag tone={b.state==="paid"?"green":b.state==="open"?"yellow":b.state==="void"?"gray":"blue"}>{
-          b.refunded_cents>0?(b.refunded_cents>=b.amount_cents?"Refunded":"Partially refunded"):
-            /^(demo_|cs_test_)/.test(b.paid_ref??"")?"Test payment confirmed":label(b.state)
-        }</Tag>,
-        stamp(b.posted_at),
-        b.receipt_available?<Action run={async()=>{
-          const {receipt_url}=await request("/charges/"+b.charge_item_id+"/receipt");
-          location.assign(receipt_url);
-        }}>{b.paid_ref?.startsWith("cs_test_")?"View test receipt":"View Stripe receipt"}</Action>:
-          b.paid_ref?.startsWith("demo_")?<small>Test payment</small>:
-          b.paid_ref?<details className="small"><summary className="code" title={b.paid_ref}>…{String(b.paid_ref).slice(-8)}</summary><span className="code" style={{overflowWrap:"anywhere"}}>{b.paid_ref}</span></details>:b.latest_attempt_state?label(b.latest_attempt_state):"—",
-        b.scope_revision_id&&b.order_numbers?.[0]?<Link href={inspectionScopePath(b.order_numbers[0],b.scope_revision_id)}>Review scope charge</Link>:
-        b.state==="open"&&b.expires_at&&Date.parse(b.expires_at)<=Date.now()
-          ?(b.unresolved_payment?<span>Payment confirmation pending</span>:
-            b.purpose==="dispatch"&&b.batch_id?<CodeButton code="Review dispatch batch" onClick={()=>setBatchTarget(b.batch_id)}/>:
-            b.purpose==="storage"&&b.storage_item_code?<Link href={"/items?item="+encodeURIComponent(b.storage_item_code)}>Review stored item</Link>:
-            b.purpose==="inspection"&&b.order_numbers?.[0]?<Link href={"/orders/"+b.order_numbers[0]+"/payment"}>Review expired quote</Link>:<span>Quote expired</span>)
-          :b.state==="open"?<Action run={()=>goCheckout(b.charge_item_id,b.quote_revision)}>Pay</Action>:null
-      ])} empty="No charges yet."/>
+      <Table headers={["Purpose","Order / Batch","Amount","Refunded","Status","Date","Details",""]} rows={data.bills.map((b:Row)=>{
+        const quoteExpired=b.state==="open"&&b.expires_at&&Date.parse(b.expires_at)<=Date.now();
+        const shownState=quoteExpired?(b.unresolved_payment?"processing":"expired"):b.state;
+        return [
+          <span id={"charge-"+b.charge_item_id} className="billing-charge-anchor" tabIndex={b.charge_item_id===requestedCharge?-1:undefined}>{b.scope_revision_id?"Supplemental inspection":label(b.purpose)}</span>,
+          (b.order_numbers??[]).length?b.order_numbers.map((no:string)=><Link key={no} className="code-btn" href={"/orders/"+no}>{no}</Link>):b.batch_id?<CodeButton code={`Batch #${b.batch_id.slice(0,8)}`} onClick={()=>setBatchTarget(b.batch_id)}/>:"—",
+          usd(b.amount_cents),
+          b.refunded_cents?usd(b.refunded_cents):"—",
+          <Tag tone={shownState==="paid"?"green":shownState==="open"?"yellow":["void","expired"].includes(shownState)?"gray":"blue"}>{
+            b.refunded_cents>0?(b.refunded_cents>=b.amount_cents?"Refunded":"Partially refunded"):
+              /^(demo_|cs_test_)/.test(b.paid_ref??"")?"Test payment confirmed":label(shownState)
+          }</Tag>,
+          stamp(b.posted_at),
+          b.receipt_available?<Action run={async()=>{
+            const {receipt_url}=await request("/charges/"+b.charge_item_id+"/receipt");
+            location.assign(receipt_url);
+          }}>{b.paid_ref?.startsWith("cs_test_")?"View test receipt":"View Stripe receipt"}</Action>:
+            b.paid_ref?.startsWith("demo_")?<small>Test payment</small>:
+            b.paid_ref?<details className="small"><summary className="code" title={b.paid_ref}>…{String(b.paid_ref).slice(-8)}</summary><span className="code" style={{overflowWrap:"anywhere"}}>{b.paid_ref}</span></details>:b.latest_attempt_state?label(b.latest_attempt_state):"—",
+          b.scope_revision_id&&b.order_numbers?.[0]?<Link href={inspectionScopePath(b.order_numbers[0],b.scope_revision_id)}>Review scope charge</Link>:
+          quoteExpired
+            ?(b.unresolved_payment?<span>Payment confirmation pending</span>:
+              b.purpose==="dispatch"&&b.batch_id?<CodeButton code="Review dispatch batch" onClick={()=>setBatchTarget(b.batch_id)}/>:
+              b.purpose==="storage"&&b.storage_item_code?<Link href={"/items?item="+encodeURIComponent(b.storage_item_code)}>Review stored item</Link>:
+              b.purpose==="inspection"&&b.order_numbers?.[0]?<Link href={"/orders/"+b.order_numbers[0]+"/payment"}>Review expired quote</Link>:<span>Quote expired</span>)
+            :b.state==="open"?<Action run={()=>goCheckout(b.charge_item_id,b.quote_revision)}>Pay</Action>:null
+        ];
+      })} empty="No charges yet."/>
     </Panel><Panel title="Refunds" subtitle="Platform fee refunds issued by QCWarehouse. Seller refunds are handled on your seller's platform and are not shown here.">
       <Table headers={["Requested","Purpose","Order","Amount","Status"]} rows={(data.refunds??[]).map((r:Row)=>[
         stamp(r.created_at),
@@ -3486,7 +3503,7 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
   </>;
 }
 
-function FulfillmentQuote({quote,onUpdate,onOpenBatch}:{quote:Row;onUpdate?:()=>void;onOpenBatch?:(batchId:string)=>void}) {
+function FulfillmentQuote({quote,onUpdate,onOpenBatch,focused=false}:{quote:Row;onUpdate?:()=>void;onOpenBatch?:(batchId:string)=>void;focused?:boolean}) {
   const stamp=useWorkspaceStamp();
   const [expiredId,setExpiredId]=useState<string>();
   useEffect(()=>{
@@ -3501,7 +3518,7 @@ function FulfillmentQuote({quote,onUpdate,onOpenBatch}:{quote:Row;onUpdate?:()=>
   const shipping=quote.purpose==="dispatch";
   const {snapshot}=quote;
   const purpose=shipping?({return_to_seller:"Return to seller",to_forwarder:"Send to freight forwarder",to_domestic_address:"Domestic delivery"} as Record<string,string>)[quote.action]:"Extend storage";
-  return <article id={"quote-"+quote.id} className="card fulfillment-quote">
+  return <article id={"quote-"+quote.id} className="card fulfillment-quote" tabIndex={focused?-1:undefined}>
     <div className="row"><div><h3>{purpose}</h3><small>Quote {quote.revision} · expires {stamp(quote.expires_at)}</small></div>
       <div className="actions">
         {shipping&&quote.batch_id&&onOpenBatch&&<CodeButton code={`Batch #${String(quote.batch_id).slice(0,8)} · Inspect / Amend`} onClick={()=>onOpenBatch(quote.batch_id)}/>}
@@ -3559,7 +3576,7 @@ function customerActionHref(row:Row) {
   }
   if(row.kind==="parcel") return "/parcels/"+row.id;
   if(row.kind==="charge") return billingChargePath(row.id);
-  if(row.kind==="quote") return "/account/billing#quote-"+row.id;
+  if(row.kind==="quote") return billingQuotePath(row.id);
   if(row.kind==="scope") return inspectionScopePath(row.reference,row.id);
   if(row.kind==="reference"||row.kind==="storage") return "/items?item="+encodeURIComponent(row.reference);
   if(row.kind==="email") return "/account/security";
