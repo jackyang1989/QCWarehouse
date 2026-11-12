@@ -4645,6 +4645,19 @@ test("Stocktake, warehouse incident compensation, stage refunds, dispute freezes
     summary_en:"Refund $5 service fee + $25 merchandise compensation",
   });
   assert.equal(proposedInc.state,"proposed");
+  const incidentCasePath=`/cases/${incCreated.ticket_id}`;
+  const customerDraft=await c.fetch(`/me/incidents/${incId}`);
+  const caseDraft=(await c.fetch(incidentCasePath)).incident;
+  for(const draft of [customerDraft,caseDraft]) {
+    assert.equal(draft.decision_required,false);
+    assert.equal(draft.proposal_visible,false);
+    assert.equal(draft.compensation_cents,0);
+    assert.equal(draft.service_refund_cents,0);
+    assert.equal(draft.proposal_summary_en,null);
+  }
+  const unrelated=(await signCustomer()).c;
+  await unrelated.fetch(incidentCasePath,undefined,"GET",404);
+  await c.fetch(`/me/incidents/${incId}/response`,{decision:"accept"},"POST",409);
 
   // Non-finance staff (receiving) listing incidents sees resolution.financial_restricted = true and undefined compensation_cents
   const recvIncList=await receiving.fetch("/staff/incidents");
@@ -4667,12 +4680,31 @@ test("Stocktake, warehouse incident compensation, stage refunds, dispute freezes
   const custIncView=await c.fetch(`/me/incidents/${incId}`);
   assert.equal(custIncView.service_refund_cents,500);
   assert.equal(custIncView.compensation_cents,2500);
+  const pendingCase=await c.fetch(incidentCasePath);
+  assert.equal(pendingCase.incident.decision_required,true);
+  assert.equal(pendingCase.incident.proposal_summary_en,custIncView.proposal_summary_en);
+  assert.equal((await c.fetch(incidentCasePath+"/messages",{revision:pendingCase.revision,body:"I have read the proposal and will decide separately."})).state,"waiting_internal");
+  const action=(await c.fetch("/actions")).rows.find(row=>row.id===incCreated.ticket_id);
+  assert.equal(action.state,"incident_decision");
+  assert.equal(action.due_at,null);
+  await unrelated.fetch(`/me/incidents/${incId}/response`,{decision:"accept"},"POST",404);
+  for(let i=0;i<80;i++) {
+    const notices=await c.fetch("/me/notifications");
+    if(notices.rows.some(row=>row.case_id===incCreated.ticket_id&&row.template==="ticket.reply")) break;
+    if(!await workOnce()) break;
+  }
+  assert.equal((await c.fetch("/me/notifications")).rows.filter(row=>row.case_id===incCreated.ticket_id&&row.template==="ticket.reply").length,1);
   const custAcceptInc=await c.fetch(`/me/incidents/${incId}/response`,{
     decision:"accept",
     note:"I accept the $5 service refund + $25 compensation.",
   });
   assert.equal(custAcceptInc.state,"awaiting_payout");
   assert.equal(custAcceptInc.paid,false,"Accepting compensation proposal must not mark payout as completed until payment_proof is recorded (T103)");
+  assert(!(await c.fetch("/actions")).rows.some(row=>row.id===incCreated.ticket_id));
+  const acceptedCase=(await c.fetch(incidentCasePath)).incident;
+  assert.equal(acceptedCase.customer_decision,"accept");
+  assert.equal(acceptedCase.decision_required,false);
+  assert.equal(acceptedCase.paid,false);
 
   // Admin records actual payout proof -> state becomes resolved and paid = true, unfreezing itemB
   const resolvedInc=await admin.fetch(`/staff/incidents/${incId}/resolve`,{

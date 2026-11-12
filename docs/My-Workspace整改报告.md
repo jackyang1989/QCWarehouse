@@ -166,3 +166,9 @@ flowchart TD
 | `QCW_BROWSER_WORKSPACE_ONLY=1 QCW_BROWSER_NEW_CUSTOMER_ONLY=1 node tests/workspace.browser.mjs` | 0 | 在独立浏览器副本 `qcw_test-workspace-parcel-browser` 验证新客户、付款、待办深链、两包逐次登记、顺丰运单更正和回到原单。11 个页面或状态，六档视口共 66 张原图，整页横向溢出为 0 |
 
 增量 Chrome 原图、索引及日志位于 `qcwarehouse-parcel-followup`。它补充前次 252 张全页面证据，重点更新分批预报、运单纠错和待仓库实收的订单状态。承运商实际查询和实仓交接仍按外部续验条件跟踪。
+
+## 客户理赔续验
+
+续做基线 `f18ea8b`。后台独立批准后写入 `approved_awaiting_customer`，旧工单页面用 `customer_pending` 判断表单，导致客户无法在工单中提交决策。旧待办依赖 `tickets.state`，普通回复会把工单转给客服而提前移除决策待办。现在事故状态统一决定表单和待办，批准时沿用工单通知 Worker。未批准的方案金额和摘要不在客户端发布。实际赔付凭证与客户接受、服务费退款分别显示。
+
+`npm run check`、`npm run build`、`python3 docs/contracts/check.py`、空库关系校验及 `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-incident-followup npm run test:integration` 均退出 0，集成 62/62。`QCW_BROWSER_INCIDENT_ONLY=1 node tests/workspace.browser.mjs` 在独立库 `qcw_test-workspace-incident-browser` 退出 0，覆盖仓库、独立审核和两个客户角色，确认审批前无金额、普通回复不清待办、接受后待赔付及录入测试凭证后显示已登记。六档 24 张原图无整页横向溢出，原图、索引及命令日志位于 `qcwarehouse-incident-followup`。正式赔付条款及外部核验仍按原门禁跟踪。

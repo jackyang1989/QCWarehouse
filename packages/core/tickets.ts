@@ -3,6 +3,7 @@ import type { DB } from "../db";
 import { audit, code, event, guard, hash, lock, one, organization, revision, role, uuid, type Actor } from "./common";
 import { savePhoto } from "./intake";
 import { hasStaffAccess, staffAccess } from "./staff-access";
+import { customerIncidentProposal } from "./storage";
 
 const body=z.string().trim().min(2).max(2000);
 const version=z.number().int().positive();
@@ -87,16 +88,15 @@ export async function caseDetail(db:DB,actor:Actor,id:string,orderNumber:string|
     kind:res.kind??"damage",
     status:incidentRow.state,
     summary_en:res.summary_en??"",
-    service_refund_cents:res.service_refund_cents??0,
-    compensation_cents:res.compensation_cents??0,
-    currency:res.currency??"USD",
-    customer_decision:res.customer_decision??null,
-    customer_note:res.customer_note??null,
+    ...customerIncidentProposal(incidentRow.state,res),
+    paid:Boolean(incidentRow.payment_proof),
     payout_reference:proof.payout_reference??null,
     payout_method:proof.payout_method??null,
     paid_amount_cents:proof.paid_amount_cents??null,
     resolved_at:proof.paid_at??null,
-    ...(actor.kind==="staff"?{internal_note:res.internal_note??null}:{}),
+    ...(actor.kind==="staff"?{internal_note:res.internal_note??null,proposal_summary_en:res.proposal_summary_en??null,
+      service_refund_cents:res.service_refund_cents??0,compensation_cents:res.compensation_cents??0,currency:res.currency??"USD",
+      customer_decision:res.customer_decision??null,customer_note:res.customer_note??null}:{}),
   }:null;
   const staffCandidates=actor.kind==="staff"?(await db.query(`select distinct u.id,coalesce(u.display_name,u.id::text) as display_name
     from users u join staff_roles sr on sr.user_id=u.id

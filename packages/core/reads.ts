@@ -7,6 +7,7 @@ import { eligibleManualQuoteOrderSql, expiredManualInspectionPaymentSql, orderAc
 import { declaredItemTracking, orderInboundRegistration, orderShipments } from "./fulfillment-reads";
 import { getIntakeContext, waybill } from "./intake";
 import { scopeSupplementForOrder, scopeSupplementState } from "./scope-payment";
+import { incidentAwaitingCustomer } from "./storage";
 import { hasStaffAccess, staffAccess } from "./staff-access";
 import { effectiveDispatchCharge, pendingDispatchQuote, pendingStorageQuote, renewableFulfillmentQuote, unresolvedQuotePayment } from "./dispatch";
 
@@ -161,8 +162,11 @@ export async function customerActions(db:DB,actor:Actor) {
     union all select t.advice_id,'parcel',t.sync_state,t.tracking_norm,null from tracking_records t
       where t.org_id=$1 and t.direction='inbound' and t.advice_id is not null and t.closed_at is null
       and t.sync_state in ('needs_verification','needs_carrier')
-    union all select k.id,'support',k.state,k.public_no,k.next_action_at from tickets k
-      where k.org_id=$1 and k.state='waiting_customer'
+    union all select k.id,'support',case when incident.decision_required then 'incident_decision' else k.state end,
+      k.public_no,case when not incident.decision_required then k.next_action_at end
+      from tickets k cross join lateral (select exists(select 1 from incident_cases ic
+        where ic.ticket_id=k.id and ic.state=$3) decision_required) incident
+      where k.org_id=$1 and (k.state='waiting_customer' or incident.decision_required)
     union all select s.id,'scope','scope_review',o.public_no,null from scope_revisions s join orders o on o.id=s.order_id
       where o.org_id=$1 and o.state='awaiting_samples' and s.accepted_at is null
       and s.previous_snapshot->>'order_revision'=o.revision::text
@@ -192,7 +196,7 @@ export async function customerActions(db:DB,actor:Actor) {
       where w.org_id=$1 and w.custody_state in ('received','stored') and w.parent_item_id is null
         and w.storage_until is not null and w.storage_until<=now()+interval '3 days'
         and not exists(select 1 from disposition_requests d where d.item_id=w.id and d.state='requested')
-  ) actions order by due_at nulls last,kind,reference,id limit 200`,[org,actor.id]);
+  ) actions order by due_at nulls last,kind,reference,id limit 200`,[org,actor.id,incidentAwaitingCustomer]);
   return {rows};
 }
 const customerOrderSelect=`select o.id,o.public_no,o.state,o.revision,o.price_cents,o.created_at,

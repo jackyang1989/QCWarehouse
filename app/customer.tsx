@@ -3541,6 +3541,7 @@ const actionTitles:Record<string,string>={
   draft:"Continue inspection draft",awaiting_payment:"Review inspection payment",awaiting_samples:"Register seller tracking",
   return_to_seller:"Review seller return quote",to_forwarder:"Review forwarding quote",to_domestic_address:"Review domestic shipping quote",
   retain:"Review storage extension",needs_carrier:"Confirm parcel carrier",needs_verification:"Verify parcel tracking",waiting_customer:"Review support case",
+  incident_decision:"Review warehouse incident proposal",
   dispatch:"Review shipping payment",storage:"Review storage payment",
   bounced:"We couldn't deliver email to this address",complained:"We couldn't deliver email to this address",
   reference_expired:"Update expired reference sample",reference_conflict:"Resolve reference sample in use before shipping",
@@ -3562,7 +3563,7 @@ function customerActionHref(row:Row) {
   if(row.kind==="scope") return inspectionScopePath(row.reference,row.id);
   if(row.kind==="reference"||row.kind==="storage") return "/items?item="+encodeURIComponent(row.reference);
   if(row.kind==="email") return "/account/security";
-  return "/support/cases/"+row.id;
+  return "/support/cases/"+row.id+(row.state==="incident_decision"?"#incident-decision":"");
 }
 
 export function CustomerActions() {

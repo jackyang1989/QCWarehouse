@@ -561,6 +561,20 @@ export async function proposeIncidentResolution(
   return {id:incidentId,state:"proposed",service_refund_cents:serviceRefund,compensation_cents:compensation};
 }
 
+export const incidentAwaitingCustomer="approved_awaiting_customer";
+
+export function customerIncidentProposal(state:string,resolution:Record<string,unknown>) {
+  const decision_required=state===incidentAwaitingCustomer;
+  const proposal_visible=decision_required||["awaiting_payout","customer_rejected","resolved","closed"].includes(state);
+  return {decision_required,proposal_visible,
+    proposal_summary_en:proposal_visible?resolution.proposal_summary_en??null:null,
+    service_refund_cents:proposal_visible?Number(resolution.service_refund_cents??0):0,
+    compensation_cents:proposal_visible?Number(resolution.compensation_cents??0):0,
+    currency:proposal_visible?resolution.currency??"USD":"USD",
+    customer_decision:proposal_visible&&!decision_required?resolution.customer_decision??null:null,
+    customer_note:proposal_visible&&!decision_required?resolution.customer_note??null:null};
+}
+
 export async function approveIncidentResolution(db:DB,actor:Actor,incidentId:string,input:{reason?:string}) {
   role(actor,"finance","super_admin");
   const ic=await one(db,"select * from incident_cases where id=$1 for update",[incidentId]);
@@ -596,7 +610,7 @@ export async function approveIncidentResolution(db:DB,actor:Actor,incidentId:str
     service_refund_id:serviceRefundId,
     compensation_state:Number(res.compensation_cents??0)>0?"approved_unpaid":"none",
   };
-  await db.query("update incident_cases set state='approved_awaiting_customer',resolution=$2 where id=$1",[incidentId,nextRes]);
+  await db.query("update incident_cases set state=$3,resolution=$2 where id=$1",[incidentId,nextRes,incidentAwaitingCustomer]);
   await db.query("update tickets set state='waiting_customer' where id=$1",[ic.ticket_id]);
   await db.query(
     `insert into ticket_events(id,ticket_id,actor_type,actor_id,kind,body)
@@ -607,9 +621,10 @@ export async function approveIncidentResolution(db:DB,actor:Actor,incidentId:str
     service_refund_id:serviceRefundId,
     compensation_cents:res.compensation_cents??0,
   });
+  if(ticket.org_id) await event(db,"ticket.reply",{ticket_id:ic.ticket_id,org_id:ticket.org_id});
   return {
     id:incidentId,
-    state:"approved_awaiting_customer",
+    state:incidentAwaitingCustomer,
     service_refund_id:serviceRefundId,
     compensation_state:nextRes.compensation_state,
   };
@@ -628,6 +643,7 @@ export async function customerReadIncident(db:DB,actor:Actor,incidentId:string) 
     [incidentId,org]
   );
   const res=(row.resolution??{}) as Record<string,unknown>;
+  const proposal=customerIncidentProposal(row.state,res);
   return {
     id:row.id,
     item_id:row.item_id,
@@ -638,13 +654,9 @@ export async function customerReadIncident(db:DB,actor:Actor,incidentId:string) 
     state:row.state,
     kind:res.kind??null,
     summary_en:res.summary_en??"",
-    proposal_summary_en:res.proposal_summary_en??null,
-    service_refund_cents:Number(res.service_refund_cents??0),
-    compensation_cents:Number(res.compensation_cents??0),
-    currency:res.currency??"USD",
-    compensation_state:res.compensation_state??"pending_proposal",
-    customer_decision:res.customer_decision??null,
-    customer_accepted_at:res.customer_accepted_at??null,
+    ...proposal,
+    compensation_state:proposal.proposal_visible?res.compensation_state??"pending_proposal":"pending_proposal",
+    customer_accepted_at:proposal.customer_decision==="accept"?res.customer_accepted_at??null:null,
     settled_at:res.settled_at??null,
     evidence_ids:(row.evidence?.media_ids??[]) as string[],
     paid:Boolean(row.payment_proof),
@@ -665,7 +677,7 @@ export async function customerRespondIncident(
      where ic.id=$1 and w.org_id=$2 for update of ic`,
     [incidentId,org]
   );
-  guard(row.state==="approved_awaiting_customer","INCIDENT_UNAVAILABLE","This incident case is not awaiting customer confirmation.");
+  guard(row.state===incidentAwaitingCustomer,"INCIDENT_UNAVAILABLE","This incident case is not awaiting customer confirmation.");
   const res=(row.resolution??{}) as Record<string,unknown>;
   const compCents=Number(res.compensation_cents??0);
   // T103: Customer acceptance records agreement ONLY; if compensation > 0, it enters 'awaiting_payout' and is NEVER marked 'paid' until payment_proof is recorded!

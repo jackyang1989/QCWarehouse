@@ -496,10 +496,71 @@ async function verifySupportHistory({page,call,errors},other) {
   console.log("PASS support history pagination, case search, browser back, and customer isolation");
 }
 
+async function verifyIncidentDecision({page,call,errors},other) {
+  const receiver=await session("receiving@qcw.test",true);
+  const admin=await session("admin@qcw.test",true);
+  const profile=await call("/me/receiving-address");
+  const tracking_no="ZTO"+randomUUID().slice(0,8).toUpperCase();
+  const advice=await call("/me/parcels",{body:{address_id:profile.warehouse_address.id,tracking_no,carrier_code:"zto"},status:201});
+  const photo=await sharp({create:{width:100,height:80,channels:3,background:"#11736d"}}).png().toBuffer();
+  const csrf=(await receiver.context.cookies()).find(cookie=>cookie.name==="qcw_csrf")?.value;
+  const upload=await receiver.context.request.post("/api/v1/staff/media",{
+    headers:{origin,"Idempotency-Key":randomUUID(),"X-CSRF-Token":csrf},
+    multipart:{kind:"intake_outer",photo:{name:"fixture.png",mimeType:"image/png",buffer:photo}},
+  });
+  assert.equal(upload.status(),201);
+  const parcel=await receiver.call("/staff/intake/check-in",{body:{tracking_no,carrier_code:"zto",advice_id:advice.id,
+    outer_media_ids:[(await upload.json()).id]},status:201});
+  const {locations}=await receiver.call("/staff/desk");
+  const item=await receiver.call(`/staff/packages/${parcel.id}/items`,{body:{revision:parcel.revision,
+    items:[{code:"S-"+randomUUID(),location_id:locations.find(location=>location.code==="R-01").id}]},status:201});
+  const subject="Warehouse found a torn sample seam";
+  const incident=await receiver.call("/staff/incidents",{body:{item_id:item.item_ids[0],kind:"damage",summary_en:subject},status:201});
+  const staffPath=`/staff/incidents/${incident.id}`,customerPath=`/me/incidents/${incident.id}`,casePath=`/support/cases/${incident.ticket_id}`;
+  const proposalSummary="We propose merchandise compensation for the damage.";
+  await receiver.call(staffPath+"/propose",{body:{compensation_cents:2500,currency:"USD",summary_en:proposalSummary}});
+  await page.goto(casePath);
+  await page.getByRole("heading",{name:"Incident resolution"}).waitFor();
+  assert.equal(await page.getByText(proposalSummary,{exact:true}).count(),0);
+  assert.equal(await page.getByRole("button",{name:"Submit compensation decision"}).count(),0);
+  await captureWizard(page,"incident-under-review",subject);
+  await other.call("/cases/"+incident.ticket_id,{status:404});
+  await other.call(customerPath+"/response",{body:{decision:"accept"},status:404});
+  await admin.call(staffPath+"/approve",{body:{reason:"Independent review of the warehouse evidence."}});
+  await page.goto("/actions");
+  const action=page.getByRole("row").filter({hasText:incident.ticket_no});
+  await action.getByRole("cell",{name:"Review warehouse incident proposal",exact:true}).waitFor();
+  await action.getByRole("link",{name:"Open"}).click();
+  await page.waitForURL(url=>url.pathname===casePath&&url.hash==="#incident-decision");
+  await page.getByLabel("Decision",{exact:true}).waitFor();
+  assert.equal(await page.getByLabel("Decision",{exact:true}).inputValue(),"");
+  await page.getByLabel("Reply",{exact:true}).fill("Thank you. I will confirm the proposal separately.");
+  await page.getByRole("button",{name:"Send reply"}).click();
+  await page.getByText("Your reply was sent.").waitFor();
+  assert.equal((await call("/actions")).rows.find(row=>row.id===incident.ticket_id).state,"incident_decision");
+  await captureWizard(page,"incident-decision-required",subject);
+  await page.getByLabel("Decision",{exact:true}).selectOption("accept");
+  await page.getByRole("button",{name:"Submit compensation decision"}).click();
+  await page.getByText("You accepted this proposal.").waitFor();
+  assert.equal((await call(customerPath)).paid,false);
+  assert(!(await call("/actions")).rows.some(row=>row.id===incident.ticket_id));
+  await page.getByText("Payout pending",{exact:true}).waitFor();
+  await captureWizard(page,"incident-payout-pending",subject);
+  await admin.call(staffPath+"/resolve",{body:{payout_reference:"ISOLATED-TEST-PAYOUT",payout_method:"bank_transfer",paid_amount_cents:2500}});
+  await page.reload();
+  await page.getByText("Payout recorded",{exact:true}).waitFor();
+  assert.equal((await call(customerPath)).paid,true);
+  await captureWizard(page,"incident-payout-recorded",subject);
+  assert.deepEqual(errors,[]);
+  assert(entries.every(entry=>entry.overflow===0));
+  console.log("PASS independently approved incident proposal, customer decision, retained action after reply, and separate payout proof");
+}
+
 try {
   const customer = await session(resumeMatrix?process.env.QCW_BROWSER_FIXTURE_EMAIL:undefined,false,resumeMatrix);
   const other = await session(resumeMatrix?process.env.QCW_BROWSER_INVENTORY_EMAIL:undefined,false,resumeMatrix);
   if(resumeMatrix) await verifyWorkspaceViews(customer,other);
+  else if(process.env.QCW_BROWSER_INCIDENT_ONLY==="1") await verifyIncidentDecision(customer,other);
   else if(process.env.QCW_BROWSER_SUPPORT_ONLY==="1") await verifySupportHistory(customer,other);
   else if(process.env.QCW_BROWSER_SCOPE_ONLY==="1") await verifyScopeRenewal(customer,other);
   else if(process.env.QCW_BROWSER_FULFILLMENT_ONLY==="1") await verifyFulfillmentRenewal(other);

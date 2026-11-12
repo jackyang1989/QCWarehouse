@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Action, Empty, ErrorBlock, Field, FileInput, Form, MediaButton, Panel, request, stamp, useWorkspaceStamp, Table, Tag, text, usd, useLoad, type Row } from "./ui";
 
 const status:Record<string,[string,string]>={
@@ -14,6 +14,16 @@ const categories:Record<string,string>={
   privacy_share:"隐私与分享",non_standard_quote:"非标咨询",
 };
 const isOpen=(state:string)=>state!=="resolved"&&state!=="closed";
+const customerIncidentStatus:Record<string,string>={
+  approved_awaiting_customer:"Decision required",awaiting_payout:"Payout pending",
+  customer_rejected:"Further review requested",resolved:"Resolved",closed:"Closed",
+};
+const customerIncidentKind:Record<string,string>={damage:"Damage",loss:"Missing item",wrong_inspection:"Inspection issue"};
+
+function incidentMoney(cents:number,currency:string) {
+  return /^[A-Z]{3}$/.test(currency)?new Intl.NumberFormat("en-US",{style:"currency",currency}).format(cents/100):
+    `${(cents/100).toFixed(2)} ${currency}`;
+}
 
 function Conversation({events,staff=false}:{events:Row[];staff?:boolean}) {
   const stamp=useWorkspaceStamp();
@@ -31,11 +41,17 @@ export function CustomerCase({id,order}:{id:string;order?:string}) {
   const stamp=useWorkspaceStamp();
   const api="/cases/"+id;
   const {data,error,reload}=useLoad(api+(order?"?"+new URLSearchParams({order}):""));
+  const incident=data?.incident;
   const [sent,setSent]=useState<number>();
+  useEffect(()=>{
+    if(incident?.decision_required&&location.hash==="#incident-decision") {
+      document.getElementById("incident-decision")?.scrollIntoView({block:"start"});
+    }
+  },[id,incident?.decision_required]);
   return <>
     <div className="page-head"><Link href={order?"/orders/"+order:"/support"}>{order?"← Inspection order":"← Support"}</Link>
       <p className="eyebrow report-eyebrow">CLIENT WORKSPACE / SUPPORT</p><h1>{data?.subject??"Support case"}</h1>
-      {data&&<div className="actions"><span className="code">{data.public_no}</span><Tag>{status[data.state]?.[0]}</Tag>
+      {data&&<div className="actions"><span className="code">{data.public_no}</span><Tag>{incident?.decision_required?"Decision required":status[data.state]?.[0]}</Tag>
         {data.order_number&&<Link className="code-btn" href={"/orders/"+data.order_number}>{data.order_number}</Link>}
         {data.parcel&&<Link className="code-btn" href={"/parcels/"+data.parcel.id}>Parcel {data.parcel.tracking_norm??"details"}</Link>}
       </div>}</div>
@@ -46,29 +62,31 @@ export function CustomerCase({id,order}:{id:string;order?:string}) {
         {data.state==="waiting_customer"&&data.next_action_at&&<p className="notice">Please reply by {stamp(data.next_action_at)}.</p>}
         <Conversation events={data.events}/>
       </Panel>
-      {data.incident&&<Panel title="Incident & Compensation Proposal">
+      {incident&&<div id="incident-decision" style={{scrollMarginTop:88}}><Panel title="Incident resolution">
         <dl className="location-facts">
-          <div><dt>Incident type</dt><dd>{data.incident.kind}</dd></div>
-          <div><dt>Status</dt><dd><Tag>{data.incident.status}</Tag></dd></div>
-          <div><dt>Service fee refund</dt><dd>{usd(data.incident.service_refund_cents??0)}</dd></div>
-          <div><dt>Compensation</dt><dd>{usd(data.incident.compensation_cents??0)}</dd></div>
+          <div><dt>Incident type</dt><dd>{customerIncidentKind[incident.kind]??"Warehouse incident"}</dd></div>
+          <div><dt>Status</dt><dd><Tag>{incident.paid?"Payout recorded":customerIncidentStatus[incident.status]??"Under review"}</Tag></dd></div>
+          {incident.proposal_visible&&incident.service_refund_cents>0&&<div><dt>Service fee refund in proposal</dt><dd>{incidentMoney(incident.service_refund_cents,incident.currency)}</dd></div>}
+          {incident.proposal_visible&&incident.compensation_cents>0&&<div><dt>Merchandise compensation</dt><dd>{incidentMoney(incident.compensation_cents,incident.currency)}</dd></div>}
         </dl>
-        <p>{data.incident.summary_en}</p>
-        {data.incident.payout_reference&&<p className="muted">Payout reference: <span className="code">{data.incident.payout_reference}</span> ({data.incident.payout_method})</p>}
-        {data.incident.status==="customer_pending"&&<Form label="Submit compensation decision" run={async fields=>{
-          await request("/me/incidents/"+data.incident.id+"/response","POST",{
+        {incident.proposal_summary_en&&<p>{incident.proposal_summary_en}</p>}
+        {incident.customer_decision&&<p role="status">{incident.customer_decision==="accept"?"You accepted this proposal.":"You requested further review."}</p>}
+        {incident.paid&&incident.payout_reference&&<p className="muted">Payout reference <span className="code">{incident.payout_reference}</span></p>}
+        {incident.decision_required&&<Form label="Submit compensation decision" run={async fields=>{
+          await request("/me/incidents/"+incident.id+"/response","POST",{
             decision:text(fields,"decision"),
             note:text(fields,"note")||undefined,
           });
           reload();
         }}>
-          <label>Decision<select name="decision" defaultValue="accept">
+          <div className="field"><label htmlFor="incident-decision-choice">Decision</label><select id="incident-decision-choice" name="decision" required defaultValue="">
+            <option value="">Choose a decision</option>
             <option value="accept">Accept compensation proposal</option>
             <option value="reject">Reject and request further review</option>
-          </select></label>
+          </select></div>
           <Field name="note" label="Response note (optional)" required={false}/>
         </Form>}
-      </Panel>}
+      </Panel></div>}
       {isOpen(data.state)&&<Panel title="Reply to support">
         <Form key={sent} label="Send reply" run={async fields=>{
           const photo=fields.get("photo");
