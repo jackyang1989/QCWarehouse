@@ -42,6 +42,8 @@ function UpdatesTable({notices,onRead}:{notices:Row[];onRead:()=>void}) {
       const title=noticeTitles[notice.template]??"Account update";
       return [<span className="cell-stack"><span style={{fontWeight:notice.read_at?500:750}}>{title}</span>
           {notice.item_code&&<small className="code">{notice.item_code}</small>}
+          {notice.parcel_tracking_number&&<small>Tracking <span className="code">{notice.parcel_tracking_number}</span></small>}
+          {notice.case_number&&<small>Case <span className="code">{notice.case_number}</span></small>}
           {notice.order_number&&<small>Order <span className="code">{notice.order_number}</span>{notice.report_version?` · Report v${notice.report_version}`:""}</small>}</span>,
         stamp(notice.created_at),notice.read_at?"Read":"Unread",
         <div className="actions">{href&&<Link href={href}>Open</Link>}

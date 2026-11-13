@@ -730,7 +730,8 @@ async function verifyParcelOwnership({page,call,errors},other) {
   await other.call("/me/parcels/"+approved.advice_id+"/tracking",{status:404});
   let received=false;
   for(let attempt=0;attempt<60&&!received;attempt++) {
-    received=(await call("/me/notifications")).rows.some(row=>row.case_id===claim.id);
+    const {rows}=await call("/me/notifications");
+    received=rows.some(row=>row.case_id===claim.id)&&rows.some(row=>row.advice_id===approved.advice_id);
     if(!received)await delay(1000);
   }
   assert(received,"The Worker did not deliver the private claim decision notification.");
@@ -738,6 +739,10 @@ async function verifyParcelOwnership({page,call,errors},other) {
   const notices=page.getByText("Support has replied to your case",{exact:true});
   await notices.waitFor({timeout:60000});
   const notice=page.getByRole("link",{name:"Open"}).and(page.locator('a[href="/support/cases/'+claim.id+'"]'));
+  const notificationRow=page.getByRole("row").filter({has:notice});
+  await notificationRow.getByText(claim.public_no,{exact:true}).waitFor();
+  await page.getByRole("row").filter({hasText:"The warehouse received your parcel"}).getByText(tracking,{exact:true}).waitFor();
+  await captureWizard(page,"parcel-claim-notifications","Notifications");
   await notice.click();
   await page.getByText("Ownership confirmed",{exact:true}).waitFor();
   assert.equal(await page.getByText(staffNote,{exact:true}).count(),0);
@@ -1105,6 +1110,23 @@ async function verifyWorkspaceViews(customer,other) {
         assert.equal(await fixture.page.getByRole("button",{name:"Add inbound parcel"}).count(),0);
       }
     }
+  }
+  await fixture.page.goto("/orders/"+chosenOrder.public_no+"/payment",{waitUntil:"domcontentloaded"});
+  const scope=fixture.page.locator("section").filter({has:fixture.page.getByRole("heading",{name:"Inspection scope",exact:true})});
+  await scope.waitFor();
+  const scopeCode=scope.locator("button.code-btn").first();
+  if(await scopeCode.count()) {
+    const layout=await scopeCode.evaluate(button=>{
+      const cell=button.closest("td");
+      const label=cell.querySelector(".table-cell-label").getBoundingClientRect();
+      const bounds=button.getBoundingClientRect();
+      const range=document.createRange();
+      range.selectNodeContents(button);
+      const text=range.getBoundingClientRect();
+      return {stacked:text.top>=label.bottom,contained:text.top>=bounds.top&&text.bottom<=bounds.bottom&&
+        bounds.right<=cell.getBoundingClientRect().right+1};
+    });
+    assert.deepEqual(layout,{stacked:true,contained:true});
   }
   await fixture.page.goto("/orders/new",{waitUntil:"domcontentloaded"});
   await fixture.page.getByRole("radio",{name:/Apparel.*Available now/}).waitFor();

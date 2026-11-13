@@ -1100,11 +1100,14 @@ test("unmatched intake remains private until a staff evidence decision",async()=
   assert.equal(rejected.ownership_review.advice_id,null);
   assert.equal(rejected.events.length,1);
   assert.match(rejected.events[0].body,/could not verify ownership/);
-  const decisionKeys=[target.id,other.id].map(id=>"intake-claim.decision:"+id);
-  for(let i=0;i<120&&(await pool.query("select 1 from notifications where dedupe_key=any($1::text[])",[decisionKeys])).rowCount!==2;i++)
+  const decisionKeys=[target.id,other.id].map(id=>"intake-claim.decision:"+id).concat("package.received:"+pkg.id);
+  for(let i=0;i<120&&(await pool.query("select 1 from notifications where dedupe_key=any($1::text[])",[decisionKeys])).rowCount!==decisionKeys.length;i++)
     if(!(await workOnce())) break;
   assert.equal((await c.fetch("/me/notifications")).rows.filter((row:{case_id:string})=>row.case_id===application.id).length,1);
   assert.equal((await another.fetch("/me/notifications")).rows.filter((row:{case_id:string})=>row.case_id===other.id).length,1);
+  const receivedNotice=(await c.fetch("/me/notifications")).rows.find((row:{advice_id:string})=>row.advice_id===advices[0].id);
+  assert.equal(receivedNotice.parcel_tracking_number,tracking);
+  assert(!(await another.fetch("/me/notifications")).rows.some((row:{parcel_tracking_number:string})=>row.parcel_tracking_number===tracking));
 });
 
 test("tracking verification and signed Chinese carrier delivery stay separate from physical receipt",async()=>{
@@ -2069,6 +2072,8 @@ test("support and customer can finish a parcel case while private notes and phot
     assert.equal(updates.length,1);
     assert.equal(updates[0].read_at,null);
     assert.equal(updates[0].template,"ticket.reply");
+    assert.equal(updates[0].case_number,created.public_no);
+    assert.deepEqual((await c.fetch("/me/desk?include_activity=0")).notices,[]);
     assert(!("payload" in updates[0]));
     assert(!(await other.fetch("/me/desk")).notices.some((n:{id:string})=>n.id===updates[0].id));
     const noticePath="/me/notifications/"+updates[0].id+"/read";
@@ -2132,7 +2137,7 @@ test("notification history paginates equal timestamps and keeps unread state and
   const first=await c.fetch(list);
   assert.equal(first.rows.length,50);
   assert.equal(first.next_before,expected[49]);
-  assert(first.rows.every((n:{case_id:string|null})=>n.case_id===null));
+  assert(first.rows.every((n:{case_id:string|null;case_number:string|null})=>n.case_id===null&&n.case_number===null));
   assert(!JSON.stringify(first).includes(foreignCase.id));
   const anchor=first.next_before;
   await other.c.fetch(list+"&before="+anchor,undefined,"GET",404);

@@ -373,7 +373,8 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   }
   if(method==="GET" && path==="/me/desk") {
     const charge=idSchema.nullable().parse(url.searchParams.get("charge"));
-    return json(await transaction(db=>customerDesk(db,actorRequired(actor),url.searchParams.get("include_items")!=="0",charge)));
+    return json(await transaction(db=>customerDesk(db,actorRequired(actor),url.searchParams.get("include_items")!=="0",charge,
+      url.searchParams.get("include_activity")!=="0")));
   }
   if(method==="GET" && path==="/me/email-delivery-status") return json(await transaction(db=>customerEmailDeliveryStatus(db,actorRequired(actor))));
   if(method==="GET" && path==="/me/privacy/export") return json(await transaction(db=>exportCustomerPrivacyData(db,actorRequired(actor))));

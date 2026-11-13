@@ -2940,7 +2940,8 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   const requestedCharge=isBills?(search.get("charge")??legacyCharge)?.toLowerCase():undefined;
   const requestedQuote=isBills?search.get("quote")?.toLowerCase():undefined;
   const focusedQuote=useLoad(requestedQuote?"/quotes/"+encodeURIComponent(requestedQuote):null);
-  const {data,error,reload}=useLoad("/me/desk?include_items=0"+(requestedCharge?"&charge="+encodeURIComponent(requestedCharge):"")),carriers=useLoad("/carriers");
+  const {data,error,reload}=useLoad("/me/desk?include_items=0"+(path==="/account"?"":"&include_activity=0")+
+    (requestedCharge?"&charge="+encodeURIComponent(requestedCharge):"")),carriers=useLoad("/carriers");
   const focusedChargeAvailable=Boolean(requestedCharge&&data?.bills.some((bill:Row)=>bill.charge_item_id===requestedCharge));
   const focusedQuoteAvailable=Boolean(data&&requestedQuote&&focusedQuote.data?.id===requestedQuote);
   const homeActions=useLoad(path==="/account"?"/actions":null);

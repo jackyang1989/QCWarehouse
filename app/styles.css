@@ -1029,7 +1029,8 @@ td .form input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
 td .form select,
 td .button:not(.lg),
 td .btn:not(.lg),
-td button:not(.wizard-step):not(.option-card):not(.step):not(.evidence-open):not(.cal-day):not(.cal-nav):not(.lg) {
+td button.code-btn,
+td button:not(.wizard-step):not(.option-card):not(.step):not(.evidence-open):not(.cal-day):not(.cal-nav):not(.lg):not(.code-btn) {
   height: 35px;
   min-height: 35px;
   padding: 0 12px;
@@ -1964,6 +1965,7 @@ button.option-card.disabled, .option-card.disabled {
     border: 0;
     min-width: 0;
     padding: 7px;
+    overflow-wrap: anywhere;
   }
   .workspace-customer .responsive-table:not(.report-comparison .responsive-table) td:first-child {
     grid-column: 1 / -1;
@@ -1971,9 +1973,14 @@ button.option-card.disabled, .option-card.disabled {
   }
   .workspace-customer .responsive-table:not(.report-comparison .responsive-table) td :is(.tag,.code-btn) {
     max-width: 100%;
+    vertical-align: top;
     white-space: normal;
     overflow-wrap: anywhere;
     text-align: left;
+  }
+  .workspace-customer .responsive-table:not(.report-comparison .responsive-table) td button.code-btn {
+    height: auto;
+    min-height: 44px;
   }
   .workspace-customer .responsive-table:not(.report-comparison .responsive-table) .table-cell-label {
     display: block;

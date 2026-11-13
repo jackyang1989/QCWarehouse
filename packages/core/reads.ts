@@ -226,7 +226,7 @@ export async function listCustomerOrders(db:DB,actor:Actor,query:string,state:st
   return {rows:rows.slice(0,pageSize),has_more:rows.length>pageSize};
 }
 
-export async function customerDesk(db:DB,actor:Actor,includeItems=true,focusedCharge:string|null=null) {
+export async function customerDesk(db:DB,actor:Actor,includeItems=true,focusedCharge:string|null=null,includeActivity=true) {
   const org=organization(actor);
   const orders=(await db.query(customerOrderSelect+" where o.org_id=$1 order by updated_at desc,o.id desc limit 200",[org])).rows;
   const advices=(await db.query(`select a.id,a.address_snapshot,t.tracking_norm,t.carrier_code,t.transport_state,t.sync_state,p.state warehouse_state,p.received_quantity,
@@ -303,7 +303,7 @@ export async function customerDesk(db:DB,actor:Actor,includeItems=true,focusedCh
   const inspectionQuotes=(await db.query(`select q.id,q.amount_cents,q.currency,q.expires_at,o.public_no order_number
     ${currentOfferedManualQuote}
     order by q.expires_at,q.id`,[org])).rows;
-  const notices=(await customerNotifications(db,actor,false,null,5)).rows;
+  const notices=includeActivity?(await customerNotifications(db,actor,false,null,5)).rows:[];
   const references=(await db.query(`select r.id reference_id,r.item_id,r.state,r.revision,r.condition_note,r.expires_at,
     r.authorization_snapshot->>'seal_code' seal_code,
     r.authorization_snapshot->>'safe_location_code' safe_location_code,
@@ -346,12 +346,8 @@ export async function customerNotifications(db:DB,actor:Actor,unread=false,befor
   select n.id,n.template,n.read_at,n.created_at,o.public_no order_number,
     (select v.version from reports r join report_versions v on v.report_id=r.id
       where r.order_id=o.id and v.version::text=n.payload->>'version' and v.state in ('published','superseded')) report_version,
-    (select k.id from tickets k where k.id::text=n.payload->>'ticket_id' and k.org_id=$2) case_id,
-    coalesce((select s.id from shipments s join dispatch_batches b on b.id=s.batch_id
-      where s.id::text=n.payload->>'shipment_id' and b.org_id=$2),
-      (select tr.shipment_id from tracking_records tr where tr.id::text=n.payload->>'tracker_id' and tr.org_id=$2)) shipment_id,
-    coalesce((select p.advice_id from packages p where p.id::text=n.payload->>'package_id' and p.org_id=$2),
-      (select tr.advice_id from tracking_records tr where tr.id::text=n.payload->>'tracker_id' and tr.org_id=$2)) advice_id,
+    k.id case_id,k.public_no case_number,s.id shipment_id,a.id advice_id,
+    coalesce(s.tracking_norm,parcel_tracking.tracking_norm) parcel_tracking_number,
     (select c.id from charge_items c where c.id::text=n.payload->>'charge_id' and c.org_id=$2) charge_id,
     case n.template
       when 'dispatch.quoted' then (select q.id from dispatch_quote_versions q join dispatch_batches b on b.id=q.batch_id
@@ -361,6 +357,15 @@ export async function customerNotifications(db:DB,actor:Actor,unread=false,befor
     end quote_id,
     (select w.code from warehouse_items w where w.id::text=n.payload->>'item_id' and w.org_id=$2) item_code
   from batch n left join orders o on o.id=n.order_id and o.org_id=$2
+  left join tickets k on k.id::text=n.payload->>'ticket_id' and k.org_id=$2
+  left join tracking_records tr on tr.id::text=n.payload->>'tracker_id' and tr.org_id=$2
+  left join packages p on p.id::text=n.payload->>'package_id' and p.org_id=$2
+  left join package_advices a on a.id=coalesce(p.advice_id,tr.advice_id) and a.org_id=$2
+  left join lateral(select s.id,s.tracking_norm from shipments s join dispatch_batches b on b.id=s.batch_id
+    where b.org_id=$2 and (s.id::text=n.payload->>'shipment_id' or s.id=tr.shipment_id)
+    order by (s.id::text=n.payload->>'shipment_id') desc nulls last limit 1) s on true
+  left join lateral(select t.tracking_norm from tracking_records t where t.advice_id=a.id and t.org_id=$2
+    and t.direction='inbound' and t.closed_at is null order by t.generation desc limit 1) parcel_tracking on true
   order by n.created_at desc nulls last,n.id desc`,[actor.id,org,unread,before,pageSize+1]);
   const page=rows.slice(0,pageSize);
   const unread_count=(await one<{n:number}>(db,"select count(*)::int n from notifications where user_id=$1 and read_at is null",[actor.id])).n;

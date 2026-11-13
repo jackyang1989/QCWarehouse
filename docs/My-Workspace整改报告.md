@@ -18,7 +18,7 @@
 | 包裹 | `/parcels`、`/parcels?tab=attention`、`/parcels/{id}`、`/shipments/{id}` | 登记运单、绑定本人订单、入仓与承运商状态分列、认领指定运单、出库追踪。待核验申请可分页查看，支持补充回复和结果通知。归属核实后可从原工单打开包裹，查看仓库登记时间、件数和外箱状况 | 通过已关联订单的逐件运单读取供应商和预计件数，与仓库记录数量分列。独立包裹的供应商和件数申报、原始外箱照发布规则 OPEN |
 | 实物 | `/items`，实物使用 `?item={code}` 打开抽屉，兼容 `#item-{code}` | 实物编号、所属委托、检查与保管状态。按实物提交不同去向，支持退商家、集运、续存和确认样。待封存状态独立展示 | 每页 20 件，统计与筛选来自全部本人库存。选择跨页保留，提交后回读真实逐件指令 |
 | 账单 | `/account/billing`，兼容 `/billing`，用 `?charge={id}` 定位具体收费 | 分开待确认报价、收费和退款。按入账或报价接受时间展示，区分测试付款。订单、待办或通知可直接定位本人历史收费。退货、发运和续存收费显示其关联订单 | Stripe 沙盒及正式主体收据验收 OPEN |
-| 通知 | `/account/notifications`，兼容 `/notifications` | 所属对象深链，已读写回，未读计数、游标分页。付款、入库、报告和封存使用现有事件去重键 | 邮件与实际承运商事件联调 OPEN |
+| 通知 | `/account/notifications`，兼容 `/notifications` | 所属对象深链、关联工单或运单编号、已读写回、未读计数、游标分页。付款、入库、报告和封存使用现有事件去重键 | 邮件与实际承运商事件联调 OPEN |
 | 支持 | `/support`、`/support/cases/{id}` | 创建工单、按工单号或订单号查找、按状态筛选并分页。旧工单有公开回复时排到前面，详情支持公开对话、客户回复及证据附件 | 可从本人包裹进入工单，创建时附照片，客户与授权客服可查看。客户自行关闭或重新开启 NEEDS_BUSINESS_DECISION |
 | 账户安全 | `/account/security` | 邮箱、登录方式、设备、敏感操作重新认证、导出与账户关闭。永久码显示于账户与安全页面 | 可编辑昵称与显示时区，服务端验证并应用于工作台日期。语言与通知偏好未有对应设置工作流 |
 | 测试收银台 | `/checkout/demo/{id}` | 隔离模式确认真实数据库收费记录。付款后回到原检验订单。客户隔离与重复确认由服务端验证 | Stripe 沙盒及正式验收 OPEN |
@@ -218,3 +218,9 @@ flowchart TD
 `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-parcel-receipt npm run test:integration` 通过 62/62。类型、构建、47 个契约操作和空库关系校验均退出 0。`QCW_BROWSER_INTAKE_CLAIM_ONLY=1 node tests/workspace.browser.mjs` 使用独立 Worker 和 `qcw_test-workspace-parcel-receipt-browser` 退出 0，六档截图和日志位于 `qcwarehouse-parcel-receipt-followup`。本机低磁盘空间导致首次 Chrome 挂起，关闭此前临时预览并清理可重建的构建缓存后完成复验。历史数据库、测试库数据及截图原图均保留。
 
 全页矩阵在 `6a3202e` 的隔离预览执行，使用同一 PostgreSQL 副本的真实客户、审核员和质检员会话。初次运行发现注册 Worker 已投递一条注册通知，补充业务通知标题和空态断言后，草稿恢复、报价失败恢复、支付重放及跨页库存选择均通过。第二次运行在历史报告页面加载处超时，保留 192 张截图。`QCW_BROWSER_RESUME_MATRIX=1 node tests/workspace.browser.mjs` 补齐历史报告六张截图、PDF 版本和角色隔离，退出 0。合计六档、33 个页面或状态、198 张原图，横向溢出为 0。全页原图及原始日志位于 `qcwarehouse-final-head-regression`，本次变更的收货页面原图见同段的收货专项证据。
+
+## 通知对象与手机表格续验
+
+续做基线 `6733e14`。入仓和发运通知显示关联运单号，客服回复显示工单号，号码从本人可读的业务对象取得。非首页的 `/me/desk` 请求跳过活动查询，首页和通知中心仍分别提供近期活动与分页历史。375px 订单表格的固定按钮高度导致多行实物码越过按钮边界，已修正并通过文字位置断言和实际截图核验。
+
+`TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-notification-context npm run test:integration` 通过 62/62。类型、构建、契约和空库关系检查退出 0。独立 Worker 与真实 Chrome 验证入仓通知、客服通知、工单跳转及本人包裹详情，六档 36 张原图位于 `qcwarehouse-notification-context-followup`。全页更新以 `QCW_BROWSER_RESUME_MATRIX=1` 退出 0，更新的 198 张矩阵及先前失败日志见 `qcwarehouse-final-head-regression`。本机重启后已使用历史验证副本恢复 localhost:3000，健康检查返回 200。
