@@ -3,6 +3,7 @@ import * as oidc from "openid-client";
 import { oidcSettings, postmarkSettings, type OidcProvider } from "./integrations";
 import { pool, transaction, type DB } from "../db";
 import { Problem, audit, code, event, guard, hash, isDemo, lock, one, organization, role, uuid, type Actor } from "./common";
+import { demoTermsVersion, demoWarehouseAddressZh, usableWarehouseAddressSql } from "./demo-fixtures";
 
 const token = () => randomBytes(32).toString("base64url");
 export function appOrigin() {
@@ -226,7 +227,8 @@ export async function demoSwitchAccount(email: string) {
 }
 export async function currentTerms(db: DB, kinds: string[]) {
   return (await db.query<{id:string;kind:string;version:string;content_md:string;effective_at:Date}>(`select distinct on(kind) id,kind,version,content_md,effective_at
-    from terms_versions where kind=any($1) and effective_at<=now() order by kind,effective_at desc,id`,[kinds])).rows;
+    from terms_versions where kind=any($1) and effective_at<=now() and ($2::boolean or version<>$3)
+    order by kind,effective_at desc,id`,[kinds,isDemo(),demoTermsVersion])).rows;
 }
 export async function publicPolicy(db:DB,kind:string,version:string|null) {
   if(version===null) {
@@ -235,7 +237,7 @@ export async function publicPolicy(db:DB,kind:string,version:string|null) {
     return current;
   }
   return one(db,`select id,kind,version,content_md,effective_at from terms_versions
-    where kind=$1 and version=$2 and effective_at<=now()`,[kind,version]);
+    where kind=$1 and version=$2 and effective_at<=now() and ($3::boolean or version<>$4)`,[kind,version,isDemo(),demoTermsVersion]);
 }
 export function requireTerms(actual: {id:string}[], submitted: string[], count: number) {
   guard(actual.length===count && submitted.length===count && actual.every(t=>submitted.includes(t.id)),"TERMS_CHANGED","Review the current terms before continuing.");
@@ -243,7 +245,8 @@ export function requireTerms(actual: {id:string}[], submitted: string[], count: 
 export async function receiving(db: DB, userId: string) {
   const profile = await one<{org_id:string;receiving_code:string}>(db,"select org_id,receiving_code from customer_receiving_profiles where user_id=$1",[userId]);
   const address = (await db.query(`select id,contact_name || ' ' || $1 as recipient,contact_phone as phone,address_zh,address_en
-    from warehouse_addresses where is_default and active`,[profile.receiving_code])).rows[0] ?? null;
+    from warehouse_addresses where is_default and active and ${usableWarehouseAddressSql("$2","$3")}`,
+    [profile.receiving_code,isDemo(),demoWarehouseAddressZh])).rows[0] ?? null;
   return {user_id:userId,...profile,warehouse_address_status:address ? "available" : "pending",warehouse_address:address};
 }
 type CustomerPreferences={display_name:string|null;timezone:string|null};

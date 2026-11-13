@@ -2471,6 +2471,13 @@ test("catalog and order creation enforce joint category, capability, template, a
 
   setFixtureEnv(t,{QCW_DEMO:"0"});
   assert.equal((await c.fetch("/catalog")).offers.length,0);
+  assert.deepEqual((await c.fetch("/public/terms")).terms,[]);
+  await c.fetch("/public/terms/privacy?version=demo-v1",undefined,"GET",404);
+  const profile=await c.fetch("/me/receiving-address");
+  assert.equal(profile.warehouse_address,null);
+  assert(profile.receiving_code);
+  const {rows:[demoAddress]}=await pool.query("select id from warehouse_addresses where is_default and active");
+  await c.fetch("/me/parcels",{address_id:demoAddress.id,tracking_no:"ZT"+randomUUID().slice(0,8)},"POST",404);
   await c.fetch("/orders",{lines:[{category_id:bags.category_id,offer_id:bags.offer_id,quantity:1}]},"POST",409);
 });
 
@@ -5753,8 +5760,8 @@ test("Week 29 & Week 30 rehearsal archiving, Hong Kong legal entity configuratio
 
   // 1. Initial launch readiness check before legal entity & 5 rehearsal scenarios are archived
   const initialReadiness=await admin.fetch("/staff/admin/launch-readiness");
-  assert.equal(initialReadiness.gates.warehouse_address,true);
-  assert.equal(initialReadiness.gates.legal_terms,true);
+  assert.equal(initialReadiness.gates.warehouse_address,false);
+  assert.equal(initialReadiness.gates.legal_terms,false);
   assert.equal(initialReadiness.gates.shipping_rates,true);
   assert.equal(initialReadiness.gates.catalog_purity,true);
   assert.equal(initialReadiness.gates.legal_entity_configured,false);

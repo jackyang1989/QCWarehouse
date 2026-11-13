@@ -3,6 +3,7 @@ import type { DB } from "../db";
 import { requireCustomerActive } from "./auth";
 import { audit, code, event, guard, hash, lock, one, organization, revision, role, uuid, type Actor } from "./common";
 import { integrationPreflight } from "./integrations";
+import { demoTermsVersion, demoWarehouseAddressZh } from "./demo-fixtures";
 import { savePhoto } from "./intake";
 import { activatePaidOrder, orderItemReadiness, priceSchema, readyOrder, templateSchema } from "./orders";
 import { scopeSupplementState } from "./scope-payment";
@@ -1640,8 +1641,8 @@ export async function evaluateLaunchReadiness(db:DB,actor:Actor) {
   }>(
     db,
     `select
-       (select count(*)::int from warehouse_addresses where active and is_default) default_address_count,
-       (select count(distinct kind)::int from terms_versions where effective_at is not null and effective_at<=now()) published_terms_kinds,
+       (select count(*)::int from warehouse_addresses where active and is_default and address_zh<>$1) default_address_count,
+       (select count(distinct kind)::int from terms_versions where effective_at<=now() and version<>$2) published_terms_kinds,
        (select count(*)::int from shipping_rate_versions) shipping_rates_count,
        (select count(*)::int from service_offers o
          join offer_templates ot on ot.offer_id=o.id
@@ -1653,7 +1654,8 @@ export async function evaluateLaunchReadiness(db:DB,actor:Actor) {
        (select count(*)::int from dispatch_batches where state not in ('draft','closed','cancelled')) in_flight_batches,
        (select count(*)::int from warehouse_items where custody_state in ('received','stored','packed')) stored_items,
        (select count(*)::int from payment_disputes where state<>'resolved_by_staff') open_disputes,
-       (select count(*)::int from outbox_events where processed_at is null and attempts>=5) exhausted_jobs`
+       (select count(*)::int from outbox_events where processed_at is null and attempts>=5) exhausted_jobs`,
+    [demoWarehouseAddressZh,demoTermsVersion]
   );
   const cfgRows=(await db.query<{key:string;value:unknown}>(
     "select key,value from app_config where key in ('legal.entity','launch.rehearsal_runs','launch.signoff','disposal.production_execution_enabled')"

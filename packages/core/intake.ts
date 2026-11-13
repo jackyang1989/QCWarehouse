@@ -1,6 +1,7 @@
 import type { DB } from "../db";
-import { audit, code, event, guard, hash, lock, one, organization, revision, role, uuid, type Actor } from "./common";
+import { audit, code, event, guard, hash, isDemo, lock, one, organization, revision, role, uuid, type Actor } from "./common";
 import { requireCustomerActive } from "./auth";
+import { demoWarehouseAddressZh, usableWarehouseAddressSql } from "./demo-fixtures";
 import { processImageBytes } from "./media";
 import { orderAcceptsSampleAssignmentSql, readyOrder } from "./orders";
 import { assertZonePurpose, requireSpace } from "./storage";
@@ -27,7 +28,8 @@ export async function advise(db:DB,actor:Actor,input:{tracking_no:string;address
   for(const order of orders) await one(db,"select id from orders where id=$1 and org_id=$2",[order,org]);
   let row=prev;
   if(!row) {
-    const address=await one(db,"select * from warehouse_addresses where id=$1 and active",[input.address_id]);
+    const address=await one(db,`select * from warehouse_addresses where id=$1 and active and ${usableWarehouseAddressSql("$2","$3")}`,
+      [input.address_id,isDemo(),demoWarehouseAddressZh]);
     row=await one(db,`insert into package_advices(user_id,org_id,address_id,address_snapshot) values($1,$2,$3,$4) returning id,revision`,[actor.id,org,address.id,address]);
     await db.query(`insert into tracking_records(org_id,direction,advice_id,carrier_code,tracking_norm,generation,transport_state,sync_state,next_query_at)
       values($1,'inbound',$2,$3,$4,1,'unknown',$5,now())`,[org,row.id,carrier,tracking,carrier?"pending":"needs_carrier"]);
@@ -601,7 +603,8 @@ export async function bindUnmatchedPackageOwner(
   revision(pkg.revision,input.revision);
   guard(!pkg.org_id && pkg.state==="unmatched","CLAIM_NOT_AVAILABLE","This parcel already has an assigned owner or is not unmatched.");
   await attachEvidence(db,actor,input.evidence_ids,"label_photo",{org:profile.org_id,package:packageId});
-  const address=await one(db,"select * from warehouse_addresses where active and is_default");
+  const address=await one(db,`select * from warehouse_addresses where active and is_default and ${usableWarehouseAddressSql("$1","$2")}`,
+    [isDemo(),demoWarehouseAddressZh]);
   const advice=await one<{id:string}>(
     db,
     "insert into package_advices(user_id,org_id,address_id,address_snapshot) values($1,$2,$3,$4) returning id",
@@ -684,7 +687,8 @@ export async function decideIntakeClaim(db:DB,actor:Actor,id:string,decision:"ap
       "CLAIM_NOT_AVAILABLE","Confirm there is a single unassigned physical parcel before approving.");
     const pkg=await one(db,"select org_id,state from packages where id=$1 for update",[match.package_id]);
     guard(!pkg.org_id && pkg.state==="unmatched","CLAIM_NOT_AVAILABLE","This parcel is no longer unassigned.");
-    const address=await one(db,"select * from warehouse_addresses where active and is_default");
+    const address=await one(db,`select * from warehouse_addresses where active and is_default and ${usableWarehouseAddressSql("$1","$2")}`,
+      [isDemo(),demoWarehouseAddressZh]);
     const advice=await one(db,`insert into package_advices(user_id,org_id,address_id,address_snapshot)
       values($1,$2,$3,$4) returning id`,[details.applicant_id,ticket.org_id,address.id,address]);
     await db.query("update packages set org_id=$2,advice_id=$3,state='checked_in',revision=revision+1 where id=$1",

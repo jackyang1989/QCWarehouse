@@ -1,4 +1,5 @@
 import { addEmailOtpIdentity } from "../packages/core/auth";
+import { demoTermsVersion, demoWarehouseAddressZh } from "../packages/core/demo-fixtures";
 import { APPAREL_SUBCATEGORY_TEMPLATES } from "../packages/core/inspection";
 import { pool, transaction } from "../packages/db";
 import { hash, lock, one, uuid } from "../packages/core/common";
@@ -24,7 +25,7 @@ async function seed() {
     const admin=actors.get("admin")!, reviewer=actors.get("reviewer")!, inspector=actors.get("inspector")!;
     const addrId=uuid();
     await db.query(`insert into warehouse_addresses(id,address_zh,address_en,contact_name,contact_phone,is_default)
-      values($1,'广东省佛山市南海区桂城街道质检演示仓 3 号库','Unit 3, QC Inspection Center, Nanhai District, Foshan, Guangdong, China','QCW 收货组','13800138000',true)`,[addrId]);
+      values($1,$2,'Unit 3, QC Inspection Center, Nanhai District, Foshan, Guangdong, China','QCW 收货组','13800138000',true)`,[addrId,demoWarehouseAddressZh]);
     await db.query(`insert into storage_locations(id,code,zone,capacity,notes) values
       ($1,'R-01','receiving',null,'到件暂存区'),
       ($2,'S-01','post_inspection',null,'检后存放区'),
@@ -45,7 +46,7 @@ async function seed() {
     await addEmailOtpIdentity(db,custId,custEmail.id);
     for(const kind of ["terms","privacy","restricted_items","report_notice"]) {
       const content="Development fixture. Use test parcels and simulated payments only. No physical shipment is requested.";
-      await db.query("insert into terms_versions(id,kind,version,effective_at,content_md,content_hash) values($1,$2,'demo-v1',now(),$3,$4)",[uuid(),kind,content,hash(content)]);
+      await db.query("insert into terms_versions(id,kind,version,effective_at,content_md,content_hash) values($1,$2,$3,now(),$4,$5)",[uuid(),kind,demoTermsVersion,content,hash(content)]);
     }
     for(const [c,provider,en,zh,required] of [
       ["sf","shunfeng","SF Express","顺丰",true],["zto","zhongtong","ZTO Express","中通",false],["yto","yuantong","YTO Express","圆通",false],
