@@ -10,6 +10,7 @@ import { scopeSupplementForOrder, scopeSupplementState } from "./scope-payment";
 import { incidentAwaitingCustomer, itemHandlingHoldSql } from "./storage";
 import { hasStaffAccess, staffAccess } from "./staff-access";
 import { effectiveDispatchCharge, pendingDispatchQuote, pendingStorageQuote, renewableFulfillmentQuote, unresolvedQuotePayment } from "./dispatch";
+import { inspectionPaymentForOrder } from "./payments";
 
 const inventoryJoins=`from warehouse_items w
     left join order_line_item_links a on a.item_id=w.id and a.unlinked_at is null
@@ -132,9 +133,6 @@ export async function customerActions(db:DB,actor:Actor) {
     from orders o ${orderInboundRegistration} where o.org_id=$1 and (
       (o.state='draft' and not exists(select 1 from manual_quote_requests m where m.order_id=o.id
         and m.revision=o.revision and m.state in ('requested','offered'))) or
-      (o.state='awaiting_payment' and not (${expiredManualInspectionPaymentSql}) and not exists(
-        select 1 from charge_items c join payments p on p.charge_item_id=c.id
-        where c.inspection_quote_id::text=o.submission_snapshot->>'quote_id' and c.voided_at is null and p.state='processing')) or
       inbound_registration.parcel_registration_due or
       (o.state in ('report_ready','action_pending') and exists(
         select 1 from order_lines l join order_line_item_links a on a.order_line_id=l.id and a.unlinked_at is null
@@ -144,6 +142,13 @@ export async function customerActions(db:DB,actor:Actor) {
         and not exists(select 1 from disposition_requests d where d.item_id=w.id and d.state<>'cancelled' and d.state<>'completed')
         and not exists(select 1 from reference_samples r where r.item_id=w.id and (r.state='pending_safe_storage' or (r.state='active' and r.expires_at>now())))))
     )
+    union all select o.id,'order',case inspection_payment.state when 'open' then 'awaiting_payment'
+      when 'reconciliation' then 'inspection_payment_reconciliation' else 'inspection_quote_expired' end,
+      o.public_no,case when inspection_payment.state='open' then inspection_payment.expires_at end
+      from orders o ${inspectionPaymentForOrder}
+      where o.org_id=$1 and o.state='awaiting_payment'
+      and (inspection_payment.state='open' or (inspection_payment.state in ('expired','reconciliation')
+        and not (${expiredManualInspectionPaymentSql})))
     union all select q.id,'inspection_quote','manual_quote_ready',o.public_no,q.expires_at
       ${currentOfferedManualQuote}
     union all select o.id,'inspection_quote','manual_quote_expired',o.public_no,null
@@ -211,12 +216,8 @@ const customerOrderSelect=`select o.id,o.public_no,o.state,o.revision,o.price_ce
     (select s.title->>'en' from order_lines l join service_offers s on s.id=l.offer_id where l.order_id=o.id order by l.id limit 1) service_title,
     (select st.code from order_lines l join service_offers s on s.id=l.offer_id join service_types st on st.id=s.service_type_id where l.order_id=o.id order by l.id limit 1) service_code,
     (select r.published_version from reports r where r.order_id=o.id limit 1) report_version,
-    (select case when c.applied_payment_id is not null or c.free_authorization is not null then 'paid'
-      when exists(select 1 from payments p where p.charge_item_id=c.id and p.state='processing') then 'processing'
-      when iq.expires_at<=now() then 'expired' else 'open' end
-     from charge_items c join inspection_quotes iq on iq.id=c.inspection_quote_id
-     where iq.order_id=o.id and iq.id::text=o.submission_snapshot->>'quote_id' and c.voided_at is null limit 1) payment_state
-    from orders o ${orderInboundRegistration}`;
+    nullif(inspection_payment.state,'not_due') payment_state
+    from orders o ${orderInboundRegistration} ${inspectionPaymentForOrder}`;
 
 export async function listCustomerOrders(db:DB,actor:Actor,query:string,state:string,page:number) {
   const pageSize=20;

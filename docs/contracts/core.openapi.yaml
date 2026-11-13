@@ -176,6 +176,9 @@ paths:
                 properties:
                   state:
                     enum: [not_due, open, processing, expired, paid]
+                  previous_checkout_expired:
+                    type: boolean
+                    description: 当前报价已过期，旧渠道会话仍可核对
                   charge:
                     oneOf:
                     - type: 'null'

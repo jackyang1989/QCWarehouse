@@ -269,6 +269,48 @@ async function verifyParcelPagination({page,call,errors},other) {
   console.log("PASS parcel pagination, tab reset, browser back and tenant isolation");
 }
 
+async function verifyInspectionPaymentActions({page,call,errors},other) {
+  const dbURL=new URL(process.env.QCW_BROWSER_DATABASE_URL);
+  assert.equal(dbURL.hostname,"127.0.0.1");
+  assert.match(dbURL.pathname,/^\/qcw_test-[a-z0-9-]+$/);
+  const {default:pg}=await import("pg");
+  const db=new pg.Client({connectionString:dbURL.href});
+  await db.connect();
+  try {
+    const {offers}=await call("/catalog");
+    const offer=offers.find(row=>row.sku_code==="apparel-inspection-1");
+    const draft=await call("/orders",{body:{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},status:201});
+    const path="/orders/"+draft.id;
+    const quote=await call(path+"/quotes",{body:{revision:draft.revision},status:201});
+    const {rows:[fixtureQuote]}=await db.query("update inspection_quotes set expires_at=now()+interval '12 seconds' where id=$1 and accepted_at is null returning expires_at",[quote.id]);
+    const {terms}=await call("/public/terms");
+    const submitted=await call(path+"/submit",{body:{revision:draft.revision,quote_id:quote.id,terms_version_ids:terms.map(term=>term.id),
+      acknowledgements:{scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true}}});
+    const row=page.getByRole("row").filter({hasText:draft.public_no});
+    await page.goto("/actions");
+    await row.getByRole("cell",{name:"Review inspection payment",exact:true}).waitFor();
+    assert.equal(Date.parse((await call("/actions")).rows.find(action=>action.id===draft.id).due_at),fixtureQuote.expires_at.valueOf());
+    await db.query("select pg_sleep(greatest(0,extract(epoch from expires_at-clock_timestamp()))+.02) from inspection_quotes where id=$1",[quote.id]);
+    await page.getByRole("button",{name:"Refresh actions"}).click();
+    await row.getByRole("cell",{name:"Review expired inspection quote",exact:true}).waitFor();
+    await captureWizard(page,"expired-inspection-action","Action required");
+    await row.getByRole("link",{name:"Open"}).click();
+    await page.waitForURL("**/orders/"+draft.public_no+"/payment");
+    await page.getByRole("button",{name:"Review a new quote"}).waitFor();
+    assert.equal(await page.getByRole("button",{name:"Resume payment"}).count(),0);
+    await other.call(path+"/payment",{status:404});
+    assert(!(await other.call("/actions")).rows.some(action=>action.id===draft.id));
+    assert.equal((await call(path+"/payment")).charge.id,submitted.charge.charge_item_id);
+    await captureWizard(page,"expired-inspection-payment","Inspection payment");
+    await page.getByRole("button",{name:"Review a new quote"}).click();
+    await page.locator("#inspection-quote").waitFor();
+    assert.equal((await call(path+"/payment")).charge.id,submitted.charge.charge_item_id);
+    assert.deepEqual(errors,[]);
+    assert(entries.every(entry=>entry.overflow===0));
+    console.log("PASS inspection quote expiry updates the task and original payment route without a payable link");
+  } finally {await db.end();}
+}
+
 async function verifyManualQuoteRenewal({page,call,errors},other) {
   const staff=await session("admin@qcw.test",true);
   const {offers}=await call("/catalog");
@@ -794,6 +836,7 @@ try {
   const other = await session(resumeMatrix?process.env.QCW_BROWSER_INVENTORY_EMAIL:undefined,false,resumeMatrix);
   if(resumeMatrix) await verifyWorkspaceViews(customer,other);
   else if(process.env.QCW_BROWSER_PARCELS_ONLY==="1") await verifyParcelPagination(customer,other);
+  else if(process.env.QCW_BROWSER_PAYMENT_ACTIONS_ONLY==="1") await verifyInspectionPaymentActions(customer,other);
   else if(process.env.QCW_BROWSER_INTAKE_CLAIM_ONLY==="1") await verifyParcelOwnership(customer,other);
   else if(process.env.QCW_BROWSER_INCIDENT_ONLY==="1") await verifyIncidentDecision(customer,other);
   else if(process.env.QCW_BROWSER_SELLER_RETURN_ONLY==="1") await verifySellerReturn(customer,other);

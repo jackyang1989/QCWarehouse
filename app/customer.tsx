@@ -23,6 +23,7 @@ const states:Record<string,string>={
   action_pending:"Awaiting disposition",cancelled:"Cancelled",closed:"Closed",on_hold:"On hold",stored:"In storage",
   waiting_customer:"Awaiting your reply",waiting_internal:"With support",identity_unclear:"Parcel ownership review",
   non_standard_quote:"General inquiry",not_due:"Not due",needs_verification:"Verification needed",needs_carrier:"Carrier needed",
+  reconciliation:"Payment status to verify",
 };
 const label=(state:string|null|undefined)=>state?states[state]??(state.charAt(0).toUpperCase()+state.slice(1).replaceAll("_"," ")):"—";
 const parcelLinkStates=["draft","awaiting_payment","awaiting_samples","on_hold"];
@@ -2375,14 +2376,15 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
   const manualRenewal=o?.manual_quote_renewable;
   const needsManualQuoteRenewal=manualQuote?.state==="expired"||Boolean(manualRenewal&&!manualQuote);
   const quote=manualQuote?.id?manualQuote:manualRenewal?undefined:calculatedQuote;
-  const paymentState=payment.data?.state;
+  const paymentState=payment.data?.previous_checkout_expired?"reconciliation":payment.data?.state;
   const scopePayment=o?.scope_payment;
   const scopePaymentHref=scopePayment?inspectionScopePath(number,scopePayment.id):undefined;
   const refreshPayment=()=>{detail.reload();payment.reload();};
   useEffect(()=>{
     const target=location.hash.slice(1);
-    if(o?.id&&(target==="manual-quote-request"||target==="inspection-quote")) document.getElementById(target)?.scrollIntoView({block:"start"});
-  },[o?.id]);
+    if(calculatedQuote?.id) document.getElementById("inspection-quote")?.scrollIntoView({block:"start"});
+    else if(o?.id&&(target==="manual-quote-request"||target==="inspection-quote")) document.getElementById(target)?.scrollIntoView({block:"start"});
+  },[o?.id,calculatedQuote?.id]);
   useEffect(()=>{
     if(!quote?.expires_at) return;
     const expiry=Date.parse(quote.expires_at);
@@ -2488,10 +2490,16 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
       {(section==="payment"||!section&&o.state==="awaiting_payment")&&<Panel title="Inspection payment">
         {payment.error?<ErrorBlock error={payment.error}/>:!payment.data?<p role="status">Loading the current charge…</p>:<>
           {payment.data.charge&&<p><strong>{usd(payment.data.charge.amount_cents)}</strong> · Quote {payment.data.charge.quote_revision}</p>}
-          {paymentState==="open"&&!checkoutNotice?.expired&&<Action primary run={()=>continuePayment(payment.data!.charge.id,payment.data!.charge.quote_revision)}>
-            {manualRenewal?"Check previous payment status":"Resume payment"}</Action>}
+          {(paymentState==="open"||paymentState==="reconciliation")&&!checkoutNotice?.expired&&<Action primary run={()=>continuePayment(payment.data!.charge.id,payment.data!.charge.quote_revision)}>
+            {paymentState==="reconciliation"||manualRenewal?"Check previous payment status":"Resume payment"}</Action>}
+          {paymentState==="reconciliation"&&!checkoutNotice?.expired&&<p>The quote has expired. Check the previous checkout before requesting a new quote.</p>}
           {paymentState==="processing"&&<p role="status">Payment is processing. We will update the order after confirmation.</p>}
-          {(paymentState==="expired"||checkoutNotice?.expired)&&<p>The quote has expired. Review a new quote for this order.</p>}
+          {(paymentState==="expired"||checkoutNotice?.expired)&&<>
+            <p>The quote has expired. Review a new quote for this order.</p>
+            {!manualRenewal&&<Action primary run={async()=>{
+              setQuote(await request("/orders/"+id+"/quotes","POST",{revision:o.revision}));
+            }}>Review a new quote</Action>}
+          </>}
           {returnedFromCheckout&&paymentState==="open"&&<p role="status">Waiting for payment confirmation.</p>}
           {paymentState==="paid"&&<div className="actions"><Tag>Payment confirmed</Tag>
             {o.state==="awaiting_samples"&&<Link className="button primary" href={base+"/parcels"}>Register seller tracking</Link>}
@@ -2529,9 +2537,9 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
         </div>)}
       </details>}
       {o.report_version&&<Link className="button primary" href={"/orders/"+number+"/report"}>Open inspection report</Link>}
-      {(o.state==="draft"||!manualRenewal&&o.state==="awaiting_payment"&&(paymentState==="expired"||checkoutNotice?.expired))&&
-        <div className="actions"><Action primary run={async()=>setQuote(await request("/orders/"+id+"/quotes","POST",{revision:o.revision}))}>{o.state==="draft"?"Calculate quote":"Review a new quote"}</Action>
-          {o.state==="draft"&&<Link className="button" href={"/orders/new?draft="+encodeURIComponent(number)}>Modify items or service in wizard</Link>}
+      {o.state==="draft"&&
+        <div className="actions"><Action primary run={async()=>setQuote(await request("/orders/"+id+"/quotes","POST",{revision:o.revision}))}>Calculate quote</Action>
+          <Link className="button" href={"/orders/new?draft="+encodeURIComponent(number)}>Modify items or service in wizard</Link>
         </div>}
       {(o.state==="draft"||manualRenewal)&&<details className="card" id="manual-quote-request" open={manualQuote||manualRenewal?true:undefined}>
         <summary>Manual inspection quote</summary>
@@ -2884,7 +2892,8 @@ function orderNextAction(o:Row):{label:string;href:string} {
   if(o.scope_payment) return {label:"Review scope charge",href:inspectionScopePath(o.public_no,o.scope_payment.id)};
   switch(o.state) {
     case "draft": return {label:"Resume wizard",href:"/orders/new?draft="+encodeURIComponent(o.public_no)};
-    case "awaiting_payment": return {label:"Complete payment",href:base+"/payment"};
+    case "awaiting_payment": return {label:o.payment_state==="expired"?"Review expired quote":o.payment_state==="reconciliation"?
+      "Check previous payment status":o.payment_state==="processing"?"Track payment confirmation":"Complete payment",href:base+"/payment"};
     case "awaiting_samples": return {label:o.parcel_registration_due?"Register seller tracking":"Track inbound parcels",href:base+"/parcels"};
     case "report_ready":
     case "action_pending": return {label:"Choose item handling",href:base+"/dispositions"};
@@ -3590,6 +3599,7 @@ const actionTitles:Record<string,string>={
   manual_quote_ready:"Review your inspection quote",manual_quote_expired:"Request an updated inspection quote",
   report_ready:"Choose how to handle inspected items",action_pending:"Choose how to handle inspected items",
   draft:"Continue inspection draft",awaiting_payment:"Review inspection payment",awaiting_samples:"Register seller tracking",
+  inspection_quote_expired:"Review expired inspection quote",inspection_payment_reconciliation:"Check previous inspection payment",
   return_to_seller:"Review seller return quote",to_forwarder:"Review forwarding quote",to_domestic_address:"Review domestic shipping quote",
   retain:"Review storage extension",needs_carrier:"Confirm parcel carrier",needs_verification:"Verify parcel tracking",waiting_customer:"Review support case",
   incident_decision:"Review warehouse incident proposal",
@@ -3604,7 +3614,7 @@ function customerActionHref(row:Row) {
   if(row.kind==="inspection_quote") return base+(row.state==="manual_quote_expired"?"#manual-quote-request":"#inspection-quote");
   if(row.kind==="order") {
     if(row.state==="draft") return "/orders/new?draft="+encodeURIComponent(row.reference);
-    if(row.state==="awaiting_payment") return base+"/payment";
+    if(["awaiting_payment","inspection_quote_expired","inspection_payment_reconciliation"].includes(row.state)) return base+"/payment";
     if(row.state==="awaiting_samples") return base+"/parcels";
     return base+"/dispositions";
   }

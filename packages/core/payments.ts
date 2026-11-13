@@ -8,20 +8,26 @@ import { applyScopePositionsAndAdditions, computeOrderRefundStage, type ScopeAdd
 import { inspectionScopePath } from "./portal-routes";
 const refundApprovalMfaMinutes=15;
 
+export const inspectionPaymentForOrder=`left join lateral (
+  select c.id,c.amount_cents,q.revision quote_revision,q.expires_at,case
+    when c.applied_payment_id is not null or c.free_authorization is not null then 'paid'
+    when o.state<>'awaiting_payment' then 'not_due'
+    when exists(select 1 from payments p where p.charge_item_id=c.id and p.state='processing') then 'processing'
+    when q.expires_at>now() then 'open'
+    when exists(select 1 from payments p where p.charge_item_id=c.id and p.state='requires_payment' and p.provider_ref is not null)
+      then 'reconciliation'
+    else 'expired' end state
+  from inspection_quotes q join charge_items c on c.inspection_quote_id=q.id and c.org_id=o.org_id and c.voided_at is null
+  where q.order_id=o.id and q.id::text=o.submission_snapshot->>'quote_id' and c.scope_revision_id is null
+) inspection_payment on true`;
+
 export async function orderPayment(db:DB,actor:Actor,id:string) {
-  const row=await one(db,`select o.state order_state,c.id,c.amount_cents,q.revision quote_revision,q.expires_at,
-    c.applied_payment_id,c.free_authorization,q.expires_at>now() quote_valid,
-    exists(select 1 from payments p where p.charge_item_id=c.id and p.state='processing') processing,
-    exists(select 1 from payments p where p.charge_item_id=c.id and p.state='requires_payment' and p.provider_ref is not null) remote_attempt
-    from orders o left join inspection_quotes q on q.order_id=o.id and q.id::text=o.submission_snapshot->>'quote_id'
-    left join charge_items c on c.inspection_quote_id=q.id and c.org_id=o.org_id and c.voided_at is null
+  const row=await one(db,`select inspection_payment.* from orders o ${inspectionPaymentForOrder}
     where o.id=$1 and o.org_id=$2`,[id,organization(actor)]);
-  if(!row.id) return {state:"not_due",charge:null};
+  if(!row.id||row.state==="not_due") return {state:"not_due",charge:null};
   const charge={id:row.id,amount_cents:row.amount_cents,quote_revision:row.quote_revision,expires_at:row.expires_at};
-  if(row.applied_payment_id || row.free_authorization) return {state:"paid",charge};
-  if(row.order_state!=="awaiting_payment") return {state:"not_due",charge:null};
-  if(row.processing) return {state:"processing",charge};
-  return {state:row.quote_valid||row.remote_attempt?"open":"expired",charge};
+  if(row.state==="reconciliation") return {state:"open",charge,previous_checkout_expired:true};
+  return {state:row.state,charge};
 }
 
 function stripe() {

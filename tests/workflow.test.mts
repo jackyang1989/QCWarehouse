@@ -1308,9 +1308,13 @@ test("checkout withholds expired links and retains Stripe sessions for payment r
       acknowledgements:{scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true}});
     await pool.query("update orders set is_test=false where id=$1",[draft.id]);
     const chargeId=accepted.charge.charge_item_id;
-    return {path,quote,chargeId,checkoutPath:"/charges/"+chargeId+"/checkout",body:{quote_revision:quote.revision}};
+    return {path,quote,chargeId,draft,checkoutPath:"/charges/"+chargeId+"/checkout",body:{quote_revision:quote.revision}};
   }
   const existing=await acceptedInspection(3);
+  const actionFor=async (id:string)=>(await c.fetch("/actions")).rows.find(row=>row.id===id);
+  const currentAction=await actionFor(existing.draft.id);
+  assert.equal(currentAction.state,"awaiting_payment");
+  assert(currentAction.due_at);
   let crossing:Awaited<ReturnType<typeof acceptedInspection>>|undefined;
   setFixtureEnv(t,{QCW_DEMO:"0",STRIPE_SECRET_KEY:"sk_test_fixture",STRIPE_WEBHOOK_SECRET:"whsec_fixture"});
   const CommonJsStripe:typeof Stripe=createRequire(import.meta.url)("stripe");
@@ -1343,6 +1347,12 @@ test("checkout withholds expired links and retains Stripe sessions for payment r
   assert.equal(remote.size,1);
 
   await waitForExpiry(existing.quote.id);
+  const previousPayment=await c.fetch(existing.path+"/payment");
+  assert.equal(previousPayment.state,"open");
+  assert.equal(previousPayment.previous_checkout_expired,true);
+  assert.equal((await c.fetch("/me/orders?q="+existing.draft.public_no)).rows[0].payment_state,"reconciliation");
+  assert.equal((await actionFor(existing.draft.id)).state,"inspection_payment_reconciliation");
+  assert.equal((await actionFor(existing.draft.id)).due_at,null);
   const repeated=await c.fetch(existing.checkoutPath,existing.body,"POST",409,key);
   const resumed=await c.fetch(existing.checkoutPath,existing.body,"POST",409);
   assert.equal(repeated.error.code,"QUOTE_EXPIRED");
@@ -1362,6 +1372,7 @@ test("checkout withholds expired links and retains Stripe sessions for payment r
   const response=await handle(new Request(origin+"/api/v1"+webhook,{method:"POST",body:payload,headers:{"stripe-signature":signature}}),webhook);
   assert.equal(response.status,200);
   assert.equal((await c.fetch(existing.path)).state,"awaiting_samples");
+  assert.equal((await actionFor(existing.draft.id)).state,"awaiting_samples");
   assert.deepEqual(await c.fetch(existing.checkoutPath,existing.body,"POST",200,key),{state:"paid",charge_item_id:existing.chargeId});
 
   process.env.QCW_DEMO="1";
