@@ -198,3 +198,9 @@ flowchart TD
 续做基线 `3a6df40`。处置写入原本会拒绝事故和盘点冻结件，客户库存和订单页面仍可能提供选择，待办也会把冻结件计作可处理。现由同一冻结条件驱动写入、库存、订单、统计和待办。客户可查看仍在本人名下的实物和冻结原因。未委托、已取消或已关闭订单仍在仓且符合原条件的实物，纳入待处置筛选。已登记的实物与收费保留。
 
 `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-hold-followup npm run test:integration` 通过 62/62。`npm run check`、`npm run build`、`python3 docs/contracts/check.py` 及空库关系检查退出 0。`QCW_BROWSER_INCIDENT_ONLY=1 node tests/workspace.browser.mjs` 在 `qcw_test-workspace-hold-browser` 退出 0，验证库存冻结标识、理赔决策和录入测试凭证后恢复处置。六档 30 张原图、对照及日志位于 `qcwarehouse-item-hold-followup`。
+
+## 同商家退货合包续验
+
+续做基线 `87d2203`。客户退货表单原来不提交现有契约已支持的 `seller_name`、`seller_id`。现在客户可填写商家名称或店铺编号，保存后从「待处置」视图直接跳到可查看已保存指令的列表。合包仍须通过原供应商、实物和包裹来源、退货授权、目的地以及租户校验。单件退货可留空。
+
+`TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-seller-followup npm run test:integration` 通过 62/62。类型、构建、契约和空库关系检查退出 0。`QCW_BROWSER_SELLER_RETURN_ONLY=1 node tests/workspace.browser.mjs` 在独立副本 `qcw_test-workspace-seller-browser` 退出 0，验证两个订单、两个包裹、两条退货指令、跨客户拦截和客户确认批次后进入待报价。六档 12 张原图及日志位于 `qcwarehouse-seller-return-followup`。初次测试发现待处置筛选在保存后隐藏已处理实物，已补入口。另保留一次测试表格定位超时的原始日志。

@@ -530,6 +530,79 @@ async function verifySupportHistory({page,call,errors},other) {
   console.log("PASS support history pagination, case search, browser back, and customer isolation");
 }
 
+async function verifySellerReturn({page,call,errors},other) {
+  const receiver=await session("receiving@qcw.test",true);
+  const profile=await call("/me/receiving-address");
+  const {offers}=await call("/catalog");
+  const offer=offers.find(row=>row.sku_code==="apparel-inspection-1");
+  const terms=(await call("/public/terms")).terms.map(term=>term.id);
+  const {locations}=await receiver.call("/staff/desk");
+  const location=locations.find(row=>row.code==="R-01");
+  const photo=await sharp({create:{width:100,height:80,channels:3,background:"#11736d"}}).png().toBuffer();
+  async function evidence(kind) {
+    const csrf=(await receiver.context.cookies()).find(cookie=>cookie.name==="qcw_csrf")?.value;
+    const upload=await receiver.context.request.post("/api/v1/staff/media",{
+      headers:{origin,"Idempotency-Key":randomUUID(),"X-CSRF-Token":csrf},
+      multipart:{kind,photo:{name:"fixture.png",mimeType:"image/png",buffer:photo}},
+    });
+    assert.equal(upload.status(),201);
+    return (await upload.json()).id;
+  }
+  async function prepareItem() {
+    const tracking_no="ZTO"+randomUUID().slice(0,8).toUpperCase(),code="S-"+randomUUID();
+    const draft=await call("/orders",{status:201,body:{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,
+      quantity:1,items:[{sample_code:code,supplier_alias:"Fixture supplier",tracking_no}]}]}});
+    const orderPath="/orders/"+draft.id;
+    const quote=await call(orderPath+"/quotes",{status:201,body:{revision:draft.revision}});
+    const submitted=await call(orderPath+"/submit",{body:{revision:draft.revision,quote_id:quote.id,terms_version_ids:terms,
+      acknowledgements:{scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true}}});
+    const checkout=await call("/charges/"+submitted.charge.charge_item_id+"/checkout",{body:{quote_revision:quote.revision}});
+    await call("/checkout/demo/"+checkout.attempt_id,{body:{}});
+    const advice=await call("/me/parcels",{status:201,body:{address_id:profile.warehouse_address.id,tracking_no,carrier_code:"zto",order_ids:[draft.id]}});
+    const parcel=await receiver.call("/staff/intake/check-in",{status:201,body:{tracking_no,carrier_code:"zto",advice_id:advice.id,outer_media_ids:[await evidence("intake_outer")]}});
+    const {item_ids:[id]}=await receiver.call("/staff/packages/"+parcel.id+"/items",{status:201,body:{revision:parcel.revision,items:[{code,location_id:location.id}]}});
+    const position=(await call(orderPath)).items[0];
+    await receiver.call("/staff/items/"+id+"/assign",{body:{revision:1,order_line_id:position.order_line_id,expected_item_id:position.id,evidence_ids:[await evidence("label_photo")]}});
+    const current=await call(orderPath);
+    await call(orderPath+"/cancel",{body:{revision:current.revision}});
+    return {code,id};
+  }
+  const items=[await prepareItem(),await prepareItem()];
+  await page.goto("/items?filter=handling");
+  for(const item of items) await page.getByRole("checkbox",{name:`Select ${item.code} for handling`}).check();
+  await page.getByText("Seller details for a combined return",{exact:true}).click();
+  await page.getByLabel("Recipient",{exact:true}).fill("Fixture return recipient");
+  await page.getByLabel("Destination phone").fill("13800000000");
+  await page.getByLabel("Return address supplied by your seller").fill("Fixture seller return address");
+  await page.getByLabel("Seller’s shop name (optional)").fill("Fixture shop");
+  await page.getByLabel("Seller’s shop ID (optional)").fill("FIXTURE-SHOP-1");
+  await captureWizard(page,"seller-return-details","Warehouse items");
+  await page.getByRole("checkbox",{name:/I have arranged the return/}).check();
+  await page.getByRole("button",{name:"Save handling instruction (2 items)"}).click();
+  await page.getByText(/Instructions recorded for/).waitFor();
+  const instructions=[];
+  for(const item of items) {
+    const {rows:[stored]}=await call("/me/inventory?code="+item.code);
+    assert.equal(stored.active_disposition.return_info.seller_name,"Fixture shop");
+    assert.equal(stored.active_disposition.return_info.seller_id,"FIXTURE-SHOP-1");
+    instructions.push(stored.active_disposition.id);
+  }
+  await other.call("/dispatch-batches",{body:{disposition_ids:instructions},status:409});
+  await page.getByRole("link",{name:"View items with saved instructions"}).click();
+  for(const item of items) await page.getByRole("row").filter({has:page.getByRole("button",{name:item.code,exact:true})})
+    .getByRole("checkbox",{name:"Select for shipping"}).check();
+  await page.getByRole("button",{name:"Confirm selected items for quoting (2)"}).click();
+  const batch=page.getByRole("heading",{name:"Dispatch batches"});
+  await batch.waitFor();
+  await page.getByRole("cell",{name:"Awaiting quote",exact:true}).waitFor();
+  const savedBatch=(await call("/me/desk?include_items=0")).active_batches.find(row=>items.every(item=>row.item_codes.includes(item.code)));
+  assert.equal(savedBatch.state,"confirmed");
+  await captureWizard(page,"seller-return-batch","Warehouse items");
+  assert.deepEqual(errors,[]);
+  assert(entries.every(entry=>entry.overflow===0));
+  console.log("PASS same-seller return details saved through customer form, cross-order batch confirmed, and foreign batch blocked");
+}
+
 async function verifyIncidentDecision({page,call,errors},other) {
   const receiver=await session("receiving@qcw.test",true);
   const admin=await session("admin@qcw.test",true);
@@ -603,6 +676,7 @@ try {
   const other = await session(resumeMatrix?process.env.QCW_BROWSER_INVENTORY_EMAIL:undefined,false,resumeMatrix);
   if(resumeMatrix) await verifyWorkspaceViews(customer,other);
   else if(process.env.QCW_BROWSER_INCIDENT_ONLY==="1") await verifyIncidentDecision(customer,other);
+  else if(process.env.QCW_BROWSER_SELLER_RETURN_ONLY==="1") await verifySellerReturn(customer,other);
   else if(process.env.QCW_BROWSER_SUPPORT_ONLY==="1") await verifySupportHistory(customer,other);
   else if(process.env.QCW_BROWSER_SCOPE_ONLY==="1") await verifyScopeRenewal(customer,other);
   else if(process.env.QCW_BROWSER_FULFILLMENT_ONLY==="1") await verifyFulfillmentRenewal(other);

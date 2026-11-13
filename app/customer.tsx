@@ -3227,7 +3227,9 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
       ])} empty="No reference samples reserved yet. Use the instruction form below to reserve a stored item as a reference sample."/>
     </Panel>
     <Panel title="Request handling for items">
-      {handlingNotice&&<p className="notice ok" role="status">{handlingNotice}</p>}
+      {handlingNotice&&<div className="notice ok"><p role="status">{handlingNotice}</p>
+        {itemFilter==="handling"&&<Link href={inventoryHref(1,"all")} scroll={false}>View items with saved instructions</Link>}
+      </div>}
       {handlingItems.length?<>
         <button className="button sm" type="button" onClick={()=>setHandlingItems([])}>Clear selection</button>
         <ItemInstructionForm items={handlingItems} preselected recentDestinations={data.recent_destinations??[]}
@@ -3672,6 +3674,7 @@ function ItemInstructionForm({items,orderId,storage=false,preselected=false,rece
         ...(currentAction==="to_forwarder"?{member_code:memberCode.trim()||text(f,"member_code")}:{}),
       }:undefined;
       const deadline=text(f,"deadline");
+      const sellerName=text(f,"seller_name"),sellerId=text(f,"seller_id");
       const retainDays=currentAction==="retain"?Number(text(f,"days")||30):undefined;
       const recorded:Row[]=[];
       try {
@@ -3680,6 +3683,7 @@ function ItemInstructionForm({items,orderId,storage=false,preselected=false,rece
           ...(orderId?{item_id:item.item_id}:{}),action:currentAction,terms_version_id:termsId,...(destination?{destination}:{}),
           ...(retainDays?{days:retainDays}:{}),
           ...(currentAction==="return_to_seller"?{return_info:{requested_from_seller:true,customer_pays_shipping:true,
+            ...(sellerName?{seller_name:sellerName}:{}),...(sellerId?{seller_id:sellerId}:{}),
             ...(deadline?{deadline:new Date(deadline).toISOString()}:{})}}:{}),
           });
           recorded.push(item);
@@ -3745,7 +3749,15 @@ function ItemInstructionForm({items,orderId,storage=false,preselected=false,rece
         <label>{currentAction==="return_to_seller"?"Return address supplied by your seller":"Destination address"}<textarea name="address" required value={address} onChange={e=>setAddress(e.target.value)}/></label>
       </>}
       {currentAction==="to_forwarder"&&<label>Forwarder member code<input name="member_code" required value={memberCode} onChange={e=>setMemberCode(e.target.value)}/></label>}
-      {currentAction==="return_to_seller"&&<Field name="deadline" label="Seller’s return deadline (your local time)" type="datetime-local" required={false}/>}
+      {currentAction==="return_to_seller"&&<>
+        <Field name="deadline" label="Seller’s return deadline (your local time)" type="datetime-local" required={false}/>
+        <details className="card">
+          <summary>Seller details for a combined return</summary>
+          <p className="small muted">If you plan to combine returns from different orders and inbound parcels, enter the same seller’s shop name or shop ID for each return. The warehouse checks the items’ declared supplier before they can be combined.</p>
+          <label>Seller’s shop name (optional)<input name="seller_name" maxLength={120}/></label>
+          <label>Seller’s shop ID (optional)<input name="seller_id" maxLength={120}/></label>
+        </details>
+      </>}
       <label className="check"><input name="agree" required type="checkbox"/>{currentAction==="return_to_seller"?
         "I have arranged the return with my seller and will pay the return shipping fee.":"I authorize this request subject to the current terms and quote."}</label>
     </Form>
