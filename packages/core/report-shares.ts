@@ -6,15 +6,17 @@ export const shareTokenPattern="[A-Za-z0-9_-]{43}";
 export const shareInput=z.object({days:z.union([z.literal(1),z.literal(7),z.literal(30)])}).strict();
 export const reportSharingEnabled=()=>process.env.REPORT_SHARING_ENABLED==="1";
 
-export async function listPublishedReports(db:DB,actor:Actor,reference:string|null,version:number|null,latest=false) {
+export async function listPublishedReports(db:DB,actor:Actor,reference:string|null,version:number|null,latest=false,page?:number) {
+  const size=page===undefined?100:20;
   const {rows}=await db.query(`select o.id order_id,o.public_no order_number,r.public_no report_number,
     v.version,v.published_at,v.amend_reason,v.version=r.published_version is_current
     from reports r join orders o on o.id=r.order_id join report_versions v on v.report_id=r.id
     where o.org_id=$1 and v.state in ('published','superseded')
     and ($2::text is null or o.public_no=$2 or r.public_no=$2)
     and ($3::int is null or v.version=$3) and (not $4::boolean or v.version=r.published_version)
-    order by v.published_at desc,v.id limit 100`,[organization(actor),reference,version,latest]);
-  return {rows};
+    order by v.published_at desc nulls last,v.id limit $5 offset $6`,[organization(actor),reference,version,latest,
+    page===undefined?size:size+1,((page??1)-1)*size]);
+  return {rows:rows.slice(0,size),...(page===undefined?{}:{page,has_more:rows.length>size})};
 }
 
 async function ownedVersion(db:DB,actor:Actor,orderId:string,version:number) {

@@ -739,6 +739,10 @@ test("33 physical items from three parcels share one order, report and selective
   assert.equal((await c.fetch("/me/reports?reference="+published.snapshot.report_no)).rows.length,2);
   assert.deepEqual((await other.fetch(reportList)).rows,[]);
   await c.fetch(reportList+"&version=0",undefined,"GET",422);
+  assert.deepEqual((await c.fetch(reportList+"&page=1")).rows,versions);
+  assert.deepEqual(await c.fetch(reportList+"&page=2"),{rows:[],page:2,has_more:false});
+  assert.deepEqual((await c.fetch(reportList+"&latest=1&page=1")).rows.map(row=>row.version),[2]);
+  await c.fetch(reportList+"&page=0",undefined,"GET",422);
   assert.equal(history.state,"superseded");
   assert.deepEqual(history.snapshot,published.snapshot);
   const sharesPath=path+"/report/versions/1/shares";

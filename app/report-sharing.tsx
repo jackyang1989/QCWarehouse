@@ -18,7 +18,14 @@ export function PublishedReports() {
   const apiParams=new URLSearchParams(params);
   apiParams.delete("history");
   if(!history&&!params.has("version")) apiParams.set("latest","1");
+  const page=Number(search.get("page")??1);
+  apiParams.set("page",String(page));
   const {data,error,reload}=useLoad("/me/reports?"+apiParams);
+  function pageHref(target:number) {
+    const next=new URLSearchParams(params);
+    if(target>1)next.set("page",String(target));
+    return "/reports"+(next.size?"?"+next:"");
+  }
   return <>
     <div className="page-head"><p className="eyebrow">CLIENT WORKSPACE / INSPECTION RECORDS</p><h1>Reports</h1>
       <p className="muted">Find a published report or open a specific historical version.</p></div>
@@ -42,7 +49,12 @@ export function PublishedReports() {
           }}>Download PDF</Action>
           <Link href={"/orders/"+row.order_number+"/dispositions"}>Related items</Link>
         </div>,
-      ])} empty={query?"No matching published reports.":"Published inspection reports will appear here."}/>}
+      ])} empty={page>1?"No published reports on this page.":query?"No matching published reports.":"Published inspection reports will appear here."}/>}
+      {data&&!error&&(page>1||data.has_more)&&<nav className="actions" aria-label="Report pages">
+        {page>1&&<Link className="button" href={pageHref(page-1)}>Previous page</Link>}
+        <span>Page {page}</span>
+        {data.has_more&&<Link className="button" href={pageHref(page+1)}>Next page</Link>}
+      </nav>}
     </Panel>
   </>;
 }

@@ -164,7 +164,8 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const reference=z.string().trim().toUpperCase().pipe(z.string().regex(/^(QW|R)-[A-F0-9]{1,64}$/)).optional()
       .parse(url.searchParams.get("reference")||undefined)??null;
     const version=z.coerce.number().int().min(1).max(2147483647).optional().parse(url.searchParams.get("version")||undefined)??null;
-    return json(await transaction(db=>listPublishedReports(db,actorRequired(actor),reference,version,url.searchParams.get("latest")==="1")));
+    const page=z.coerce.number().int().min(1).max(10000).optional().parse(url.searchParams.get("page")??undefined);
+    return json(await transaction(db=>listPublishedReports(db,actorRequired(actor),reference,version,url.searchParams.get("latest")==="1",page)));
   }
   if(method==="GET" && path==="/health") {
     await pool.query("select 1");
