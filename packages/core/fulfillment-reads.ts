@@ -39,7 +39,7 @@ export const orderInboundRegistration=`left join lateral (
   from pending
 ) inbound_registration on true`;
 
-export async function orderShipments(db:DB,orderId:string,org:string,shipmentId:string|null=null) {
+export async function orderShipments(db:DB,orderId:string|null,org:string,shipmentId:string|null=null) {
   return (await db.query(`with related as (${relatedItems})
     select s.id,s.batch_id,s.carrier_code,s.state,s.tracking_norm,s.shipped_at,s.weight_g,b.action,b.destination_snapshot,
     (select jsonb_agg(jsonb_build_object('code',w.code,'returned_at',sr.received_at) order by w.code)
@@ -47,10 +47,16 @@ export async function orderShipments(db:DB,orderId:string,org:string,shipmentId:
       left join shipment_return_items sr on sr.shipment_id=s.id and sr.item_id=w.id
       where si.shipment_id=s.id) items
     from shipments s join dispatch_batches b on b.id=s.batch_id
-    where b.org_id=$2 and s.shipped_at is not null and ($3::uuid is null or s.id=$3) and exists(
+    where b.org_id=$2 and s.shipped_at is not null and ($3::uuid is null or s.id=$3) and ($1::uuid is null or exists(
       select 1 from shipment_items si join related a on a.item_id=si.item_id
-      where si.shipment_id=s.id and a.linked_at<=s.shipped_at and (a.unlinked_at is null or a.unlinked_at>s.shipped_at))
+      where si.shipment_id=s.id and a.linked_at<=s.shipped_at and (a.unlinked_at is null or a.unlinked_at>s.shipped_at)))
     order by s.shipped_at desc,s.id`,[orderId,org,shipmentId])).rows;
+}
+
+export async function customerShipment(db:DB,actor:Actor,id:string) {
+  const [shipment]=await orderShipments(db,null,organization(actor),id);
+  guard(shipment,"NOT_FOUND","Shipment not found.",404);
+  return shipment;
 }
 
 async function fulfillmentQuotes(db:DB,orderId:string|null,org:string,quoteId:string|null) {

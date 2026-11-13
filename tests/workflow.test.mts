@@ -488,6 +488,7 @@ test(category+": customer to warehouse to PDF to dispatch on the same records",a
   const outbound=await c.fetch("/shipments/"+shipment.shipment_id+"/tracking");
   assert.equal(outbound.tracking_no,actual);assert.equal(outbound.direction,forward?"outbound_forward":"outbound_return");assert.equal(outbound.warehouse_state,"shipped");
   await another.c.fetch("/shipments/"+shipment.shipment_id+"/tracking",undefined,"GET",404);
+  await another.c.fetch("/shipments/"+shipment.shipment_id,undefined,"GET",404);
   if(category==="Apparel") {
     const admin=await staffLogin("admin");
     const staffPath="/staff/orders/by-number/"+draft.public_no;
@@ -519,6 +520,9 @@ test(category+": customer to warehouse to PDF to dispatch on the same records",a
   const repeated=await staff.fetch("/staff/shipments/"+shipment.shipment_id+"/receive-return",returned);
   assert.equal(confirmedReturn.return_status,"complete");assert.equal(repeated.revision,confirmedReturn.revision);
   assert.equal((await c.fetch("/me/items")).items[0].custody_state,"stored");
+  const customerReturn=await c.fetch("/shipments/"+shipment.shipment_id);
+  assert.equal(customerReturn.state,"returned");
+  assert.equal(Date.parse(customerReturn.items[0].returned_at),Date.parse(returned.received_at));
   const dispatchDetail=await staff.fetch("/staff/dispatch-batches/"+(await pool.query("select batch_id from shipments where id=$1",[shipment.shipment_id])).rows[0].batch_id);
   assert.equal(dispatchDetail.shipments[0].state,"returned");
   assert.equal((await staff.fetch("/staff/dispatch-batches?state=returned&reference="+actual)).rows[0].returns,1);
@@ -891,6 +895,7 @@ test("33 physical items from three parcels share one order, report and selective
   }
   const work=(await staff.fetch("/staff/desk")).batches.find((b:{id:string})=>b.id===batch.batch_id);
   assert.deepEqual(work.packed_item_ids.sort(),selected.slice().sort());
+  await c.fetch("/shipments/"+shipments[0].shipment_id,undefined,"GET",404);
   const outboundWaybills=new Set<string>();
   for(const [index,packed] of shipments.entries()) {
     const tracking="YTO"+randomUUID().slice(0,8).toUpperCase();
@@ -901,6 +906,7 @@ test("33 physical items from three parcels share one order, report and selective
     assert.equal(record.tracking_no,tracking);
     outboundWaybills.add(record.tracking_no);
     const details=await c.fetch(path+"/shipments/"+packed.shipment_id);
+    assert.deepEqual(await c.fetch("/shipments/"+packed.shipment_id),details);
     assert.equal(details.tracking_norm,tracking);
     assert.equal(details.weight_g,parcels[index].weight_g);
     assert.equal(details.items.length,parcels[index].item_ids.length);
@@ -3554,6 +3560,15 @@ test("intake quarantine, half-unpacking, suit components, post-pay & cross-order
     terms_version_id:termsId,
   },"POST",201);
   const {shipment,actual:returnWaybill}=await shipOne(c,receiving,rates[0].id,disp.id,mainItem2Id);
+  const shipmentPath=`/shipments/${shipment.shipment_id}`;
+  const directShipment=await c.fetch(shipmentPath);
+  assert.equal(directShipment.action,"return_to_seller");
+  assert.equal(directShipment.tracking_norm,returnWaybill);
+  assert.equal(directShipment.destination_snapshot.recipient,"Seller Return Dept");
+  assert.equal(directShipment.items.length,1);
+  assert.equal(directShipment.items[0].returned_at,null);
+  await c.fetch(`/orders/${order2.id}${shipmentPath}`,undefined,"GET",404);
+  await receiving.fetch(shipmentPath,undefined,"GET",403);
   const returnTrack=await c.fetch(`/shipments/${shipment.shipment_id}/tracking`);
   assert.equal(returnTrack.tracking_no,returnWaybill);
   assert.equal(returnTrack.direction,"outbound_return");

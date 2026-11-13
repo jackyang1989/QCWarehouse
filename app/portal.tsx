@@ -104,7 +104,8 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
   else if(path==="/account/notifications"||path==="/notifications") content=<NotificationInbox/>;
   else if(route.view==="order") content=<OrderView key={route.id} number={route.id} section={route.section}/>;
   else if(route.view==="demo") content=<DemoCheckout id={route.id}/>;
-  else if(route.view==="parcel"||route.view==="shipment") content=<TrackView kind={route.view==="parcel"?"parcels":"shipments"} id={route.id}/>;
+  else if(route.view==="parcel") content=<TrackView kind="parcels" id={route.id}/>;
+  else if(route.view==="shipment") content=<OrderFulfillment key={route.id} id={route.id} kind="shipments"/>;
   else content=<CustomerDesk path={path==="/billing"?"/account/billing":path} demo={demo}/>;
   const locale=isStaff?"zh-CN":"en";
   const signOut=a?<Action run={async()=>{await request("/auth/logout","POST",{});if(a.kind==="customer") clearCustomerDraftRecovery(a.id);location.assign(a.kind==="staff"?"/staff/login":"/login");}}>{a.kind==="staff"?"退出登录":"Sign out"}</Action>:undefined;

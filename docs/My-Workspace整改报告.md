@@ -12,7 +12,7 @@
 | 下单 | `/orders/new`，支持 `offer` 和 `draft` 深链 | 主侧栏、单一六步进度、单一摘要。目录联动、已发布模板、逐件默认值与覆盖、草稿与真实报价 | 正式数量档交期、线上未发布组合、未配置附加检查 OPEN |
 | 订单列表 | `/orders` | 服务端按订单号、状态、页码查询。按最新记录排序，显示逐件数量、质检状态、付款、报告及下一步。浏览器后退恢复筛选 | 以订单级状态汇总，逐件状态在详情 |
 | 订单详情 | `/orders/{publicNo}`，子页 `/payment`、`/parcels`、`/dispositions`、`/storage` | 展示创建、付款、到齐、报告发布、结案等已记录时间。原单支付恢复、实际到仓、范围、售后和逐件处置 | 暂停及异常按实际工单和状态展示，特定短少恢复见 E2E-04 |
-| 订单履约详情 | `/orders/{publicNo}/quotes/{id}`、`/orders/{publicNo}/shipments/{id}`、`/orders/{publicNo}/cases/{id}` | 报价版本、仓库交接、运单和工单使用原单与对象双重约束 | 有效正式运输价格及提供方联调 OPEN |
+| 订单履约详情 | `/orders/{publicNo}/quotes/{id}`、`/orders/{publicNo}/shipments/{id}`、`/orders/{publicNo}/cases/{id}` | 报价版本、仓库交接、运单和工单使用原单与对象双重约束。已交接出库可从 `/shipments/{id}` 直接查看，包括无质检订单的发运 | 有效正式运输价格及提供方联调 OPEN |
 | 待办 | `/actions` | 草稿、待支付、卖家追踪、人工报价确认与过期续询、待选处置、物流验证、范围修订、参考样、续存及客户待回复工单有深链 | 泛化暂停不再单独计作客户待办。人工收件归属审核期间不暴露未匹配仓库对象 |
 | 报告 | `/reports`、`/orders/{publicNo}/report`、`/orders/{publicNo}/report/versions/{n}` | 默认最新已发布，支持精确检索和查看历史。PDF 请求锁定同一版本。报告实物编号直达客户库存 | 公开分享沿用原开关，发布快照和私有证据隔离保留 |
 | 包裹 | `/parcels`、`/parcels?tab=attention`、`/parcels/{id}`、`/shipments/{id}` | 登记运单、绑定本人订单、入仓与承运商状态分列、认领指定运单、出库追踪。待核验申请可分页查看，支持补充回复和结果通知。归属核实后可从原工单打开包裹，查看仓库登记时间、件数和外箱状况 | 通过已关联订单的逐件运单读取供应商和预计件数，与仓库记录数量分列。独立包裹的供应商和件数申报、原始外箱照发布规则 OPEN |
@@ -230,3 +230,9 @@ flowchart TD
 续做基线 `1d16d82`。缓存刷新与承运商查询分别提供操作。已配置渠道时，获授权客户可在原限频窗口内提交查询，Worker 从数据库调度消费。旧实现把下一次执行时间推迟一小时，并且 DTO 未提供相应操作。当前请求将已到期的记录交给 Worker，审计与原查询账本共同约束重放、冷却与额度。未配置渠道返回 503，现有仓库收货和已保存轨迹仍可即时重读。
 
 `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-manual-tracking npm run test:integration` 通过 62/62。隔离测试用供应商响应夹具核对真实 Worker 查询账本及英文轨迹。类型、构建、契约和空库关系检查退出 0。Chrome 通过包裹收货、未配置渠道与缓存重读，六档 36 张原图位于 `qcwarehouse-tracking-refresh-followup`。实际快递100沙盒与供应商额度证据仍为 OPEN。
+
+## 出库详情续验
+
+续做基线 `92b807e`。通知与包裹列表的 `/shipments/{id}` 原先只呈现轨迹，现在使用原仓库交接详情，展示实际运单、原目的地、交接时间、对应实物和逐件退回时间。已交接记录才可由所属客户读取。订单子页沿用交接时的订单关系，实物链接打开本人库存详情。
+
+`TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-shipment-detail npm run test:integration` 通过 62/62，覆盖无委托实物寄回、打包后未交接的拒绝、退回时间与其他客户权限。类型、构建、契约及空库关系检查退出 0。Chrome 验证客户实际点击实物链接和其他客户 404，更新六档入仓、出库及原单出库截图，原图与 `chrome-shipment-final.log` 在 `qcwarehouse-final-head-regression`。外部承运商和实体交接 OPEN。

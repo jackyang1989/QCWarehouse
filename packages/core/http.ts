@@ -19,7 +19,7 @@ import { approveTrackingTranslation, correctCustomerParcelTracking, correctStaff
 import { adminDesk, bills, customerActions, customerDesk, customerInventory, customerNotifications, dispatchQueueStates, items, listCustomerOrders, markNotificationRead, orderLedger, orderLedgerCsv, readOrderByPublicNumber, readStaffObjectSummary, reconcileFinance, searchStaffOrders, staffOrderDetail, staffOrderFilters, warehouseDesk, warehouseDispatchBatch, warehouseDispatchQueue, warehouseItem, warehousePackage } from "./reads";
 import { staffAccess } from "./staff-access";
 import { customerDestination, withDestination } from "./portal-routes";
-import { customerFulfillmentQuote, orderFulfillmentRecord } from "./fulfillment-reads";
+import { customerFulfillmentQuote, customerShipment, orderFulfillmentRecord } from "./fulfillment-reads";
 import { renewScopeSupplement } from "./operations";
 import { canReadCasePhoto, caseDetail, createPublicInquiry, customerCaseHistory, customerCaseQuery, customerTicketMessage, inquiryCategories, publicInquiry, replyToCase, staffTicketEvent, staffTicketQueue, writeStaffTicket } from "./tickets";
 import { approveDisposalCase, approveIncidentResolution, approveStocktake, createDisposalCase, createIncident, createLocations, createStocktake, customerReadIncident, customerRespondIncident, executeDisposalCase, listIncidents, listOverdueAndRestrictedQueue, listStocktakes, locationBatchSchema, locationMaster, proposeIncidentResolution, resolveIncidentCompensation, scanStocktakeItem, setLocationActive, storageMovementDesk, submitStocktake } from "./storage";
@@ -506,6 +506,8 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     idSchema.parse(fulfillment[1]),fulfillment[2].toLowerCase() as "quotes"|"shipments",idSchema.parse(fulfillment[3]))));
   const fulfillmentQuote=path.match(/^\/quotes\/([a-f0-9-]{36})$/i);
   if(method==="GET"&&fulfillmentQuote) return json(await transaction(db=>customerFulfillmentQuote(db,actorRequired(actor),idSchema.parse(fulfillmentQuote[1]))));
+  const customerShipmentRoute=path.match(/^\/shipments\/([a-f0-9-]{36})$/i);
+  if(method==="GET"&&customerShipmentRoute) return json(await transaction(db=>customerShipment(db,actorRequired(actor),idSchema.parse(customerShipmentRoute[1]))));
   if(method==="GET" && path==="/staff/inspection-tasks/lookup") {
     const code=z.string().trim().min(1).max(100).parse(url.searchParams.get("code"));
     const orderId=idSchema.nullable().parse(url.searchParams.get("order_id"));

@@ -3849,17 +3849,17 @@ function OrderHandling({
   </>;
 }
 
-export function OrderFulfillment({order,id,kind}:{order:string;id:string;kind:"quotes"|"shipments"}) {
+export function OrderFulfillment({order,id,kind}:{order?:string;id:string;kind:"quotes"|"shipments"}) {
   const stamp=useWorkspaceStamp();
-  const lookup=useLoad("/orders/by-number/"+order);
-  const record=useLoad(lookup.data?"/orders/"+lookup.data.id+"/"+kind+"/"+id:null);
+  const lookup=useLoad(order?"/orders/by-number/"+order:null);
+  const record=useLoad(order?(lookup.data?"/orders/"+lookup.data.id+"/"+kind+"/"+id:null):"/"+kind+"/"+id);
   const data=record.data;
   const error=lookup.error||record.error;
   const destination=data?.destination_snapshot;
   return <>
-    <div className="page-head"><Link href={"/orders/"+order+"/dispositions"}>← Order item instructions</Link>
+    <div className="page-head"><Link href={order?"/orders/"+order+"/dispositions":"/parcels?tab=outgoing"}>{order?"← Order item instructions":"← Outgoing parcels"}</Link>
       <p className="eyebrow report-eyebrow">CLIENT WORKSPACE / FULFILLMENT</p>
-      <h1>{kind==="quotes"?"Fulfillment quote":"Shipment details"}</h1><p className="code">{order}</p></div>
+      <h1>{kind==="quotes"?"Fulfillment quote":"Shipment details"}</h1>{order&&<p className="code">{order}</p>}</div>
     {error&&<ErrorBlock error={error}/>}
     {!data&&!error&&<p role="status">Loading the order record…</p>}
     {data&&kind==="quotes"&&<FulfillmentQuote quote={data} onUpdate={record.reload}/>}
@@ -3870,10 +3870,10 @@ export function OrderFulfillment({order,id,kind}:{order:string;id:string;kind:"q
           <div><dt>Tracking number</dt><dd className="code">{data.tracking_norm}</dd></div>
           <div><dt>Handed to carrier</dt><dd>{stamp(data.shipped_at)}</dd></div>
           <div><dt>Recorded weight</dt><dd>{data.weight_g} g</dd></div>
-          <div><dt>Destination</dt><dd>{destination.recipient} · {destination.address}{destination.member_code?" · "+destination.member_code:""}</dd></div>
+          {destination&&<div><dt>Destination</dt><dd>{destination.recipient} · {destination.address}{destination.member_code?" · "+destination.member_code:""}</dd></div>}
         </dl>
         <Table headers={["Item code","Returned to warehouse"]} rows={(data.items??[]).map((item:Row)=>[
-          <span className="code">{item.code}</span>,stamp(item.returned_at),
+          <Link className="code" href={"/items?item="+encodeURIComponent(item.code)}>{item.code}</Link>,stamp(item.returned_at),
         ])}/>
       </Panel>
       <TrackView kind="shipments" id={id} embedded/>

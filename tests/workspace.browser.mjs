@@ -1040,7 +1040,7 @@ async function verifyWorkspaceViews(customer,other) {
   ];
   if(published) paths.push(["report","/orders/"+published.order_number+"/report/versions/"+published.version,published.report_number]);
   if(parcelId) paths.push(["parcel","/parcels/"+parcelId,/tracking/i]);
-  if(shipmentId) paths.push(["shipment","/shipments/"+shipmentId,/tracking/i]);
+  if(shipmentId) paths.push(["shipment","/shipments/"+shipmentId,/Warehouse handover/]);
   if(caseId) paths.push(["support-case","/support/cases/"+caseId,/Messages/]);
   if(orderCase) paths.push(["order-case","/orders/"+chosenOrder.public_no+"/cases/"+orderCase,/Messages/]);
   if(orderQuote) paths.push(["order-quote","/orders/"+chosenOrder.public_no+"/quotes/"+orderQuote,/Fulfillment quote/]);
@@ -1169,6 +1169,13 @@ async function verifyWorkspaceViews(customer,other) {
   }
   if(caseId) await other.call("/cases/"+caseId,{status:404});
   if(parcelId) await other.call("/me/parcels/"+parcelId+"/tracking",{status:404});
+  if(shipmentId) {
+    await other.call("/shipments/"+shipmentId,{status:404});
+    const shipment=await fixture.call("/shipments/"+shipmentId);
+    await fixture.page.goto("/shipments/"+shipmentId,{waitUntil:"domcontentloaded"});
+    await fixture.page.getByRole("link",{name:shipment.items[0].code,exact:true}).click();
+    await fixture.page.getByRole("dialog",{name:`Warehouse Item · ${shipment.items[0].code}`}).waitFor();
+  }
   const reviewer = await session("reviewer@qcw.test",true);
   const inspector = await session("inspector@qcw.test",true);
   await reviewer.page.goto("/wh/review");
