@@ -5,7 +5,7 @@ import { receiving } from "./auth";
 import { customerEmailDeliveryStatus } from "./email";
 import { eligibleManualQuoteOrderSql, expiredManualInspectionPaymentSql, orderAcceptsSampleAssignmentSql, orderDTO } from "./orders";
 import { declaredItemTracking, orderInboundRegistration, orderShipments } from "./fulfillment-reads";
-import { getIntakeContext, waybill } from "./intake";
+import { getIntakeContext, pendingIntakeClaimSql, waybill } from "./intake";
 import { scopeSupplementForOrder, scopeSupplementState } from "./scope-payment";
 import { incidentAwaitingCustomer, itemHandlingHoldSql } from "./storage";
 import { hasStaffAccess, staffAccess } from "./staff-access";
@@ -637,12 +637,13 @@ export async function adminDesk(db:DB,actor:Actor) {
     tickets:ops?(await db.query("select id,public_no,subject,category,state,next_action_at from tickets order by created_at desc limit 150")).rows:[],
     claims:ops?(await db.query(`select k.id,k.public_no,k.state,k.details->>'tracking_no' tracking_no,
       k.details->>'carrier_code' carrier_code,k.details->>'proof_id' proof_id,k.details->>'decision' decision,
+      (${pendingIntakeClaimSql}) can_decide,
       array(select m.id from tracking_records t join media_assets m on m.package_id=t.package_id
         where t.direction='inbound' and t.closed_at is null and t.org_id is null
         and t.tracking_norm=k.details->>'tracking_no' and coalesce(t.carrier_code,k.details->>'carrier_code')=k.details->>'carrier_code'
         and m.kind='intake_outer' and m.status='ready') outer_photo_ids
       from tickets k where category='identity_unclear' and details ? 'proof_id'
-      order by created_at desc limit 100`)).rows:[],
+      order by (${pendingIntakeClaimSql}) desc,created_at desc limit 100`)).rows:[],
     manualQuotes:ops?(await db.query(`select r.id,r.order_id,r.revision,r.state,r.assignee_id,r.reason,o.public_no,
       (select jsonb_agg(jsonb_build_object('id',l.id,'quantity',l.quantity,'title',s.title->>'zh-CN') order by l.id)
        from order_lines l join service_offers s on s.id=l.offer_id where l.order_id=r.order_id) lines

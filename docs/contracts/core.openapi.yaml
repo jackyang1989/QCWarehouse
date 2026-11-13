@@ -1880,6 +1880,93 @@ paths:
                   type: integer
                   minimum: 1
               additionalProperties: false
+  /me/intake-claims:
+    get:
+      operationId: listIntakeClaims
+      summary: 按组织分页读取客户本人提交的包裹认领申请
+      security:
+      - cookieSession: []
+      x-roles: [customer]
+      parameters:
+      - name: page
+        in: query
+        schema: {type: integer, minimum: 1, maximum: 10000, default: 1}
+      responses:
+        '200':
+          description: 包裹详情入口只在审核通过且包裹仍归属本组织时返回
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rows, page, has_more]
+                properties:
+                  rows:
+                    type: array
+                    maxItems: 20
+                    items:
+                      type: object
+                      required: [id, public_no, state, decision, tracking_no, carrier_code, advice_id]
+                      properties:
+                        id: {type: string, format: uuid}
+                        public_no: {type: string, minLength: 1}
+                        state: {enum: [open, waiting_internal, waiting_customer, resolved, closed]}
+                        decision: {enum: [approve, reject, null]}
+                        tracking_no: {type: string, minLength: 5}
+                        carrier_code: {type: string, minLength: 1}
+                        advice_id: {type: [string, 'null'], format: uuid}
+                      additionalProperties: false
+                  page: {type: integer, minimum: 1}
+                  has_more: {type: boolean}
+                additionalProperties: false
+        default:
+          description: See stable HTTP error codes in §7.2
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      operationId: requestIntakeClaim
+      summary: 提交私密认领证据，已有待审核申请时返回同一工单
+      security:
+      - cookieSession: []
+      x-roles: [customer]
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [tracking_no, carrier_code, photo]
+              properties:
+                tracking_no: {type: string, minLength: 5, maxLength: 80}
+                carrier_code: {type: string, minLength: 1, maxLength: 40}
+                advice_id: {type: string, format: uuid}
+                photo: {type: string, format: binary}
+              additionalProperties: false
+      responses:
+        '201':
+          description: 私密工单。历史幂等响应可能仅有编号和状态
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [public_no, state]
+                properties:
+                  id: {type: string, format: uuid}
+                  public_no: {type: string, minLength: 1}
+                  state: {enum: [open, waiting_internal, waiting_customer]}
+                additionalProperties: false
+        default:
+          description: See stable HTTP error codes in §7.2
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /me/items:
     get:
       operationId: ownedItems

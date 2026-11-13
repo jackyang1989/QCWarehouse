@@ -630,6 +630,24 @@ export async function bindUnmatchedPackageOwner(
   return {id:packageId,org_id:profile.org_id,receiving_code:profile.receiving_code,state:"checked_in",revision:pkg.revision+1};
 }
 
+export const pendingIntakeClaimSql=`k.state in ('open','waiting_internal','waiting_customer') and k.details->>'decision' is null`;
+export const approvedIntakeAdviceSql=`(select p.advice_id from package_claims c
+  join packages p on p.id=c.package_id and p.org_id=k.org_id
+  join package_advices a on a.id=p.advice_id and a.org_id=p.org_id
+  where k.details->>'decision'='approve' and c.state='approved'
+    and c.applicant_id::text=k.details->>'applicant_id' and c.evidence_ids @> array[(k.details->>'proof_id')::uuid]
+  order by c.decided_at desc,c.id limit 1)`;
+
+export async function customerIntakeClaims(db:DB,actor:Actor,page:number) {
+  const size=20;
+  const {rows}=await db.query(`select k.id,k.public_no,k.state,k.details->>'decision' decision,
+      k.details->>'tracking_no' tracking_no,k.details->>'carrier_code' carrier_code,
+      ${approvedIntakeAdviceSql} advice_id
+    from tickets k where k.org_id=$1 and k.category='identity_unclear' and k.details ? 'proof_id'
+    order by k.created_at desc,k.id desc limit $2 offset $3`,[organization(actor),size+1,(page-1)*size]);
+  return {rows:rows.slice(0,size),page,has_more:rows.length>size};
+}
+
 export async function requestIntakeClaim(db:DB,actor:Actor,input:{tracking_no:string;carrier_code:string;advice_id?:string},bytes:Buffer) {
   const org=organization(actor),tracking=waybill(input.tracking_no);
   await lock(db,"org:"+org);
@@ -637,14 +655,15 @@ export async function requestIntakeClaim(db:DB,actor:Actor,input:{tracking_no:st
   if(input.advice_id) await one(db,`select a.id from package_advices a join tracking_records t on t.advice_id=a.id
     where a.id=$1 and a.org_id=$2 and t.closed_at is null and t.tracking_norm=$3 and coalesce(t.carrier_code,$4)=$4`,
     [input.advice_id,org,tracking,input.carrier_code]);
-  const current=(await db.query(`select public_no,state from tickets where org_id=$1 and category='identity_unclear'
-    and details->>'tracking_no'=$2 and details->>'carrier_code'=$3 and state in ('open','waiting_internal')`,
+  const current=(await db.query(`select id,public_no,state from tickets k where org_id=$1 and category='identity_unclear'
+    and details ? 'proof_id' and details->>'tracking_no'=$2 and details->>'carrier_code'=$3 and ${pendingIntakeClaimSql}
+    order by created_at desc,id desc limit 1`,
     [org,tracking,input.carrier_code])).rows[0];
   if(current) return current;
   const proof=await savePhoto(db,actor,bytes,"attachment");
   const id=uuid();
   const ticket=await one(db,`insert into tickets(id,public_no,org_id,category,subject,details)
-    values($1,$2,$3,'identity_unclear','Inbound parcel ownership review',$4) returning public_no,state`,
+    values($1,$2,$3,'identity_unclear','Inbound parcel ownership review',$4) returning id,public_no,state`,
     [id,code("CLAIM-"),org,{tracking_no:tracking,carrier_code:input.carrier_code,applicant_id:actor.id,proof_id:proof.id,advice_id:input.advice_id}]);
   await audit(db,actor,"request_intake_claim","tickets",id);
   return ticket;
@@ -654,8 +673,8 @@ export async function decideIntakeClaim(db:DB,actor:Actor,id:string,decision:"ap
   role(actor,"support","super_admin");
   const initial=await one(db,"select org_id from tickets where id=$1 and category='identity_unclear' and details ? 'proof_id'",[id]);
   await lock(db,"org:"+initial.org_id);
-  const ticket=await one(db,"select * from tickets where id=$1 for update",[id]);
-  guard(ticket.state==="open","CLAIM_DECIDED","This claim has already been decided.");
+  const ticket=await one(db,`select k.*,(${pendingIntakeClaimSql}) can_decide from tickets k where id=$1 for update`,[id]);
+  guard(ticket.can_decide,"CLAIM_DECIDED","This claim has already been decided.");
   const details=ticket.details;
   if(decision==="approve") {
     await lock(db,"waybill:"+details.tracking_no);
@@ -688,7 +707,10 @@ export async function decideIntakeClaim(db:DB,actor:Actor,id:string,decision:"ap
   await db.query("update tickets set state='resolved',resolved_at=now(),next_action_at=null,revision=revision+1,details=details||$2::jsonb where id=$1",
     [id,{decision,reviewed_by:actor.id}]);
   await db.query(`insert into ticket_events(id,ticket_id,actor_type,actor_id,kind,body)
-    values($1,$2,'staff',$3,'internal_note',$4)`,[uuid(),id,actor.id,reason]);
+    values($1,$2,'staff',$3,'internal_note',$4),($5,$2,'staff',$3,'message',$6)`,[uuid(),id,actor.id,reason,uuid(),
+    decision==="approve"?"We verified ownership. You can now open the parcel from this case.":
+      "We could not verify ownership from the available evidence. If your seller can provide more information, submit a new request with the updated evidence."]);
+  await event(db,"ticket.reply",{ticket_id:id,org_id:ticket.org_id,dedupe_key:"intake-claim.decision:"+id});
   await audit(db,actor,"decide_intake_claim","tickets",id,{decision});
   return {public_no:ticket.public_no,state:"resolved",decision};
 }

@@ -15,7 +15,7 @@
 | 订单履约详情 | `/orders/{publicNo}/quotes/{id}`、`/orders/{publicNo}/shipments/{id}`、`/orders/{publicNo}/cases/{id}` | 报价版本、仓库交接、运单和工单使用原单与对象双重约束 | 有效正式运输价格及提供方联调 OPEN |
 | 待办 | `/actions` | 草稿、待支付、卖家追踪、人工报价确认与过期续询、待选处置、物流验证、范围修订、参考样、续存及客户待回复工单有深链 | 泛化暂停不再单独计作客户待办。人工收件归属审核期间不暴露未匹配仓库对象 |
 | 报告 | `/reports`、`/orders/{publicNo}/report`、`/orders/{publicNo}/report/versions/{n}` | 默认最新已发布，支持精确检索和查看历史。PDF 请求锁定同一版本。报告实物编号直达客户库存 | 公开分享沿用原开关，发布快照和私有证据隔离保留 |
-| 包裹 | `/parcels`、`/parcels/{id}`、`/shipments/{id}` | 登记运单、绑定本人订单、入仓与承运商状态分列、认领指定运单、出库追踪。列表按 Incoming、Received、Needs Attention、Outgoing 切换 | 通过已关联订单的逐件运单读取供应商和预计件数，与仓库记录数量分列。独立包裹的供应商和件数申报、原始外箱照发布规则 OPEN |
+| 包裹 | `/parcels`、`/parcels?tab=attention`、`/parcels/{id}`、`/shipments/{id}` | 登记运单、绑定本人订单、入仓与承运商状态分列、认领指定运单、出库追踪。待核验申请可分页查看，支持补充回复和结果通知。归属核实后可从原工单打开包裹 | 通过已关联订单的逐件运单读取供应商和预计件数，与仓库记录数量分列。独立包裹的供应商和件数申报、原始外箱照发布规则 OPEN |
 | 实物 | `/items`，实物使用 `?item={code}` 打开抽屉，兼容 `#item-{code}` | 实物编号、所属委托、检查与保管状态。按实物提交不同去向，支持退商家、集运、续存和确认样。待封存状态独立展示 | 每页 20 件，统计与筛选来自全部本人库存。选择跨页保留，提交后回读真实逐件指令 |
 | 账单 | `/account/billing`，兼容 `/billing`，用 `?charge={id}` 定位具体收费 | 分开待确认报价、收费和退款。按入账或报价接受时间展示，区分测试付款。订单、待办或通知可直接定位本人历史收费。退货、发运和续存收费显示其关联订单 | Stripe 沙盒及正式主体收据验收 OPEN |
 | 通知 | `/account/notifications`，兼容 `/notifications` | 所属对象深链，已读写回，未读计数、游标分页。付款、入库、报告和封存使用现有事件去重键 | 邮件与实际承运商事件联调 OPEN |
@@ -146,7 +146,7 @@ flowchart TD
 
 履约重报模式使用与本机应用一致的 `QCW_BROWSER_DATABASE_URL`（仅接受 `127.0.0.1` 上的 `qcw_test-*`）和有至少两件待指示实物的 `QCW_BROWSER_INVENTORY_EMAIL`，缩短新建测试报价的有效期以复现真实过期。范围补款回归同样只在浏览器副本缩短测试快照的有效期。
 
-最新全量集成在 `qcw_test-workspace-scope` 执行。Chrome 使用该库的独立副本，专项复验使用 `qcw_test-workspace-continuation-visual`，完整页面矩阵使用 `qcw_test-workspace-continuation-chrome-final`。两次续验均保留已有 `qcw_test-workspace-final` 快照。本地预览 `http://localhost:3000/` 由 `qcw_workspace_local` 提供演示数据。
+上述全量集成基线在 `qcw_test-workspace-scope` 执行。Chrome 使用该库的独立副本，专项复验使用 `qcw_test-workspace-continuation-visual`，完整页面矩阵使用 `qcw_test-workspace-continuation-chrome-final`。两次续验均保留已有 `qcw_test-workspace-final` 快照。当前 `http://localhost:3000/` 使用本机历史验证副本，详见本机历史数据核验一节。
 
 集成库的箱包、家居及鞋类使用测试能力审批。截图中的可售状态由该目录产生。正式可售品类仍以原项目已发布目录为准。
 
@@ -204,3 +204,9 @@ flowchart TD
 续做基线 `87d2203`。客户退货表单原来不提交现有契约已支持的 `seller_name`、`seller_id`。现在客户可填写商家名称或店铺编号，保存后从「待处置」视图直接跳到可查看已保存指令的列表。合包仍须通过原供应商、实物和包裹来源、退货授权、目的地以及租户校验。单件退货可留空。
 
 `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-seller-followup npm run test:integration` 通过 62/62。类型、构建、契约和空库关系检查退出 0。`QCW_BROWSER_SELLER_RETURN_ONLY=1 node tests/workspace.browser.mjs` 在独立副本 `qcw_test-workspace-seller-browser` 退出 0，验证两个订单、两个包裹、两条退货指令、跨客户拦截和客户确认批次后进入待报价。六档 12 张原图及日志位于 `qcwarehouse-seller-return-followup`。初次测试发现待处置筛选在保存后隐藏已处理实物，已补入口。另保留一次测试表格定位超时的原始日志。
+
+## 包裹认领申请与结果续验
+
+续做基线 `ba7399a`。客户补充工单回复后进入待内部处理，旧后台裁决入口、裁决 API 和客服外箱凭证读取只接受 `open`。三处现使用同一个未裁决条件。客户在包裹「Needs Attention」用指定运单提交证据，查看本人审核记录、补充回复、通过站内通知打开审核结果。已批准且仍归属本组织时，按原认领申请人和凭证关联实收包裹。客服核验备注仅在员工工单显示。原历史库已有一笔批准和一笔待审，使用只读 SQL 核对批准工单的认领证据与预报关系。包裹归属、入库事实和已存历史数据仍由原记录决定。
+
+`TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-intake-claim npm run test:integration` 通过 62/62。`npm run check`、`npm run build`、`python3 docs/contracts/check.py`（47 项契约操作）和空库关系检查均退出 0。`QCW_BROWSER_INTAKE_CLAIM_ONLY=1 node tests/workspace.browser.mjs` 在 `qcw_test-workspace-intake-claim-browser` 及独立 Worker 上退出 0，六档 30 张原图整页横向溢出为 0。原图和日志位于 `qcwarehouse-intake-claim-followup`。Chrome 初次执行有两次测试定位失败，最终版本从新客户和新包裹完整重跑。隔离站内通知实测通过，实际邮件及仓库实体验收保留 OPEN。

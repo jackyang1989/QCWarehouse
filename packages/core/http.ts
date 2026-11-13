@@ -11,7 +11,7 @@ import { integrationPreflight, signInMethods } from "./integrations";
 import { failedJobs, retryFailedJob } from "./worker";
 import { customerEmailDeliveryStatus, receivePostmarkWebhook, retryEmailDelivery, staffEmailDeliveries } from "./email";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
-import { advise, assign, bindUnmatchedPackageOwner, checkIn, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, savePhoto, unassignItem, waybill } from "./intake";
+import { advise, assign, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
 import { acceptQuote, amendDispatchBatch, calculateShippingPreview, cancelDisposition, checkStorageReminders, closeCompletedOrder, confirmBatch, handover, instruct, packShipment, planBatch, publishShippingRate, quoteBatch, readDispatchBatch, receiveReturn, releaseReferenceSample, storageQuote } from "./dispatch";
 import { chargeReceipt, checkout, demoPay, orderPayment, orderRefundPayments, refundApprove, refundRequest, resolvePaymentDispute, stripeEvent, verifyStripe } from "./payments";
@@ -46,11 +46,11 @@ function validateSchema(schema:object) {
   const expanded=JSON.parse(JSON.stringify(schema).replaceAll('"#/components/schemas/',`"${documentId}#/components/schemas/`));
   return ajv.compile(expanded);
 }
-const operations=Object.entries(contract.paths).flatMap(([path,methods])=>Object.entries(methods).map(([method,op])=>({
-  method:method.toUpperCase(), re:new RegExp("^"+path.replace(/\{[^}]+\}/g,"([^/]+)")+"$"),
-  op, path, validate:op.requestBody?validateSchema(op.requestBody.content["application/json"].schema):null,
-  status:Number(Object.keys(op.responses).find(k=>/^2/.test(k))??200),
-})));
+const operations=Object.entries(contract.paths).flatMap(([path,methods])=>Object.entries(methods).map(([method,op])=>{
+  const schema=op.requestBody?.content["application/json"]?.schema;
+  return {method:method.toUpperCase(),re:new RegExp("^"+path.replace(/\{[^}]+\}/g,"([^/]+)")+"$"),
+    op,path,validate:schema?validateSchema(schema):null,status:Number(Object.keys(op.responses).find(k=>/^2/.test(k))??200)};
+}));
 const idSchema=z.string().uuid();
 const revSchema=z.number().int().positive();
 const emailSchema=z.email().max(254).transform(v=>v.toLowerCase());
@@ -106,6 +106,14 @@ async function supportPhotoForm(req:Request) {
   const form=await req.formData(),file=form.get("photo");
   guard(file instanceof File&&file.size>0&&file.size<=8_000_000,"FILE_INVALID","Choose a photo up to 8 MB.",422);
   return {form,bytes:Buffer.from(await file.arrayBuffer())};
+}
+async function submitIntakeClaim(req:Request,actor:Actor,key:string) {
+  guard(req.headers.get("content-type")?.startsWith("multipart/form-data"),"INVALID_REQUEST","Attach the seller’s shipment photo.",422);
+  const {form,bytes}=await supportPhotoForm(req);
+  const fields=z.object({tracking_no:z.string().min(5).max(80),carrier_code:z.string().min(1).max(40),advice_id:idSchema.optional()}).parse(
+    {tracking_no:form.get("tracking_no"),carrier_code:form.get("carrier_code"),advice_id:form.get("advice_id")||undefined});
+  return transaction(db=>idempotent(db,actor.id+":/me/intake-claims",key,{...fields,proof:hash(bytes)},
+    ()=>requestIntakeClaim(db,actor,fields,bytes)));
 }
 async function extras(req:Request,path:string,actor:Actor|null):Promise<Response|null> {
   const method=req.method;
@@ -671,19 +679,6 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const bytes=Buffer.from(await file.arrayBuffer());
     return json(await transaction(db=>savePhoto(db,a,bytes,"attachment")),201);
   }
-  if(method==="POST" && path==="/me/intake-claims") {
-    csrf(req);
-    const a=actorRequired(actor);organization(a);
-    const key=idSchema.parse(req.headers.get("idempotency-key"));
-    guard(Number(req.headers.get("content-length")??0)<=8_100_000,"BODY_TOO_LARGE","Photo is too large.",413);
-    const form=await req.formData(),photo=form.get("photo");
-    guard(photo instanceof File && photo.size<=8_000_000,"FILE_INVALID","Choose a photo up to 8 MB.",422);
-    const fields=z.object({tracking_no:z.string().min(5).max(80),carrier_code:z.string().min(1).max(40),advice_id:idSchema.optional()}).parse(
-      {tracking_no:form.get("tracking_no"),carrier_code:form.get("carrier_code"),advice_id:form.get("advice_id")||undefined});
-    const bytes=Buffer.from(await photo.arrayBuffer());
-    return json(await transaction(db=>idempotent(db,a.id+":"+path,key,{...fields,proof:hash(bytes)},
-      ()=>requestIntakeClaim(db,a,fields,bytes))),201);
-  }
   const claim=path.match(/^\/staff\/intake-claims\/([a-f0-9-]{36})\/decision$/i);
   if(method==="POST" && claim) return extraWrite(req,path,actor,z.object({
     decision:z.enum(["approve","reject"]),reason:z.string().trim().min(4).max(1000)
@@ -1111,6 +1106,10 @@ async function extraWrite<S extends z.ZodType>(req:Request,path:string,actor:Act
 // The request is validated against the operation's OpenAPI schema before dispatch.
 async function dispatch(db:DB,actor:Actor,id:string,op:string,b:Record<string,any>,req:Request) {
   switch(op) {
+    case "listIntakeClaims": {
+      const page=z.coerce.number().int().min(1).max(10000).parse(new URL(req.url).searchParams.get("page")??1);
+      return customerIntakeClaims(db,actor,page);
+    }
     case "createDraft": return saveOrder(db,actor,b as Parameters<typeof saveOrder>[2]);
     case "editDraft": return saveOrder(db,actor,b as Parameters<typeof saveOrder>[2],id);
     case "quoteOrder": return quoteOrder(db,actor,id,b.revision);
@@ -1198,6 +1197,10 @@ export async function handle(req:Request,path:string) {
     const a=actorRequired(actor);
     guard(a.kind==="customer"?op["x-roles"].includes("customer"):op["x-roles"].some(r=>a.roles.includes(r)),
       "FORBIDDEN","This action requires a different role.",403);
+    if(op.operationId==="requestIntakeClaim") {
+      guard(key,"INVALID_REQUEST","Provide an idempotency key.",422);
+      return json(await submitIntakeClaim(req,a,key),status);
+    }
     if(op.operationId==="chargeReceipt") return json(await chargeReceipt(a,args[0]),status);
     if(op.operationId==="checkout") {
       guard(key,"INVALID_REQUEST","Provide an idempotency key.",422);

@@ -234,12 +234,16 @@ async function verifyEmptyWorkspace({page,call}) {
     ["/orders",/You haven't created an inspection yet/],["/actions",/You’re all caught up/],
     ["/reports",/Published inspection reports will appear here/],["/parcels",/No parcels match this view/],
     ["/items",/Items will appear after physical warehouse intake/],["/account/billing",/No charges yet/],
-    ["/account/notifications",/No updates yet/],["/support",/No support cases yet/],
+    ["/support",/No support cases yet/],
   ]) {
     await page.goto(path);
     await page.getByText(empty).waitFor();
   }
-  console.log("PASS fresh customer empty states match PostgreSQL in eight workspace modules");
+  const {rows}=await call("/me/notifications");
+  assert(rows.every(notice=>notice.template==="account.registered")&&rows.length<=1);
+  await page.goto("/account/notifications");
+  await page.getByText(/No updates yet|Your workspace is ready/).waitFor();
+  console.log("PASS fresh customer empty states and registration activity match PostgreSQL");
 }
 
 async function verifyManualQuoteRenewal({page,call,errors},other) {
@@ -671,10 +675,88 @@ async function verifyIncidentDecision({page,call,errors},other) {
   console.log("PASS independently approved incident proposal, customer decision, retained action after reply, and separate payout proof");
 }
 
+async function verifyParcelOwnership({page,call,errors},other) {
+  const receiver=await session("receiving@qcw.test",true);
+  const admin=await session("admin@qcw.test",true);
+  const tracking="ZT"+randomUUID().slice(0,8).toUpperCase();
+  const photo=await sharp({create:{width:100,height:80,channels:3,background:"#11736d"}}).png().toBuffer();
+  const csrf=(await receiver.context.cookies()).find(cookie=>cookie.name==="qcw_csrf")?.value;
+  const upload=await receiver.context.request.post("/api/v1/staff/media",{
+    headers:{origin,"Idempotency-Key":randomUUID(),"X-CSRF-Token":csrf},
+    multipart:{kind:"intake_outer",photo:{name:"fixture.png",mimeType:"image/png",buffer:photo}},
+  });
+  assert.equal(upload.status(),201);
+  const parcel=await receiver.call("/staff/intake/check-in",{body:{tracking_no:tracking,carrier_code:"zto",
+    outer_media_ids:[(await upload.json()).id]},status:201});
+  assert.equal(parcel.state,"unmatched");
+  await page.goto("/parcels");
+  await page.getByRole("button",{name:"Needs Attention"}).click();
+  await page.waitForURL(url=>url.searchParams.get("tab")==="attention");
+  const reviews=page.locator("section").filter({has:page.getByRole("heading",{name:"Parcel ownership reviews"})});
+  await reviews.getByText("Find a missing parcel",{exact:true}).click();
+  await reviews.getByLabel("Seller’s tracking number",{exact:true}).fill(tracking);
+  await reviews.locator('select[name="carrier_code"]').selectOption("zto");
+  await reviews.getByLabel(/^Seller shipment proof/).setInputFiles({name:"seller.png",mimeType:"image/png",buffer:photo});
+  await captureWizard(page,"parcel-claim-form","Parcels");
+  await page.getByRole("button",{name:"Request ownership review"}).click();
+  const confirmed=page.getByRole("status").filter({hasText:"is with support"});
+  await confirmed.waitFor();
+  const claim=(await call("/me/intake-claims")).rows[0];
+  assert.equal(claim.tracking_no,tracking);
+  assert.equal(claim.advice_id,null);
+  assert.deepEqual((await other.call("/me/intake-claims")).rows,[]);
+  await captureWizard(page,"parcel-claim-submitted","Parcels");
+  await confirmed.getByRole("link",{name:claim.public_no}).click();
+  await page.getByRole("heading",{name:"Seller parcel"}).waitFor();
+  const reply="My seller confirmed the parcel label and tracking number.";
+  await page.getByLabel("Reply",{exact:true}).fill(reply);
+  await page.getByRole("button",{name:"Send reply"}).click();
+  await page.getByText(reply,{exact:true}).waitFor();
+  await captureWizard(page,"parcel-claim-in-review","Inbound parcel ownership review");
+  await other.call("/cases/"+claim.id,{status:404});
+  await admin.page.goto("/admin/orders#case-"+claim.id);
+  const review=admin.page.locator("#case-"+claim.id);
+  await review.getByRole("link",{name:"查看工单与客户补充回复"}).click();
+  await admin.page.getByText(reply,{exact:true}).waitFor();
+  await admin.page.getByRole("link",{name:"查看认领核验"}).click();
+  await review.locator('select[name="decision"]').selectOption("approve");
+  const staffNote="Matched the physical label with private seller evidence.";
+  await review.getByLabel("核验证据和原因").fill(staffNote);
+  await review.getByRole("button",{name:"记录核验结论"}).click();
+  await review.locator("summary").filter({hasText:"approve"}).waitFor();
+  const approved=(await call("/me/intake-claims")).rows[0];
+  assert.equal(approved.decision,"approve");
+  assert(approved.advice_id);
+  await other.call("/me/parcels/"+approved.advice_id+"/tracking",{status:404});
+  let received=false;
+  for(let attempt=0;attempt<60&&!received;attempt++) {
+    received=(await call("/me/notifications")).rows.some(row=>row.case_id===claim.id);
+    if(!received)await delay(1000);
+  }
+  assert(received,"The Worker did not deliver the private claim decision notification.");
+  await page.goto("/account/notifications");
+  const notices=page.getByText("Support has replied to your case",{exact:true});
+  await notices.waitFor({timeout:60000});
+  const notice=page.getByRole("link",{name:"Open"}).and(page.locator('a[href="/support/cases/'+claim.id+'"]'));
+  await notice.click();
+  await page.getByText("Ownership confirmed",{exact:true}).waitFor();
+  assert.equal(await page.getByText(staffNote,{exact:true}).count(),0);
+  await captureWizard(page,"parcel-claim-approved","Inbound parcel ownership review");
+  await page.getByRole("link",{name:"Open parcel"}).click();
+  await page.waitForURL("**/parcels/"+approved.advice_id);
+  await page.getByText(tracking,{exact:true}).waitFor();
+  await page.getByText("Warehouse · Received at warehouse",{exact:true}).waitFor();
+  await captureWizard(page,"parcel-claim-receipt","Tracking details");
+  assert.deepEqual([...errors,...admin.errors,...receiver.errors,...other.errors],[]);
+  assert(entries.every(entry=>entry.overflow===0));
+  console.log("PASS parcel claim from customer evidence through staff review, private notification and owned warehouse receipt");
+}
+
 try {
   const customer = await session(resumeMatrix?process.env.QCW_BROWSER_FIXTURE_EMAIL:undefined,false,resumeMatrix);
   const other = await session(resumeMatrix?process.env.QCW_BROWSER_INVENTORY_EMAIL:undefined,false,resumeMatrix);
   if(resumeMatrix) await verifyWorkspaceViews(customer,other);
+  else if(process.env.QCW_BROWSER_INTAKE_CLAIM_ONLY==="1") await verifyParcelOwnership(customer,other);
   else if(process.env.QCW_BROWSER_INCIDENT_ONLY==="1") await verifyIncidentDecision(customer,other);
   else if(process.env.QCW_BROWSER_SELLER_RETURN_ONLY==="1") await verifySellerReturn(customer,other);
   else if(process.env.QCW_BROWSER_SUPPORT_ONLY==="1") await verifySupportHistory(customer,other);

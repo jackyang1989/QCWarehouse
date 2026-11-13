@@ -5,6 +5,7 @@ import { pool, type DB } from "../db";
 import { appOrigin } from "./auth";
 import { Problem, audit, guard, hash, one, organization, role, uuid, type Actor } from "./common";
 import { canReadCasePhoto } from "./tickets";
+import { pendingIntakeClaimSql } from "./intake";
 
 export const mediaKindSchema = z.enum([
   "intake_outer",
@@ -456,7 +457,7 @@ export async function authorizeMediaRead(db: DB, actor: Actor, id: string) {
           `select 1 from tracking_records t join tickets k on k.details->>'tracking_no'=t.tracking_norm
            and coalesce(t.carrier_code,k.details->>'carrier_code')=k.details->>'carrier_code'
            where t.package_id=$1 and t.closed_at is null and t.org_id is null
-           and k.category='identity_unclear' and k.state='open' and k.details ? 'proof_id'`,
+           and k.category='identity_unclear' and k.details ? 'proof_id' and ${pendingIntakeClaimSql}`,
           [m.package_id]
         )
       ).rowCount;

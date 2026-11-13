@@ -1050,21 +1050,61 @@ test("unmatched intake remains private until a staff evidence decision",async()=
   }
   const application=await claim(c),competing=await claim(another);
   assert.notEqual(competing.public_no,application.public_no);
+  const claimCase="/cases/"+application.id;
+  const submitted=await c.fetch(claimCase);
+  assert.equal(submitted.ownership_review.tracking_no,tracking);
+  assert.equal(submitted.ownership_review.advice_id,null);
+  await another.fetch(claimCase,undefined,"GET",404);
+  await another.fetch("/media/"+submitted.ownership_review.proof_id,undefined,"GET",404);
+  await c.fetch("/media/"+submitted.ownership_review.proof_id);
+  await c.fetch(claimCase+"/messages",{revision:submitted.revision,body:"The seller confirmed the shipment label."});
+  assert.equal((await claim(c)).id,application.id);
+  const pending=(await c.fetch("/me/intake-claims")).rows;
+  assert.equal(pending.length,1);
+  assert.deepEqual(pending[0],{id:application.id,public_no:application.public_no,state:"waiting_internal",decision:null,
+    tracking_no:tracking,carrier_code:"zto",advice_id:null});
+  assert.deepEqual((await c.fetch("/me/intake-claims?page=2")).rows,[]);
+  assert.equal((await another.fetch("/me/intake-claims")).rows[0].id,competing.id);
+  await staff.fetch("/me/intake-claims",undefined,"GET",403);
   assert.equal((await c.fetch("/me/items")).items.length,0);
   await c.fetch("/media/"+outer,undefined,"GET",404);
   const queue=(await support.fetch("/staff/admin/desk")).claims;
   const target=queue.find((x:{public_no:string})=>x.public_no===application.public_no);
   assert.deepEqual(target.outer_photo_ids,[outer]);
+  assert.equal(target.can_decide,true);
+  await support.fetch("/media/"+outer);
   const other=queue.find((x:{public_no:string})=>x.public_no===competing.public_no);
   const decision={decision:"approve",reason:"Seller proof and physical label were verified."};
   await staff.fetch("/staff/intake-claims/"+target.id+"/decision",decision,"POST",403);
-  await support.fetch("/staff/intake-claims/"+target.id+"/decision",decision);
+  const decisionPath="/staff/intake-claims/"+target.id+"/decision",decisionKey=randomUUID();
+  const [original,replayed]=await Promise.all([
+    support.fetch(decisionPath,decision,"POST",200,decisionKey),
+    support.fetch(decisionPath,decision,"POST",200,decisionKey),
+  ]);
+  assert.deepEqual(replayed,original);
+  await support.fetch(decisionPath,decision,"POST",409);
   await support.fetch("/staff/intake-claims/"+other.id+"/decision",decision,"POST",409);
+  await support.fetch("/staff/intake-claims/"+other.id+"/decision",{decision:"reject",reason:"Private evidence review."});
   assert.equal((await c.fetch("/me/items")).items[0].item_id,saved.item_ids[0]);
   assert.equal((await another.fetch("/me/items")).items.length,0);
   const advices=(await c.fetch("/me/desk")).advices;
   assert.equal(advices[0].tracking_norm,tracking);
   await another.fetch("/me/parcels/"+advices[0].id+"/tracking",undefined,"GET",404);
+  const approved=await c.fetch(claimCase);
+  assert.equal(approved.ownership_review.advice_id,advices[0].id);
+  assert.deepEqual(approved.events.map((row:{body:string})=>row.body),[
+    "The seller confirmed the shipment label.","We verified ownership. You can now open the parcel from this case."]);
+  assert.equal((await c.fetch("/me/intake-claims")).rows[0].advice_id,advices[0].id);
+  const rejected=await another.fetch("/cases/"+other.id);
+  assert.equal(rejected.ownership_review.decision,"reject");
+  assert.equal(rejected.ownership_review.advice_id,null);
+  assert.equal(rejected.events.length,1);
+  assert.match(rejected.events[0].body,/could not verify ownership/);
+  const decisionKeys=[target.id,other.id].map(id=>"intake-claim.decision:"+id);
+  for(let i=0;i<120&&(await pool.query("select 1 from notifications where dedupe_key=any($1::text[])",[decisionKeys])).rowCount!==2;i++)
+    if(!(await workOnce())) break;
+  assert.equal((await c.fetch("/me/notifications")).rows.filter((row:{case_id:string})=>row.case_id===application.id).length,1);
+  assert.equal((await another.fetch("/me/notifications")).rows.filter((row:{case_id:string})=>row.case_id===other.id).length,1);
 });
 
 test("tracking verification and signed Chinese carrier delivery stay separate from physical receipt",async()=>{

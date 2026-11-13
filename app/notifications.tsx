@@ -6,6 +6,7 @@ import { billingChargePath, billingQuotePath } from "../packages/core/portal-rou
 import { Action, Empty, ErrorBlock, Panel, request, useWorkspaceStamp, Table, useLoad, type Row } from "./ui";
 
 const noticeTitles:Record<string,string>={
+  "account.registered":"Your workspace is ready",
   "reference.sealed":"Your Golden Sample is active",
   "ticket.reply":"Support has replied to your case",
   "report.published":"Your inspection report is ready",

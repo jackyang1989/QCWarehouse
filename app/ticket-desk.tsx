@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { Action, Empty, ErrorBlock, Field, FileInput, Form, MediaButton, Panel, request, stamp, useWorkspaceStamp, Table, Tag, text, usd, useLoad, type Row } from "./ui";
+import { useEffect, useRef, useState } from "react";
+import { Action, Empty, ErrorBlock, Field, FileInput, Form, MediaButton, Panel, Photo, request, Select, stamp, useWorkspaceStamp, Table, Tag, text, usd, useLoad, type Row } from "./ui";
 
 const status:Record<string,[string,string]>={
   open:["Open","待处理"],waiting_customer:["Awaiting your reply","待客户回复"],
@@ -14,6 +14,8 @@ const categories:Record<string,string>={
   privacy_share:"隐私与分享",non_standard_quote:"非标咨询",
 };
 const isOpen=(state:string)=>state!=="resolved"&&state!=="closed";
+const claimStatus=(claim:Row,state:string)=>claim.decision==="approve"?"Ownership confirmed":claim.decision==="reject"?
+  "Ownership unverified":state==="waiting_customer"?"Awaiting your reply":isOpen(state)?"Under review":"Review closed";
 const customerIncidentStatus:Record<string,string>={
   approved_awaiting_customer:"Decision required",awaiting_payout:"Payout pending",
   customer_rejected:"Further review requested",resolved:"Resolved",closed:"Closed",
@@ -37,11 +39,50 @@ function Conversation({events,staff=false}:{events:Row[];staff?:boolean}) {
       </div>}
   </li>)}</ol>;
 }
+export function ParcelOwnershipReviews({carriers,page}:{carriers:Row[];page:number}) {
+  const claims=useLoad("/me/intake-claims?page="+page);
+  const [submitted,setSubmitted]=useState<Row>();
+  const formSection=useRef<HTMLDetailsElement>(null);
+  const href=(target:number)=>"/parcels?tab=attention"+(target>1?"&claim_page="+target:"");
+  return <Panel title="Parcel ownership reviews">
+    <details className="card" ref={formSection}>
+      <summary>Find a missing parcel</summary>
+      <p className="muted">Enter the seller’s tracking number for the missing parcel and attach their shipment proof. Our team will verify ownership against the warehouse record.</p>
+      <Form key={submitted?.public_no} label="Request ownership review" run={async fields=>{
+        const result=await request("/me/intake-claims","POST",fields);
+        setSubmitted(result);
+        if(formSection.current)formSection.current.open=false;
+        claims.reload();
+      }}>
+        <Field name="tracking_no" label="Seller’s tracking number"/>
+        <Select name="carrier_code" label="Carrier" choices={carriers.map(carrier=>({id:carrier.code,label:carrier.labels.en}))}/>
+        <Photo label="Seller shipment proof"/>
+      </Form>
+    </details>
+    {submitted&&<p role="status">Review request {submitted.id?<Link href={"/support/cases/"+submitted.id}>{submitted.public_no}</Link>:submitted.public_no} is with support.</p>}
+    {claims.error&&<><ErrorBlock error={claims.error}/><button className="button sm" onClick={claims.reload}>Retry reviews</button></>}
+    {!claims.data&&!claims.error&&<p role="status">Loading ownership reviews…</p>}
+    {claims.data&&<>
+      <Table headers={["Case","Seller tracking number","Review status","Parcel"]} rows={claims.data.rows.map((claim:Row)=>[
+        <Link className="code" href={"/support/cases/"+claim.id}>{claim.public_no}</Link>,
+        <span className="code">{claim.tracking_no}</span>,
+        <Tag>{claimStatus(claim,claim.state)}</Tag>,
+        claim.advice_id?<Link href={"/parcels/"+claim.advice_id}>Open parcel →</Link>:"—",
+      ])} empty="You have no ownership review requests on this page."/>
+      {(page>1||claims.data.has_more)&&<nav className="actions" aria-label="Ownership review pages">
+        {page>1&&<Link className="button" href={href(page-1)}>Previous page</Link>}
+        <span>Page {page}</span>
+        {claims.data.has_more&&<Link className="button" href={href(page+1)}>Next page</Link>}
+      </nav>}
+    </>}
+  </Panel>;
+}
 export function CustomerCase({id,order}:{id:string;order?:string}) {
   const stamp=useWorkspaceStamp();
   const api="/cases/"+id;
   const {data,error,reload}=useLoad(api+(order?"?"+new URLSearchParams({order}):""));
   const incident=data?.incident;
+  const claim=data?.ownership_review;
   const [sent,setSent]=useState<number>();
   useEffect(()=>{
     if(incident?.decision_required&&location.hash==="#incident-decision") {
@@ -49,15 +90,20 @@ export function CustomerCase({id,order}:{id:string;order?:string}) {
     }
   },[id,incident?.decision_required]);
   return <>
-    <div className="page-head"><Link href={order?"/orders/"+order:"/support"}>{order?"← Inspection order":"← Support"}</Link>
+    <div className="page-head"><Link href={order?"/orders/"+order:claim?"/parcels?tab=attention":"/support"}>{order?"← Inspection order":claim?"← Parcel ownership reviews":"← Support"}</Link>
       <p className="eyebrow report-eyebrow">CLIENT WORKSPACE / SUPPORT</p><h1>{data?.subject??"Support case"}</h1>
-      {data&&<div className="actions"><span className="code">{data.public_no}</span><Tag>{incident?.decision_required?"Decision required":status[data.state]?.[0]}</Tag>
+      {data&&<div className="actions"><span className="code">{data.public_no}</span><Tag>{claim?claimStatus(claim,data.state):incident?.decision_required?"Decision required":status[data.state]?.[0]}</Tag>
         {data.order_number&&<Link className="code-btn" href={"/orders/"+data.order_number}>{data.order_number}</Link>}
         {data.parcel&&<Link className="code-btn" href={"/parcels/"+data.parcel.id}>Parcel {data.parcel.tracking_norm??"details"}</Link>}
       </div>}</div>
     {error&&<><ErrorBlock error={error}/><button type="button" onClick={reload}>Retry</button></>}
     {!error&&!data&&<p role="status">Loading your support case…</p>}
     {!error&&data&&<>
+      {claim&&<Panel title="Seller parcel">
+        <dl className="def"><dt>Seller tracking number</dt><dd className="code">{claim.tracking_no}</dd></dl>
+        <div className="actions"><MediaButton ids={[claim.proof_id]} label="View seller shipment proof"/>
+          {claim.advice_id&&<Link className="button sm" href={"/parcels/"+claim.advice_id}>Open parcel →</Link>}</div>
+      </Panel>}
       <Panel title="Messages">
         {data.state==="waiting_customer"&&data.next_action_at&&<p className="notice">Please reply by {stamp(data.next_action_at)}.</p>}
         <Conversation events={data.events}/>
@@ -170,6 +216,7 @@ export function StaffTicket({id,actor}:{id:string;actor:Row}) {
           <div><dt>状态</dt><dd><Tag>{status[data.state]?.[1]}</Tag></dd></div>
           <div><dt>关联订单</dt><dd className="code">{data.order_number?<Link href={"/admin/orders/"+data.order_number}>{data.order_number}</Link>:"—"}</dd></div>
           {data.parcel&&<div><dt>关联入库运单</dt><dd className="code">{data.parcel.tracking_norm??"运单号待核对"}</dd></div>}
+          {data.ownership_review&&<div><dt>待核验运单</dt><dd className="code">{data.ownership_review.tracking_no} · <Link href={"/admin/orders#case-"+data.id}>查看认领核验</Link></dd></div>}
           <div><dt>负责人</dt><dd>{data.assignee??"未领取"}</dd></div>
           <div><dt>下一处理时间</dt><dd>{stamp(data.next_action_at)}</dd></div>
           {data.inquiry&&<>

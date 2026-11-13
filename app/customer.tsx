@@ -4,6 +4,7 @@ import Link from "next/link";
 import { ScopeReview } from "./scope-review";
 import { ReportShares } from "./report-sharing";
 import { RecentUpdates } from "./notifications";
+import { ParcelOwnershipReviews } from "./ticket-desk";
 import { PlatformIcon } from "./chrome";
 import { ApparelIllustration } from "./report-guide";
 import { CategoryTiles } from "./category-coverage";
@@ -2915,7 +2916,16 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   const focusedItem=useLoad(isItems&&requestedItem?"/me/inventory?code="+encodeURIComponent(requestedItem):null);
   const [handlingItems,setHandlingItems]=useState<Row[]>([]);
   const [handlingNotice,setHandlingNotice]=useState("");
-  const [parcelTab,setParcelTab]=useState("incoming");
+  const parcelTabs=[["incoming","Incoming"],["received","Received"],["attention","Needs Attention"],["outgoing","Outgoing"]];
+  const parcelTab=parcelTabs.find(([id])=>id===search.get("tab"))?.[0]??"incoming";
+  const claimPage=Number(search.get("claim_page")??1);
+  function selectParcelTab(tab:string) {
+    const params=new URLSearchParams(search);
+    params.delete("claim_page");
+    if(tab==="incoming")params.delete("tab");
+    else params.set("tab",tab);
+    router.push("/parcels"+(params.size?"?"+params:""),{scroll:false});
+  }
   const [addressCopied,setAddressCopied]=useState(false);
   const [createdCase,setCreatedCase]=useState<Row>();
   const requestedCharge=isBills?(search.get("charge")??legacyCharge)?.toLowerCase():undefined;
@@ -3086,12 +3096,12 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     <details className="card" open={Boolean(parcelOrder)||undefined}>
       <summary>Register incoming parcel</summary>
       <InboundParcelForm address={addr} carriers={carriers.data?.carriers??[]} orders={linkableOrders} preferredOrder={parcelOrder}
-        onSave={()=>{setParcelTab("incoming");reload();}}/>
+        onSave={()=>{if(parcelTab!=="incoming")selectParcelTab("incoming");reload();}}/>
     </details>
     <div className="actions workspace-filters" aria-label="Parcel filters">
-      {[["incoming","Incoming"],["received","Received"],["attention","Needs Attention"],["outgoing","Outgoing"]].map(([key,title])=>
+      {parcelTabs.map(([key,title])=>
         <button type="button" key={key} aria-pressed={parcelTab===key} className={parcelTab===key?"button primary":"button"}
-          onClick={()=>setParcelTab(key)}>{title}</button>)}
+          onClick={()=>selectParcelTab(key)}>{title}</button>)}
     </div>
     {parcelTab!=="outgoing"&&<Panel title={parcelTab==="received"?"Warehouse receipts":parcelTab==="attention"?"Parcels needing attention":"Incoming parcels"}>
       <Table headers={["Inbound tracking","Linked orders","Warehouse status","Carrier status"]} rows={parcelRows.map((a:Row)=>{
@@ -3122,15 +3132,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         ];
       })} empty="No parcels match this view."/>
     </Panel>}
-    {parcelTab==="attention"&&<Panel title="Request a parcel ownership review">
-      <p className="muted">If a specific parcel is missing from your account, use its seller tracking number and upload the seller’s shipment proof. Parcel details become visible after the warehouse verifies ownership.</p>
-      <Form label="Request ownership review" run={async f=>{await request("/me/intake-claims","POST",f);reload();}}>
-        <Field name="tracking_no" label="Seller’s tracking number"/>
-        <Select name="carrier_code" label="Carrier" choices={(carriers.data?.carriers??[]).map((c:Row)=>({id:c.code,label:c.labels.en}))}/>
-        <Photo label="Seller shipment proof"/>
-      </Form>
-      <Table headers={["Claim","Review status"]} rows={data.tickets.filter((t:Row)=>t.public_no.startsWith("CLAIM-")).map((t:Row)=>[t.public_no,t.decision??t.state])}/>
-    </Panel>}
+    {parcelTab==="attention"&&<ParcelOwnershipReviews carriers={carriers.data?.carriers??[]} page={claimPage}/>}
     {parcelTab==="outgoing"&&<Panel title="Outbound parcels">
       <Table headers={["Tracking number","Batch","Destination type","Warehouse handover",""]} rows={data.shipments.map((s:Row)=>[
         <div className="actions">

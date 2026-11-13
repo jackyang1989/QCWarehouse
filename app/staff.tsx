@@ -1241,7 +1241,7 @@ export function AdminDesk({actor,path}:{actor:Row;path:string}) {
   const activeLinks=links.filter(([href])=>href!=="/admin");
   const canHandleOrders=activeLinks.some(([href])=>href==="/admin/orders");
   const queue=canHandleOrders?[
-    ...data.claims.filter((c:Row)=>c.state==="open").map((c:Row)=>({number:c.public_no,action:"核验包裹归属",detail:c.tracking_no,href:"/admin/orders#case-"+c.id})),
+    ...data.claims.filter((c:Row)=>c.can_decide).map((c:Row)=>({number:c.public_no,action:"核验包裹归属",detail:c.tracking_no,href:"/admin/orders#case-"+c.id})),
     ...data.manualQuotes.filter((q:Row)=>q.state==="requested").map((q:Row)=>({number:q.public_no,action:"人工报价",detail:q.reason,href:"/admin/dispositions#case-"+q.id})),
   ].slice(0,8):[];
   const requestedRefunds=activeLinks.some(([href])=>href==="/admin/finance"||href==="/admin/refunds")?data.refunds.filter((r:Row)=>r.state==="requested").length:0;
@@ -1334,11 +1334,12 @@ export function AdminDesk({actor,path}:{actor:Row;path:string}) {
         {data.claims.map((c:Row)=><details key={c.id} className="card" id={"case-"+c.id}>
           <summary>{c.public_no} · {c.carrier_code} {c.tracking_no} · {c.decision??c.state}</summary>
           <div className="actions" style={{marginBlock:8}}>
+            <Link href={"/admin/tickets/"+c.id}>查看工单与客户补充回复</Link>
             {c.tracking_no&&<CodeButton code={c.tracking_no} onClick={()=>setDrawer({kind:"tracking",ref:c.tracking_no})}/>}
             {c.proof_id&&<MediaButton ids={[c.proof_id]} labels={[`${c.public_no} 客户发货凭证`]} label="查看客户发货凭证"/>}
             {c.outer_photo_ids?.length>0&&<MediaButton ids={c.outer_photo_ids} label={`核对仓库外箱照片 (${c.outer_photo_ids.length})`}/>}
           </div>
-          {c.state==="open"&&<Form label="记录核验结论" run={async f=>{
+          {c.can_decide&&<Form label="记录核验结论" run={async f=>{
             const decision=text(f,"decision");
             if(decision==="approve"&&!c.outer_photo_ids.length)throw new Error("先确认实物入库及外箱凭证。");
             await request("/staff/intake-claims/"+c.id+"/decision","POST",{decision,reason:text(f,"reason")});reload();
