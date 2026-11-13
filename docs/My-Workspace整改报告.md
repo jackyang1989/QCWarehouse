@@ -192,3 +192,9 @@ flowchart TD
 | 快照保护 | 源库与完成核验的副本中，订单、订单行、检验报价、收费及报告版本五组记录的聚合 SHA-256 一致。关闭演示模式后当前应用从源库读取 0 个可售 Offer。5 笔没有测试标记的订单仍由 `@qcw.test` 账户创建，其所用服务均有演示价格历史 |
 
 命令、计数、哈希和浏览器复验日志保存在 `qcwarehouse-historical-verification`。核验未导出报告文件、个人资料、私有证据或付款引用。此次结果覆盖本机可用历史数据，生产目录及 Stripe 沙盒、邮件、承运商、实仓和业务决策的原验收条件继续保留。
+
+## 冻结实物的处置入口
+
+续做基线 `3a6df40`。处置写入原本会拒绝事故和盘点冻结件，客户库存和订单页面仍可能提供选择，待办也会把冻结件计作可处理。现由同一冻结条件驱动写入、库存、订单、统计和待办。客户可查看仍在本人名下的实物和冻结原因。未委托、已取消或已关闭订单仍在仓且符合原条件的实物，纳入待处置筛选。已登记的实物与收费保留。
+
+`TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-hold-followup npm run test:integration` 通过 62/62。`npm run check`、`npm run build`、`python3 docs/contracts/check.py` 及空库关系检查退出 0。`QCW_BROWSER_INCIDENT_ONLY=1 node tests/workspace.browser.mjs` 在 `qcw_test-workspace-hold-browser` 退出 0，验证库存冻结标识、理赔决策和录入测试凭证后恢复处置。六档 30 张原图、对照及日志位于 `qcwarehouse-item-hold-followup`。

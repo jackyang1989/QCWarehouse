@@ -2225,6 +2225,7 @@ function CustomerItemDrawer({
           {!item.active_batch_id&&!item.outbound_shipment?.id&&"—"}
         </dd></dl>
       </div>
+      {item.handling_hold&&<p className="notice">{handlingHoldLabel[item.handling_hold]}</p>}
       {Array.isArray(item.components)&&item.components.length>0&&<p className="small muted" style={{marginTop:10}}>
         <strong>Sub-components:</strong> {item.components.map((c:Row)=>`${c.code}${c.label?` (${c.label})`:""}`).join(", ")}
       </p>}
@@ -3182,7 +3183,8 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
           {w.outbound_shipment?.id&&<small><CodeButton code={w.outbound_shipment.tracking_norm} onClick={()=>setTrackTarget({kind:"shipments",id:w.outbound_shipment.id,code:w.outbound_shipment.tracking_norm})}/></small>}
           {!w.reference_sample&&!w.active_batch_id&&!w.outbound_shipment?.id&&"—"}
         </div>,
-        w.instructions.length>0?w.instructions.map((i:string)=><label key={i} className="small"><input type="checkbox" checked={batchIds.includes(i)} onChange={e=>setBatchIds(xs=>e.target.checked?[...xs,i]:xs.filter(x=>x!==i))}/> Select for shipping</label>):
+        w.handling_hold?<Tag tone="yellow">{handlingHoldLabel[w.handling_hold]}</Tag>:
+          w.instructions.length>0?w.instructions.map((i:string)=><label key={i} className="small"><input type="checkbox" checked={batchIds.includes(i)} onChange={e=>setBatchIds(xs=>e.target.checked?[...xs,i]:xs.filter(x=>x!==i))}/> Select for shipping</label>):
           w.active_disposition?<Tag tone="outline">{label(w.active_disposition.action)}</Tag>:canChooseHandling(w)?<label className="small">
             <input type="checkbox" aria-label={`Select ${w.code} for handling`} checked={handlingItems.some(row=>row.item_id===w.item_id)}
               onChange={e=>setHandlingItems(rows=>e.target.checked?[...rows,w]:rows.filter(row=>row.item_id!==w.item_id))}/> Select for handling
@@ -3547,8 +3549,9 @@ function FulfillmentQuote({quote,onUpdate,onOpenBatch,focused=false}:{quote:Row;
 }
 
 const handlingStates=["report_ready","action_pending","cancelled","closed"];
+const handlingHoldLabel:Record<string,string>={stocktake:"Warehouse inventory check in progress",incident:"Warehouse incident under review"};
 function canChooseHandling(item:Row) {
-  return item.allowed_actions.includes("request_disposition")&&(!item.order_state||handlingStates.includes(item.order_state))&&
+  return !item.handling_hold&&item.allowed_actions.includes("request_disposition")&&(!item.order_state||handlingStates.includes(item.order_state))&&
     !item.active_disposition&&!item.reference_sample?.in_use&&item.reference_sample?.state!=="pending_safe_storage";
 }
 
@@ -3762,21 +3765,22 @@ function OrderHandling({
   const desk=useLoad("/me/desk");
   const [selected,setSelected]=useState<string[]>([]);
   const items:Row[]=order.items.filter((item:Row)=>item.item_id);
-  const allowed=["report_ready","action_pending","cancelled","closed"].includes(order.state);
-  const eligible=allowed?items.filter(item=>!item.instruction&&["stored","received"].includes(item.custody_state)):[];
-  const awaiting=items.filter(item=>item.instruction?.awaiting_batch);
+  const allowed=handlingStates.includes(order.state);
+  const eligible=allowed?items.filter(item=>!item.instruction&&!item.handling_hold&&item.identity_state!=="quarantined"&&["stored","received"].includes(item.custody_state)):[];
+  const awaiting=items.filter(item=>!item.handling_hold&&item.instruction?.awaiting_batch);
   const selection=selected.filter(id=>awaiting.some(item=>item.instruction.id===id));
   return <>
     <Panel title={storage?"Storage by item":"Instructions by item"}>
       <Table headers={["Item","Warehouse status","Storage through","Paid through","Active instruction"]} rows={items.map(item=>[
         onOpenItem?<CodeButton code={item.code} onClick={()=>onOpenItem({...item,order_no:order.public_no})}/>:<span className="code">{item.code}</span>,
         label(item.custody_state),stamp(item.storage_until),stamp(item.paid_storage_until),
-        item.instruction?<div className="actions"><Tag>{label(item.instruction.action)}</Tag>{!storage&&item.instruction.awaiting_batch&&
+        <div className="actions">{item.handling_hold&&<Tag tone="yellow">{handlingHoldLabel[item.handling_hold]}</Tag>}
+        {item.instruction?<><Tag>{label(item.instruction.action)}</Tag>{!storage&&!item.handling_hold&&item.instruction.awaiting_batch&&
           <label className="small"><input type="checkbox" checked={selection.includes(item.instruction.id)} onChange={e=>
             setSelected(current=>e.target.checked?[...current,item.instruction.id]:current.filter(id=>id!==item.instruction.id))}/> Select for shipping</label>}
           {item.instruction.state==="requested"&&<Action run={async()=>{
             await request("/me/dispositions/"+item.instruction.id+"/cancel","POST",{});onSave();
-          }}>Cancel</Action>}</div>:"—",
+          }}>Cancel</Action>}</>:!item.handling_hold?"—":null}</div>,
       ])} empty="No warehouse items are linked to this inspection."/>
       {!storage&&selection.length>0&&<Action primary run={async()=>{
         const batch=await request("/dispatch-batches","POST",{disposition_ids:selection});

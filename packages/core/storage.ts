@@ -11,20 +11,18 @@ export const locationBatchSchema = z.object({
   capacity:z.number().int().min(1).max(999),notes:z.string().trim().max(200).optional(),
 }).refine(input=>input.start<=input.end,"The slot range must be in ascending order.");
 
+export const itemHandlingHoldSql=`case
+  when exists(select 1 from stocktake_items si join stocktakes st on st.id=si.stocktake_id
+    where si.item_id=w.id and si.state='investigating' and st.state in ('in_progress','submitted')) then 'stocktake'
+  when exists(select 1 from incident_cases ic
+    where ic.item_id=w.id and ic.state not in ('resolved','closed')) then 'incident' end`;
+
 export async function assertItemNotFrozen(db:DB,itemIds:string[],errorCode="ITEM_FROZEN") {
   if(!itemIds.length) return;
-  const stocktakeFrozen=(await db.query(
-    `select si.item_id from stocktake_items si join stocktakes st on st.id=si.stocktake_id
-     where si.item_id=any($1::uuid[]) and si.state='investigating' and st.state in ('in_progress','submitted') limit 1`,
-    [itemIds]
-  )).rowCount;
-  guard(!stocktakeFrozen,errorCode,"An item is frozen pending stocktake discrepancy investigation.");
-  const incidentFrozen=(await db.query(
-    `select ic.item_id from incident_cases ic
-     where ic.item_id=any($1::uuid[]) and ic.state not in ('resolved','closed') limit 1`,
-    [itemIds]
-  )).rowCount;
-  guard(!incidentFrozen,errorCode,"An item is frozen due to an active warehouse incident case.");
+  const holds=(await db.query<{reason:string|null}>(`select ${itemHandlingHoldSql} reason
+    from warehouse_items w where w.id=any($1::uuid[])`,[itemIds])).rows;
+  guard(!holds.some(row=>row.reason==="stocktake"),errorCode,"An item is frozen pending stocktake discrepancy investigation.");
+  guard(!holds.some(row=>row.reason==="incident"),errorCode,"An item is frozen due to an active warehouse incident case.");
 }
 
 async function lockedLocation(db:DB,id:string) {

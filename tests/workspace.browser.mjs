@@ -546,10 +546,16 @@ async function verifyIncidentDecision({page,call,errors},other) {
   const parcel=await receiver.call("/staff/intake/check-in",{body:{tracking_no,carrier_code:"zto",advice_id:advice.id,
     outer_media_ids:[(await upload.json()).id]},status:201});
   const {locations}=await receiver.call("/staff/desk");
+  const itemCode="S-"+randomUUID();
   const item=await receiver.call(`/staff/packages/${parcel.id}/items`,{body:{revision:parcel.revision,
-    items:[{code:"S-"+randomUUID(),location_id:locations.find(location=>location.code==="R-01").id}]},status:201});
+    items:[{code:itemCode,location_id:locations.find(location=>location.code==="R-01").id}]},status:201});
   const subject="Warehouse found a torn sample seam";
   const incident=await receiver.call("/staff/incidents",{body:{item_id:item.item_ids[0],kind:"damage",summary_en:subject},status:201});
+  await page.goto("/items");
+  const itemRow=page.getByRole("row").filter({has:page.getByRole("button",{name:itemCode,exact:true})});
+  await itemRow.getByText("Warehouse incident under review",{exact:true}).waitFor();
+  assert.equal(await itemRow.getByRole("checkbox",{name:`Select ${itemCode} for handling`}).count(),0);
+  await captureWizard(page,"incident-inventory-hold","Warehouse items");
   const staffPath=`/staff/incidents/${incident.id}`,customerPath=`/me/incidents/${incident.id}`,casePath=`/support/cases/${incident.ticket_id}`;
   const proposalSummary="We propose merchandise compensation for the damage.";
   await receiver.call(staffPath+"/propose",{body:{compensation_cents:2500,currency:"USD",summary_en:proposalSummary}});
@@ -585,6 +591,8 @@ async function verifyIncidentDecision({page,call,errors},other) {
   await page.getByText("Payout recorded",{exact:true}).waitFor();
   assert.equal((await call(customerPath)).paid,true);
   await captureWizard(page,"incident-payout-recorded",subject);
+  await page.goto("/items?filter=handling");
+  await itemRow.getByRole("checkbox",{name:`Select ${itemCode} for handling`}).waitFor();
   assert.deepEqual(errors,[]);
   assert(entries.every(entry=>entry.overflow===0));
   console.log("PASS independently approved incident proposal, customer decision, retained action after reply, and separate payout proof");

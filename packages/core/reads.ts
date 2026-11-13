@@ -7,15 +7,16 @@ import { eligibleManualQuoteOrderSql, expiredManualInspectionPaymentSql, orderAc
 import { declaredItemTracking, orderInboundRegistration, orderShipments } from "./fulfillment-reads";
 import { getIntakeContext, waybill } from "./intake";
 import { scopeSupplementForOrder, scopeSupplementState } from "./scope-payment";
-import { incidentAwaitingCustomer } from "./storage";
+import { incidentAwaitingCustomer, itemHandlingHoldSql } from "./storage";
 import { hasStaffAccess, staffAccess } from "./staff-access";
 import { effectiveDispatchCharge, pendingDispatchQuote, pendingStorageQuote, renewableFulfillmentQuote, unresolvedQuotePayment } from "./dispatch";
 
 const inventoryJoins=`from warehouse_items w
     left join order_line_item_links a on a.item_id=w.id and a.unlinked_at is null
     left join order_lines l on l.id=a.order_line_id left join orders o on o.id=l.order_id and o.org_id=w.org_id`;
-const awaitingItemInstructions=`o.state in ('report_ready','action_pending')
+const awaitingItemInstructions=`(o.id is null or o.state in ('report_ready','action_pending','cancelled','closed'))
     and w.custody_state in ('received','stored') and w.identity_state<>'quarantined'
+    and (${itemHandlingHoldSql}) is null
     and not exists(select 1 from disposition_requests d where d.item_id=w.id and d.state not in ('completed','cancelled'))
     and not exists(select 1 from reference_samples r where r.item_id=w.id
       and (r.state='pending_safe_storage' or (r.state='active' and r.expires_at>now())))`;
@@ -25,6 +26,7 @@ const awaitingOrInInspection=`o.state in ('awaiting_samples','samples_ready','qu
 const itemFilters={all:"true",inspection:awaitingOrInInspection,handling:awaitingItemInstructions,reference:activeReference};
 export async function items(db:DB,actor:Actor,options?:{page:number;filter:keyof typeof itemFilters;code?:string}) {
   return (await db.query(`select w.id item_id,w.code,w.custody_state,w.revision,w.identity_state,w.condition_state,w.storage_until,w.received_at,
+    ${itemHandlingHoldSql} handling_hold,
     p.code package_code,p.advice_id inbound_advice_id,
     (select t.tracking_norm from tracking_records t where t.package_id=p.id and t.direction='inbound' and t.closed_at is null order by t.generation desc limit 1) inbound_tracking_norm,
     (select max(sp.ends_at) from storage_periods sp where sp.item_id=w.id) paid_storage_until,
@@ -54,7 +56,7 @@ export async function items(db:DB,actor:Actor,options?:{page:number;filter:keyof
     order by w.received_at desc,w.id desc limit $3 offset $4`,[
       organization(actor),options?.code??null,options?21:400,options?(options.page-1)*20:0,
     ])).rows.map(w=>({
-      ...w,allowed_actions:["stored","received"].includes(w.custody_state)&&w.identity_state!=="quarantined"?["request_disposition"]:[],
+      ...w,allowed_actions:["stored","received"].includes(w.custody_state)&&w.identity_state!=="quarantined"&&!w.handling_hold?["request_disposition"]:[],
     }));
 }
 export async function customerInventory(db:DB,actor:Actor,page:number,filter:keyof typeof itemFilters,code?:string) {
@@ -138,6 +140,7 @@ export async function customerActions(db:DB,actor:Actor) {
         select 1 from order_lines l join order_line_item_links a on a.order_line_id=l.id and a.unlinked_at is null
         join warehouse_items w on w.id=a.item_id and w.org_id=o.org_id
         where l.order_id=o.id and w.custody_state in ('received','stored') and w.parent_item_id is null and w.identity_state<>'quarantined'
+        and (${itemHandlingHoldSql}) is null
         and not exists(select 1 from disposition_requests d where d.item_id=w.id and d.state<>'cancelled' and d.state<>'completed')
         and not exists(select 1 from reference_samples r where r.item_id=w.id and (r.state='pending_safe_storage' or (r.state='active' and r.expires_at>now())))))
     )
@@ -194,6 +197,7 @@ export async function customerActions(db:DB,actor:Actor) {
       w.code,w.storage_until
       from warehouse_items w
       where w.org_id=$1 and w.custody_state in ('received','stored') and w.parent_item_id is null
+        and (${itemHandlingHoldSql}) is null
         and w.storage_until is not null and w.storage_until<=now()+interval '3 days'
         and not exists(select 1 from disposition_requests d where d.item_id=w.id and d.state='requested')
   ) actions order by due_at nulls last,kind,reference,id limit 200`,[org,actor.id,incidentAwaitingCustomer]);

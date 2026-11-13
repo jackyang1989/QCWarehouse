@@ -4592,6 +4592,11 @@ test("Stocktake, warehouse incident compensation, stage refunds, dispute freezes
   });
   assert.equal(scanMissing.state,"investigating");
   assert.equal(scanMissing.frozen,true);
+  const itemBCode=(await c.fetch(`/orders/${oMain.id}`)).items.find(row=>row.item_id===itemB).code;
+  const readItemHold=async()=> (await c.fetch("/me/inventory?code="+itemBCode)).rows[0];
+  assert.equal((await readItemHold()).handling_hold,"stocktake");
+  assert.deepEqual((await readItemHold()).allowed_actions,[]);
+  assert(!(await c.fetch("/me/inventory?filter=handling")).rows.some(row=>row.item_id===itemB));
 
   const frozenDispErr=await c.fetch(`/orders/${oMain.id}/dispositions`,{
     item_id:itemB,
@@ -4640,6 +4645,8 @@ test("Stocktake, warehouse incident compensation, stage refunds, dispute freezes
     destination:{recipient:"Fwd",phone:"13800001111",address:"Shenzhen Fwd",member_code:"FWD-B"},
   },"POST",409);
   assert.equal(incFrozenErr.error.code,"ITEM_UNAVAILABLE");
+  assert.equal((await readItemHold()).handling_hold,"incident");
+  assert.equal((await c.fetch(`/orders/${oMain.id}`)).items.find(row=>row.item_id===itemB).handling_hold,"incident");
 
   // Propose resolution separating service fee refund (within Stripe balance) and merchandise compensation
   // First verify excessive service_refund_cents (> paid order balance) is rejected with 409 REFUND_EXCEEDS_PAYMENT
@@ -4728,6 +4735,9 @@ test("Stocktake, warehouse incident compensation, stage refunds, dispute freezes
   });
   assert.equal(resolvedInc.state,"resolved");
   assert.equal(resolvedInc.paid,true);
+  assert.equal((await readItemHold()).handling_hold,null);
+  assert((await readItemHold()).allowed_actions.includes("request_disposition"));
+  assert((await c.fetch("/me/inventory?filter=handling")).rows.some(row=>row.item_id===itemB));
 
   // 5. TASK-105 (T53): Closing order while items are still in storage fails with 409 ITEMS_STILL_IN_STORAGE
   const closeEarlyErr=await admin.fetch(`/staff/orders/${oMain.id}/close`,{},"POST",409);

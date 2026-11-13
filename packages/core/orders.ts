@@ -4,6 +4,7 @@ import { currentTerms, requireCustomerActive, requireTerms } from "./auth";
 import { audit, code, event, guard, isDemo, lock, one, organization, revision, role, uuid, type Actor } from "./common";
 import { orderInboundRegistration, orderQuotes, orderShipments } from "./fulfillment-reads";
 import { scopeSupplementForOrder } from "./scope-payment";
+import { itemHandlingHoldSql } from "./storage";
 
 export const checkSchema = z.object({
   key:z.string().min(1).max(80), label:z.string().min(1).max(120), zh:z.string().min(1).max(120),
@@ -412,6 +413,7 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
     where l.order_id=$1 order by l.id`,[id])).rows;
   const rows=(await db.query(`select e.id,e.position,e.declared_fields,e.in_scope,l.id as order_line_id,l.quantity,so.title,st.code service,
     w.id item_id,w.code,w.identity_state,w.condition_state,w.custody_state,w.storage_until,pkg.code package_code,
+    ${itemHandlingHoldSql} handling_hold,
     (select max(p.ends_at) from storage_periods p where p.item_id=w.id) paid_storage_until,
     (select jsonb_build_object('id',d.id,'action',d.action,'state',d.state,
       'awaiting_batch',d.action<>'retain' and not exists(select 1 from dispatch_batch_items bi where bi.disposition_id=d.id and bi.released_at is null))
