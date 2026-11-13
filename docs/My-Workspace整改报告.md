@@ -224,3 +224,9 @@ flowchart TD
 续做基线 `6733e14`。入仓和发运通知显示关联运单号，客服回复显示工单号，号码从本人可读的业务对象取得。非首页的 `/me/desk` 请求跳过活动查询，首页和通知中心仍分别提供近期活动与分页历史。375px 订单表格的固定按钮高度导致多行实物码越过按钮边界，已修正并通过文字位置断言和实际截图核验。
 
 `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-notification-context npm run test:integration` 通过 62/62。类型、构建、契约和空库关系检查退出 0。独立 Worker 与真实 Chrome 验证入仓通知、客服通知、工单跳转及本人包裹详情，六档 36 张原图位于 `qcwarehouse-notification-context-followup`。全页更新以 `QCW_BROWSER_RESUME_MATRIX=1` 退出 0，更新的 198 张矩阵及先前失败日志见 `qcwarehouse-final-head-regression`。本机重启后已使用历史验证副本恢复 localhost:3000，健康检查返回 200。
+
+## 物流手动刷新续验
+
+续做基线 `1d16d82`。缓存刷新与承运商查询分别提供操作。已配置渠道时，获授权客户可在原限频窗口内提交查询，Worker 从数据库调度消费。旧实现把下一次执行时间推迟一小时，并且 DTO 未提供相应操作。当前请求将已到期的记录交给 Worker，审计与原查询账本共同约束重放、冷却与额度。未配置渠道返回 503，现有仓库收货和已保存轨迹仍可即时重读。
+
+`TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-manual-tracking npm run test:integration` 通过 62/62。隔离测试用供应商响应夹具核对真实 Worker 查询账本及英文轨迹。类型、构建、契约和空库关系检查退出 0。Chrome 通过包裹收货、未配置渠道与缓存重读，六档 36 张原图位于 `qcwarehouse-tracking-refresh-followup`。实际快递100沙盒与供应商额度证据仍为 OPEN。

@@ -2801,28 +2801,28 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
   const canCorrect=kind==="parcels"&&Boolean(data&&!data.warehouse_state);
   const verificationPath=path+id+"/tracking-verification";
   const verification=useLoad(canVerify||canCorrect?verificationPath:null),carriers=useLoad(canVerify||canCorrect?"/carriers":null);
-  const [refreshError,setRefreshError]=useState<string|null>(null);
+  const [nextManualRefresh,setNextManualRefresh]=useState<string>();
   const [correctedTracking,setCorrectedTracking]=useState<string>();
   const [correctionCarrier,setCorrectionCarrier]=useState("");
   const selectedCarrier=correctionCarrier||verification.data?.carrier_code||"";
   const labelPhoneHint=carriers.data?.carriers.find((carrier:Row)=>carrier.code===selectedCarrier)?.format_hint;
   const receipt=data?.warehouse_receipt;
+  const nextQueryAt=[data?.next_allowed_at,nextManualRefresh].filter(Boolean).sort().at(-1);
+  const manualRefresh=data?.allowed_actions.includes("refresh_tracking");
   const outerCondition=receipt?.outer_condition&&({intact:"Intact",crushed:"Crushed",torn:"Torn",wet:"Wet"} as Record<string,string>)[receipt.outer_condition];
   useEffect(()=>{const timer=setInterval(reload,60000);return ()=>clearInterval(timer);},[reload]);
-  return <>{!embedded&&<div className="page-head"><p className="eyebrow">Warehouse / Tracking</p><h1>Tracking details</h1><p className="muted">Follow carrier events and the warehouse’s own handling status.</p></div>}{error&&<ErrorBlock error={error}/>}{refreshError&&<ErrorBlock error={refreshError}/>}
+  return <>{!embedded&&<div className="page-head"><p className="eyebrow">Warehouse / Tracking</p><h1>Tracking details</h1><p className="muted">Follow carrier events and the warehouse’s own handling status.</p></div>}{error&&<ErrorBlock error={error}/>}
     {!data&&!error&&<p role="status">Loading carrier tracking…</p>}
     {data&&<Panel title={data.carrier??"Carrier pending"}><p className="code">{data.tracking_no}</p>
       <div className="actions"><Tag>{label(data.transport_state)}</Tag><Tag>{label(data.sync_state)}</Tag>
       {data.warehouse_state&&<Tag>Warehouse · {label(data.warehouse_state)}</Tag>}
       {kind==="parcels"&&<Link className="button sm" href={"/support?parcel="+encodeURIComponent(id)}>Get help with this parcel</Link>}
-      <button onClick={async()=>{
-        setRefreshError(null);
-        if(data.allowed_actions.includes("refresh_tracking")) {
-          try { await request(path+id+"/tracking/refresh","POST",{}); }
-          catch(e){ setRefreshError(e instanceof Error?e.message:String(e)); }
-        }
+      <button type="button" onClick={reload}>Reload tracking status</button>
+      {manualRefresh&&<Action disabled={!!nextQueryAt&&Date.parse(nextQueryAt)>Date.now()} run={async()=>{
+        const result=await request(path+id+"/tracking/refresh","POST",{});
+        setNextManualRefresh(result.next_allowed_at);
         reload();
-      }}>Refresh status</button></div>
+      }}>Request carrier update</Action>}</div>
       {data.direction==="inbound"&&data.transport_state==="delivered"&&!data.warehouse_state&&<p className="notice" role="status"><strong>Delivered by carrier · Warehouse check-in pending.</strong> Physical receipt is confirmed only after warehouse check-in.</p>}
       {receipt&&<section aria-label="Warehouse receipt" className="top-gap">
         <dl className="location-facts">
@@ -2838,7 +2838,8 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
       {data.sync_state==="no_record"&&<p className="muted small" role="status">No carrier events reported yet — the carrier may not have scanned the parcel yet.</p>}
       {(data.sync_state==="delayed"||data.sync_state==="provider_error")&&<p className="muted small" role="status">Carrier updates are temporarily delayed — showing the last known snapshot from {stamp(data.last_success_at)}.</p>}
       {data.sync_state==="unsupported"&&<p className="muted small" role="status">Automatic tracking is not supported for this carrier; warehouse check-in and handover updates will still appear here.</p>}
-      {data.next_allowed_at&&!data.allowed_actions.includes("refresh_tracking")&&<p className="muted small">Next manual refresh available at {stamp(data.next_allowed_at)}.</p>}
+      {nextManualRefresh&&<p className="muted small" role="status">Carrier update requested. Tracking will refresh when the warehouse system receives a response.</p>}
+      {manualRefresh&&nextQueryAt&&Date.parse(nextQueryAt)>Date.now()&&<p className="muted small">Next carrier update request available at {stamp(nextQueryAt)}.</p>}
       {canVerify&&verification.data&&<Form label="Verify carrier tracking" run={async f=>{
         const phone=text(f,"phone");
         await request(verificationPath,"POST",{revision:verification.data?.revision,carrier_code:verification.data?.carrier_code??text(f,"carrier_code"),...(phone?{phone}:{})});

@@ -751,6 +751,11 @@ async function verifyParcelOwnership({page,call,errors},other) {
   await page.waitForURL("**/parcels/"+approved.advice_id);
   await page.getByText(tracking,{exact:true}).waitFor();
   await page.getByText("Warehouse · Received at warehouse",{exact:true}).waitFor();
+  assert.equal(await page.getByRole("button",{name:"Request carrier update"}).count(),0);
+  const cachedRead=page.waitForResponse(response=>response.request().method()==="GET"&&
+    new URL(response.url()).pathname==="/api/v1/me/parcels/"+approved.advice_id+"/tracking");
+  await page.getByRole("button",{name:"Reload tracking status"}).click();
+  assert.equal((await cachedRead).status(),200);
   const receipt=page.getByRole("region",{name:"Warehouse receipt"});
   await receipt.getByText("Warehouse check-in",{exact:true}).waitFor();
   await receipt.getByText("Torn",{exact:true}).waitFor();

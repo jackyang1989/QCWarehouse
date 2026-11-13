@@ -1545,10 +1545,16 @@ test("Kuaidi100 query stores English events and distinguishes provider rate limi
       data:[{context:"Delivered to receiving desk",ftime:"2026-11-04 15:03:00",status:"Delivered",statusCode:"301"}]});
     return Response.json({result:false,returnCode:"504",message:"Fixture rate limit"});
   });
+  const requestKey=randomUUID();
+  const manual=await c.fetch(ok.path+"/refresh",{},"POST",202,requestKey);
+  assert.deepEqual(await c.fetch(ok.path+"/refresh",{},"POST",202,requestKey),manual);
+  await c.fetch(ok.path+"/refresh",{},"POST",429);
+  assert.equal(fetch.mock.callCount(),0);
   assert.equal(await syncTrackingOnce(),true);
   assert.equal(await syncTrackingOnce(),true);
   assert.equal(await syncTrackingOnce(),true);
   assert.equal(fetch.mock.callCount(),3);
+  assert.equal((await pool.query("select count(*)::int n from tracking_query_attempts where tracking_norm=$1",[ok.tracking])).rows[0].n,1);
   const english=await c.fetch(ok.path);
   assert.equal(english.events[0].text,"Delivered to receiving desk");
   assert.equal(english.events[0].status_code,"301");
@@ -2967,8 +2973,9 @@ test("Stripe webhook signature/amount guards, order hold/resume during payment, 
   }
 });
 
-test("bilingual tracking freshness, out-of-order callbacks, manual translation review, manual refresh cooldown and waybill correction",async()=>{
+test("bilingual tracking freshness, out-of-order callbacks, manual translation review, manual refresh cooldown and waybill correction",async t=>{
   const {c,registration}=await signCustomer();
+  const foreign=(await signCustomer()).c;
   const receiving=await staffLogin("receiving"),admin=await staffLogin("admin");
   const wrongWaybill="YTO"+randomUUID().slice(0,8).toUpperCase();
   const rightWaybill="ZTO"+randomUUID().slice(0,8).toUpperCase();
@@ -2992,9 +2999,15 @@ test("bilingual tracking freshness, out-of-order callbacks, manual translation r
   assert.equal(trackers[1].id,trackerId);
   assert.equal(trackers[1].generation,2);
 
+  await c.fetch(parcelPath+"/tracking/refresh",{},"POST",503);
+  setFixtureEnv(t,{QCW_DEMO:"0",KUAIDI100_KEY:"key-fixture",KUAIDI100_CUSTOMER:"customer-fixture"});
+  assert((await c.fetch(parcelPath+"/tracking")).allowed_actions.includes("refresh_tracking"));
   const refreshed=await c.fetch(parcelPath+"/tracking/refresh",{},"POST",202);
   assert.equal(refreshed.queued,true);
   assert(refreshed.next_allowed_at);
+  assert(Date.parse((await c.fetch(parcelPath+"/tracking")).next_allowed_at)>Date.now());
+  assert((await pool.query("select next_query_at<=now() as due from tracking_records where id=$1",[trackerId])).rows[0].due);
+  await foreign.fetch(parcelPath+"/tracking/refresh",{},"POST",404);
   const rateLimited=await c.fetch(parcelPath+"/tracking/refresh",{},"POST",429);
   assert.equal(rateLimited.error.code,"RATE_LIMITED");
 

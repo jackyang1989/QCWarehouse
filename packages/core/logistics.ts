@@ -8,6 +8,17 @@ import { staffAccess } from "./staff-access";
 import { Problem, audit, event, guard, hash, isDemo, lock, one, organization, revision, role, uuid, type Actor } from "./common";
 
 const md5=(s:string)=>createHash("md5").update(s).digest("hex").toUpperCase();
+const manualQueryCooldownMs=60*60_000;
+const blockedManualSyncStates=["stopped","superseded","needs_carrier","needs_verification","unsupported","delayed"];
+function trackingQueryEnabled() {
+  const {key,customer}=trackingSettings();
+  return !isDemo()&&Boolean(key&&customer);
+}
+async function recentManualQuery(db:DB,trackerId:string) {
+  return (await db.query<{at:Date}>(`select at from audit_events where entity_type='tracking_records' and entity_id=$1
+    and action='request_tracking_query' and at>now()-make_interval(secs=>$2) order by at desc limit 1`,
+    [trackerId,manualQueryCooldownMs/1000])).rows[0];
+}
 const states:Record<string,string>={"0":"in_transit","1":"picked_up","2":"exception","3":"delivered","4":"returned","5":"out_for_delivery","6":"returning","7":"forwarded","8":"exception"};
 const payloadSchema=z.object({com:z.string().optional(),nu:z.string().optional(),state:z.union([z.string(),z.number()]).optional(),
   data:z.array(z.object({context:z.string().min(1).max(1600),ftime:z.string().optional(),time:z.string().optional(),statusCode:z.string().optional(),areaName:z.string().optional(),areaCode:z.string().optional()})).max(500)});
@@ -122,13 +133,16 @@ export async function tracking(db:DB,actor:Actor,id:string,kind:"advice"|"shipme
     }
   }
   const canVerify=kind==="advice" && ["needs_carrier","needs_verification"].includes(t.sync_state);
+  const canRequest=trackingQueryEnabled()&&t.carrier_code&&!blockedManualSyncStates.includes(t.sync_state);
+  const latestRequest=canRequest?await recentManualQuery(db,t.id):null;
+  const nextAllowed=latestRequest?new Date(Math.max(t.next_query_at?.valueOf()??0,latestRequest.at.valueOf()+manualQueryCooldownMs)):t.next_query_at;
   return {tracking_id:t.id,direction:t.direction,carrier:t.labels?.[lang]??t.labels?.en??t.carrier_code??null,tracking_no:t.tracking_norm,
     warehouse_state:t.warehouse_state??null,transport_state:t.transport_state,sync_state:t.sync_state,locale:lang,
     ...(kind==="advice"&&t.warehouse_received_at?{warehouse_receipt:{received_at:t.warehouse_received_at,
       logged_item_count:t.logged_item_count,outer_condition:t.outer_condition}}:{}),
-    translation_status:translationStatus,events,allowed_actions:canVerify?["verify_tracking"]:[],
+    translation_status:translationStatus,events,allowed_actions:canVerify?["verify_tracking"]:canRequest?["refresh_tracking"]:[],
     ...(t.last_success_at?{last_success_at:t.last_success_at}:{}),...(t.latest_event_at?{latest_event_at:t.latest_event_at}:{}),
-    ...(snapshot?{localized_snapshot_at:snapshot.fetched_at}:{}),...(t.next_query_at?{next_allowed_at:t.next_query_at}:{})};
+    ...(snapshot?{localized_snapshot_at:snapshot.fetched_at}:{}),...(nextAllowed?{next_allowed_at:nextAllowed}:{})};
 }
 export async function verificationState(db:DB,actor:Actor,id:string) {
   const org=organization(actor);
@@ -200,6 +214,7 @@ export async function refreshTracking(db:DB,actor:Actor,id:string,kind:"advice"|
   const org=organization(actor);
   const filter=kind==="advice"?"advice_id":"shipment_id";
   const t=await one(db,`select * from tracking_records where ${filter}=$1 and org_id=$2 and closed_at is null order by generation desc limit 1 for update`,[id,org]);
+  guard(trackingQueryEnabled(),"TRACKING_QUERY_UNAVAILABLE","Carrier queries are unavailable. The last recorded tracking status remains visible.",503);
   await lock(db,"query:"+(t.carrier_code??"unknown")+":"+t.tracking_norm);
   const counts=t.carrier_code
     ?await one<{n:number;too_soon:boolean;last_reserved:Date|null}>(db,`select count(*)::int n,coalesce(max(reserved_at)>now()-interval '60 minutes',false) too_soon,max(reserved_at) last_reserved
@@ -208,16 +223,18 @@ export async function refreshTracking(db:DB,actor:Actor,id:string,kind:"advice"|
     :{n:0,too_soon:false,last_reserved:null};
   const now=new Date();
   const nextAllowed=t.next_query_at?new Date(t.next_query_at):now;
-  const blocked=!t.carrier_code || ["stopped","superseded","needs_carrier","needs_verification","unsupported","delayed"].includes(t.sync_state) || counts.n>=24 || counts.too_soon || nextAllowed>now;
-  let effectiveNext=nextAllowed>now?nextAllowed:new Date(now.getTime()+60*60_000);
+  const queued=await recentManualQuery(db,t.id);
+  const blocked=!t.carrier_code || blockedManualSyncStates.includes(t.sync_state) || counts.n>=24 || counts.too_soon || nextAllowed>now || queued;
+  let effectiveNext=nextAllowed>now?nextAllowed:new Date(now.getTime()+manualQueryCooldownMs);
   if(counts.too_soon && counts.last_reserved) {
-    const cooldownEnd=new Date(new Date(counts.last_reserved).getTime()+60*60_000);
+    const cooldownEnd=new Date(new Date(counts.last_reserved).getTime()+manualQueryCooldownMs);
     if(cooldownEnd>effectiveNext) effectiveNext=cooldownEnd;
   }
   if(blocked) {
     throw new Problem("RATE_LIMITED",`Next manual refresh is available at ${effectiveNext.toISOString()}.`,429);
   }
-  await db.query("update tracking_records set next_query_at=now()+interval '60 minutes' where id=$1",[t.id]);
+  await db.query("update tracking_records set next_query_at=least(coalesce(next_query_at,now()),now()) where id=$1",[t.id]);
+  await audit(db,actor,"request_tracking_query","tracking_records",t.id);
   const snap=await tracking(db,actor,id,kind,"en");
   return {queued:true,cooldown:false,next_allowed_at:effectiveNext.toISOString(),cached_snapshot:snap};
 }
