@@ -2806,6 +2806,8 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
   const [correctionCarrier,setCorrectionCarrier]=useState("");
   const selectedCarrier=correctionCarrier||verification.data?.carrier_code||"";
   const labelPhoneHint=carriers.data?.carriers.find((carrier:Row)=>carrier.code===selectedCarrier)?.format_hint;
+  const receipt=data?.warehouse_receipt;
+  const outerCondition=receipt?.outer_condition&&({intact:"Intact",crushed:"Crushed",torn:"Torn",wet:"Wet"} as Record<string,string>)[receipt.outer_condition];
   useEffect(()=>{const timer=setInterval(reload,60000);return ()=>clearInterval(timer);},[reload]);
   return <>{!embedded&&<div className="page-head"><p className="eyebrow">Warehouse / Tracking</p><h1>Tracking details</h1><p className="muted">Follow carrier events and the warehouse’s own handling status.</p></div>}{error&&<ErrorBlock error={error}/>}{refreshError&&<ErrorBlock error={refreshError}/>}
     {!data&&!error&&<p role="status">Loading carrier tracking…</p>}
@@ -2822,6 +2824,13 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
         reload();
       }}>Refresh status</button></div>
       {data.direction==="inbound"&&data.transport_state==="delivered"&&!data.warehouse_state&&<p className="notice" role="status"><strong>Delivered by carrier · Warehouse check-in pending.</strong> Physical receipt is confirmed only after warehouse check-in.</p>}
+      {receipt&&<section aria-label="Warehouse receipt" className="top-gap">
+        <dl className="location-facts">
+          <div><dt>Warehouse check-in</dt><dd>{stamp(receipt.received_at)}</dd></div>
+          {receipt.logged_item_count!=null&&<div><dt>Items logged by warehouse</dt><dd>{receipt.logged_item_count}</dd></div>}
+          {outerCondition&&<div><dt>Outer carton condition</dt><dd>{outerCondition}</dd></div>}
+        </dl>
+      </section>}
       {data.direction==="outbound_forward"&&data.transport_state==="delivered"&&<p className="notice" role="status"><strong>Delivered to domestic freight forwarder.</strong> International forwarding is managed by your forwarder.</p>}
       {data.direction==="outbound_return"&&data.transport_state==="delivered"&&<p className="notice" role="status"><strong>Delivered to seller.</strong> Seller refund depends on your seller platform confirmation.</p>}
       {(data.translation_status==="updating"||data.translation_status==="pending")&&<p className="muted small" role="status">English details are being updated{data.latest_event_at?` · Latest carrier event ${stamp(data.latest_event_at)}`:""}.</p>}

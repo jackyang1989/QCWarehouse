@@ -3273,6 +3273,14 @@ components:
           type:
           - string
           - 'null'
+        warehouse_receipt:
+          type: object
+          required: [received_at, logged_item_count, outer_condition]
+          properties:
+            received_at: {type: string, format: date-time}
+            logged_item_count: {type: [integer, 'null'], minimum: 0}
+            outer_condition: {enum: [intact, crushed, torn, wet, null]}
+          additionalProperties: false
         last_success_at:
           type: string
           format: date-time

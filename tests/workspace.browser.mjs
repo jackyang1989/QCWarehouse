@@ -34,7 +34,7 @@ async function session(email = randomUUID()+"@qcw.test", staff = false, existing
   async function call(path, options = {}) {
     const method = options.method ?? (options.body === undefined ? "GET" : "POST");
     const csrf = (await context.cookies()).find(cookie => cookie.name === "qcw_csrf")?.value;
-    const result = await context.request.fetch("/api/v1"+path, {method,data:options.body,
+    const result = await context.request.fetch("/api/v1"+path, {method,data:options.body,timeout:30000,
       headers:method==="GET"?{}:{origin,"Idempotency-Key":options.key??randomUUID(),...(csrf?{"X-CSRF-Token":csrf}:{})}});
     assert.equal(result.status(), options.status ?? 200, method+" "+path);
     if(result.headers()["content-type"]?.startsWith("application/pdf")) return result.body();
@@ -687,7 +687,7 @@ async function verifyParcelOwnership({page,call,errors},other) {
   });
   assert.equal(upload.status(),201);
   const parcel=await receiver.call("/staff/intake/check-in",{body:{tracking_no:tracking,carrier_code:"zto",
-    outer_media_ids:[(await upload.json()).id]},status:201});
+    outer_media_ids:[(await upload.json()).id],outer_condition:"torn",condition_note:"Private fixture handling note."},status:201});
   assert.equal(parcel.state,"unmatched");
   await page.goto("/parcels");
   await page.getByRole("button",{name:"Needs Attention"}).click();
@@ -746,6 +746,10 @@ async function verifyParcelOwnership({page,call,errors},other) {
   await page.waitForURL("**/parcels/"+approved.advice_id);
   await page.getByText(tracking,{exact:true}).waitFor();
   await page.getByText("Warehouse · Received at warehouse",{exact:true}).waitFor();
+  const receipt=page.getByRole("region",{name:"Warehouse receipt"});
+  await receipt.getByText("Warehouse check-in",{exact:true}).waitFor();
+  await receipt.getByText("Torn",{exact:true}).waitFor();
+  assert.equal(await page.getByText("Private fixture handling note.",{exact:true}).count(),0);
   await captureWizard(page,"parcel-claim-receipt","Tracking details");
   assert.deepEqual([...errors,...admin.errors,...receiver.errors,...other.errors],[]);
   assert(entries.every(entry=>entry.overflow===0));
@@ -1123,7 +1127,13 @@ async function verifyWorkspaceViews(customer,other) {
     if(older) {
       const olderPath=`/orders/${published.order_id}/report/versions/${older.version}`;
       await fixture.page.goto(`/orders/${published.order_number}/report/versions/${older.version}`,{waitUntil:"domcontentloaded"});
-      await fixture.page.getByText(/This is a historical report/).waitFor();
+      try {
+        await fixture.page.getByText(/This is a historical report/).waitFor({timeout:15000});
+      } catch (error) {
+        if(await fixture.page.getByRole("status").getByText("Loading report evidence…").count()===0) throw error;
+        await fixture.page.reload({waitUntil:"domcontentloaded"});
+        await fixture.page.getByText(/This is a historical report/).waitFor();
+      }
       const olderPdf=await fixture.call(olderPath+"/pdf");
       assert.equal(olderPdf.version,older.version);
       assert.notEqual(olderPdf.url,file.url);

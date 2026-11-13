@@ -1,6 +1,6 @@
 # My Workspace 客户中心整改报告
 
-2026-11-11 至 2026-11-12 · 基线 `34d66aa` · 续做基线 `f972f2b` · 本地工程验收
+2026-11-11 至 2026-11-13 · 基线 `34d66aa` · 本地工程验收
 
 本轮续接已有七个未提交文件中的客户工作台改动。原 `.env` 指向的开发库和测试库共用一个已经不存在的本地 socket。`.env` 保持原配置，验证使用本机 PostgreSQL 的独立数据库，分别执行空库关系校验、全量集成及 Chrome。目录、仓址、凭证、运单、图片、支付和角色账号均为隔离夹具。测试未触发外部实物操作或真实交易。
 
@@ -15,7 +15,7 @@
 | 订单履约详情 | `/orders/{publicNo}/quotes/{id}`、`/orders/{publicNo}/shipments/{id}`、`/orders/{publicNo}/cases/{id}` | 报价版本、仓库交接、运单和工单使用原单与对象双重约束 | 有效正式运输价格及提供方联调 OPEN |
 | 待办 | `/actions` | 草稿、待支付、卖家追踪、人工报价确认与过期续询、待选处置、物流验证、范围修订、参考样、续存及客户待回复工单有深链 | 泛化暂停不再单独计作客户待办。人工收件归属审核期间不暴露未匹配仓库对象 |
 | 报告 | `/reports`、`/orders/{publicNo}/report`、`/orders/{publicNo}/report/versions/{n}` | 默认最新已发布，支持精确检索和查看历史。PDF 请求锁定同一版本。报告实物编号直达客户库存 | 公开分享沿用原开关，发布快照和私有证据隔离保留 |
-| 包裹 | `/parcels`、`/parcels?tab=attention`、`/parcels/{id}`、`/shipments/{id}` | 登记运单、绑定本人订单、入仓与承运商状态分列、认领指定运单、出库追踪。待核验申请可分页查看，支持补充回复和结果通知。归属核实后可从原工单打开包裹 | 通过已关联订单的逐件运单读取供应商和预计件数，与仓库记录数量分列。独立包裹的供应商和件数申报、原始外箱照发布规则 OPEN |
+| 包裹 | `/parcels`、`/parcels?tab=attention`、`/parcels/{id}`、`/shipments/{id}` | 登记运单、绑定本人订单、入仓与承运商状态分列、认领指定运单、出库追踪。待核验申请可分页查看，支持补充回复和结果通知。归属核实后可从原工单打开包裹，查看仓库登记时间、件数和外箱状况 | 通过已关联订单的逐件运单读取供应商和预计件数，与仓库记录数量分列。独立包裹的供应商和件数申报、原始外箱照发布规则 OPEN |
 | 实物 | `/items`，实物使用 `?item={code}` 打开抽屉，兼容 `#item-{code}` | 实物编号、所属委托、检查与保管状态。按实物提交不同去向，支持退商家、集运、续存和确认样。待封存状态独立展示 | 每页 20 件，统计与筛选来自全部本人库存。选择跨页保留，提交后回读真实逐件指令 |
 | 账单 | `/account/billing`，兼容 `/billing`，用 `?charge={id}` 定位具体收费 | 分开待确认报价、收费和退款。按入账或报价接受时间展示，区分测试付款。订单、待办或通知可直接定位本人历史收费。退货、发运和续存收费显示其关联订单 | Stripe 沙盒及正式主体收据验收 OPEN |
 | 通知 | `/account/notifications`，兼容 `/notifications` | 所属对象深链，已读写回，未读计数、游标分页。付款、入库、报告和封存使用现有事件去重键 | 邮件与实际承运商事件联调 OPEN |
@@ -210,3 +210,11 @@ flowchart TD
 续做基线 `ba7399a`。客户补充工单回复后进入待内部处理，旧后台裁决入口、裁决 API 和客服外箱凭证读取只接受 `open`。三处现使用同一个未裁决条件。客户在包裹「Needs Attention」用指定运单提交证据，查看本人审核记录、补充回复、通过站内通知打开审核结果。已批准且仍归属本组织时，按原认领申请人和凭证关联实收包裹。客服核验备注仅在员工工单显示。原历史库已有一笔批准和一笔待审，使用只读 SQL 核对批准工单的认领证据与预报关系。包裹归属、入库事实和已存历史数据仍由原记录决定。
 
 `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-intake-claim npm run test:integration` 通过 62/62。`npm run check`、`npm run build`、`python3 docs/contracts/check.py`（47 项契约操作）和空库关系检查均退出 0。`QCW_BROWSER_INTAKE_CLAIM_ONLY=1 node tests/workspace.browser.mjs` 在 `qcw_test-workspace-intake-claim-browser` 及独立 Worker 上退出 0，六档 30 张原图整页横向溢出为 0。原图和日志位于 `qcwarehouse-intake-claim-followup`。Chrome 初次执行有两次测试定位失败，最终版本从新客户和新包裹完整重跑。隔离站内通知实测通过，实际邮件及仓库实体验收保留 OPEN。
+
+## 包裹实收与全页面续验
+
+续做基线 `6a3202e`。入仓详情从同组织仓库记录展示实收时间、登记件数和已记录的外箱状态。签名承运商签收事件只更新物流状态。隔离测试随后执行实际收货接口，对照 PostgreSQL 时间和数量，并验证原始外箱照、内部备注和他人包裹的读取权限。
+
+`TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-parcel-receipt npm run test:integration` 通过 62/62。类型、构建、47 个契约操作和空库关系校验均退出 0。`QCW_BROWSER_INTAKE_CLAIM_ONLY=1 node tests/workspace.browser.mjs` 使用独立 Worker 和 `qcw_test-workspace-parcel-receipt-browser` 退出 0，六档截图和日志位于 `qcwarehouse-parcel-receipt-followup`。本机低磁盘空间导致首次 Chrome 挂起，关闭此前临时预览并清理可重建的构建缓存后完成复验。历史数据库、测试库数据及截图原图均保留。
+
+全页矩阵在 `6a3202e` 的隔离预览执行，使用同一 PostgreSQL 副本的真实客户、审核员和质检员会话。初次运行发现注册 Worker 已投递一条注册通知，补充业务通知标题和空态断言后，草稿恢复、报价失败恢复、支付重放及跨页库存选择均通过。第二次运行在历史报告页面加载处超时，保留 192 张截图。`QCW_BROWSER_RESUME_MATRIX=1 node tests/workspace.browser.mjs` 补齐历史报告六张截图、PDF 版本和角色隔离，退出 0。合计六档、33 个页面或状态、198 张原图，横向溢出为 0。全页原图及原始日志位于 `qcwarehouse-final-head-regression`，本次变更的收货页面原图见同段的收货专项证据。

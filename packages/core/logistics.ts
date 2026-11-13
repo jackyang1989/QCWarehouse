@@ -82,7 +82,10 @@ async function storeSnapshot(db:DB,id:string,locale:string,source:string,input:u
 export async function tracking(db:DB,actor:Actor,id:string,kind:"advice"|"shipment",locale:string) {
   const org=organization(actor);
   const filter=kind==="advice"?"t.advice_id":"t.shipment_id";
-  const t=await one(db,`select t.*,coalesce(p.state,s.state) warehouse_state,c.labels from tracking_records t left join packages p on p.id=t.package_id
+  const t=await one(db,`select t.*,coalesce(p.state,s.state) warehouse_state,c.labels,
+      p.received_at warehouse_received_at,p.received_quantity logged_item_count,
+      substring(p.condition_note from '^\\[outer:(intact|crushed|torn|wet)\\]') outer_condition
+    from tracking_records t left join packages p on p.id=t.package_id and p.org_id=t.org_id
     left join shipments s on s.id=t.shipment_id left join carriers c on c.code=t.carrier_code where ${filter}=$1 and t.org_id=$2 and t.closed_at is null order by t.generation desc limit 1`,[id,org]);
   const lang=locale==="zh-CN"?"zh-CN":"en";
   const snapshot=(await db.query(`select fetched_at,latest_event_at,events_json from tracking_snapshots where tracker_id=$1 and locale=$2
@@ -121,6 +124,8 @@ export async function tracking(db:DB,actor:Actor,id:string,kind:"advice"|"shipme
   const canVerify=kind==="advice" && ["needs_carrier","needs_verification"].includes(t.sync_state);
   return {tracking_id:t.id,direction:t.direction,carrier:t.labels?.[lang]??t.labels?.en??t.carrier_code??null,tracking_no:t.tracking_norm,
     warehouse_state:t.warehouse_state??null,transport_state:t.transport_state,sync_state:t.sync_state,locale:lang,
+    ...(kind==="advice"&&t.warehouse_received_at?{warehouse_receipt:{received_at:t.warehouse_received_at,
+      logged_item_count:t.logged_item_count,outer_condition:t.outer_condition}}:{}),
     translation_status:translationStatus,events,allowed_actions:canVerify?["verify_tracking"]:[],
     ...(t.last_success_at?{last_success_at:t.last_success_at}:{}),...(t.latest_event_at?{latest_event_at:t.latest_event_at}:{}),
     ...(snapshot?{localized_snapshot_at:snapshot.fetched_at}:{}),...(t.next_query_at?{next_allowed_at:t.next_query_at}:{})};

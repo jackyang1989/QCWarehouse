@@ -1138,11 +1138,22 @@ test("tracking verification and signed Chinese carrier delivery stay separate fr
   const english=await c.fetch(path+"/tracking?locale=en");
   assert.equal(english.transport_state,"delivered");
   assert.equal(english.warehouse_state,null);
+  assert.equal(english.warehouse_receipt,undefined);
   assert.deepEqual(english.events,[]);
   const staff=await staffLogin("receiving");
   const chinese=(await staff.fetch("/staff/tracking")).rows.find((row:{id:string})=>row.id===t);
   assert.equal(chinese.events[0].text,"快件已签收");
   assert.equal((await c.fetch("/me/items")).items.length,0);
+  const photo=await staff.photo("intake_outer");
+  const conditionNote="Private warehouse handling note";
+  const received=await staff.fetch("/staff/intake/check-in",{tracking_no:tracking,carrier_code:"sf",advice_id:advice.id,
+    outer_media_ids:[photo],outer_condition:"crushed",condition_note:conditionNote},"POST",201);
+  const receipt=(await c.fetch(path+"/tracking")).warehouse_receipt;
+  const {rows:[stored]}=await pool.query("select received_at,received_quantity from packages where id=$1",[received.id]);
+  assert.deepEqual(receipt,{received_at:stored.received_at.toISOString(),logged_item_count:stored.received_quantity,outer_condition:"crushed"});
+  assert(!JSON.stringify(await c.fetch(path+"/tracking")).includes(conditionNote));
+  await another.fetch(path+"/tracking",undefined,"GET",404);
+  await c.fetch("/media/"+photo,undefined,"GET",404);
 });
 
 test("staff quote is versioned, private and can activate 101 positions with explicit zero-charge authorization",async()=>{
