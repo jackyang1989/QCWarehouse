@@ -226,17 +226,14 @@ export async function listCustomerOrders(db:DB,actor:Actor,query:string,state:st
   return {rows:rows.slice(0,pageSize),has_more:rows.length>pageSize};
 }
 
-export async function customerDesk(db:DB,actor:Actor,includeItems=true,focusedCharge:string|null=null,includeActivity=true) {
-  const org=organization(actor);
-  const orders=(await db.query(customerOrderSelect+" where o.org_id=$1 order by updated_at desc,o.id desc limit 200",[org])).rows;
-  const advices=(await db.query(`select a.id,a.address_snapshot,t.tracking_norm,t.carrier_code,t.transport_state,t.sync_state,p.state warehouse_state,p.received_quantity,
-    count(*) filter (where p.id is null) over()::int awaiting_check_in_count,
-    count(*) filter (where p.id is not null) over()::int checked_in_count,
+const customerAdviceFields=`a.id,t.tracking_norm,t.carrier_code,t.transport_state,t.sync_state,p.state warehouse_state,p.received_quantity,
     array(select order_id from advice_orders where advice_id=a.id) order_ids,
     array(select o.public_no from advice_orders ao join orders o on o.id=ao.order_id where ao.advice_id=a.id order by o.public_no) order_numbers,
-    planned.item_count declared_item_count,planned.suppliers declared_suppliers
+    planned.item_count declared_item_count,planned.suppliers declared_suppliers`;
+const customerAdviceSource=`
     from package_advices a
-    join tracking_records t on t.advice_id=a.id and t.closed_at is null left join packages p on p.advice_id=a.id
+    join tracking_records t on t.advice_id=a.id and t.org_id=a.org_id and t.closed_at is null
+    left join packages p on p.advice_id=a.id and p.org_id=a.org_id
     left join lateral(select count(*)::int item_count,
       array_agg(distinct nullif(e.declared_fields->>'supplier_alias','')) filter (where nullif(e.declared_fields->>'supplier_alias','') is not null) suppliers
       from advice_orders ao join order_lines l on l.order_id=ao.order_id and l.org_id=ao.org_id
@@ -246,10 +243,29 @@ export async function customerDesk(db:DB,actor:Actor,includeItems=true,focusedCh
         and not exists(select 1 from advice_orders other join tracking_records tr on tr.advice_id=other.advice_id
           and tr.closed_at is null and tr.tracking_norm=t.tracking_norm
           where other.order_id=ao.order_id and other.org_id=ao.org_id and other.advice_id<>a.id)
-    ) planned on true
-    where a.org_id=$1 order by a.created_at desc limit 200`,[org])).rows;
-  const shipments=(await db.query(`select s.id,s.batch_id,s.state,s.tracking_norm,s.carrier_code,s.shipped_at,b.action from shipments s join dispatch_batches b on b.id=s.batch_id
-    where b.org_id=$1 and s.shipped_at is not null order by s.shipped_at desc limit 200`,[org])).rows;
+    ) planned on true where a.org_id=$1`;
+const customerShipmentSelect=`select s.id,s.batch_id,s.state,s.tracking_norm,s.carrier_code,s.shipped_at,b.action
+    from shipments s join dispatch_batches b on b.id=s.batch_id where b.org_id=$1 and s.shipped_at is not null`;
+const parcelFilters={incoming:"p.id is null",received:"p.id is not null",
+  attention:"(t.sync_state in ('needs_carrier','needs_verification') or p.state='quarantined')"} as const;
+export const customerParcelTab=z.enum(["incoming","received","attention","outgoing"]);
+
+export async function listCustomerParcels(db:DB,actor:Actor,tab:z.infer<typeof customerParcelTab>,page:number) {
+  const size=20;
+  const query=tab==="outgoing"?customerShipmentSelect+" order by s.shipped_at desc,s.id desc":
+    `select ${customerAdviceFields} ${customerAdviceSource} and ${parcelFilters[tab]} order by a.created_at desc nulls last,a.id desc`;
+  const {rows}=await db.query(query+" limit $2 offset $3",[organization(actor),size+1,(page-1)*size]);
+  return {rows:rows.slice(0,size),page,has_more:rows.length>size};
+}
+
+export async function customerDesk(db:DB,actor:Actor,includeItems=true,focusedCharge:string|null=null,includeActivity=true) {
+  const org=organization(actor);
+  const orders=(await db.query(customerOrderSelect+" where o.org_id=$1 order by updated_at desc,o.id desc limit 200",[org])).rows;
+  const advices=(await db.query(`select ${customerAdviceFields},a.address_snapshot,
+    count(*) filter (where p.id is null) over()::int awaiting_check_in_count,
+    count(*) filter (where p.id is not null) over()::int checked_in_count
+    ${customerAdviceSource} order by a.created_at desc nulls last,a.id desc limit 200`,[org])).rows;
+  const shipments=(await db.query(customerShipmentSelect+" order by s.shipped_at desc,s.id desc limit 200",[org])).rows;
   const quotes=(await db.query(`select pending.*,count(*) over()::int quote_count from (
     select q.id,q.revision,q.amount_cents,q.expires_at,'dispatch' purpose,q.batch_id,b.action,
     q.snapshot, (select jsonb_object_agg(w.id::text,w.code) from dispatch_batch_items bi join warehouse_items w

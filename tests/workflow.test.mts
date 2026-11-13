@@ -1678,6 +1678,36 @@ test("an unclaimed warehouse parcel has one tracker and cannot be exposed by pre
   assert.equal((await c.fetch("/me/desk")).advices.length,0);
 });
 
+test("parcel tabs filter the complete owned history before pagination",async()=>{
+  const {c,registration}=await signCustomer(),other=(await signCustomer()).c;
+  const staff=await staffLogin("receiving");
+  const address_id=registration.warehouse_address.id;
+  const tracking_no="ZT"+randomUUID().slice(0,8).toUpperCase();
+  const oldest=await c.fetch("/me/parcels",{address_id,tracking_no,carrier_code:"zto"},"POST",201);
+  await staff.fetch("/staff/intake/check-in",{advice_id:oldest.id,tracking_no,carrier_code:"zto",
+    outer_media_ids:[await staff.photo("intake_outer")]},"POST",201);
+  const {actor}=await c.fetch("/me");
+  const prefix="IN"+randomUUID().slice(0,8).toUpperCase();
+  await pool.query(`with entries as (
+    insert into package_advices(user_id,org_id,address_id,address_snapshot)
+      select $1,$2,id,to_jsonb(a) from warehouse_addresses a cross join generate_series(1,205) where a.id=$3
+    returning id,org_id
+  ) insert into tracking_records(org_id,direction,advice_id,tracking_norm,generation,transport_state,sync_state)
+    select org_id,'inbound',id,$4||row_number() over(order by id),1,'delivered','needs_carrier' from entries`,[actor.id,actor.org,address_id,prefix]);
+  const page1=await c.fetch("/me/parcels?tab=incoming"),page2=await c.fetch("/me/parcels?tab=incoming&page=2");
+  assert.equal(page1.rows.length,20);
+  assert.equal(page1.has_more,true);
+  assert.equal(page2.rows.length,20);
+  assert.equal(new Set([...page1.rows,...page2.rows].map(row=>row.id)).size,40);
+  assert(page1.rows.every(row=>!("address_snapshot" in row)));
+  assert(page1.rows.every(row=>row.warehouse_state===null&&row.transport_state==="delivered"));
+  assert.deepEqual((await c.fetch("/me/parcels?tab=received")).rows.map(row=>row.id),[oldest.id]);
+  assert.equal((await c.fetch("/me/parcels?tab=attention&page=11")).rows.length,5);
+  assert.deepEqual((await other.fetch("/me/parcels?tab=received")).rows,[]);
+  await staff.fetch("/me/parcels",undefined,"GET",403);
+  await c.fetch("/me/parcels?tab=invalid",undefined,"GET",422);
+});
+
 test("a verified callback for a closed tracking instance cannot change its replacement or inventory",async()=>{
   const {c,registration}=await signCustomer();
   const tracking="YT"+randomUUID().slice(0,8).toUpperCase();

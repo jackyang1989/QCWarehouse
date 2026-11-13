@@ -16,7 +16,7 @@ import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, cr
 import { acceptQuote, amendDispatchBatch, calculateShippingPreview, cancelDisposition, checkStorageReminders, closeCompletedOrder, confirmBatch, handover, instruct, packShipment, planBatch, publishShippingRate, quoteBatch, readDispatchBatch, receiveReturn, releaseReferenceSample, storageQuote } from "./dispatch";
 import { chargeReceipt, checkout, demoPay, orderPayment, orderRefundPayments, refundApprove, refundRequest, resolvePaymentDispute, stripeEvent, verifyStripe } from "./payments";
 import { approveTrackingTranslation, correctCustomerParcelTracking, correctStaffTracking, providerCallback, refreshTracking, submitTrackingTranslation, tracking, trackingAdmin, trackingMonitor, updateTrackingAlert, verificationState, verifyTracking } from "./logistics";
-import { adminDesk, bills, customerActions, customerDesk, customerInventory, customerNotifications, dispatchQueueStates, items, listCustomerOrders, markNotificationRead, orderLedger, orderLedgerCsv, readOrderByPublicNumber, readStaffObjectSummary, reconcileFinance, searchStaffOrders, staffOrderDetail, staffOrderFilters, warehouseDesk, warehouseDispatchBatch, warehouseDispatchQueue, warehouseItem, warehousePackage } from "./reads";
+import { adminDesk, bills, customerActions, customerDesk, customerInventory, customerNotifications, customerParcelTab, dispatchQueueStates, items, listCustomerOrders, listCustomerParcels, markNotificationRead, orderLedger, orderLedgerCsv, readOrderByPublicNumber, readStaffObjectSummary, reconcileFinance, searchStaffOrders, staffOrderDetail, staffOrderFilters, warehouseDesk, warehouseDispatchBatch, warehouseDispatchQueue, warehouseItem, warehousePackage } from "./reads";
 import { staffAccess } from "./staff-access";
 import { customerDestination, withDestination } from "./portal-routes";
 import { customerFulfillmentQuote, customerShipment, orderFulfillmentRecord } from "./fulfillment-reads";
@@ -154,6 +154,11 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const filter=z.enum(["all","inspection","handling","reference"]).parse(url.searchParams.get("filter")??"all");
     const code=z.string().regex(/^S-[a-zA-Z0-9-]{1,64}$/).optional().parse(url.searchParams.get("code")??undefined);
     return json(await transaction(db=>customerInventory(db,actorRequired(actor),page,filter,code)));
+  }
+  if(method==="GET"&&path==="/me/parcels") {
+    const tab=customerParcelTab.parse(url.searchParams.get("tab")??"incoming");
+    const page=z.coerce.number().int().min(1).max(10000).parse(url.searchParams.get("page")??"1");
+    return json(await transaction(db=>listCustomerParcels(db,actorRequired(actor),tab,page)));
   }
   if(method==="GET"&&path==="/me/reports") {
     const reference=z.string().trim().toUpperCase().pipe(z.string().regex(/^(QW|R)-[A-F0-9]{1,64}$/)).optional()

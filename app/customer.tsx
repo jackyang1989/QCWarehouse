@@ -2929,9 +2929,18 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   const parcelTabs=[["incoming","Incoming"],["received","Received"],["attention","Needs Attention"],["outgoing","Outgoing"]];
   const parcelTab=parcelTabs.find(([id])=>id===search.get("tab"))?.[0]??"incoming";
   const claimPage=Number(search.get("claim_page")??1);
+  const parcelPage=Number(search.get("page")??1);
+  const parcelList=useLoad(path==="/parcels"?"/me/parcels?"+new URLSearchParams({tab:parcelTab,page:String(parcelPage)}):null);
+  function parcelPageHref(page:number) {
+    const params=new URLSearchParams(search);
+    if(page>1)params.set("page",String(page));
+    else params.delete("page");
+    return "/parcels"+(params.size?"?"+params:"");
+  }
   function selectParcelTab(tab:string) {
     const params=new URLSearchParams(search);
     params.delete("claim_page");
+    params.delete("page");
     if(tab==="incoming")params.delete("tab");
     else params.set("tab",tab);
     router.push("/parcels"+(params.size?"?"+params:""),{scroll:false});
@@ -3011,9 +3020,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   function refreshInventory() {inventory.reload();reload();}
   const visibleItems:Row[]=inventory.data?.rows??[];
   const itemCounts=inventory.data?.summary;
-  const parcelRows=data.advices.filter((parcel:Row)=>parcelTab==="attention"
-    ?["needs_carrier","needs_verification"].includes(parcel.sync_state)||parcel.warehouse_state==="quarantined"
-    :parcelTab==="received"?Boolean(parcel.warehouse_state):!parcel.warehouse_state);
+  const parcelRows:Row[]=parcelList.data?.rows??[];
   return <>
     {data.email_delivery?.banner_message&&<div className="notice" role="alert"><strong>{data.email_delivery.banner_message}</strong>{data.email_delivery.masked_email?` (${data.email_delivery.masked_email})`:""}. Important updates remain available in your account notifications and action centre. <Link href="/account/security">Update email in account security →</Link></div>}
     {isHome&&<>
@@ -3107,14 +3114,16 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     <details className="card" open={Boolean(parcelOrder)||undefined}>
       <summary>Register incoming parcel</summary>
       <InboundParcelForm address={addr} carriers={carriers.data?.carriers??[]} orders={linkableOrders} preferredOrder={parcelOrder}
-        onSave={()=>{if(parcelTab!=="incoming")selectParcelTab("incoming");reload();}}/>
+        onSave={()=>{if(parcelTab!=="incoming"||parcelPage>1)selectParcelTab("incoming");parcelList.reload();reload();}}/>
     </details>
     <div className="actions workspace-filters" aria-label="Parcel filters">
       {parcelTabs.map(([key,title])=>
         <button type="button" key={key} aria-pressed={parcelTab===key} className={parcelTab===key?"button primary":"button"}
           onClick={()=>selectParcelTab(key)}>{title}</button>)}
     </div>
-    {parcelTab!=="outgoing"&&<Panel title={parcelTab==="received"?"Warehouse receipts":parcelTab==="attention"?"Parcels needing attention":"Incoming parcels"}>
+    {parcelList.error&&<><ErrorBlock error={parcelList.error}/><button className="button sm" onClick={parcelList.reload}>Retry parcels</button></>}
+    {!parcelList.data&&!parcelList.error&&<p role="status">Loading parcels…</p>}
+    {parcelList.data&&parcelTab!=="outgoing"&&<Panel title={parcelTab==="received"?"Warehouse receipts":parcelTab==="attention"?"Parcels needing attention":"Incoming parcels"}>
       <Table headers={["Inbound tracking","Linked orders","Warehouse status","Carrier status"]} rows={parcelRows.map((a:Row)=>{
         const linkedNos:string[]=a.order_numbers??[];
         const candidates=linkableOrders.filter(o=>!linkedNos.includes(o.public_no));
@@ -3130,6 +3139,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
               <summary style={{cursor:"pointer"}}>+ Link to order</summary>
               <Form label="Link" run={async f=>{
                 await request(`/me/parcels/${a.id}/link-order`,"POST",{order_id:text(f,"order_id")});
+                parcelList.reload();
                 reload();
               }}>
                 <Select name="order_id" label="Order" choices={candidates.map(o=>({id:o.id,label:`${o.public_no} (${label(o.state)})`}))}/>
@@ -3143,9 +3153,8 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         ];
       })} empty="No parcels match this view."/>
     </Panel>}
-    {parcelTab==="attention"&&<ParcelOwnershipReviews carriers={carriers.data?.carriers??[]} page={claimPage}/>}
-    {parcelTab==="outgoing"&&<Panel title="Outbound parcels">
-      <Table headers={["Tracking number","Batch","Destination type","Warehouse handover",""]} rows={data.shipments.map((s:Row)=>[
+    {parcelList.data&&parcelTab==="outgoing"&&<Panel title="Outbound parcels">
+      <Table headers={["Tracking number","Batch","Destination type","Warehouse handover",""]} rows={parcelRows.map(s=>[
         <div className="actions">
           <CodeButton code={s.tracking_norm} title="Preview outbound tracking" onClick={()=>setTrackTarget({kind:"shipments",id:s.id,code:s.tracking_norm})}/>
           <Link className="small muted" href={"/shipments/"+s.id}>Page →</Link>
@@ -3155,7 +3164,14 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         stamp(s.shipped_at),
         <CodeButton code="Track" onClick={()=>setTrackTarget({kind:"shipments",id:s.id,code:s.tracking_norm})}/>,
       ])} empty="No outbound shipments yet."/>
-    </Panel>}</>}
+    </Panel>}
+    {parcelList.data&&(parcelPage>1||parcelList.data.has_more)&&<nav className="actions" aria-label="Parcel pages">
+      {parcelPage>1&&<Link className="button" href={parcelPageHref(parcelPage-1)}>Previous page</Link>}
+      <span>Page {parcelPage}</span>
+      {parcelList.data.has_more&&<Link className="button" href={parcelPageHref(parcelPage+1)}>Next page</Link>}
+    </nav>}
+    {parcelTab==="attention"&&<ParcelOwnershipReviews carriers={carriers.data?.carriers??[]} page={claimPage}/>}
+    </>}
     {isItems&&<><div className="page-head"><p className="eyebrow">Inventory &amp; handling</p><h1>Warehouse items</h1><p className="muted">Click any item code, tracking number or dispatch batch to inspect details, or submit batch handling instructions below.</p></div>
     <div className="metric-strip" aria-label="Items summary">
       {[

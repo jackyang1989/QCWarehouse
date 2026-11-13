@@ -244,3 +244,9 @@ flowchart TD
 `TEST_DATABASE_URL=postgresql://127.0.0.1/qcw_test-workspace-launch-fixtures npm run test:integration` 退出 0，62/62。`npm run check`、`npm run build`、`python3 docs/contracts/check.py` 与空库关系校验退出 0。集成初次复验遇到磁盘不足，清理本轮可重建的缓存后全量复跑。隔离 Chrome 关闭演示时读取实际目录和政策 API，验证 `demo-v1` 返回 404、未发布的隐私政策显示实际错误，保留另行发布的测试条款。六档原图位于 `qcwarehouse-latest-regression/production-mode`。
 
 `0be435a` 的全量 Playwright/Chrome 从新会话一次执行退出 0。证据包 `qcwarehouse-latest-regression` 含 198 张工作台截图、六档视口数据、完整测试日志及索引。当前预览在 3000 使用 `qcw_test-workspace-historical-review`。重新核对源库与副本的订单、订单行、报价、收费和报告版本，五组计数及 SHA-256 一致。75 笔有客户会话的历史订单、27 笔历史草稿、14 个 PDF 和两种历史模板的移动 Chrome 实测通过，28 次跨客户报告和 PDF 读取全部拒绝。剩余两笔已关闭账户的取消订单按原只读 SQL 证据保留。
+
+## 包裹完整历史
+
+续做基线 `ef31561`。包裹视图原来先从工作台取最近 200 条，再在客户端筛选。`GET /me/parcels` 现在按所属组织、选定标签和真实仓库状态筛选后分页。205 笔较新预报出现后，较早的仓库实收仍可在 Received 找到。已由承运商签收的预报在仓库尚未实收时仍归 Incoming。列表响应不含仓址快照。
+
+隔离数据库集成 63/63，类型、构建、契约及空库关系检查退出 0。`QCW_BROWSER_PARCELS_ONLY=1 node tests/workspace.browser.mjs` 退出 0，验证翻页、切换标签、返回和其他客户隔离，六档截图及日志见 `qcwarehouse-parcel-pagination`。独立预报的供应商与预计件数仍缺合法业务存储，现有地址快照、审计记录与仓库实收字段继续按原用途使用。

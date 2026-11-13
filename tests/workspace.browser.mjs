@@ -246,6 +246,29 @@ async function verifyEmptyWorkspace({page,call}) {
   console.log("PASS fresh customer empty states and registration activity match PostgreSQL");
 }
 
+async function verifyParcelPagination({page,call,errors},other) {
+  const {warehouse_address}=await call("/me/receiving-address");
+  const prefix="ZT"+randomUUID().slice(0,8).toUpperCase();
+  for(let i=0;i<21;i++) await call("/me/parcels",{body:{address_id:warehouse_address.id,
+    tracking_no:prefix+String(i).padStart(2,"0"),carrier_code:"zto"},status:201});
+  await page.goto("/parcels");
+  const pages=page.getByRole("navigation",{name:"Parcel pages"});
+  await pages.getByRole("link",{name:"Next page"}).click();
+  await page.waitForURL(url=>url.searchParams.get("page")==="2");
+  await page.getByRole("button",{name:prefix+"00",exact:true}).waitFor();
+  assert.equal(await page.getByRole("button",{name:prefix+"20",exact:true}).count(),0);
+  await captureWizard(page,"incoming-parcels-page-two","Parcels");
+  await page.getByRole("button",{name:"Received",exact:true}).click();
+  await page.getByText("No parcels match this view.",{exact:true}).waitFor();
+  assert.equal(new URL(page.url()).searchParams.get("page"),null);
+  await page.goBack();
+  await page.getByRole("button",{name:prefix+"00",exact:true}).waitFor();
+  assert.deepEqual((await other.call("/me/parcels")).rows,[]);
+  assert.deepEqual(errors,[]);
+  assert(entries.every(entry=>entry.overflow===0));
+  console.log("PASS parcel pagination, tab reset, browser back and tenant isolation");
+}
+
 async function verifyManualQuoteRenewal({page,call,errors},other) {
   const staff=await session("admin@qcw.test",true);
   const {offers}=await call("/catalog");
@@ -770,6 +793,7 @@ try {
   const customer = await session(resumeMatrix?process.env.QCW_BROWSER_FIXTURE_EMAIL:undefined,false,resumeMatrix);
   const other = await session(resumeMatrix?process.env.QCW_BROWSER_INVENTORY_EMAIL:undefined,false,resumeMatrix);
   if(resumeMatrix) await verifyWorkspaceViews(customer,other);
+  else if(process.env.QCW_BROWSER_PARCELS_ONLY==="1") await verifyParcelPagination(customer,other);
   else if(process.env.QCW_BROWSER_INTAKE_CLAIM_ONLY==="1") await verifyParcelOwnership(customer,other);
   else if(process.env.QCW_BROWSER_INCIDENT_ONLY==="1") await verifyIncidentDecision(customer,other);
   else if(process.env.QCW_BROWSER_SELLER_RETURN_ONLY==="1") await verifySellerReturn(customer,other);
