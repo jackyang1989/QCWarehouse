@@ -19,7 +19,7 @@ export async function request(path:string,method="GET",body?:unknown,idempotency
     ...(!form?{"content-type":"application/json"}:{}),"Idempotency-Key":idempotencyKey??crypto.randomUUID(),
     ...(csrf?{"X-CSRF-Token":csrf}:{}),
   },...(body!==undefined?{body:form?body:JSON.stringify(body)}:{})}).catch(error=>{
-    if(error instanceof TypeError)throw new RequestError("The connection was interrupted. Check your connection and try again.","NETWORK_ERROR");
+    if(error instanceof TypeError)throw new RequestError("Connection interrupted. Check your connection and try again.","NETWORK_ERROR");
     throw error;
   });
   const data=await r.json().catch(()=>null);
