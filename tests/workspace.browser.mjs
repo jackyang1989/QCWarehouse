@@ -1434,6 +1434,7 @@ async function verifySupportHistory({page,call,errors},other) {
   const invalidResponse=await invalid;assert.equal(invalidResponse.status(),422);
   await submissionError.waitFor();
   await submissionError.getByText(/Use 150 characters or fewer for the subject\./).waitFor();
+  assert.equal(await page.getByRole("status").filter({hasText:/Case .* opened\./}).count(),0,"A failed new submission must not retain the previous case's success message.");
   await captureWizard(page,"support-validation-error","My support cases");
   await page.getByLabel("Subject",{exact:true}).fill("Corrected support subject "+randomUUID());
   const corrected=page.waitForResponse(response=>response.request().method()==="POST"&&new URL(response.url()).pathname==="/api/v1/me/cases");

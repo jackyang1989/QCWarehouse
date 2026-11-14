@@ -3049,6 +3049,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   }
   const [addressCopied,setAddressCopied]=useState(false);
   const [createdCase,setCreatedCase]=useState<Row>();
+  const [caseFormVersion,setCaseFormVersion]=useState(0);
   const requestedCharge=isBills?(search.get("charge")??legacyCharge)?.toLowerCase():undefined;
   const requestedQuote=isBills?search.get("quote")?.toLowerCase():undefined;
   const chargePage=Number(search.get("charge_page")??1);
@@ -3479,7 +3480,8 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     </Panel></div></>}
     {isHelp&&<><div className="page-head"><p className="eyebrow">MY WORKSPACE · ACCOUNT</p><h1>Support</h1><p className="muted">Open a case about an order, parcel, report or payment, and follow the warehouse team&apos;s replies.</p></div>
       <Panel title="Open a support case">
-        <Form key={createdCase?.id??search.get("parcel")} label="Submit case" idempotent run={async (f,key)=>{
+        <Form key={caseFormVersion+":"+(search.get("parcel")??"")} label="Submit case" idempotent run={async (f,key)=>{
+          setCreatedCase(undefined);
           const orderId=text(f,"order_id"),category=text(f,"category"),parcelId=text(f,"parcel_id");
           if(category&&!orderId) throw new Error("Select the related order for this issue type.");
           const photo=f.get("photo");
@@ -3489,6 +3491,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
               ...(category?{category}:{}),...(parcelId?{parcel_id:parcelId}:{}),
             },key);
             setCreatedCase(result);
+            setCaseFormVersion(version=>version+1);
           } finally {caseList.reload();}
         }}>
           <Select name="category" label="Issue type" required={false} choices={[
