@@ -84,7 +84,7 @@ async function screenshotPage(page,path,width) {
   } finally {await chrome.detach();}
 }
 
-async function capture(page, name, width, heading) {
+async function capture(page, name, width, heading, viewportOnly=false) {
   await ready(page,heading);
   await page.getByText(/^Loading(?:\s.+)?…$/).filter({visible:true}).first().waitFor({state:"hidden"});
   await page.evaluate(async()=>{
@@ -112,15 +112,17 @@ async function capture(page, name, width, heading) {
       }));
     assert.deepEqual(clipped,[],name+" at "+width+" px clips a status or code inside a mobile table card.");
   }
-  await screenshotPage(page,join(out,name+"-"+width+".png"),width);
+  const path=join(out,name+"-"+width+".png");
+  if(viewportOnly) await page.screenshot({path,fullPage:false,animations:"disabled"});
+  else await screenshotPage(page,path,width);
   entries.push({name,width,overflow});
 }
 
-async function captureWizard(page, name, heading) {
+async function captureWizard(page, name, heading, viewportOnly=false) {
   for(const width of widths) {
     if(captured(name,width)) continue;
     await page.setViewportSize({width,height:1000});
-    await capture(page,name,width,heading);
+    await capture(page,name,width,heading,viewportOnly);
   }
   await page.setViewportSize({width:1440,height:1000});
 }
@@ -503,6 +505,8 @@ async function verifyWorkspaceStates() {
   const published=(await call("/me/reports?latest=1")).rows[0];
   assert(published);
   const order=await call("/orders/"+published.order_id);
+  const {rows:inventory}=await call("/me/inventory?filter=all");
+  assert(inventory[0]);
   const orderPath="/orders/"+order.id;
   const view="/orders/"+order.public_no;
   const cases=[
@@ -523,6 +527,7 @@ async function verifyWorkspaceStates() {
     ["order-items",view+"/dispositions",orderPath,"Retry order"],
     ["order-storage",view+"/storage",orderPath,"Retry order"],
     ["report",view+"/report/versions/"+published.version,orderPath+"/report/versions/"+published.version,"Retry report"],
+    ["item-details","/items?item="+inventory[0].code,"/me/inventory?code="+inventory[0].code,"Retry item details"],
   ];
   assert(desk.advices[0]&&desk.shipments[0]&&desk.tickets[0]&&order.quotes[0]&&order.shipments[0]&&order.cases[0]);
   cases.push(
@@ -554,7 +559,8 @@ async function verifyWorkspaceStates() {
     let release,started;
     const gate=new Promise(resolve=>{release=resolve;});
     const pending=new Promise(resolve=>{started=resolve;});
-    const match=url=>url.pathname==="/api/v1"+read;
+    const readURL=new URL("/api/v1"+read,origin);
+    const match=url=>url.pathname===readURL.pathname&&(!readURL.search||url.search===readURL.search);
     const route=async route=>{
       if(mode==="loading") {started();await gate;}
       if(mode==="error") await route.fulfill({status:503,contentType:"application/json",body:JSON.stringify({error:{code:"SERVER_ERROR",message}})});
@@ -566,7 +572,7 @@ async function verifyWorkspaceStates() {
     await page.getByText(/^Loading(?:\s.+)?…$/).filter({visible:true}).first().waitFor();
     if(name==="new-inspection") assert.equal(await page.locator(".wizard-shell").count(),0);
     await captureState(name,"loading");
-    const loaded=page.waitForResponse(response=>new URL(response.url()).pathname==="/api/v1"+read&&response.status()===200);
+    const loaded=page.waitForResponse(response=>match(new URL(response.url()))&&response.status()===200);
     mode="normal";
     release();
     await loaded;
@@ -576,7 +582,7 @@ async function verifyWorkspaceStates() {
     await page.getByRole("alert").filter({hasText:message}).waitFor();
     if(name==="new-inspection") assert.equal(await page.locator(".wizard-shell").count(),0);
     await captureState(name,"error");
-    const recovered=page.waitForResponse(response=>new URL(response.url()).pathname==="/api/v1"+read&&response.status()===200);
+    const recovered=page.waitForResponse(response=>match(new URL(response.url()))&&response.status()===200);
     mode="normal";
     await page.getByRole("button",{name:retry,exact:true}).click();
     await recovered;
@@ -590,6 +596,18 @@ async function verifyWorkspaceStates() {
     const buttons=await page.locator("button:visible").evaluateAll(buttons=>buttons.filter(button=>
       !button.textContent.trim()&&!button.getAttribute("aria-label")&&!button.getAttribute("aria-labelledby")&&!button.title).length);
     assert.equal(buttons,0,name+" unnamed buttons");
+    if(name==="item-details") {
+      const drawer=page.getByRole("dialog",{name:"Warehouse Item · "+inventory[0].code,exact:true});
+      await drawer.waitFor();
+      await drawer.getByRole("button",{name:"Close",exact:true}).focus();
+      await page.keyboard.press("Shift+Tab");
+      assert(await drawer.evaluate(node=>node.contains(document.activeElement)));
+      await page.keyboard.press("Tab");
+      assert(await drawer.evaluate(node=>node.contains(document.activeElement)));
+      await page.keyboard.press("Escape");
+      await drawer.waitFor({state:"hidden"});
+      assert(await page.locator("#main-content").evaluate(node=>node.contains(document.activeElement)||node===document.activeElement));
+    }
     const menu=page.getByRole("button",{name:"Open workspace menu",exact:true});
     await menu.focus();
     await page.keyboard.press("Enter");
@@ -978,42 +996,92 @@ async function verifySellerReturn({page,call,errors},other) {
     await receiver.call("/staff/items/"+id+"/assign",{body:{revision:1,order_line_id:position.order_line_id,expected_item_id:position.id,evidence_ids:[await evidence("label_photo")]}});
     const current=await call(orderPath);
     await call(orderPath+"/cancel",{body:{revision:current.revision}});
-    return {code,id};
+    return {code,id,orderNo:draft.public_no};
   }
-  const items=[await prepareItem(),await prepareItem()];
-  await page.goto("/items?filter=handling");
-  for(const item of items) await page.getByRole("checkbox",{name:`Select ${item.code} for handling`}).check();
-  await page.getByText("Seller details for a combined return",{exact:true}).click();
-  await page.getByLabel("Recipient",{exact:true}).fill("Fixture return recipient");
-  await page.getByLabel("Destination phone").fill("13800000000");
-  await page.getByLabel("Return address supplied by your seller").fill("Fixture seller return address");
-  await page.getByLabel("Seller’s shop name (optional)").fill("Fixture shop");
-  await page.getByLabel("Seller’s shop ID (optional)").fill("FIXTURE-SHOP-1");
-  await captureWizard(page,"seller-return-details","Warehouse items");
-  await page.getByRole("checkbox",{name:/I have arranged the return/}).check();
-  await page.getByRole("button",{name:"Save handling instruction (2 items)"}).click();
-  await page.getByText(/Instructions recorded for/).waitFor();
-  const instructions=[];
-  for(const item of items) {
-    const {rows:[stored]}=await call("/me/inventory?code="+item.code);
-    assert.equal(stored.active_disposition.return_info.seller_name,"Fixture shop");
-    assert.equal(stored.active_disposition.return_info.seller_id,"FIXTURE-SHOP-1");
-    instructions.push(stored.active_disposition.id);
+  for(const interruption of ["before-confirm","after-confirm"]) {
+    const items=[await prepareItem(),await prepareItem()];
+    const suffix=interruption==="before-confirm"?"":"-response-lost";
+    await page.goto("/items?filter=handling");
+    for(const item of items) await page.getByRole("checkbox",{name:`Select ${item.code} for handling`}).check();
+    await page.getByText("Seller details for a combined return",{exact:true}).click();
+    await page.getByLabel("Recipient",{exact:true}).fill("Fixture return recipient");
+    await page.getByLabel("Destination phone").fill("13800000000");
+    await page.getByLabel("Return address supplied by your seller").fill("Fixture seller return address");
+    await page.getByLabel("Seller’s shop name (optional)").fill("Fixture shop");
+    await page.getByLabel("Seller’s shop ID (optional)").fill("FIXTURE-SHOP-1");
+    await captureWizard(page,"seller-return-details"+suffix,"Warehouse items");
+    await page.getByRole("checkbox",{name:/I have arranged the return/}).check();
+    await page.getByRole("button",{name:"Save handling instruction (2 items)"}).click();
+    await page.getByText(/Instructions recorded for/).waitFor();
+    const instructions=[];
+    for(const item of items) {
+      const {rows:[stored]}=await call("/me/inventory?code="+item.code);
+      assert.equal(stored.active_disposition.return_info.seller_name,"Fixture shop");
+      assert.equal(stored.active_disposition.return_info.seller_id,"FIXTURE-SHOP-1");
+      instructions.push(stored.active_disposition.id);
+    }
+    await other.call("/dispatch-batches",{body:{disposition_ids:instructions},status:409});
+    const shippingItems=interruption==="before-confirm"?items:[items[0]];
+    if(interruption==="before-confirm") await page.getByRole("link",{name:"View items with saved instructions"}).click();
+    else await page.goto("/orders/"+items[0].orderNo+"/dispositions");
+    for(const item of shippingItems) await page.getByRole("row").filter({has:page.getByRole("button",{name:item.code,exact:true})})
+      .getByRole("checkbox",{name:"Select for shipping"}).check();
+    let batchId;
+    await page.route("**/api/v1/dispatch-batches/*/confirm",async route=>{
+      batchId=new URL(route.request().url()).pathname.split("/").at(-2);
+      if(interruption==="after-confirm") {
+        const response=await route.fetch();
+        assert.equal(response.status(),200);
+        await route.abort("connectionreset");
+      } else await route.fulfill({status:503,contentType:"application/json",body:JSON.stringify({error:{code:"SERVER_ERROR",message:"Confirmation interrupted. Retry this batch."}})});
+    },{times:1});
+    let releaseDetails;
+    const pendingDetails=new Promise(resolve=>{releaseDetails=resolve;});
+    await page.route("**/api/v1/dispatch-batches/*",async route=>{
+      await pendingDetails;
+      await route.fulfill({status:503,contentType:"application/json",body:JSON.stringify({error:{code:"SERVER_ERROR",message:"Batch details are temporarily unavailable."}})});
+    },{times:1});
+    await page.getByRole("button",{name:`Confirm selected items for quoting (${shippingItems.length})`}).click();
+    const dialog=page.getByRole("dialog");
+    await dialog.getByRole("status").getByText("Loading dispatch batch details…",{exact:true}).waitFor();
+    assert(batchId);
+    const current=await call("/dispatch-batches/"+batchId);
+    assert.equal(current.state,interruption==="before-confirm"?"draft":"confirmed");
+    await other.call("/dispatch-batches/"+batchId,{status:404});
+    releaseDetails();
+    await dialog.getByRole("alert").getByText("Batch details are temporarily unavailable.",{exact:true}).waitFor();
+    await captureWizard(page,"seller-return-batch-retry"+suffix,/Dispatch Batch/,true);
+    await dialog.getByRole("button",{name:"Retry batch details",exact:true}).click();
+    await dialog.getByRole("heading",{name:"Items in this batch",exact:true}).waitFor();
+    await page.keyboard.press("Tab");
+    assert(await dialog.evaluate(node=>node.contains(document.activeElement)),"Keyboard focus remains inside the asynchronously restored batch drawer");
+    await page.keyboard.press("Shift+Tab");
+    assert(await dialog.evaluate(node=>node.contains(document.activeElement)));
+    if(interruption==="before-confirm") {
+      await dialog.getByRole("button",{name:"Confirm batch for warehouse quoting",exact:true}).click();
+      await dialog.getByText("Confirmed",{exact:true}).waitFor();
+    } else assert.equal(await dialog.getByRole("button",{name:"Confirm batch for warehouse quoting",exact:true}).count(),0);
+    assert.equal((await call("/dispatch-batches/"+batchId)).state,"confirmed");
+    const warehouseQueue=await receiver.call("/staff/dispatch-batches?state=weighing&reference="+batchId);
+    assert.equal(warehouseQueue.rows.length,1);
+    assert.equal(warehouseQueue.rows[0].id,batchId);
+    assert.equal(warehouseQueue.rows[0].remaining,shippingItems.length);
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({state:"hidden"});
+    assert(await page.locator("#main-content").evaluate(node=>node.contains(document.activeElement)||node===document.activeElement));
+    if(interruption==="after-confirm") await page.goto("/items");
+    await page.getByRole("heading",{name:"Dispatch batches"}).waitFor();
+    await page.getByRole("cell",{name:"Awaiting quote",exact:true}).first().waitFor();
+    const matches=(await call("/me/desk?include_items=0")).active_batches.filter(row=>shippingItems.every(item=>row.item_codes.includes(item.code)));
+    assert.equal(matches.length,1);
+    const savedBatch=matches[0];
+    assert.equal(savedBatch.id,batchId);
+    assert.equal(savedBatch.state,"confirmed");
+    await captureWizard(page,"seller-return-batch"+suffix,"Warehouse items");
   }
-  await other.call("/dispatch-batches",{body:{disposition_ids:instructions},status:409});
-  await page.getByRole("link",{name:"View items with saved instructions"}).click();
-  for(const item of items) await page.getByRole("row").filter({has:page.getByRole("button",{name:item.code,exact:true})})
-    .getByRole("checkbox",{name:"Select for shipping"}).check();
-  await page.getByRole("button",{name:"Confirm selected items for quoting (2)"}).click();
-  const batch=page.getByRole("heading",{name:"Dispatch batches"});
-  await batch.waitFor();
-  await page.getByRole("cell",{name:"Awaiting quote",exact:true}).waitFor();
-  const savedBatch=(await call("/me/desk?include_items=0")).active_batches.find(row=>items.every(item=>row.item_codes.includes(item.code)));
-  assert.equal(savedBatch.state,"confirmed");
-  await captureWizard(page,"seller-return-batch","Warehouse items");
   assert.deepEqual(errors,[]);
   assert(entries.every(entry=>entry.overflow===0));
-  console.log("PASS same-seller return details saved through customer form, cross-order batch confirmed, and foreign batch blocked");
+  console.log("PASS seller returns recover the original batch after failed confirmation or lost success, with private details and no duplicate batches");
 }
 
 async function verifyIncidentDecision({page,call,errors},other) {

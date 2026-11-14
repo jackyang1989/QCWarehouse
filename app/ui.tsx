@@ -407,7 +407,11 @@ export function ModalDrawer({
     if(!open)return;
     const previous=document.activeElement;
     closeButton.current?.focus({preventScroll:true});
-    return ()=>{if(previous instanceof HTMLElement&&previous.isConnected) previous.focus({preventScroll:true});};
+    return ()=>{
+      const target=previous instanceof HTMLElement&&previous!==document.body&&previous.isConnected
+        ?previous:document.getElementById("main-content");
+      target?.focus({preventScroll:true});
+    };
   },[open]);
   useEffect(()=>{
     if(!open)return;

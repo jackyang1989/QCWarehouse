@@ -2339,8 +2339,8 @@ function CustomerBatchDrawer({
       <Link className="button sm" href="/items" onClick={onClose}>Open Warehouse Items →</Link>
     </div>}
   >
-    {view.error&&<ErrorBlock error={view.error}/>}
-    {!d&&!view.error&&<Empty>Loading dispatch batch details…</Empty>}
+    {view.error&&<><ErrorBlock error={view.error}/><button type="button" onClick={view.reload}>Retry batch details</button></>}
+    {!d&&!view.error&&<p role="status">Loading dispatch batch details…</p>}
     {d&&<>
       <div className="panel" style={{margin:0}}>
         <div className="row">
@@ -3290,7 +3290,8 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         <option value="all">All items</option><option value="inspection">Awaiting or in inspection</option>
         <option value="handling">Awaiting instructions</option><option value="reference">Active Golden Samples</option>
       </select></label>
-      {focusedItem.error&&<ErrorBlock error={focusedItem.error}/>}
+      {focusedItem.error&&<><ErrorBlock error={focusedItem.error}/><button type="button" onClick={focusedItem.reload}>Retry item details</button></>}
+      {requestedItem&&!focusedItem.data&&!focusedItem.error&&<p role="status">Loading selected item…</p>}
       {inventory.error&&<><ErrorBlock error={inventory.error}/><button className="button sm" onClick={inventory.reload}>Retry inventory</button></>}
       {!inventory.data&&!inventory.error&&<p role="status">Loading items…</p>}
       {!!visibleItems.length&&<Table headers={["Item","Inbound / Package","Order & inspection","Custody","Storage through","Reference / Dispatch","Next action"]} rows={visibleItems.map((w:Row)=>[
@@ -3329,7 +3330,18 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         <span>Page {itemPage}</span>
         {inventory.data.has_more&&<Link className="button sm" href={inventoryHref(itemPage+1)} scroll={false}>Next</Link>}
       </nav>}
-      {!!batchIds.length&&<Action primary run={async()=>{const b=await request("/dispatch-batches","POST",{disposition_ids:batchIds});await request("/dispatch-batches/"+b.batch_id+"/confirm","POST",{revision:b.revision});setBatchIds([]);refreshInventory();}}>Confirm selected items for quoting ({batchIds.length})</Action>}
+      {!!batchIds.length&&<Action primary run={async()=>{
+        let batch:Row|undefined;
+        try {
+          const created=await request("/dispatch-batches","POST",{disposition_ids:batchIds});
+          batch=created;
+          setBatchIds(current=>current.filter(id=>!batchIds.includes(id)));
+          await request("/dispatch-batches/"+created.batch_id+"/confirm","POST",{revision:created.revision});
+        } catch(error) {
+          if(batch) setBatchTarget(batch.batch_id);
+          throw error;
+        } finally {refreshInventory();}
+      }}>Confirm selected items for quoting ({batchIds.length})</Action>}
       {data.batches.map((b:Row)=><div key={b.id} className="notice row"><span>Draft shipping batch <strong className="code">#{b.id.slice(0,8)}</strong></span><div className="actions"><CodeButton code="Inspect / Amend" onClick={()=>setBatchTarget(b.id)}/><Action run={async()=>{await request("/dispatch-batches/"+b.id+"/confirm","POST",{revision:b.revision});refreshInventory();}}>Confirm draft batch</Action></div></div>)}
     </Panel>
     {(data.active_batches??[]).length>0&&<Panel title="Dispatch batches" subtitle="Click any batch to view items, quotes, outbound tracking, or amend destination before carrier handover.">
@@ -3952,13 +3964,19 @@ function OrderHandling({
           }}>Cancel</Action>}</>:!item.handling_hold?"—":null}</div>,
       ])} empty="No warehouse items are linked to this inspection."/>
       {!storage&&selection.length>0&&<Action primary run={async()=>{
-        const batch=await request("/dispatch-batches","POST",{disposition_ids:selection});
-        setSelected([]);onSave();
-        await request("/dispatch-batches/"+batch.batch_id+"/confirm","POST",{revision:batch.revision});
-        onSave();
+        let batch:Row|undefined;
+        try {
+          const created=await request("/dispatch-batches","POST",{disposition_ids:selection});
+          batch=created;
+          setSelected(current=>current.filter(id=>!selection.includes(id)));
+          await request("/dispatch-batches/"+created.batch_id+"/confirm","POST",{revision:created.revision});
+        } catch(error) {
+          if(batch) onOpenBatch?.(batch.batch_id);
+          throw error;
+        } finally {onSave();desk.reload();}
       }}>Confirm selected items for quoting ({selection.length})</Action>}
       <p><Link href={storage?"/orders/"+order.public_no+"/dispositions":"/account/billing"}>{storage?"Review other handling options":"Open shipping and storage quotes"}</Link></p>
-      {!storage&&<p className="muted">Use the account’s warehouse items page to combine eligible items across your orders or amend an unshipped batch.</p>}
+      {!storage&&<p className="muted"><Link href="/items">Review shipping batches and warehouse items</Link> to resume an unconfirmed batch, combine eligible items across orders, or amend unshipped details.</p>}
     </Panel>
     <Panel title={storage?"Storage quotes":"Shipping and storage quotes"}>
       <Table headers={["Action","Batch","Quote version","Amount","Status","Expires"]} rows={order.quotes.filter((q:Row)=>!storage||q.purpose==="storage").map((q:Row)=>[
