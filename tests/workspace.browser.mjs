@@ -1433,6 +1433,7 @@ async function verifySupportHistory({page,call,errors},other) {
   await page.getByRole("button",{name:"Submit case",exact:true}).click();
   const invalidResponse=await invalid;assert.equal(invalidResponse.status(),422);
   await submissionError.waitFor();
+  await submissionError.getByText(/Use 150 characters or fewer for the subject\./).waitFor();
   await captureWizard(page,"support-validation-error","My support cases");
   await page.getByLabel("Subject",{exact:true}).fill("Corrected support subject "+randomUUID());
   const corrected=page.waitForResponse(response=>response.request().method()==="POST"&&new URL(response.url()).pathname==="/api/v1/me/cases");

@@ -838,7 +838,8 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     return json(await transaction(db=>customerCaseHistory(db,actorRequired(actor),query)));
   }
   if(method==="POST" && path==="/me/cases") {
-    const schema=z.object({subject:z.string().trim().min(2).max(150),message:z.string().trim().min(2).max(2000),
+    const schema=z.object({subject:z.string().trim().min(2,"Enter a subject of at least 2 characters.").max(150,"Use 150 characters or fewer for the subject."),
+      message:z.string().trim().min(2,"Enter a message of at least 2 characters.").max(2000,"Use 2,000 characters or fewer for the message."),
       order_id:idSchema.optional(),category:orderCaseCategory.optional(),parcel_id:idSchema.optional()});
     if(req.headers.get("content-type")?.startsWith("multipart/form-data")) {
       csrf(req);
