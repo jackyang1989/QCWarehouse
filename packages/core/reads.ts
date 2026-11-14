@@ -102,7 +102,10 @@ export async function bills(db:DB,actor:Actor,focusedCharge:string|null=null) {
       when exists(select 1 from payments p where p.charge_item_id=c.id and p.state='processing') then 'processing' else 'open' end state,
     coalesce((select sum(r.amount_cents)::int from refunds r join payments p on p.id=r.payment_id where p.charge_item_id=c.id and r.state='succeeded'),0) refunded_cents,
     coalesce(linked.order_ids,array[]::uuid[]) order_ids,coalesce(linked.order_numbers,array[]::text[]) order_numbers,
-    d.batch_id,c.scope_revision_id, (select w.code from disposition_requests dr join warehouse_items w on w.id=dr.item_id and w.org_id=dr.org_id
+    d.batch_id,c.scope_revision_id,
+    case when inspection_payment.id=c.id then inspection_payment.state end inspection_payment_state,
+    case when inspection_payment.id=c.id then o.public_no end inspection_order_number,
+    (select w.code from disposition_requests dr join warehouse_items w on w.id=dr.item_id and w.org_id=dr.org_id
       where dr.id=s.disposition_id and dr.org_id=c.org_id) storage_item_code,
     ${unresolvedQuotePayment} unresolved_payment,
     (select p.state from payments p where p.charge_item_id=c.id order by p.updated_at desc nulls last,p.id desc limit 1) latest_attempt_state,
@@ -116,6 +119,8 @@ export async function bills(db:DB,actor:Actor,focusedCharge:string|null=null) {
     coalesce(i.revision,d.revision,s.revision) quote_revision
     from charge_items c left join inspection_quotes i on i.id=c.inspection_quote_id left join dispatch_quote_versions d on d.id=c.dispatch_quote_id
     left join storage_quotes s on s.id=c.storage_quote_id
+    left join orders o on o.id=i.order_id and o.org_id=c.org_id and c.purpose='inspection' and c.scope_revision_id is null
+    ${inspectionPaymentForOrder}
     left join payments paid on paid.id=c.applied_payment_id and paid.charge_item_id=c.id
     left join lateral(select min(a.at) paid_at from audit_events a
       where a.entity_type='charge_items' and a.entity_id=c.id and a.action='payment_confirmed') confirmation on true

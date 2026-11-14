@@ -1312,6 +1312,8 @@ test("checkout withholds expired links and retains Stripe sessions for payment r
   }
   const existing=await acceptedInspection(3);
   const actionFor=async (id:string)=>(await c.fetch("/actions")).rows.find(row=>row.id===id);
+  const billFor=async ()=>(await c.fetch("/me/desk?include_items=0&include_activity=0&charge="+existing.chargeId))
+    .bills.find(row=>row.charge_item_id===existing.chargeId);
   const currentAction=await actionFor(existing.draft.id);
   assert.equal(currentAction.state,"awaiting_payment");
   assert(currentAction.due_at);
@@ -1353,6 +1355,9 @@ test("checkout withholds expired links and retains Stripe sessions for payment r
   assert.equal((await c.fetch("/me/orders?q="+existing.draft.public_no)).rows[0].payment_state,"reconciliation");
   assert.equal((await actionFor(existing.draft.id)).state,"inspection_payment_reconciliation");
   assert.equal((await actionFor(existing.draft.id)).due_at,null);
+  const unresolvedBill=await billFor();
+  assert.equal(unresolvedBill.inspection_payment_state,"reconciliation");
+  assert.equal(unresolvedBill.inspection_order_number,existing.draft.public_no);
   const repeated=await c.fetch(existing.checkoutPath,existing.body,"POST",409,key);
   const resumed=await c.fetch(existing.checkoutPath,existing.body,"POST",409);
   assert.equal(repeated.error.code,"QUOTE_EXPIRED");
@@ -1364,15 +1369,23 @@ test("checkout withholds expired links and retains Stripe sessions for payment r
   remote.set(remoteId,{id:remoteId,status:"complete",url:null});
   assert.deepEqual(await c.fetch(existing.checkoutPath,existing.body),{state:"processing",charge_item_id:existing.chargeId});
   assert.equal((await c.fetch(existing.path)).state,"awaiting_payment");
-  const payload=JSON.stringify({id:"evt_fixture_"+randomUUID(),object:"event",livemode:false,type:"checkout.session.completed",
-    data:{object:{id:remoteId,payment_status:"paid",amount_total:existing.quote.amount_cents,currency:"usd",
-      payment_intent:"pi_fixture_"+randomUUID(),metadata:{payment_id:first.attempt_id,charge_item_id:existing.chargeId,org_id:actor.org}}}});
-  const webhook="/webhooks/stripe";
-  const signature=Stripe.webhooks.generateTestHeaderString({payload,secret:"whsec_fixture"});
-  const response=await handle(new Request(origin+"/api/v1"+webhook,{method:"POST",body:payload,headers:{"stripe-signature":signature}}),webhook);
-  assert.equal(response.status,200);
+  const paymentIntent="pi_fixture_"+randomUUID();
+  async function sendEvent(type:string,paymentStatus:string) {
+    const payload=JSON.stringify({id:"evt_fixture_"+randomUUID(),object:"event",livemode:false,type,
+      data:{object:{id:remoteId,payment_status:paymentStatus,amount_total:existing.quote.amount_cents,currency:"usd",
+        payment_intent:paymentIntent,metadata:{payment_id:first.attempt_id,charge_item_id:existing.chargeId,org_id:actor.org}}}});
+    const webhook="/webhooks/stripe";
+    const signature=Stripe.webhooks.generateTestHeaderString({payload,secret:"whsec_fixture"});
+    const response=await handle(new Request(origin+"/api/v1"+webhook,{method:"POST",body:payload,headers:{"stripe-signature":signature}}),webhook);
+    assert.equal(response.status,200);
+  }
+  await sendEvent("checkout.session.completed","unpaid");
+  assert.equal((await billFor()).inspection_payment_state,"processing");
+  assert.equal(await actionFor(existing.draft.id),undefined);
+  await sendEvent("checkout.session.async_payment_succeeded","paid");
   assert.equal((await c.fetch(existing.path)).state,"awaiting_samples");
   assert.equal((await actionFor(existing.draft.id)).state,"awaiting_samples");
+  assert.equal((await billFor()).inspection_payment_state,"paid");
   assert.deepEqual(await c.fetch(existing.checkoutPath,existing.body,"POST",200,key),{state:"paid",charge_item_id:existing.chargeId});
 
   process.env.QCW_DEMO="1";

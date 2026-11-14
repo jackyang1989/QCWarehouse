@@ -3296,7 +3296,11 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
       {requestedCharge&&!focusedChargeAvailable&&<p role="status">This charge is unavailable.</p>}
       <Table headers={["Purpose","Order / Batch","Amount","Refunded","Status","Date","Details",""]} rows={data.bills.map((b:Row)=>{
         const quoteExpired=b.state==="open"&&b.expires_at&&Date.parse(b.expires_at)<=Date.now();
-        const shownState=quoteExpired?(b.unresolved_payment?"processing":"expired"):b.state;
+        const shownState=b.inspection_payment_state??(quoteExpired?(b.unresolved_payment?"processing":"expired"):b.state);
+        const inspectionPaymentLabel=({
+          reconciliation:"Check previous payment status",expired:"Review expired quote",processing:"Track payment confirmation",
+        } as Record<string,string>)[b.inspection_payment_state];
+        const inspectionPaymentHref=b.inspection_order_number?"/orders/"+b.inspection_order_number+"/payment":null;
         return [
           <span id={"charge-"+b.charge_item_id} className="billing-charge-anchor" tabIndex={b.charge_item_id===requestedCharge?-1:undefined}>{b.scope_revision_id?"Supplemental inspection":label(b.purpose)}</span>,
           (b.order_numbers??[]).length?b.order_numbers.map((no:string)=><Link key={no} className="code-btn" href={"/orders/"+no}>{no}</Link>):b.batch_id?<CodeButton code={`Batch #${b.batch_id.slice(0,8)}`} onClick={()=>setBatchTarget(b.batch_id)}/>:"—",
@@ -3314,12 +3318,12 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
             b.paid_ref?.startsWith("demo_")?<small>Test payment</small>:
             b.paid_ref?<details className="small"><summary className="code" title={b.paid_ref}>…{String(b.paid_ref).slice(-8)}</summary><span className="code" style={{overflowWrap:"anywhere"}}>{b.paid_ref}</span></details>:b.latest_attempt_state?label(b.latest_attempt_state):"—",
           b.scope_revision_id&&b.order_numbers?.[0]?<Link href={inspectionScopePath(b.order_numbers[0],b.scope_revision_id)}>Review scope charge</Link>:
+          inspectionPaymentHref&&inspectionPaymentLabel?<Link href={inspectionPaymentHref}>{inspectionPaymentLabel}</Link>:
           quoteExpired
             ?(b.unresolved_payment?<span>Payment confirmation pending</span>:
               b.purpose==="dispatch"&&b.batch_id?<CodeButton code="Review dispatch batch" onClick={()=>setBatchTarget(b.batch_id)}/>:
-              b.purpose==="storage"&&b.storage_item_code?<Link href={"/items?item="+encodeURIComponent(b.storage_item_code)}>Review stored item</Link>:
-              b.purpose==="inspection"&&b.order_numbers?.[0]?<Link href={"/orders/"+b.order_numbers[0]+"/payment"}>Review expired quote</Link>:<span>Quote expired</span>)
-            :b.state==="open"?<Action run={()=>goCheckout(b.charge_item_id,b.quote_revision)}>Pay</Action>:null
+              b.purpose==="storage"&&b.storage_item_code?<Link href={"/items?item="+encodeURIComponent(b.storage_item_code)}>Review stored item</Link>:<span>Quote expired</span>)
+            :shownState==="open"?<Action run={()=>goCheckout(b.charge_item_id,b.quote_revision)}>Pay</Action>:null
         ];
       })} empty="No charges yet."/>
     </Panel><Panel title="Refunds" subtitle="Platform fee refunds issued by QCWarehouse. Seller refunds are handled on your seller's platform and are not shown here.">

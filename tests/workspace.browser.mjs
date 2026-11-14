@@ -302,6 +302,12 @@ async function verifyInspectionPaymentActions({page,call,errors},other) {
     assert(!(await other.call("/actions")).rows.some(action=>action.id===draft.id));
     assert.equal((await call(path+"/payment")).charge.id,submitted.charge.charge_item_id);
     await captureWizard(page,"expired-inspection-payment","Inspection payment");
+    await page.goto("/account/billing?charge="+submitted.charge.charge_item_id);
+    await row.getByText("Expired",{exact:true}).waitFor();
+    assert.equal(await row.getByRole("button",{name:"Pay",exact:true}).count(),0);
+    await captureWizard(page,"expired-inspection-bill","Billing");
+    await row.getByRole("link",{name:"Review expired quote"}).click();
+    await page.waitForURL("**/orders/"+draft.public_no+"/payment");
     await page.getByRole("button",{name:"Review a new quote"}).click();
     await page.locator("#inspection-quote").waitFor();
     assert.equal((await call(path+"/payment")).charge.id,submitted.charge.charge_item_id);
