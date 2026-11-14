@@ -455,40 +455,72 @@ export function MediaLightbox({
   const [idx,setIdx]=useState(()=>Math.min(Math.max(0,initialIndex),Math.max(0,ids.length-1)));
   const [zoomed,setZoomed]=useState(false);
   const [showOverlay,setShowOverlay]=useState(true);
+  const titleId=useId();
+  const closeButton=useRef<HTMLButtonElement>(null);
+  const [attempt,setAttempt]=useState(0);
+  const [imageResult,setImageResult]=useState<{id:string;attempt:number;state:"loaded"|"failed"}>();
   useEffect(()=>{
-    const onKey=(e:KeyboardEvent)=>{
-      if(e.key==="Escape")onClose();
-      if(e.key==="ArrowLeft")setIdx(i=>(i>0?i-1:ids.length-1));
-      if(e.key==="ArrowRight")setIdx(i=>(i+1<ids.length?i+1:0));
+    if(!ids.length)return;
+    const previous=document.activeElement;
+    closeButton.current?.focus({preventScroll:true});
+    return ()=>{
+      const target=previous instanceof HTMLElement&&previous!==document.body&&previous.isConnected
+        ?previous:document.getElementById("main-content");
+      target?.focus({preventScroll:true});
     };
-    document.addEventListener("keydown",onKey);
-    return ()=>document.removeEventListener("keydown",onKey);
-  },[ids.length,onClose]);
+  },[ids.length]);
   if(!ids.length)return null;
   const currentId=ids[idx]??ids[0];
   const currentLabel=labels?.[idx]??(zh?`证据照 ${idx+1}/${ids.length}`:`Photo ${idx+1} of ${ids.length}`);
   const activeAnns=annotations??[];
-  return <div className="lightbox-backdrop" role="dialog" aria-modal="true" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}>
+  const imageState=imageResult?.id===currentId&&imageResult.attempt===attempt?imageResult.state:"loading";
+  return <div className="lightbox-backdrop" role="dialog" aria-modal="true" aria-labelledby={titleId}
+    onKeyDown={event=>{
+      if(event.key==="Escape") {event.preventDefault();event.stopPropagation();onClose();return;}
+      if(event.key==="ArrowLeft"||event.key==="ArrowRight") {
+        event.preventDefault();event.stopPropagation();closeButton.current?.focus({preventScroll:true});setZoomed(false);
+        setIdx(i=>event.key==="ArrowLeft"?(i>0?i-1:ids.length-1):(i+1<ids.length?i+1:0));
+      }
+      if(event.key!=="Tab")return;
+      const focusable=Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), a[href]'))
+        .filter(element=>element.getClientRects().length>0);
+      const first=focusable[0],last=focusable.at(-1);
+      if((event.shiftKey&&document.activeElement===first)||(!event.shiftKey&&document.activeElement===last)) {
+        event.preventDefault();(event.shiftKey?last:first)?.focus();
+      }
+    }} onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}>
     <div className="lightbox-bar">
-      <div><strong>{currentLabel}</strong> <span className="muted" style={{color:"#cbd5e1"}}>({idx+1} / {ids.length})</span></div>
+      <div><strong id={titleId}>{currentLabel}</strong> <span className="muted" style={{color:"#cbd5e1"}}>({idx+1} / {ids.length})</span></div>
       <div className="actions">
         {activeAnns.length>0&&<button type="button" className="button sm" onClick={()=>setShowOverlay(v=>!v)}>
           {showOverlay?(zh?`隐藏瑕疵标注 (${activeAnns.length})`:`Hide markers (${activeAnns.length})`):(zh?`显示瑕疵标注 (${activeAnns.length})`:`Show markers (${activeAnns.length})`)}
         </button>}
-        <button type="button" className="button sm" onClick={()=>setZoomed(z=>!z)}>{zoomed?(zh?"适应窗口 (1x)":"Fit (1x)"):(zh?"放大查看 (2x)":"Zoom (2x)")}</button>
+        <button type="button" className="button sm" disabled={imageState!=="loaded"} onClick={()=>setZoomed(z=>!z)}>{zoomed?(zh?"适应窗口 (1x)":"Fit (1x)"):(zh?"放大查看 (2x)":"Zoom (2x)")}</button>
         <a className="button sm" href={`/api/v1/media/${currentId}`} target="_blank" rel="noreferrer">{zh?"新窗口原图":"Open original"}</a>
-        <button type="button" className="button sm primary" onClick={onClose}>{zh?"关闭":"Close"}</button>
+        <button type="button" className="button sm primary" ref={closeButton} onClick={onClose}>{zh?"关闭":"Close"}</button>
       </div>
     </div>
     <div className="lightbox-stage" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}>
-      <div style={{position:"relative",display:"inline-block"}}>
+      <div>
+        {imageState==="loading"&&<p role="status" style={{color:"inherit"}}>{zh?"正在读取证据图片…":"Loading evidence photo…"}</p>}
+        {imageState==="failed"&&<div>
+          <p role="alert" style={{color:"inherit"}}>{zh?"图片暂时无法读取，请重试。":"This photo could not be loaded. Please retry."}</p>
+          <button type="button" className="button" onClick={()=>{
+            closeButton.current?.focus({preventScroll:true});setZoomed(false);setAttempt(value=>value+1);
+          }}>{zh?"重试图片":"Retry photo"}</button>
+        </div>}
+        <div style={{position:"relative",display:"inline-block"}} aria-busy={imageState==="loading"}>
         <img
+          key={currentId+":"+attempt}
           className={"lightbox-img"+(zoomed?" zoomed":"")}
-          src={`/api/v1/media/${currentId}`}
+          src={`/api/v1/media/${currentId}${attempt?"?reload="+attempt:""}`}
           alt={currentLabel}
+          style={{display:imageState==="failed"?"none":undefined,visibility:imageState==="loaded"?"visible":"hidden"}}
+          onLoad={()=>setImageResult({id:currentId,attempt,state:"loaded"})}
+          onError={()=>setImageResult({id:currentId,attempt,state:"failed"})}
           onClick={()=>setZoomed(z=>!z)}
         />
-        {showOverlay&&activeAnns.map((ann,aIdx)=><div
+        {imageState==="loaded"&&showOverlay&&activeAnns.map((ann,aIdx)=><div
           key={aIdx}
           style={{
             position:"absolute",
@@ -519,6 +551,7 @@ export function MediaLightbox({
             #{aIdx+1} {ann.label||"Defect"}
           </span>
         </div>)}
+        </div>
       </div>
     </div>
     <div className="lightbox-bar">

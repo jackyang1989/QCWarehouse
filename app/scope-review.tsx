@@ -44,7 +44,7 @@ export function ScopeReview({orderId,staff=false,onSave}:{orderId:string;staff?:
     return item?(staff?item.title["zh-CN"]??item.title.en:item.title.en)+" · "+item.position+(item.item_code?" · "+item.item_code:""):id;
   };
   return <Panel title={staff?"委托范围变更与收货差异":"Inspection scope & sample discrepancies"}>
-    {error&&<ErrorBlock error={error}/>}
+    {error&&<><ErrorBlock error={error}/><button type="button" onClick={reload}>{staff?"重新读取范围":"Retry scope changes"}</button></>}
     {!data&&!error&&<p role="status">{staff?"正在读取范围…":"Loading scope changes…"}</p>}
     {data&&!error&&<>
       {mismatchedPositions.length>0&&<div className="card">

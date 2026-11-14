@@ -2830,7 +2830,7 @@ function ReportSection({section,results,grouped,showPhoto}:{section:Row;results:
   };
   const evidence=(x:Row)=>{
     const ids:string[]=x.evidence_ids??[];
-    const labels=ids.map((_,idx)=>`${x.label} · ${x.item} (${idx+1}/${ids.length})`);
+    const labels=ids.map(()=>`${x.label} · ${x.item}`);
     const anns=Array.isArray(x.annotations)?x.annotations:[];
     return ids.map((m:string,idx:number)=><button className="evidence-open" type="button" key={m}
       aria-label={`View ${x.label} evidence for ${x.item}`} onClick={()=>showPhoto(ids,labels,idx,anns)}>

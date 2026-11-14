@@ -497,6 +497,188 @@ async function verifyMultiServiceScopes({page,call,errors},other) {
   console.log("PASS each service line keeps its own published template, measurement ranges and official quote");
 }
 
+async function verifyEvidenceRecovery(other) {
+  assert(process.env.QCW_BROWSER_FIXTURE_EMAIL?.endsWith("@qcw.test"));
+  const fixture=await session(process.env.QCW_BROWSER_FIXTURE_EMAIL,false,true);
+  const {page,call}=fixture;
+  const published=(await call("/me/reports?latest=1")).rows[0];
+  assert(published);
+  const path=`/orders/${published.order_id}/report/versions/${published.version}`;
+  const report=await call(path);
+  await page.goto(`/orders/${published.order_number}/report/versions/${published.version}`);
+  const trigger=page.locator(".evidence-open").first();
+  await trigger.scrollIntoViewIfNeeded();
+  const mediaPath=await trigger.locator("img").getAttribute("src");
+  assert.match(mediaPath,/^\/api\/v1\/media\/[a-f0-9-]+$/);
+  const original=await fixture.context.request.get(mediaPath);
+  assert.equal(original.status(),200);
+  const bytes=await original.body();
+  assert.equal((await other.context.request.get(mediaPath)).status(),404);
+  assert.equal((await other.context.request.get(mediaPath+"?reload=1")).status(),404);
+  let mode="loading",started,release;
+  const pending=new Promise(resolve=>{started=resolve;});
+  const gate=new Promise(resolve=>{release=resolve;});
+  const match=url=>url.pathname===mediaPath;
+  const intercept=async route=>{
+    if(mode==="loading") {started();await gate;}
+    if(mode==="error") await route.fulfill({status:503,body:"Unavailable"});
+    else await route.continue();
+  };
+  await page.route(match,intercept);
+  await trigger.click();
+  const dialog=page.getByRole("dialog");
+  await pending;
+  await dialog.getByRole("status").getByText("Loading evidence photo…",{exact:true}).waitFor();
+  assert(await dialog.evaluate(node=>Boolean(document.getElementById(node.getAttribute("aria-labelledby"))?.textContent.trim())));
+  assert(await dialog.getByRole("button",{name:"Close",exact:true}).evaluate(button=>button===document.activeElement));
+  async function captureState(name,target,view=page) {
+    for(const width of widths) {
+      await view.setViewportSize({width,height:1000});
+      if(target)await target.scrollIntoViewIfNeeded();
+      await view.evaluate(async()=>{
+        await document.fonts.ready;
+        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+      });
+      const overflow=await view.evaluate(()=>document.documentElement.scrollWidth-innerWidth);
+      assert.equal(overflow,0);
+      await view.screenshot({path:join(out,`${name}-${width}.png`),fullPage:false,animations:"disabled"});
+      entries.push({name,width,overflow});
+    }
+    await view.setViewportSize({width:1440,height:1000});
+  }
+  await captureState("evidence-loading");
+  mode="error";release();
+  await dialog.getByRole("alert").getByText("This photo could not be loaded. Please retry.",{exact:true}).waitFor();
+  assert.equal(await dialog.getByRole("button",{name:"Zoom (2x)",exact:true}).isDisabled(),true);
+  await captureState("evidence-error");
+  const restored=page.waitForResponse(response=>match(new URL(response.url()))&&response.status()===200);
+  mode="normal";
+  await dialog.getByRole("button",{name:"Retry photo",exact:true}).click();
+  assert.deepEqual(await (await restored).body(),bytes);
+  await dialog.getByRole("button",{name:"Zoom (2x)",exact:true}).waitFor();
+  await page.waitForFunction(()=>document.querySelector(".lightbox-img")?.naturalWidth>0);
+  await dialog.getByRole("alert").waitFor({state:"hidden"});
+  assert(await dialog.evaluate(node=>node.contains(document.activeElement)),"A successful image retry keeps focus inside the lightbox before another click");
+  await page.keyboard.press("Tab");
+  assert(await dialog.evaluate(node=>node.contains(document.activeElement)));
+  await captureState("evidence-restored");
+  await dialog.getByRole("button",{name:"Zoom (2x)",exact:true}).click();
+  assert(await dialog.locator(".lightbox-img").evaluate(img=>img.classList.contains("zoomed")));
+  const controls=await dialog.locator("button:not(:disabled), a[href]").count();
+  for(let i=0;i<controls+2;i++) {
+    await page.keyboard.press("Tab");
+    assert(await dialog.evaluate(node=>node.contains(document.activeElement)));
+  }
+  for(let i=0;i<controls+2;i++) {
+    await page.keyboard.press("Shift+Tab");
+    assert(await dialog.evaluate(node=>node.contains(document.activeElement)));
+  }
+  if(await dialog.getByRole("button",{name:"Next →",exact:true}).count()) {
+    const first=await dialog.locator(".lightbox-img").getAttribute("src");
+    await page.keyboard.press("ArrowRight");
+    assert.notEqual(await dialog.locator(".lightbox-img").getAttribute("src"),first);
+    await page.keyboard.press("ArrowLeft");
+    assert.equal(await dialog.locator(".lightbox-img").getAttribute("src"),first);
+  }
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({state:"hidden"});
+  assert(await trigger.evaluate(button=>button===document.activeElement));
+  await page.unroute(match,intercept);
+  assert.deepEqual((await call(path)).snapshot,report.snapshot);
+
+  assert(process.env.QCW_BROWSER_GALLERY_EMAIL?.endsWith("@qcw.test"));
+  const comparison=await session(process.env.QCW_BROWSER_GALLERY_EMAIL,false,true);
+  let galleryReport,galleryRow,galleryIds;
+  for(const row of (await comparison.call("/me/reports?latest=1")).rows) {
+    const candidate=await comparison.call(`/orders/${row.order_id}/report/versions/${row.version}`);
+    const shots=candidate.snapshot.sections.flatMap(section=>[section.shots??[],section.comparison?.order_shots??[]]).find(rows=>rows.length>1);
+    if(shots) {galleryReport=candidate;galleryRow=row;galleryIds=shots.map(shot=>shot.media_id);break;}
+  }
+  assert(galleryReport&&galleryIds.length>1);
+  await comparison.page.goto(`/orders/${galleryRow.order_number}/report/versions/${galleryRow.version}`);
+  const galleryTrigger=comparison.page.locator(".evidence-open").filter({has:comparison.page.locator(`img[src='/api/v1/media/${galleryIds[0]}']`)}).first();
+  await galleryTrigger.click();
+  const galleryDialog=comparison.page.getByRole("dialog");
+  await galleryDialog.getByRole("button",{name:"Next →",exact:true}).waitFor();
+  const firstSource=await galleryDialog.locator(".lightbox-img").getAttribute("src");
+  await comparison.page.keyboard.press("ArrowRight");
+  assert.notEqual(await galleryDialog.locator(".lightbox-img").getAttribute("src"),firstSource);
+  assert(await galleryDialog.evaluate(node=>node.contains(document.activeElement)));
+  await comparison.page.keyboard.press("ArrowLeft");
+  assert.equal(await galleryDialog.locator(".lightbox-img").getAttribute("src"),firstSource);
+  await galleryDialog.getByRole("button",{name:"Next →",exact:true}).click();
+  assert.notEqual(await galleryDialog.locator(".lightbox-img").getAttribute("src"),firstSource);
+  await galleryDialog.getByRole("button",{name:"← Previous",exact:true}).click();
+  assert.equal(await galleryDialog.locator(".lightbox-img").getAttribute("src"),firstSource);
+  await comparison.page.waitForFunction(()=>document.querySelector(".lightbox-img")?.naturalWidth>0);
+  await captureState("evidence-gallery",null,comparison.page);
+  await comparison.page.keyboard.press("Escape");
+  await galleryDialog.waitFor({state:"hidden"});
+  assert(await galleryTrigger.evaluate(button=>button===document.activeElement));
+  await comparison.context.close();
+
+  assert(process.env.QCW_BROWSER_INVENTORY_EMAIL?.endsWith("@qcw.test"));
+  const annotated=await session(process.env.QCW_BROWSER_INVENTORY_EMAIL,false,true);
+  let annotationRow,annotationPoint;
+  for(const row of (await annotated.call("/me/reports?latest=1")).rows) {
+    const candidate=await annotated.call(`/orders/${row.order_id}/report/versions/${row.version}`);
+    const point=candidate.snapshot.sections.flatMap(section=>section.results??[]).find(result=>result.annotations?.length&&result.evidence_ids?.length);
+    if(point) {annotationRow=row;annotationPoint=point;break;}
+  }
+  assert(annotationPoint);
+  await annotated.page.goto(`/orders/${annotationRow.order_number}/report/versions/${annotationRow.version}`);
+  await annotated.page.getByRole("button",{name:`View ${annotationPoint.label} evidence for ${annotationPoint.item}`,exact:true}).first().click();
+  const annotationDialog=annotated.page.getByRole("dialog");
+  const marker=annotationDialog.getByText("#1 "+(annotationPoint.annotations[0].label||"Defect"),{exact:true});
+  await marker.waitFor();
+  await annotationDialog.getByRole("button",{name:/^Hide markers/}).click();
+  await marker.waitFor({state:"hidden"});
+  await annotationDialog.getByRole("button",{name:/^Show markers/}).click();
+  await marker.waitFor();
+  await captureState("evidence-markers",null,annotated.page);
+  await annotated.page.keyboard.press("Escape");
+  await annotationDialog.waitFor({state:"hidden"});
+  assert.deepEqual([...comparison.errors,...annotated.errors],[]);
+  await annotated.context.close();
+
+  for(const email of ["reviewer@qcw.test","inspector@qcw.test"]) {
+    const staff=await session(email,true);
+    assert.equal((await staff.context.request.get(mediaPath)).status(),200);
+    await staff.call("/me/desk",{status:403});
+    await staff.context.close();
+  }
+
+  const scopeRead=`/api/v1/orders/${published.order_id}/scope-revisions`;
+  let scopeMode="loading",scopeStarted,scopeRelease;
+  const scopePending=new Promise(resolve=>{scopeStarted=resolve;});
+  const scopeGate=new Promise(resolve=>{scopeRelease=resolve;});
+  const scopeMatch=url=>url.pathname===scopeRead;
+  const scopeRoute=async route=>{
+    if(scopeMode==="loading") {scopeStarted();await scopeGate;}
+    if(scopeMode==="error") await route.fulfill({status:503,contentType:"application/json",body:JSON.stringify({error:{code:"SERVER_ERROR",message:"Scope details are temporarily unavailable."}})});
+    else await route.continue();
+  };
+  await page.route(scopeMatch,scopeRoute);
+  await page.goto(`/orders/${published.order_number}`);
+  await scopePending;
+  const section=page.locator("section").filter({has:page.getByRole("heading",{name:"Inspection scope & sample discrepancies",exact:true})});
+  await section.getByRole("status").getByText("Loading scope changes…",{exact:true}).waitFor();
+  await captureState("scope-loading",section);
+  scopeMode="error";scopeRelease();
+  await section.getByRole("alert").getByText("Scope details are temporarily unavailable.",{exact:true}).waitFor();
+  await captureState("scope-error",section);
+  const scopeRestored=page.waitForResponse(response=>scopeMatch(new URL(response.url()))&&response.status()===200);
+  scopeMode="normal";
+  await section.getByRole("button",{name:"Retry scope changes",exact:true}).click();
+  await scopeRestored;
+  await section.getByRole("alert").waitFor({state:"hidden"});
+  await section.getByText("No scope changes have been proposed.",{exact:true}).waitFor();
+  await captureState("scope-restored",section);
+  assert.deepEqual(fixture.errors,[]);
+  await fixture.context.close();
+  console.log("PASS private evidence photo recovery, unchanged image/report, keyboard focus, and scope retry");
+}
+
 async function verifySecondaryReads(customer,other) {
   assert(process.env.QCW_BROWSER_FIXTURE_EMAIL?.endsWith("@qcw.test"));
   const fixture=await session(process.env.QCW_BROWSER_FIXTURE_EMAIL,false,true);
@@ -1445,6 +1627,7 @@ try {
   else if(process.env.QCW_BROWSER_ACTION_PAGES_ONLY==="1") await verifyActionPages(customer,other);
   else if(process.env.QCW_BROWSER_STATES_ONLY==="1") await verifyWorkspaceStates();
   else if(process.env.QCW_BROWSER_DEPENDENCIES_ONLY==="1") await verifySecondaryReads(customer,other);
+  else if(process.env.QCW_BROWSER_MEDIA_ONLY==="1") await verifyEvidenceRecovery(other);
   else if(process.env.QCW_BROWSER_INTAKE_CLAIM_ONLY==="1") await verifyParcelOwnership(customer,other,process.env.QCW_BROWSER_BIND_OWNER==="1");
   else if(process.env.QCW_BROWSER_INCIDENT_ONLY==="1") await verifyIncidentDecision(customer,other);
   else if(process.env.QCW_BROWSER_SELLER_RETURN_ONLY==="1") await verifySellerReturn(customer,other);
