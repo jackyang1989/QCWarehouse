@@ -1877,7 +1877,6 @@ button.option-card.disabled, .option-card.disabled {
   .wizard-summary-body .card-head h3 { display: none; }
   .steps .step span:not(.n) { display: none; }
   .steps .step.on span:not(.n) { display: inline; }
-  .wizard-controls { position: sticky; bottom: 0; z-index: 20; background: var(--bg); padding: 10px 0; margin-bottom: 0; }
 }
 @media (max-width: 540px) {
   .wizard-categories, .wizard-services, .land-categories, .infra-strip, .proof-data { grid-template-columns: 1fr; }

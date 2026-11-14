@@ -527,6 +527,7 @@ export function NewOrder({customerId}:{customerId:string}) {
   const [attachmentId,setAttachmentId]=useState<string>();
   const [attachmentName,setAttachmentName]=useState<string>();
   const [extraLines,setExtraLines]=useState<Row[]>([]);
+  const [addingServiceLine,setAddingServiceLine]=useState(false);
   const [consents,setConsents]=useState<Record<string,boolean>>({});
   const [policyAccepted,setPolicyAccepted]=useState(false);
   const [quotedFingerprint,setQuotedFingerprint]=useState("");
@@ -595,6 +596,7 @@ export function NewOrder({customerId}:{customerId:string}) {
     setAttachmentId(editor.attachmentId);
     setAttachmentName(editor.attachmentName);
     setExtraLines(editor.extraLines);
+    setAddingServiceLine(editor.addingServiceLine??false);
   }
 
   useEffect(()=>{
@@ -701,8 +703,8 @@ export function NewOrder({customerId}:{customerId:string}) {
               setAttachmentName("Saved reference photo");
             }
             setSizeMismatchConfirmed(primary.options?.size_mismatch_confirmed===true);
-            const savedStep=Number(params.get("step"));
-            setStep(!matchedOffer?0:ord.manual_quote?1:savedStep>=1&&savedStep<=4?savedStep:2);
+            const savedStep=params.get("step");
+            setStep(!matchedOffer?0:ord.manual_quote?1:savedStep&&/^[0-4]$/.test(savedStep)?Number(savedStep):2);
             if(attrs.name) setItemName(String(attrs.name));
             if(attrs.supplier_ref) setSupplierRef(String(attrs.supplier_ref));
             if(attrs.product_url) setProductLink(String(attrs.product_url));
@@ -716,8 +718,8 @@ export function NewOrder({customerId}:{customerId:string}) {
                 const min=Number(t.min);
                 const max=Number(t.max);
                 if(code&&Number.isFinite(min)&&Number.isFinite(max)) {
-                  const mid=((min+max)/2).toFixed(1).replace(/\.0$/,"");
-                  const pm=((max-min)/2).toFixed(1).replace(/\.0$/,"");
+                  const mid=String(Number(((min+max)/2).toFixed(3)));
+                  const pm=String(Number(((max-min)/2).toFixed(3)));
                   restored[code]={target:mid,plusMinus:pm};
                 }
               }
@@ -881,7 +883,7 @@ export function NewOrder({customerId}:{customerId:string}) {
     };
   }
 
-  const currentLine=buildCurrentLine();
+  const currentLine=addingServiceLine&&!itemName.trim()?null:buildCurrentLine();
   const allLines=extraLines.length>0?(currentLine?[...extraLines,currentLine]:extraLines):(currentLine?[currentLine]:[]);
   const totalItems=allLines.reduce((sum,l)=>sum+(Number(l.quantity)||0),0);
 
@@ -889,7 +891,7 @@ export function NewOrder({customerId}:{customerId:string}) {
   const fingerprint=JSON.stringify(draftPayload);
   const editor:DraftEditor={step,categoryKey,serviceKind,selectedOfferId,templateVariant,qty,manualQuoteMode,manualBatchQty,manualQuoteReason,
     itemName,supplierRef,baseSku,baseColor,baseSize,baseTrackingNo,productLink,toleranceMode,pointTolerances,referenceId,
-    sizeMismatchConfirmed,itemRows,notes,attachmentId,attachmentName,extraLines};
+    sizeMismatchConfirmed,itemRows,notes,attachmentId,attachmentName,extraLines,addingServiceLine};
   const editorContent=JSON.stringify({...editor,step:0});
   useLayoutEffect(()=>{
     if(!recoveryReady||draftLoadFailed||!recoveryKey) return;
@@ -1039,6 +1041,35 @@ export function NewOrder({customerId}:{customerId:string}) {
     });
   }
 
+  function addServiceLine() {
+    return runWizard("Saving inspection scope…",async()=>{
+      if(!currentLine||!itemName.trim()) throw new Error("Review the service, quantity and product name before adding another service.");
+      if(allLines.length>=20||totalItems>=maximumDraftItems) throw new Error("This order has reached its service line or item limit.");
+      const saved=await persistDraft();
+      setExtraLines(allLines);
+      setAddingServiceLine(true);
+      setItemName("");
+      setItemRows([]);
+      setItemPage(0);
+      setSupplierRef("");
+      setBaseSku("ITEM");
+      setBaseSize("");
+      setBaseColor("");
+      setBaseTrackingNo("");
+      setProductLink("");
+      setAttachmentId(undefined);
+      setAttachmentName(undefined);
+      setSizeMismatchConfirmed(false);
+      setPointTolerances({});
+      setToleranceMode("record_only");
+      setReferenceId("");
+      setShowFullChecklist(false);
+      setServerQuote(undefined);
+      setStep(0);
+      syncDraftUrl(saved.public_no,0);
+    });
+  }
+
   function syncDraftAndQuote() {
     return runWizard("Calculating quote…",async()=>{
       setServerQuote(undefined);
@@ -1114,6 +1145,10 @@ export function NewOrder({customerId}:{customerId:string}) {
       return;
     }
     if(targetStep===3||(targetStep===2&&draftOrder)) {
+      if(targetStep===2&&addingServiceLine&&!itemName.trim()) {
+        setStep(targetStep);
+        return;
+      }
       await runWizard("Saving draft…",async()=>{
         const saved=await persistDraft();
         syncDraftUrl(saved.public_no,targetStep);
@@ -1782,45 +1817,11 @@ export function NewOrder({customerId}:{customerId:string}) {
             <span>I understand comparing samples of different declared sizes affects side-by-side measurement difference interpretation.</span>
           </label>}
 
-          <div className="sep"/>
-          <div className="row between flexwrap">
-            <span className="small muted">Inspecting multiple garment types in one order? Queue this service line and configure another.</span>
-            <button type="button" className="button sm" onClick={()=>{
-              const built=buildCurrentLine();
-              if(!built) return;
-              if(!itemName.trim()) {setWizardError("Enter a product name for this service line.");return;}
-              setExtraLines(prev=>[...prev,built]);
-              setItemName("");
-              setItemRows([]);
-              setSupplierRef("");
-              setBaseSku("ITEM");
-              setBaseSize("");
-              setBaseColor("");
-              setBaseTrackingNo("");
-              setProductLink("");
-              setAttachmentId(undefined);
-              setAttachmentName(undefined);
-              setSizeMismatchConfirmed(false);
-              setPointTolerances({});
-              setToleranceMode("record_only");
-              setServerQuote(undefined);
-              setStep(0);
-            }}>+ Add service line to order ({allLines.length} configured)</button>
-          </div>
-          {extraLines.length>0&&<ul className="draft-lines">
-            {extraLines.map((line,idx)=><li key={idx}>
-              <div>
-                <strong>{line.title}</strong>
-                <small>{line.attributes.name} · {line.quantity} {line.quantity===1?"item":"items"}{line.attributes.size_label?` · Size ${line.attributes.size_label}`:""}</small>
-              </div>
-              <button type="button" className="button sm" onClick={()=>{setExtraLines(xs=>xs.filter((_,i)=>i!==idx));setServerQuote(undefined);}}>Remove</button>
-            </li>)}
-          </ul>}
         </Panel>}
 
         {step===3&&<Panel
           title="Step 4 · Inspection Scope — Checkpoints, Tolerances & Notes"
-          subtitle="Review the mandatory checkpoints for your garment subcategory and optionally specify target measurements or special focus points."
+          subtitle="Review the required checks for this service and add measurement targets or special instructions if needed."
           badge={<Tag tone="green">{templateLabel}</Tag>}
         >
           <div className="card flat" style={{marginBottom:16}}>
@@ -1913,7 +1914,7 @@ export function NewOrder({customerId}:{customerId:string}) {
                         <td>
                           <input
                             type="number"
-                            step="0.1"
+                            step="any"
                             min="0"
                             className="input"
                             placeholder="e.g. 56.0"
@@ -1929,9 +1930,8 @@ export function NewOrder({customerId}:{customerId:string}) {
                         <td>
                           <input
                             type="number"
-                            step="0.1"
-                            min="0.1"
-                            max="20"
+                            step="any"
+                            min="0"
                             className="input"
                             placeholder="Enter tolerance"
                             aria-label={`${chk.label} tolerance`}
@@ -1966,6 +1966,21 @@ export function NewOrder({customerId}:{customerId:string}) {
           <div className="line-note">
             Scope boundary: Covers non-destructive visual inspection and flat metric tape measurements on physical samples received at our warehouse. Laboratory fiber composition testing, colorfastness/shrinkage washing, and factory AQL audits are excluded.
           </div>
+          {extraLines.length>0&&<ul className="draft-lines" aria-label="Other service lines">
+            {extraLines.map((line,idx)=><li key={idx}>
+              <div>
+                <strong>{line.attributes.name||line.title}</strong>
+                <small>{line.title} · {line.quantity} {line.quantity===1?"item":"items"}</small>
+              </div>
+              <button type="button" className="button sm" disabled={Boolean(busyMessage)}
+                aria-label={`Remove ${line.attributes.name||line.title}`}
+                onClick={()=>{setExtraLines(xs=>xs.filter((_,i)=>i!==idx));setServerQuote(undefined);}}>Remove</button>
+            </li>)}
+          </ul>}
+          <div className="actions">
+            <button type="button" className="button" disabled={Boolean(busyMessage)||allLines.length>=20||totalItems>=maximumDraftItems}
+              onClick={()=>void addServiceLine()}>Save scope and add another service</button>
+          </div>
         </Panel>}
 
         {step===4&&<Panel
@@ -1974,11 +1989,25 @@ export function NewOrder({customerId}:{customerId:string}) {
           badge={hasValidQuote?<Tag tone="green">Official quote</Tag>:busyMessage?<Tag tone="yellow">Calculating…</Tag>:<Tag tone="red">Quote Required</Tag>}
         >
           <div className="grid cols2">
-            <dl className="def"><dt>Product category</dt><dd>{selectedCategoryName}</dd></dl>
-            <dl className="def"><dt>Inspection service</dt><dd>{serviceLabel}</dd></dl>
-            <dl className="def"><dt>Garment template</dt><dd>{templateLabel}</dd></dl>
-            <dl className="def"><dt>Physical quantity</dt><dd>{totalItems} {totalItems===1?"item":"items"} ({filteredChecks.length} checks / item)</dd></dl>
+            {extraLines.length===0&&<>
+              <dl className="def"><dt>Product category</dt><dd>{selectedCategoryName}</dd></dl>
+              <dl className="def"><dt>Inspection service</dt><dd>{serviceLabel}</dd></dl>
+              <dl className="def"><dt>Inspection template</dt><dd>{templateLabel}</dd></dl>
+            </>}
+            <dl className="def"><dt>Physical quantity</dt><dd>{totalItems} {totalItems===1?"item":"items"}</dd></dl>
           </div>
+          {extraLines.length>0&&<ul className="draft-lines" aria-label="Inspection scopes">
+            {allLines.map((line,idx)=>{
+              const rangeCount=line.attributes.tolerances?.length??0;
+              return <li key={idx}>
+                <div>
+                  <strong>{line.attributes.name||line.title}</strong>
+                  <small>{line.title} · {line.quantity} {line.quantity===1?"item":"items"}</small>
+                </div>
+                <span className="small">{rangeCount?`${rangeCount} measurement ${rangeCount===1?"range":"ranges"}`:"Record measured values"}</span>
+              </li>;
+            })}
+          </ul>}
 
           <div className="sep"/>
           {hasValidQuote?<div className="card flat">
@@ -2052,7 +2081,7 @@ export function NewOrder({customerId}:{customerId:string}) {
               <div className="grid cols2">
                 <dl className="def"><dt>Order number</dt><dd className="mono">{draftOrder.public_no}</dd></dl>
                 <dl className="def"><dt>Confirmed service fee</dt><dd className="mono">{usd(serverQuote!.amount_cents)} {serverQuote!.currency}</dd></dl>
-                <dl className="def"><dt>Service &amp; template</dt><dd>{serviceLabel} · {templateLabel} ({totalItems} {totalItems===1?"item":"items"})</dd></dl>
+                <dl className="def"><dt>Inspection scope</dt><dd>{extraLines.length>0?`${allLines.length} service lines`:`${serviceLabel} · ${templateLabel}`} · {totalItems} {totalItems===1?"item":"items"}</dd></dl>
                 <dl className="def"><dt>Permanent receiving code</dt><dd><span className="mono">{receiving.data?.receiving_code??"Assigned in account"}</span></dd></dl>
               </div>
 
@@ -2114,9 +2143,10 @@ export function NewOrder({customerId}:{customerId:string}) {
           </div>
           <div className="sep"/>
           <div className="mini-kv">
-            <div><div className="k">Category</div><div className="v">{selectedCategoryName}</div></div>
-            <div><div className="k">Service</div><div className="v">{serviceLabel}</div></div>
-            <div><div className="k">Template</div><div className="v">{isApparelCategory?templateLabel.split(" (")[0]:"Standard"}</div></div>
+            {extraLines.length===0?<><div><div className="k">Category</div><div className="v">{selectedCategoryName}</div></div>
+              <div><div className="k">Service</div><div className="v">{serviceLabel}</div></div>
+              <div><div className="k">Template</div><div className="v">{isApparelCategory?templateLabel.split(" (")[0]:"Standard"}</div></div></>:
+              <div><div className="k">Services</div><div className="v">{allLines.length} service lines</div></div>}
             <div><div className="k">Quantity</div><div className="v">{manualQuoteMode?`${manualBatchQty} (Manual)`:`${totalItems} ${totalItems===1?"item":"items"}`}</div></div>
           </div>
           <div className="sep"/>
@@ -2137,7 +2167,7 @@ export function NewOrder({customerId}:{customerId:string}) {
             <button
               type="button"
               className="button sm"
-              disabled={Boolean(busyMessage)||!recoveryReady||draftLoadFailed||Boolean(conflict&&!reviewingConflict)||manualQuoteMode||!validQuantity||Boolean(submittedCharge)}
+              disabled={Boolean(busyMessage)||!recoveryReady||draftLoadFailed||Boolean(conflict&&!reviewingConflict)||manualQuoteMode||!currentLine||Boolean(submittedCharge)}
               onClick={()=>void saveDraftOnly(reviewingConflict)}
             >
               {draftOrder?"Update Saved Draft":"Save Draft"}

@@ -381,6 +381,88 @@ async function verifyBillingHistory({page,call,errors},other) {
   console.log("PASS independent billing and refund history, historical charge focus, and tenant isolation");
 }
 
+async function verifyMultiServiceScopes({page,call,errors},other) {
+  const {offers}=await call("/catalog");
+  const tops=offers.find(offer=>offer.service==="inspection"&&offer.content?.subcategory==="tops");
+  const bottoms=offers.find(offer=>offer.service==="inspection"&&offer.content?.subcategory==="bottoms");
+  assert(tops&&bottoms,"Both apparel templates are required in the test catalog.");
+  await page.goto("/orders/new");
+  await page.getByRole("radio",{name:/Apparel.*Available now/}).waitFor();
+  await nextStep(page);
+  await page.getByLabel("Inspection template").selectOption("tops");
+  await nextStep(page);
+  await page.getByLabel(/Product name/).fill("Fixture hoodie");
+  assert.equal(await page.getByRole("button",{name:"Save scope and add another service"}).count(),0);
+  await nextStep(page);
+  await ready(page,/Step 4/);
+  await page.getByRole("button",{name:"Set targets and tolerances"}).click();
+  const point=page.getByRole("spinbutton",{name:/Chest.* target/i}).first();
+  await point.fill("52.125");
+  const pointLabel=(await point.getAttribute("aria-label")).replace(/ target$/,"");
+  await page.getByRole("spinbutton",{name:pointLabel+" tolerance",exact:true}).fill("0.375");
+  await page.getByRole("button",{name:"Save scope and add another service"}).click();
+  await ready(page,/Step 1/);
+  const ref=new URL(page.url()).searchParams.get("draft");
+  const order=await call("/orders/by-number/"+ref);
+  const path="/orders/"+order.id;
+  const firstLine=(await call(path)).lines[0];
+  assert.equal(firstLine.template_version_id,tops.template_version_id);
+  assert.equal(firstLine.attributes.tolerances[0].min,51.75);
+  assert.equal(firstLine.attributes.tolerances[0].max,52.5);
+
+  const reopened=await page.context().newPage();
+  await reopened.goto("/orders/new?draft="+ref+"&step=3");
+  await ready(reopened,/Step 4/);
+  assert.equal(await reopened.getByRole("spinbutton",{name:pointLabel+" target",exact:true}).inputValue(),"52.125");
+  assert.equal(await reopened.getByRole("spinbutton",{name:pointLabel+" tolerance",exact:true}).inputValue(),"0.375");
+  await reopened.close();
+
+  await page.reload();
+  await ready(page,/Step 1/);
+  await nextStep(page);
+  await page.getByLabel("Inspection template").selectOption("leggings");
+  await nextStep(page);
+  await ready(page,/Step 3/);
+  assert.equal(await page.getByLabel(/Product name/).inputValue(),"");
+  assert.equal((await call(path)).lines.length,1);
+  await page.getByLabel(/Product name/).fill("Fixture leggings");
+  await nextStep(page);
+  await ready(page,/Step 4/);
+  assert.match(await page.locator("main").innerText(),/Inseam/);
+  assert.doesNotMatch(await page.locator("main").innerText(),/Underbust|Sleeve Length/);
+  await captureWizard(page,"second-service-scope",/Step 4/);
+  await nextStep(page);
+  await page.getByText("Official quote",{exact:true}).waitFor();
+  const scopes=page.getByRole("list",{name:"Inspection scopes"});
+  await scopes.getByText("Fixture hoodie",{exact:true}).waitFor();
+  await scopes.getByText("Fixture leggings",{exact:true}).waitFor();
+  assert.match(await scopes.innerText(),/1 measurement range/);
+  assert.match(await scopes.innerText(),/Record measured values/);
+  await captureWizard(page,"multi-service-review",/Step 5/);
+  await page.setViewportSize({width:375,height:1000});
+  const controls=page.locator(".wizard-controls");
+  assert.equal(await controls.evaluate(node=>getComputedStyle(node).position),"static");
+  await controls.getByRole("button",{name:"Continue to Payment Preview",exact:false}).scrollIntoViewIfNeeded();
+  assert(await controls.isVisible());
+  const saved=await call(path);
+  assert.equal(saved.lines.length,2);
+  const legLine=saved.lines.find(line=>line.attributes.name==="Fixture leggings");
+  assert.equal(legLine.template_version_id,bottoms.template_version_id);
+  assert.equal(legLine.attributes.tolerances,undefined);
+  assert.deepEqual(saved.lines.find(line=>line.offer_id===tops.offer_id).attributes.tolerances,firstLine.attributes.tolerances);
+  const quote=await call(path+"/quotes",{body:{revision:saved.revision},status:201});
+  assert.deepEqual(quote.line_snapshot.map(line=>line.template_version_id).sort(),[tops.template_version_id,bottoms.template_version_id].sort());
+  const expected=quote.line_snapshot.reduce((total,line)=>{
+    const offer=offers.find(row=>row.offer_id===line.offer_id);
+    return total+(offer.rules.package_cents??offer.rules.unit_cents*line.quantity);
+  },0);
+  assert.equal(quote.amount_cents,expected);
+  await other.call(path,{status:404});
+  assert.deepEqual(errors,[]);
+  assert(entries.every(entry=>entry.overflow===0));
+  console.log("PASS each service line keeps its own published template, measurement ranges and official quote");
+}
+
 async function verifyManualQuoteRenewal({page,call,errors},other) {
   const staff=await session("admin@qcw.test",true);
   const {offers}=await call("/catalog");
@@ -920,6 +1002,7 @@ try {
   else if(process.env.QCW_BROWSER_PARCELS_ONLY==="1") await verifyParcelPagination(customer,other);
   else if(process.env.QCW_BROWSER_PAYMENT_ACTIONS_ONLY==="1") await verifyInspectionPaymentActions(customer,other);
   else if(process.env.QCW_BROWSER_BILLING_ONLY==="1") await verifyBillingHistory(customer,other);
+  else if(process.env.QCW_BROWSER_MULTI_SCOPE_ONLY==="1") await verifyMultiServiceScopes(customer,other);
   else if(process.env.QCW_BROWSER_INTAKE_CLAIM_ONLY==="1") await verifyParcelOwnership(customer,other,process.env.QCW_BROWSER_BIND_OWNER==="1");
   else if(process.env.QCW_BROWSER_INCIDENT_ONLY==="1") await verifyIncidentDecision(customer,other);
   else if(process.env.QCW_BROWSER_SELLER_RETURN_ONLY==="1") await verifySellerReturn(customer,other);

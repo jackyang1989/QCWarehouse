@@ -29,6 +29,7 @@ export type DraftEditor = {
   attachmentId?:string;
   attachmentName?:string;
   extraLines:Row[];
+  addingServiceLine?:boolean;
 };
 
 type DraftWrite = {fingerprint:string;key:string};
