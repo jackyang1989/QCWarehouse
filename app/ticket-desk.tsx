@@ -39,13 +39,16 @@ function Conversation({events,staff=false}:{events:Row[];staff?:boolean}) {
       </div>}
   </li>)}</ol>;
 }
-export function ParcelOwnershipReviews({carriers,page}:{carriers:Row[];page:number}) {
+export function ParcelOwnershipReviews({carriers,carrierError,onReloadCarriers,page}:{
+  carriers?:Row[];carrierError:string;onReloadCarriers:()=>void;page:number;
+}) {
   const claims=useLoad("/me/intake-claims?page="+page);
   const [submitted,setSubmitted]=useState<Row>();
   const formSection=useRef<HTMLDetailsElement>(null);
   const href=(target:number)=>"/parcels?tab=attention"+(target>1?"&claim_page="+target:"");
   return <Panel title="Parcel ownership reviews">
-    <details className="card" ref={formSection}>
+    {carrierError?<><ErrorBlock error={carrierError}/><button type="button" onClick={onReloadCarriers}>Retry review carriers</button></>:
+      !carriers?<p role="status">Loading review carriers…</p>:<details className="card" ref={formSection}>
       <summary>Find a missing parcel</summary>
       <p className="muted">Enter the seller’s tracking number for the missing parcel and attach their shipment proof. Our team will verify ownership against the warehouse record.</p>
       <Form key={submitted?.public_no} label="Request ownership review" run={async fields=>{
@@ -58,7 +61,7 @@ export function ParcelOwnershipReviews({carriers,page}:{carriers:Row[];page:numb
         <Select name="carrier_code" label="Carrier" choices={carriers.map(carrier=>({id:carrier.code,label:carrier.labels.en}))}/>
         <Photo label="Seller shipment proof"/>
       </Form>
-    </details>
+    </details>}
     {submitted&&<p role="status">Review request {submitted.id?<Link href={"/support/cases/"+submitted.id}>{submitted.public_no}</Link>:submitted.public_no} is with support.</p>}
     {claims.error&&<><ErrorBlock error={claims.error}/><button className="button sm" onClick={claims.reload}>Retry reviews</button></>}
     {!claims.data&&!claims.error&&<p role="status">Loading ownership reviews…</p>}

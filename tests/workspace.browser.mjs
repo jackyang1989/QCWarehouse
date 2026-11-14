@@ -497,6 +497,185 @@ async function verifyMultiServiceScopes({page,call,errors},other) {
   console.log("PASS each service line keeps its own published template, measurement ranges and official quote");
 }
 
+async function verifySecondaryReads(customer,other) {
+  assert(process.env.QCW_BROWSER_FIXTURE_EMAIL?.endsWith("@qcw.test"));
+  const fixture=await session(process.env.QCW_BROWSER_FIXTURE_EMAIL,false,true);
+  const offer=(await customer.call("/catalog")).offers.find(row=>row.sku_code==="apparel-inspection-1");
+  assert(offer);
+  const draft=await customer.call("/orders",{status:201,body:{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,
+    quantity:1,items:[{sample_code:"S-"+randomUUID(),supplier_alias:"Fixture supplier"}]}]}});
+  const address=(await customer.call("/me/receiving-address")).warehouse_address;
+  const advice=await customer.call("/me/parcels",{status:201,body:{address_id:address.id,tracking_no:"ZTO"+randomUUID().slice(0,8).toUpperCase(),carrier_code:"zto"}});
+  const phoneAdvice=await customer.call("/me/parcels",{status:201,body:{address_id:address.id,tracking_no:"SF"+randomUUID().replaceAll("-","").slice(0,12).toUpperCase(),carrier_code:"sf"}});
+  const dbURL=new URL(process.env.QCW_BROWSER_DATABASE_URL);
+  assert.equal(dbURL.hostname,"127.0.0.1");
+  assert.match(dbURL.pathname,/^\/qcw_test-[a-z0-9-]+$/);
+  const {default:pg}=await import("pg");
+  const db=new pg.Client({connectionString:dbURL.href});
+  await db.connect();
+  try {
+    const arranged=await db.query("update tracking_records set sync_state='needs_verification' where advice_id=$1 and carrier_code='sf' and closed_at is null returning id",[phoneAdvice.id]);
+    assert.equal(arranged.rowCount,1);
+  } finally {await db.end();}
+  const phoneRule=(await customer.call("/carriers")).carriers.find(carrier=>carrier.code==="sf").phone_rule;
+  assert((await customer.call(`/me/parcels/${phoneAdvice.id}/tracking?locale=en`)).allowed_actions.includes("verify_tracking"));
+  await other.call("/orders/"+draft.id,{status:404});
+  await other.call("/me/parcels/"+advice.id+"/tracking",{status:404});
+  const quote=await customer.call(`/orders/${draft.id}/quotes`,{status:201,body:{revision:draft.revision}});
+  const submitted=await customer.call(`/orders/${draft.id}/submit`,{body:{revision:draft.revision,quote_id:quote.id,
+    terms_version_ids:(await customer.call("/public/terms")).terms.map(term=>term.id),
+    acknowledgements:{scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true}}});
+  const checkout=await customer.call(`/charges/${submitted.charge.charge_item_id}/checkout`,{body:{quote_revision:quote.revision}});
+  const published=(await fixture.call("/me/reports?latest=1")).rows[0];
+  assert(published);
+  const inventory=(await fixture.call("/me/inventory?filter=handling")).rows;
+  assert(inventory[0]);
+  const register=page=>page.getByText("Register incoming parcel",{exact:true}).click();
+  const refund=page=>page.getByText("After-sales, re-inspection & stage refund policy",{exact:true}).click();
+  const choose=page=>page.getByRole("checkbox",{name:`Select ${inventory[0].code} for handling`,exact:true}).check();
+  const golden=async page=>{
+    await page.getByRole("button",{name:"Step 1: Select Inspection",exact:true}).click();
+    await page.getByRole("radio",{name:/Golden Sample Matching/}).click();
+    await nextStep(page);
+  };
+  const payment=async page=>{
+    await page.getByRole("button",{name:"Step 1: Select Inspection",exact:true}).click();
+    await nextStep(page);
+    await nextStep(page);
+    await page.getByLabel(/Product name/).fill("Fixture receiving dependency");
+    await nextStep(page);
+    await nextStep(page);
+    await page.getByText(/Official quote · QW/).waitFor();
+    for(const input of await page.getByRole("checkbox").all()) await input.check();
+    await nextStep(page);
+    await ready(page,/Step 6/);
+  };
+  const cases=[
+    ["home-actions",customer,"/account","/actions","Loading actions…","Retry actions",null,
+      page=>page.getByRole("heading",{name:"Action Required",exact:true}).waitFor()],
+    ["order-address",customer,`/orders/${draft.public_no}/parcels`,"/me/receiving-address","Loading parcel registration…","Retry parcel registration",null,
+      page=>page.getByRole("button",{name:"Add inbound parcel",exact:true}).waitFor()],
+    ["order-carriers",customer,`/orders/${draft.public_no}/parcels`,"/carriers","Loading parcel registration…","Retry parcel registration",null,
+      page=>page.getByLabel("Carrier (if known)").getByRole("option",{name:/ZTO/}).waitFor({state:"attached"})],
+    ["registered-parcels",customer,`/orders/${draft.public_no}/parcels`,"/me/desk","Loading registered parcels…","Retry registered parcels",null,
+      page=>page.getByRole("heading",{name:"Link an already-registered parcel",exact:true}).waitFor()],
+    ["parcel-carriers",customer,"/parcels","/carriers","Loading carriers…","Retry carriers",register,
+      page=>page.getByRole("button",{name:"Add inbound parcel",exact:true}).waitFor()],
+    ["claim-carriers",customer,"/parcels?tab=attention","/carriers","Loading review carriers…","Retry review carriers",null,
+      async page=>{
+        await page.getByText("Find a missing parcel",{exact:true}).click();
+        await page.getByRole("button",{name:"Request ownership review",exact:true}).waitFor();
+      }],
+    ["tracking-verification",customer,`/parcels/${advice.id}`,`/me/parcels/${advice.id}/tracking-verification`,"Loading tracking verification…","Retry tracking verification",null,
+      page=>page.getByText("Correct tracking number or carrier before check-in",{exact:true}).waitFor()],
+    ["tracking-carriers",customer,`/parcels/${phoneAdvice.id}`,"/carriers","Loading carriers…","Retry carriers",null,
+      page=>page.getByText("Correct tracking number or carrier before check-in",{exact:true}).waitFor()],
+    ["handling-terms",fixture,"/items?filter=handling","/public/terms","Loading service terms…","Retry service terms",choose,
+      page=>page.getByLabel("Requested action").waitFor()],
+    ["refund-policy",fixture,`/orders/${published.order_number}`,`/orders/${published.order_id}/refund-preview`,"Loading refund policy…","Retry refund policy",refund,
+      page=>page.getByText(/Current stage:/).waitFor()],
+    ["golden-samples",fixture,"/orders/new","/me/reference-samples","Loading Golden Samples…","Retry Golden Samples",golden,
+      async page=>{
+        const selector=page.getByLabel("Active Golden Sample in warehouse vault");
+        assert.equal(await selector.isEnabled(),true);
+        assert((await selector.getByRole("option").count())>1);
+      }],
+    ["payment-receiving",customer,"/orders/new","/me/receiving-address","Loading receiving details…","Retry receiving details",payment,
+      async page=>{
+        await page.getByText((await customer.call("/me/receiving-address")).receiving_code,{exact:true}).waitFor();
+        assert.equal(await page.getByText("QCW-...",{exact:true}).count(),0);
+      }],
+    ["handling-destinations",fixture,`/orders/${published.order_number}/dispositions`,"/me/desk","Loading saved destinations…","Retry saved destinations",null,
+      page=>page.getByRole("heading",{name:"Instructions by item",exact:true}).waitFor()],
+    ["checkout-capabilities",customer,`/checkout/demo/${checkout.attempt_id}`,"/auth/providers","Loading checkout…","Retry checkout",null,
+      page=>page.getByRole("button",{name:"Confirm test payment",exact:true}).waitFor()],
+  ];
+  const evidence=[];
+  async function captureState(page,name,state) {
+    for(const width of widths) {
+      await page.setViewportSize({width,height:1000});
+      await page.evaluate(async()=>{
+        await document.fonts.ready;
+        window.scrollTo({top:0,behavior:"instant"});
+        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+      });
+      const overflow=await page.evaluate(()=>document.documentElement.scrollWidth-innerWidth);
+      assert.equal(overflow,0);
+      await screenshotPage(page,join(out,`secondary-${name}-${state}-${width}.png`),width);
+      entries.push({name:`secondary-${name}-${state}`,width,overflow});
+    }
+    await page.setViewportSize({width:1440,height:1000});
+  }
+  for(const [name,actor,url,read,loading,retry,prepare,verify] of process.env.QCW_BROWSER_DEPENDENCY_EMPTY_ONLY==="1"?[]:cases) {
+    const {page}=actor;
+    const message="Temporary dependency failure: "+name;
+    let mode="loading",started,release;
+    const pending=new Promise(resolve=>{started=resolve;});
+    const gate=new Promise(resolve=>{release=resolve;});
+    const match=url=>url.pathname==="/api/v1"+read;
+    const route=async route=>{
+      if(mode==="loading") {started();await gate;}
+      if(mode==="error") await route.fulfill({status:503,contentType:"application/json",body:JSON.stringify({error:{code:"SERVER_ERROR",message}})});
+      else await route.continue();
+    };
+    await page.route(match,route);
+    await page.goto(url,{waitUntil:"domcontentloaded"});
+    if(prepare)await prepare(page);
+    await pending;
+    await page.getByRole("status").getByText(loading,{exact:true}).waitFor();
+    if(name==="tracking-carriers") await page.getByRole("button",{name:"Verify carrier tracking",exact:true}).waitFor();
+    if(name==="golden-samples") {
+      assert.equal(await page.getByLabel("Active Golden Sample in warehouse vault").isDisabled(),true);
+      assert.equal(await page.getByText(/No active Golden Samples are currently sealed/).count(),0);
+    }
+    await captureState(page,name,"loading");
+    const loaded=page.waitForResponse(response=>match(new URL(response.url()))&&response.status()===200);
+    mode="normal";release();await loaded;await verify(page);
+    mode="error";
+    await page.reload({waitUntil:"domcontentloaded"});
+    if(prepare)await prepare(page);
+    await page.getByRole("alert").filter({hasText:message}).waitFor();
+    if(name==="tracking-carriers") await page.getByRole("button",{name:"Verify carrier tracking",exact:true}).waitFor();
+    if(name==="golden-samples") {
+      assert.equal(await page.getByText(/No active Golden Samples are currently sealed/).count(),0);
+      await nextStep(page);
+      await page.getByRole("alert").getByText("Reload your Golden Samples before continuing.",{exact:true}).waitFor();
+      await page.getByRole("heading",{name:/Step 2 · Configure Service/}).waitFor();
+    }
+    if(name==="claim-carriers") {
+      await page.getByRole("heading",{name:"Parcel ownership reviews",exact:true}).waitFor();
+      await page.getByText("You have no ownership review requests on this page.",{exact:true}).waitFor();
+    }
+    await captureState(page,name,"error");
+    if(name==="tracking-carriers") {
+      await page.getByLabel("Phone used on this shipping label, if required by the carrier").fill(phoneRule.format==="last4"?"1234":"13800000000");
+      const verified=page.waitForResponse(response=>new URL(response.url()).pathname===`/api/v1/me/parcels/${phoneAdvice.id}/tracking-verification`&&response.request().method()==="POST");
+      await page.getByRole("button",{name:"Verify carrier tracking",exact:true}).click();
+      assert.equal((await verified).status(),200);
+      assert(!(await customer.call(`/me/parcels/${phoneAdvice.id}/tracking?locale=en`)).allowed_actions.includes("verify_tracking"));
+    }
+    const recovered=page.waitForResponse(response=>match(new URL(response.url()))&&response.status()===200);
+    mode="normal";
+    await page.getByRole("button",{name:retry,exact:true}).click();
+    await recovered;
+    await page.getByRole("alert").filter({hasText:message}).waitFor({state:"hidden"});
+    await verify(page);
+    await page.unroute(match,route);
+    evidence.push({name,url,read,loading:true,error503:true,real_retry:true,widths});
+    await writeFile(join(out,"secondary-states.json"),JSON.stringify(evidence,null,2)+"\n");
+    console.log("PASS secondary loading, 503 and real retry "+name);
+  }
+  await fixture.page.route("**/api/v1/public/terms",route=>route.fulfill({status:200,contentType:"application/json",body:JSON.stringify({terms:[]})}));
+  await fixture.page.goto("/items?filter=handling");
+  await choose(fixture.page);
+  await fixture.page.getByText("Current service terms are unavailable. Handling instructions cannot be submitted yet.",{exact:true}).waitFor();
+  assert.equal(await fixture.page.getByRole("button",{name:/^Save handling instruction/}).count(),0);
+  await captureState(fixture.page,"handling-terms","unpublished");
+  console.log("PASS missing published terms blocks handling without an indefinite loading state");
+  assert.deepEqual([...customer.errors,...fixture.errors,...other.errors],[]);
+  await fixture.context.close();
+}
+
 async function verifyWorkspaceStates() {
   assert(process.env.QCW_BROWSER_FIXTURE_EMAIL?.endsWith("@qcw.test"));
   const fixture=await session(process.env.QCW_BROWSER_FIXTURE_EMAIL,false,true);
@@ -1265,6 +1444,7 @@ try {
   else if(process.env.QCW_BROWSER_MULTI_SCOPE_ONLY==="1") await verifyMultiServiceScopes(customer,other);
   else if(process.env.QCW_BROWSER_ACTION_PAGES_ONLY==="1") await verifyActionPages(customer,other);
   else if(process.env.QCW_BROWSER_STATES_ONLY==="1") await verifyWorkspaceStates();
+  else if(process.env.QCW_BROWSER_DEPENDENCIES_ONLY==="1") await verifySecondaryReads(customer,other);
   else if(process.env.QCW_BROWSER_INTAKE_CLAIM_ONLY==="1") await verifyParcelOwnership(customer,other,process.env.QCW_BROWSER_BIND_OWNER==="1");
   else if(process.env.QCW_BROWSER_INCIDENT_ONLY==="1") await verifyIncidentDecision(customer,other);
   else if(process.env.QCW_BROWSER_SELLER_RETURN_ONLY==="1") await verifySellerReturn(customer,other);

@@ -1155,6 +1155,10 @@ export function NewOrder({customerId}:{customerId:string}) {
       setWizardError("Choose an available template and online quantity, or submit a manual quote request.");
       return;
     }
+    if(targetStep>=2&&serviceKind==="reference_match"&&(refs.error||!refs.data)) {
+      setWizardError("Reload your Golden Samples before continuing.");
+      return;
+    }
     if(targetStep>=2&&serviceKind==="reference_match"&&!activeRefs.some((ref:Row)=>ref.reference_id===referenceId)) {
       setWizardError("Select an active Golden Sample before continuing.");
       return;
@@ -1465,14 +1469,17 @@ export function NewOrder({customerId}:{customerId:string}) {
             </label>}
             {serviceKind==="reference_match"&&<div className="field" style={{marginTop:12}}>
               <label>Active Golden Sample in warehouse vault
-                <select value={referenceId} onChange={e=>{setReferenceId(e.target.value);setServerQuote(undefined);}}>
+                <select value={referenceId} disabled={!refs.data||Boolean(refs.error)||Boolean(busyMessage)}
+                  onChange={e=>{setReferenceId(e.target.value);setServerQuote(undefined);}}>
                   <option value="">— Select an active Golden Sample —</option>
                   {activeRefs.map((r:Row)=><option key={r.reference_id} value={r.reference_id}>
                     {(r.code??r.item_id)} · Sealed until {stamp(r.expires_at)}
                   </option>)}
                 </select>
               </label>
-              {activeRefs.length===0&&<div className="line-note warning" style={{marginTop:8}}>
+              {refs.error&&<><ErrorBlock error={refs.error}/><button type="button" onClick={refs.reload}>Retry Golden Samples</button></>}
+              {!refs.data&&!refs.error&&<p role="status">Loading Golden Samples…</p>}
+              {refs.data&&!refs.error&&activeRefs.length===0&&<div className="line-note warning" style={{marginTop:8}}>
                 No active Golden Samples are currently sealed in your workspace. After completing a Product Inspection or Sample Comparison, you can convert any approved item into a Golden Sample from the <strong>Items</strong> page.
               </div>}
             </div>}
@@ -2107,15 +2114,17 @@ export function NewOrder({customerId}:{customerId:string}) {
                 <dl className="def"><dt>Order number</dt><dd className="mono">{draftOrder.public_no}</dd></dl>
                 <dl className="def"><dt>Confirmed service fee</dt><dd className="mono">{usd(serverQuote!.amount_cents)} {serverQuote!.currency}</dd></dl>
                 <dl className="def"><dt>Inspection scope</dt><dd>{extraLines.length>0?`${allLines.length} service lines`:`${serviceLabel} · ${templateLabel}`} · {totalItems} {totalItems===1?"item":"items"}</dd></dl>
-                <dl className="def"><dt>Permanent receiving code</dt><dd><span className="mono">{receiving.data?.receiving_code??"Assigned in account"}</span></dd></dl>
+                <dl className="def"><dt>Permanent receiving code</dt><dd><span className="mono">{receiving.data?.receiving_code??(receiving.error?"Unavailable":"Loading…")}</span></dd></dl>
               </div>
+              {receiving.error&&<><ErrorBlock error={receiving.error}/><button type="button" onClick={receiving.reload}>Retry receiving details</button></>}
+              {!receiving.data&&!receiving.error&&<p role="status">Loading receiving details…</p>}
 
               <div className="sep"/>
               <div className="card flat" style={{marginBottom:14}}>
                 <div className="label">WHAT HAPPENS IMMEDIATELY AFTER PAYMENT</div>
                 <ol className="small" style={{margin:"8px 0 0",paddingLeft:18,lineHeight:1.6}}>
                   <li>After payment is confirmed, your order will show <strong>Awaiting items</strong>.</li>
-                  <li><strong>Ship samples to our China warehouse:</strong> Provide your permanent receiving code (<span className="mono">{receiving.data?.receiving_code??"QCW-..."}</span>) and our warehouse address to your supplier.</li>
+                  <li><strong>Ship samples to our China warehouse:</strong> Provide the permanent receiving code and current warehouse address shown in <Link href="/account">your account</Link> to your supplier.</li>
                   <li>Add each seller’s tracking number in <strong>Parcels</strong>.</li>
                 </ol>
               </div>
@@ -2502,6 +2511,8 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
       <Tabs path={section?base+"/"+section:base} links={sectionLinks}/>
       {o.state==="on_hold"&&<div className="notice" role="status"><strong>This order is currently on hold</strong>{o.hold_reason?`: ${o.hold_reason}`:""}.{paymentState==="paid"?" Your payment is recorded and will be applied when the hold is lifted.":""}</div>}
       {section==="parcels"&&parcelLinkStates.includes(o.state)&&<>
+        {desk.error&&<><ErrorBlock error={desk.error}/><button type="button" onClick={desk.reload}>Retry registered parcels</button></>}
+        {!desk.data&&!desk.error&&<p role="status">Loading registered parcels…</p>}
         {unlinkedAdvices.length>0&&<Panel title="Link an already-registered parcel" subtitle="Registered a tracking number earlier? Link it to this order in one click.">
           <Form label="Link selected parcel to order" run={async f=>{
             await request(`/me/parcels/${text(f,"advice_id")}/link-order`,"POST",{order_id:o.id});
@@ -2514,8 +2525,10 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
           </Form>
         </Panel>}
         <Panel title="Register new seller tracking for this order">
-          {receiving.error||carriers.error?<ErrorBlock error={receiving.error||carriers.error}/>:!receiving.data?<p role="status">Loading the receiving address…</p>:
-            <InboundParcelForm address={receiving.data.warehouse_address} carriers={carriers.data?.carriers??[]} orderId={o.id}
+          {receiving.error||carriers.error?<><ErrorBlock error={receiving.error||carriers.error}/>
+            <button type="button" onClick={()=>{receiving.reload();carriers.reload();}}>Retry parcel registration</button></>:
+            !receiving.data||!carriers.data?<p role="status">Loading parcel registration…</p>:
+            <InboundParcelForm address={receiving.data.warehouse_address} carriers={carriers.data.carriers} orderId={o.id}
               pendingWaybills={o.unregistered_waybills} onSave={()=>{detail.reload();desk.reload();}}/>}
         </Panel>
       </>}
@@ -2693,6 +2706,8 @@ function OrderAfterSalesAndRefundPanel({orderId,orderState,onSaved}:{orderId:str
   const [ticketNo,setTicketNo]=useState<string>();
   const stage=preview.data?.stage;
   return <details className="card"><summary>After-sales, re-inspection &amp; stage refund policy</summary>
+    {preview.error&&<><ErrorBlock error={preview.error}/><button type="button" onClick={preview.reload}>Retry refund policy</button></>}
+    {!["draft","awaiting_payment"].includes(orderState)&&!preview.data&&!preview.error&&<p role="status">Loading refund policy…</p>}
     {stage&&<p className="muted small">
       Current stage: <strong>{label(stage.stage)}</strong> · Standard refund rate: <strong>{stage.refund_rate_pct}%</strong> · Paid: {usd(stage.paid_cents)} · Refunded: {usd(stage.already_refunded_cents)} · Standard refundable: <strong>{usd(stage.recommended_refund_cents)}</strong> ({stage.policy_summary})
     </p>}
@@ -2720,14 +2735,14 @@ async function goCheckout(id:string,revision:number,fallback="/account/billing")
   else location.assign(fallback);
 }
 export function DemoCheckout({id}:{id:string}) {
-  const {data,error}=useLoad("/auth/providers");
+  const {data,error,reload}=useLoad("/auth/providers");
   return <div className="narrow panel"><h1>Test checkout</h1>
     {data?.demo?<><p>Confirm this test payment.</p>
       <Action primary run={async()=>{
         const result=await request("/checkout/demo/"+id,"POST",{});
         location.assign(result.order_number&&result.scope_revision_id?inspectionScopePath(result.order_number,result.scope_revision_id):
           result.order_number?"/orders/"+result.order_number:"/account/billing");
-      }}>Confirm test payment</Action></>:error?<ErrorBlock error={error}/>:data?<Empty>Checkout is unavailable.</Empty>:<p role="status">Loading checkout…</p>}
+      }}>Confirm test payment</Action></>:error?<><ErrorBlock error={error}/><button type="button" onClick={reload}>Retry checkout</button></>:data?<Empty>Checkout is unavailable.</Empty>:<p role="status">Loading checkout…</p>}
   </div>;
 }
 export function ReportView({number,version}:{number:string;version?:number}) {
@@ -2921,7 +2936,13 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
       {data.sync_state==="unsupported"&&<p className="muted small" role="status">Automatic tracking is not supported for this carrier; warehouse check-in and handover updates will still appear here.</p>}
       {nextManualRefresh&&<p className="muted small" role="status">Carrier update requested. Tracking will refresh when the warehouse system receives a response.</p>}
       {manualRefresh&&nextQueryAt&&Date.parse(nextQueryAt)>Date.now()&&<p className="muted small">Next carrier update request available at {stamp(nextQueryAt)}.</p>}
-      {canVerify&&verification.data&&<Form label="Verify carrier tracking" run={async f=>{
+      {(canVerify||canCorrect)&&<>
+        {verification.error&&<><ErrorBlock error={verification.error}/><button type="button" onClick={verification.reload}>Retry tracking verification</button></>}
+        {!verification.data&&!verification.error&&<p role="status">Loading tracking verification…</p>}
+        {carriers.error&&<><ErrorBlock error={carriers.error}/><button type="button" onClick={carriers.reload}>Retry carriers</button></>}
+        {!carriers.data&&!carriers.error&&<p role="status">Loading carriers…</p>}
+      </>}
+      {canVerify&&verification.data&&!verification.error&&(verification.data.carrier_code||carriers.data&&!carriers.error)&&<Form label="Verify carrier tracking" run={async f=>{
         const phone=text(f,"phone");
         await request(verificationPath,"POST",{revision:verification.data?.revision,carrier_code:verification.data?.carrier_code??text(f,"carrier_code"),...(phone?{phone}:{})});
         verification.reload();reload();
@@ -2929,8 +2950,7 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
         {!verification.data.carrier_code&&<Select name="carrier_code" label="Carrier" choices={(carriers.data?.carriers??[]).map((c:Row)=>({id:c.code,label:c.labels.en}))}/>}
         <Field name="phone" label="Phone used on this shipping label, if required by the carrier" required={false} type="tel"/>
       </Form>}
-      {canCorrect&&verification.data&&<details className="top-gap"><summary>Correct tracking number or carrier before check-in</summary>
-        {carriers.error?<ErrorBlock error={carriers.error}/>:!carriers.data?<p role="status">Loading carriers…</p>:
+      {canCorrect&&verification.data&&!verification.error&&carriers.data&&!carriers.error&&<details className="top-gap"><summary>Correct tracking number or carrier before check-in</summary>
         <Form key={data.tracking_id} label="Save corrected tracking" run={async f=>{
           const phone=text(f,"phone");
           const corrected=await request(path+id+"/correct","POST",{
@@ -2951,7 +2971,7 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
           <Field name="tracking_no" label="Corrected tracking number" value={data.tracking_no}/>
           <Field name="reason" label="Reason for correction"/>
           {labelPhoneHint&&<Field key={selectedCarrier} name="phone" label={labelPhoneHint} type="tel"/>}
-        </Form>}
+        </Form>
         {correctedTracking&&<p className="notice ok" role="status">Tracking updated to <strong className="code">{correctedTracking}</strong>.</p>}
       </details>}
       <p className="muted small">Carrier data updated {stamp(data.last_success_at)}</p>
@@ -3138,6 +3158,8 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         <Link className="metric" href="/items"><span>Items Awaiting Instructions</span><strong>{data.summary.awaiting_instructions}</strong><small>{data.summary.in_custody} items in warehouse custody</small></Link>
         <Link className="metric" href="/account/billing"><span>Quotes Awaiting Approval</span><strong>{data.summary.pending_quotes}</strong><small>Inspection, shipping and storage quotes</small></Link>
       </div>
+      {homeActions.error&&<><ErrorBlock error={homeActions.error}/><button type="button" onClick={homeActions.reload}>Retry actions</button></>}
+      {!homeActions.data&&!homeActions.error&&<p role="status">Loading actions…</p>}
       {(homeActions.data?.rows?.length??0)>0&&<div className="order-next" role="status">
         <div><h2>Action Required</h2><ul className="workspace-actions-list">{homeActions.data!.rows.slice(0,3).map((action:Row)=>
           <li key={action.kind+action.id}><Link href={customerActionHref(action)}>{actionTitles[action.state]??"Review action"}</Link>
@@ -3217,8 +3239,10 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     {isParcels&&<><div className="page-head"><p className="eyebrow">Warehouse deliveries</p><h1>Parcels</h1><p className="muted">Register the seller’s tracking number, link parcels to orders, and click any tracking number to inspect live events.</p></div>
     <details className="card" open={Boolean(parcelOrder)||undefined}>
       <summary>Register incoming parcel</summary>
-      <InboundParcelForm address={addr} carriers={carriers.data?.carriers??[]} orders={linkableOrders} preferredOrder={parcelOrder}
-        onSave={()=>{if(parcelTab!=="incoming"||parcelPage>1)selectParcelTab("incoming");parcelList.reload();reload();}}/>
+      {carriers.error?<><ErrorBlock error={carriers.error}/><button type="button" onClick={carriers.reload}>Retry carriers</button></>:
+        !carriers.data?<p role="status">Loading carriers…</p>:
+        <InboundParcelForm address={addr} carriers={carriers.data.carriers} orders={linkableOrders} preferredOrder={parcelOrder}
+          onSave={()=>{if(parcelTab!=="incoming"||parcelPage>1)selectParcelTab("incoming");parcelList.reload();reload();}}/>}
     </details>
     <div className="actions workspace-filters" aria-label="Parcel filters">
       {parcelTabs.map(([key,title])=>
@@ -3274,7 +3298,8 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
       <span>Page {parcelPage}</span>
       {parcelList.data.has_more&&<Link className="button" href={parcelPageHref(parcelPage+1)}>Next page</Link>}
     </nav>}
-    {parcelTab==="attention"&&<ParcelOwnershipReviews carriers={carriers.data?.carriers??[]} page={claimPage}/>}
+    {parcelTab==="attention"&&<ParcelOwnershipReviews carriers={carriers.data?.carriers} carrierError={carriers.error}
+      onReloadCarriers={carriers.reload} page={claimPage}/>}
     </>}
     {isItems&&<><div className="page-head"><p className="eyebrow">Inventory &amp; handling</p><h1>Warehouse items</h1><p className="muted">Click any item code, tracking number or dispatch batch to inspect details, or submit batch handling instructions below.</p></div>
     <div className="metric-strip" aria-label="Items summary">
@@ -3830,8 +3855,9 @@ function ItemInstructionForm({items,orderId,storage=false,preselected=false,rece
   const needsDestination=!["retain","reserve_reference"].includes(currentAction);
   const termsId=terms.data?.terms.find((t:Row)=>t.kind==="terms")?.id;
   if(!items.length)return <Empty>No items are available for a new instruction.</Empty>;
-  if(terms.error)return <ErrorBlock error={terms.error}/>;
-  if(!termsId)return <p role="status">Waiting for the current service terms.</p>;
+  if(terms.error)return <><ErrorBlock error={terms.error}/><button type="button" onClick={terms.reload}>Retry service terms</button></>;
+  if(!terms.data)return <p role="status">Loading service terms…</p>;
+  if(!termsId)return <Empty>Current service terms are unavailable. Handling instructions cannot be submitted yet.</Empty>;
   const chosen=preselected?items:items.filter(row=>selectedIds.includes(row.item_id));
   return <>
     <Form key={formKey} label={(storage?"Request storage extension":"Save handling instruction")+(chosen.length>1?` (${chosen.length} items)`:"")} run={async f=>{
@@ -3951,6 +3977,8 @@ function OrderHandling({
   const awaiting=items.filter(item=>!item.handling_hold&&item.instruction?.awaiting_batch);
   const selection=selected.filter(id=>awaiting.some(item=>item.instruction.id===id));
   return <>
+    {desk.error&&<><ErrorBlock error={desk.error}/><button type="button" onClick={desk.reload}>Retry saved destinations</button></>}
+    {!desk.data&&!desk.error&&<p role="status">Loading saved destinations…</p>}
     <Panel title={storage?"Storage by item":"Instructions by item"}>
       <Table headers={["Item","Warehouse status","Storage through","Paid through","Active instruction"]} rows={items.map(item=>[
         onOpenItem?<CodeButton code={item.code} onClick={()=>onOpenItem({...item,order_no:order.public_no})}/>:<span className="code">{item.code}</span>,
