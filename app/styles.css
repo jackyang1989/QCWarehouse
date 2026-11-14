@@ -1095,6 +1095,10 @@ a.metric:hover { border-color: #88a7e0; text-decoration: none; transform: transl
 .wizard-content { min-width: 0; }
 .wizard-side { align-self: start; position: sticky; top: 88px; min-width: 0; }
 .wizard-summary-toggle.button { display: none; }
+.wizard-summary-lines { list-style: none; margin: 12px 0; padding: 0; max-height: 360px; overflow-y: auto; }
+.wizard-summary-lines li { padding: 8px 0; }
+.wizard-summary-lines li + li { border-top: 1px solid var(--line); }
+.wizard-summary-lines .mini-kv { margin-top: 8px; }
 .wizard-controls { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 12px 0 20px; }
 
 .steps {

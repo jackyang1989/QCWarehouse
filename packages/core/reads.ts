@@ -134,7 +134,7 @@ const currentOfferedManualQuote=`from manual_quote_requests m join orders o on o
     join inspection_quotes q on q.id=m.accepted_quote_id and q.order_id=o.id
     where o.org_id=$1 and ${eligibleManualQuoteOrderSql} and m.state='offered' and q.accepted_at is null and q.expires_at>now()`;
 
-export async function customerActions(db:DB,actor:Actor) {
+export async function customerActions(db:DB,actor:Actor,page?:number) {
   const org=organization(actor);
   const {rows}=await db.query(`select * from (
     select o.id,'order' kind,o.state,o.public_no reference,null::timestamptz due_at
@@ -213,8 +213,9 @@ export async function customerActions(db:DB,actor:Actor) {
         and (${itemHandlingHoldSql}) is null
         and w.storage_until is not null and w.storage_until<=now()+interval '3 days'
         and not exists(select 1 from disposition_requests d where d.item_id=w.id and d.state='requested')
-  ) actions order by due_at nulls last,kind,reference,id limit 200`,[org,actor.id,incidentAwaitingCustomer]);
-  return {rows};
+  ) actions order by due_at nulls last,kind,reference,id limit $4 offset $5`,
+  [org,actor.id,incidentAwaitingCustomer,page?21:200,page?(page-1)*20:0]);
+  return page?{rows:rows.slice(0,20),has_more:rows.length>20}:{rows};
 }
 const customerOrderSelect=`select o.id,o.public_no,o.state,o.revision,o.price_cents,o.created_at,
     greatest(o.updated_at,o.paid_at,o.samples_ready_at,o.report_published_at,o.closed_at,o.held_at,

@@ -7463,4 +7463,35 @@ test("billing uses business dates and resolves a historical charge within the ow
   await c.fetch(history+"&charge_page=0",undefined,"GET",422);
 });
 
+test("customer action pages reach every owned task beyond the legacy batch",async()=>{
+  const {c}=await signCustomer(),other=(await signCustomer()).c;
+  const {actor}=await c.fetch("/me");
+  const offer=(await c.fetch("/catalog")).offers.find(row=>row.sku_code==="apparel-inspection-1");
+  const order=await c.fetch("/orders",{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},"POST",201);
+  await pool.query(`with created as (
+    insert into orders(id,public_no,org_id,created_by,state,is_test)
+    select gen_random_uuid(),'QW-'||upper(substr(replace(gen_random_uuid()::text,'-',''),1,12)),$1,$2,'draft',true
+    from generate_series(1,205) returning id,org_id
+  ) insert into order_lines(order_id,org_id,offer_id,category_id,template_version_id,quantity,options,attributes,draft_items)
+    select c.id,c.org_id,l.offer_id,l.category_id,l.template_version_id,l.quantity,l.options,l.attributes,l.draft_items
+    from created c cross join order_lines l where l.order_id=$3`,[actor.org,actor.id,order.id]);
+  const expected=(await pool.query("select id from orders where org_id=$1 order by public_no,id",[actor.org])).rows.map(row=>row.id);
+  assert.equal(expected.length,206);
+  assert.equal((await c.fetch("/actions")).rows.length,200);
+  const actual:string[]=[];
+  for(let page=1;page<=11;page++) {
+    const batch=await c.fetch("/actions?page="+page);
+    assert.equal(batch.rows.length,page===11?6:20);
+    assert.equal(batch.has_more,page<11);
+    actual.push(...batch.rows.map(row=>row.id));
+  }
+  assert.deepEqual(actual,expected);
+  assert.equal(new Set(actual).size,206);
+  assert.deepEqual(await other.fetch("/actions?page=11"),{rows:[],has_more:false});
+  await c.fetch("/actions?page=0",undefined,"GET",422);
+  await c.fetch("/actions?page=10001",undefined,"GET",422);
+  const staff=await staffLogin("receiving");
+  await staff.fetch("/actions?page=1",undefined,"GET",403);
+});
+
 test("all core operations have a validated success response",assertCoreCoverage);

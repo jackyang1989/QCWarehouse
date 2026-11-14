@@ -12,6 +12,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { draftRecoveryKey, readDraftRecovery, removeDraftRecovery, writeDraftRecovery, type DraftEditor, type DraftRecovery } from "./draft-recovery";
 import { conditionMatches } from "../packages/core/template-conditions";
+import { sumMeasurements } from "../packages/core/measurement-decimals";
 import { billingChargePath, billingQuotePath, customerDestination, inspectionScopePath, legalPages, orderSections, type OrderSection, servicePages } from "../packages/core/portal-routes";
 import { Action, checked, CodeButton, Empty, ErrorBlock, Field, Form, MediaLightbox, ModalDrawer, Panel, Photo, request, RequestError, Select, useWorkspaceStamp, Table, Tabs, Tag, text, useLoad, usd, type Row } from "./ui";
 
@@ -486,7 +487,7 @@ const quoteTimeoutMs=15000;
 
 export function NewOrder({customerId}:{customerId:string}) {
   const stamp=useWorkspaceStamp();
-  const {data,error}=useLoad("/catalog");
+  const {data,error,reload:reloadCatalog}=useLoad("/catalog");
   const refs=useLoad("/me/reference-samples");
   const receiving=useLoad("/me/receiving-address");
   const terms=useLoad("/public/terms");
@@ -599,6 +600,50 @@ export function NewOrder({customerId}:{customerId:string}) {
     setAddingServiceLine(editor.addingServiceLine??false);
   }
 
+  function restoreServiceLine(line:Row) {
+    const offer=offers.find(row=>row.offer_id===line.offer_id);
+    setCategoryKey(offer?.category_slug??line.category_id);
+    setSelectedOfferId(line.offer_id);
+    setServiceKind(offer?.service??line.service??"inspection");
+    setTemplateVariant(offer?templateVariantFor(offer):"basic");
+    setQty(Number(line.quantity));
+    const attrs=line.attributes??{};
+    setItemName(String(attrs.name??""));
+    setSupplierRef(String(attrs.supplier_ref??attrs.supplier_alias??""));
+    setBaseSku(String(attrs.sample_code_prefix??"ITEM"));
+    setBaseTrackingNo(String(attrs.tracking_no??""));
+    setBaseSize(String(attrs.size_label??""));
+    setBaseColor(String(attrs.color_declared??""));
+    setProductLink(String(attrs.product_url??""));
+    setAttachmentId(attrs.attachment_ids?.[0]);
+    setAttachmentName(attrs.attachment_ids?.[0]?"Saved reference photo":undefined);
+    setSizeMismatchConfirmed(line.options?.size_mismatch_confirmed===true);
+    setReferenceId(String(line.options?.reference_id??""));
+    const restored:Record<string,{target:string;plusMinus:string}>={};
+    for(const t of Array.isArray(attrs.tolerances)?attrs.tolerances:[]) {
+      const min=Number(t.min),max=Number(t.max),code=String(t.point_code??"");
+      if(code&&Number.isFinite(min)&&Number.isFinite(max)) {
+        restored[code]={target:String(sumMeasurements(min,max,2)),plusMinus:String(sumMeasurements(max,-min,2))};
+      }
+    }
+    setPointTolerances(restored);
+    setToleranceMode(Object.keys(restored).length?"custom":"record_only");
+    const items=line.items??line.draft_items??[];
+    setItemRows(items.map((item:Row,index:number)=>({
+      sku:item.sample_code===`${attrs.sample_code_prefix??"ITEM"}-${String(index+1).padStart(2,"0")}`?undefined:item.sample_code,
+      size:item.size_label===attrs.size_label?undefined:item.size_label,
+      color:item.color_declared===attrs.color_declared?undefined:item.color_declared,
+      supplier:item.supplier_alias===(attrs.supplier_ref??attrs.supplier_alias)?undefined:item.supplier_alias,
+      tracking_no:item.tracking_no===attrs.tracking_no?undefined:item.tracking_no,
+    })));
+    setItemPage(0);
+    setShowFullChecklist(false);
+    setManualQuoteMode(false);
+    setAddingServiceLine(false);
+    setServerQuote(undefined);
+    return Boolean(offer);
+  }
+
   useEffect(()=>{
     if(!data) return;
     let cancelled=false;
@@ -657,7 +702,7 @@ export function NewOrder({customerId}:{customerId:string}) {
             draftWrite.current=local.write;
             restoreEditor(local.editor);
             serverEditor.current=false;
-            setSavedNotice("Recovered unsaved edits from this tab.");
+            setSavedNotice("Restored this tab’s draft.");
             return;
           }
           if(local&&!ord.manual_quote) setConflict(local);
@@ -676,65 +721,17 @@ export function NewOrder({customerId}:{customerId:string}) {
               items:Array.isArray(l.draft_items)?l.draft_items:[],
             }));
             setExtraLines(prevLines);
-            const matchedOffer=offers.find(x=>x.offer_id===primary.offer_id);
-            if(matchedOffer) {
-              const matchedCat=wizardCategories.find(c=>resolveCategoryId(c.key)===matchedOffer.category_id);
-              if(matchedCat) setCategoryKey(matchedCat.key);
-              setSelectedOfferId(matchedOffer.offer_id);
-              setServiceKind(matchedOffer.service);
-              setTemplateVariant(templateVariantFor(matchedOffer));
-            }
-            if(primary.quantity) setQty(Number(primary.quantity));
-            if(!matchedOffer) {
+            const available=restoreServiceLine(primary);
+            if(!available) {
               setWizardError("This saved service is no longer available. Select a current service before editing this draft.");
-              setCategoryKey(primary.category_id);
-              setSelectedOfferId(primary.offer_id);
             }
             if(ord.manual_quote) {
               setManualQuoteMode(true);
               setManualBatchQty(Number(primary.quantity));
               setManualQuoteSubmitted({orderNo:ord.public_no,requestState:ord.manual_quote.state,qty:Number(primary.quantity)});
             }
-            const attrs=primary.attributes??{};
-            setBaseSku(String(attrs.sample_code_prefix??"ITEM"));
-            setBaseTrackingNo(String(attrs.tracking_no??""));
-            if(attrs.attachment_ids?.[0]) {
-              setAttachmentId(String(attrs.attachment_ids[0]));
-              setAttachmentName("Saved reference photo");
-            }
-            setSizeMismatchConfirmed(primary.options?.size_mismatch_confirmed===true);
             const savedStep=params.get("step");
-            setStep(!matchedOffer?0:ord.manual_quote?1:savedStep&&/^[0-4]$/.test(savedStep)?Number(savedStep):2);
-            if(attrs.name) setItemName(String(attrs.name));
-            if(attrs.supplier_ref) setSupplierRef(String(attrs.supplier_ref));
-            if(attrs.product_url) setProductLink(String(attrs.product_url));
-            if(attrs.size_label) setBaseSize(String(attrs.size_label));
-            if(attrs.color_declared) setBaseColor(String(attrs.color_declared));
-            if(Array.isArray(attrs.tolerances)&&attrs.tolerances.length>0) {
-              setToleranceMode("custom");
-              const restored:Record<string,{target:string;plusMinus:string}>={};
-              for(const t of attrs.tolerances as Row[]) {
-                const code=String(t.point_code??"");
-                const min=Number(t.min);
-                const max=Number(t.max);
-                if(code&&Number.isFinite(min)&&Number.isFinite(max)) {
-                  const mid=String(Number(((min+max)/2).toFixed(3)));
-                  const pm=String(Number(((max-min)/2).toFixed(3)));
-                  restored[code]={target:mid,plusMinus:pm};
-                }
-              }
-              setPointTolerances(restored);
-            }
-            if(primary.options?.reference_id) setReferenceId(String(primary.options.reference_id));
-            if(Array.isArray(primary.draft_items)&&primary.draft_items.length>0) {
-              setItemRows(primary.draft_items.map((it:Row,idx:number)=>({
-                sku:it.sample_code===`${attrs.sample_code_prefix??"ITEM"}-${String(idx+1).padStart(2,"0")}`?undefined:it.sample_code,
-                size:it.size_label===attrs.size_label?undefined:it.size_label,
-                color:it.color_declared===attrs.color_declared?undefined:it.color_declared,
-                supplier:it.supplier_alias===attrs.supplier_ref?undefined:it.supplier_alias,
-                tracking_no:it.tracking_no===attrs.tracking_no?undefined:it.tracking_no,
-              })));
-            }
+            setStep(!available?0:ord.manual_quote?1:savedStep&&/^[0-4]$/.test(savedStep)?Number(savedStep):2);
           }
         } catch(err) {
           if(cancelled) return;
@@ -822,10 +819,12 @@ export function NewOrder({customerId}:{customerId:string}) {
       const target=Number(entry.target);
       const pm=Number(entry.plusMinus);
       if(entry.target.trim()&&entry.plusMinus.trim()&&Number.isFinite(target)&&target>0&&Number.isFinite(pm)&&pm>=0&&pm<=target) {
+        const min=sumMeasurements(target,-pm),max=sumMeasurements(target,pm);
+        if(!Number.isFinite(min)||!Number.isFinite(max)) continue;
         rules.push({
           point_code:code,
-          min:Number(Math.max(0,target-pm).toFixed(2)),
-          max:Number((target+pm).toFixed(2)),
+          min,
+          max,
           unit:String(chk.unit??"cm"),
         });
       }
@@ -841,18 +840,18 @@ export function NewOrder({customerId}:{customerId:string}) {
     const items=Array.from({length:effectiveQty},(_,idx)=>{
       const custom=itemRows[idx];
       const rowSku=custom?.sku?.trim()||`${baseSku||"SKU"}-${String(idx+1).padStart(2,"0")}`;
-      const rowSize=custom?.size?.trim()||baseSize.trim();
-      const rowColor=custom?.color?.trim()||baseColor.trim();
-      const rowSupplier=custom?.supplier?.trim()||supplierRef.trim();
-      const rowTracking=custom?.tracking_no?.trim()||baseTrackingNo.trim();
+      const rowSize=(custom?.size??baseSize).trim();
+      const rowColor=(custom?.color??baseColor).trim();
+      const rowSupplier=(custom?.supplier??supplierRef).trim();
+      const rowTracking=(custom?.tracking_no??baseTrackingNo).trim();
       return {
         position:idx+1,
         sample_code:rowSku.slice(0,40),
         ...(itemName.trim()?{name:itemName.trim().slice(0,120)}:{}),
-        ...(rowSize?{size_label:rowSize}:{}),
-        ...(rowColor?{color_declared:rowColor}:{}),
-        ...(rowSupplier?{supplier_alias:rowSupplier}:{}),
-        ...(rowTracking?{tracking_no:rowTracking}:{}),
+        ...(rowSize||custom?.size!==undefined?{size_label:rowSize}:{}),
+        ...(rowColor||custom?.color!==undefined?{color_declared:rowColor}:{}),
+        ...(rowSupplier||custom?.supplier!==undefined?{supplier_alias:rowSupplier}:{}),
+        ...(rowTracking||custom?.tracking_no!==undefined?{tracking_no:rowTracking}:{}),
         ...(activeGarmentType?{garment_type:activeGarmentType}:{}),
         ...(attachmentId?{attachment_ids:[attachmentId]}:{}),
       };
@@ -901,7 +900,10 @@ export function NewOrder({customerId}:{customerId:string}) {
     }
     if(conflict&&!reviewingConflict||submittedCharge||manualQuoteSubmitted) return;
     if(editorContent===originalEditor.current) {
-      if(!draftWrite.current) removeDraftRecovery(recoveryKey);
+      if(!draftWrite.current) {
+        if(draftOrder) writeDraftRecovery(recoveryKey,{revision:draftOrder.revision,editor,write:null});
+        else removeDraftRecovery(recoveryKey);
+      }
       return;
     }
     writeDraftRecovery(recoveryKey,{
@@ -1008,8 +1010,10 @@ export function NewOrder({customerId}:{customerId:string}) {
     quoteWrite.current=null;
     setDraftOrder(updated);
     originalEditor.current=editorContent;
-    removeDraftRecovery(key);
-    setRecoveryKey(draftRecoveryKey(customerId,updated.public_no));
+    const savedKey=draftRecoveryKey(customerId,updated.public_no);
+    writeDraftRecovery(savedKey,{revision:updated.revision,editor,write:null});
+    if(key!==savedKey) removeDraftRecovery(key);
+    setRecoveryKey(savedKey);
     setConflict(null);
     setReviewingConflict(false);
     syncDraftUrl(updated.public_no,step);
@@ -1067,6 +1071,21 @@ export function NewOrder({customerId}:{customerId:string}) {
       setServerQuote(undefined);
       setStep(0);
       syncDraftUrl(saved.public_no,0);
+    });
+  }
+
+  function editServiceLine(index:number) {
+    return runWizard("Saving draft…",async()=>{
+      if(!currentLine) throw new Error("Finish the current service line before editing another.");
+      const selected=extraLines[index];
+      if(!selected) return;
+      const saved=await persistDraft();
+      setExtraLines([...extraLines.filter((_,i)=>i!==index),currentLine]);
+      const available=restoreServiceLine(selected);
+      const targetStep=available?2:0;
+      setStep(targetStep);
+      syncDraftUrl(saved.public_no,targetStep);
+      if(!available) throw new Error("This saved service is unavailable. Select a current service to continue.");
     });
   }
 
@@ -1262,7 +1281,7 @@ export function NewOrder({customerId}:{customerId:string}) {
       </div>
     </div>
 
-    {error&&<ErrorBlock error={error}/>}
+    {error&&<><ErrorBlock error={error}/><button type="button" onClick={reloadCatalog}>Retry services</button></>}
     {!data&&!error&&<p role="status">Loading available inspection services…</p>}
     {data&&!offers.length&&<Empty>No inspection services are available for online booking. <Link href="/support">Contact support</Link>.</Empty>}
     {wizardError&&<ErrorBlock error={wizardError}/>}
@@ -1285,7 +1304,7 @@ export function NewOrder({customerId}:{customerId:string}) {
     {savedNotice&&!wizardError&&<div className="notice ok" role="status">{savedNotice}</div>}
     {busyMessage&&<div className="notice" role="status">{busyMessage}</div>}
 
-    <div className="wizard-shell">
+    {data&&!error&&offers.length>0&&<div className="wizard-shell">
       <div className="wizard-content" ref={stepPanel} aria-busy={Boolean(busyMessage)}>
         <div className="steps" role="navigation" aria-label="Inspection setup steps">
           {stepLabels.map((name,idx)=><button
@@ -1972,9 +1991,12 @@ export function NewOrder({customerId}:{customerId:string}) {
                 <strong>{line.attributes.name||line.title}</strong>
                 <small>{line.title} · {line.quantity} {line.quantity===1?"item":"items"}</small>
               </div>
+              <div className="actions"><button type="button" className="button sm" disabled={Boolean(busyMessage)}
+                aria-label={`Edit ${line.attributes.name||line.title}`}
+                onClick={()=>void editServiceLine(idx)}>Edit</button>
               <button type="button" className="button sm" disabled={Boolean(busyMessage)}
                 aria-label={`Remove ${line.attributes.name||line.title}`}
-                onClick={()=>{setExtraLines(xs=>xs.filter((_,i)=>i!==idx));setServerQuote(undefined);}}>Remove</button>
+                onClick={()=>{setExtraLines(xs=>xs.filter((_,i)=>i!==idx));setServerQuote(undefined);}}>Remove</button></div>
             </li>)}
           </ul>}
           <div className="actions">
@@ -2004,7 +2026,10 @@ export function NewOrder({customerId}:{customerId:string}) {
                   <strong>{line.attributes.name||line.title}</strong>
                   <small>{line.title} · {line.quantity} {line.quantity===1?"item":"items"}</small>
                 </div>
-                <span className="small">{rangeCount?`${rangeCount} measurement ${rangeCount===1?"range":"ranges"}`:"Record measured values"}</span>
+                <div className="cell-stack"><span className="small">{rangeCount?`${rangeCount} measurement ${rangeCount===1?"range":"ranges"}`:"Record measured values"}</span>
+                  {idx<extraLines.length&&<button type="button" className="button sm" disabled={Boolean(busyMessage)}
+                    aria-label={`Edit ${line.attributes.name||line.title}`} onClick={()=>void editServiceLine(idx)}>Edit</button>}
+                </div>
               </li>;
             })}
           </ul>}
@@ -2149,6 +2174,22 @@ export function NewOrder({customerId}:{customerId:string}) {
               <div><div className="k">Services</div><div className="v">{allLines.length} service lines</div></div>}
             <div><div className="k">Quantity</div><div className="v">{manualQuoteMode?`${manualBatchQty} (Manual)`:`${totalItems} ${totalItems===1?"item":"items"}`}</div></div>
           </div>
+          {extraLines.length>0&&<ul className="wizard-summary-lines" aria-label="Service line summaries" tabIndex={0}>
+            {allLines.map((line,index)=>{
+              const offer=offers.find(row=>row.offer_id===line.offer_id);
+              const category=offers.find(row=>row.category_id===line.category_id)?.category?.en??"Saved category";
+              const service=wizardServiceCards.find(row=>row.service===offer?.service)?.title??"Inspection service";
+              const template=offer?.category_slug==="apparel"
+                ?apparelTemplateOptions.find(row=>row.variant===templateVariantFor(offer))?.label
+                :offer?.title.en;
+              return <li key={index}><strong>{line.attributes.name||line.title}</strong><div className="mini-kv">
+                <div><div className="k">Category</div><div className="v">{category}</div></div>
+                <div><div className="k">Service</div><div className="v">{service}</div></div>
+                <div><div className="k">Template</div><div className="v">{template??"Saved checklist"}</div></div>
+                <div><div className="k">Quantity</div><div className="v">{line.quantity} {line.quantity===1?"item":"items"}</div></div>
+              </div></li>;
+            })}
+          </ul>}
           <div className="sep"/>
           <div className="display-quote">
             <div className="label">{hasValidQuote?"OFFICIAL QUOTE":step>=4?"QUOTE STATUS":"CATALOG ESTIMATE"}</div>
@@ -2188,7 +2229,7 @@ export function NewOrder({customerId}:{customerId:string}) {
         </section>
 
       </aside>
-    </div>
+    </div>}
   </>;
 }
 type CustomerTrackingTarget={kind:"parcels"|"shipments";id:string;code?:string};
@@ -2454,7 +2495,8 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
       {o&&<Tag>{label(o.state)}</Tag>}
     </div>
   </div>
-    {(lookup.error||detail.error)&&<ErrorBlock error={lookup.error||detail.error}/>}
+    {(lookup.error||detail.error)&&<><ErrorBlock error={lookup.error||detail.error}/>
+      <button type="button" onClick={()=>{lookup.reload();detail.reload();}}>Retry order</button></>}
     {!o&&!lookup.error&&!detail.error&&<p role="status">Loading inspection order…</p>}
     {o&&<>
       <Tabs path={section?base+"/"+section:base} links={sectionLinks}/>
@@ -2518,7 +2560,7 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
         {o.sla_due_at&&["queued","inspecting","qa_review"].includes(o.state)&&<p>Estimated report by {stamp(o.sla_due_at)}.</p>}
       </Panel>}
       {(section==="payment"||!section&&o.state==="awaiting_payment")&&<Panel title="Inspection payment">
-        {payment.error?<ErrorBlock error={payment.error}/>:!payment.data?<p role="status">Loading the current charge…</p>:<>
+        {payment.error?<><ErrorBlock error={payment.error}/><button type="button" onClick={payment.reload}>Retry payment status</button></>:!payment.data?<p role="status">Loading the current charge…</p>:<>
           {payment.data.charge&&<p><strong>{usd(payment.data.charge.amount_cents)}</strong> · Quote {payment.data.charge.quote_revision}</p>}
           {(paymentState==="open"||paymentState==="reconciliation")&&!checkoutNotice?.expired&&<Action primary run={()=>continuePayment(payment.data!.charge.id,payment.data!.charge.quote_revision)}>
             {paymentState==="reconciliation"||manualRenewal?"Check previous payment status":"Resume payment"}</Action>}
@@ -2706,7 +2748,8 @@ export function ReportView({number,version}:{number:string;version?:number}) {
       <p className="eyebrow report-eyebrow">INSPECTION / EVIDENCE RECORD</p><h1 className="order-number">{report?.snapshot.report_no??"Inspection report"}</h1>
       {report&&<p className="muted">Version {report.version} · Published {stamp(report.published_at)}</p>}
     </div>
-    {(l.error||r.error)&&<ErrorBlock error={l.error||r.error}/>}
+    {(l.error||r.error)&&<><ErrorBlock error={l.error||r.error}/>
+      <button type="button" onClick={()=>{l.reload();r.reload();}}>Retry report</button></>}
     {!report&&!l.error&&!r.error&&<p role="status">Loading report evidence…</p>}
     {report&&<>
       {report.state==="superseded"&&<div className="notice">This is a historical report. <Link href={reportPath}>View the latest published version</Link>.</div>}
@@ -2849,7 +2892,7 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
   const manualRefresh=data?.allowed_actions.includes("refresh_tracking");
   const outerCondition=receipt?.outer_condition&&({intact:"Intact",crushed:"Crushed",torn:"Torn",wet:"Wet"} as Record<string,string>)[receipt.outer_condition];
   useEffect(()=>{const timer=setInterval(reload,60000);return ()=>clearInterval(timer);},[reload]);
-  return <>{!embedded&&<div className="page-head"><p className="eyebrow">Warehouse / Tracking</p><h1>Tracking details</h1><p className="muted">Follow carrier events and the warehouse’s own handling status.</p></div>}{error&&<ErrorBlock error={error}/>}
+  return <>{!embedded&&<div className="page-head"><p className="eyebrow">Warehouse / Tracking</p><h1>Tracking details</h1><p className="muted">Follow carrier events and the warehouse’s own handling status.</p></div>}{error&&<><ErrorBlock error={error}/><button type="button" onClick={reload}>Retry tracking</button></>}
     {!data&&!error&&<p role="status">Loading carrier tracking…</p>}
     {data&&<Panel title={data.carrier??"Carrier pending"}><p className="code">{data.tracking_no}</p>
       <div className="actions"><Tag>{label(data.transport_state)}</Tag><Tag>{label(data.sync_state)}</Tag>
@@ -3056,8 +3099,8 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     if(/^(case|quote|charge|item)-[a-zA-Z0-9-]{1,64}$/.test(id)||id==="billing-charges"||id==="billing-refunds")
       document.getElementById(id)?.scrollIntoView({block:"start"});
   },[data,path]);
-  if(error)return <ErrorBlock error={error}/>;
-  if(!data)return <p>Loading your account…</p>;
+  if(error)return <><ErrorBlock error={error}/><button type="button" onClick={reload}>Retry workspace</button></>;
+  if(!data)return <p role="status">Loading your account…</p>;
   const addr=data.profile.warehouse_address;
   const isHome=path==="/account",isSecurity=path==="/account/security",isParcels=path==="/parcels",isOrders=path==="/orders",isHelp=path==="/support";
   const orders:Row[]=data.orders;
@@ -3146,7 +3189,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         <button type="submit" className="button">Apply filters</button>
         {orderParams.size>0&&<Link href="/orders">Clear filters</Link>}
       </form>}
-      {isOrders&&orderList.error&&<ErrorBlock error={orderList.error}/>}
+      {isOrders&&orderList.error&&<><ErrorBlock error={orderList.error}/><button type="button" onClick={orderList.reload}>Retry orders</button></>}
       {isOrders&&!orderList.data&&!orderList.error&&<p role="status">Loading orders…</p>}
       {visibleOrders.length?<Table headers={isHome?["Order","Service","Inspection status","Next action"]:["Order","Service & items","Inspection status","Payment","Report","Updated","Next action"]} rows={visibleOrders.map(o=>{
         const nextAction=orderNextAction(o);
@@ -3503,6 +3546,9 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
   const activeIdentities:Row[]=info?.identities??[];
   const emails:Row[]=info?.emails??[];
   const primaryEmail=emails.find(e=>e.is_primary)?.original_email??"—";
+  if(identities.error||sessions.error) return <><h1>Sign-in methods &amp; security</h1>
+    <ErrorBlock error={identities.error||sessions.error}/><button type="button" onClick={refreshAll}>Retry security</button></>;
+  if(!info||!sessions.data) return <><h1>Sign-in methods &amp; security</h1><p role="status">Loading account security…</p></>;
   return <>
     <div className="page-head row">
       <div><Link href="/account">← Account overview</Link><p className="eyebrow">CLIENT WORKSPACE / SECURITY</p>
@@ -3511,7 +3557,6 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
       </div>
       {info?.reauthenticated?<Tag>Reauthenticated</Tag>:<Tag>Standard session</Tag>}
     </div>
-    {(identities.error||sessions.error)&&<ErrorBlock error={identities.error||sessions.error}/>}
     {info?.status==="restricted"&&<div className="notice" role="alert"><strong>Account restricted:</strong> New orders, payments, and outbound instructions are temporarily paused while your existing orders and support cases remain accessible.</div>}
     <ProfilePreferences/>
     <Panel title="Recent verification for sensitive changes">
@@ -3695,7 +3740,8 @@ function customerActionHref(row:Row) {
 
 export function CustomerActions() {
   const stamp=useWorkspaceStamp();
-  const {data,error,reload}=useLoad("/actions");
+  const page=Number(useSearchParams().get("page")??1);
+  const {data,error,reload}=useLoad("/actions?page="+page);
   return <>
     <div className="page-head row"><div><p className="eyebrow">CLIENT WORKSPACE / ACTIONS</p><h1>Action required</h1>
       <p className="muted">Continue work that needs your input. Quotes with deadlines are shown first.</p></div>
@@ -3705,7 +3751,13 @@ export function CustomerActions() {
     {data&&!error&&<Panel title="Your next actions"><Table headers={["Action","Reference","Due",""]} rows={data.rows.map((row:Row)=>{
       const href=customerActionHref(row);
       return [actionTitles[row.state]??"Review action",row.reference?<span className="code">{row.reference}</span>:"—",stamp(row.due_at),<Link href={href}>Open</Link>];
-    })} empty="You’re all caught up. New actions will appear here when an order, parcel, quote or case needs your input."/></Panel>}
+    })} empty={page>1?"No more actions on this page.":"You’re all caught up. New actions will appear here when an order, parcel, quote or case needs your input."}/>
+      {(page>1||data.has_more)&&<nav className="actions" aria-label="Action pages">
+        {page>1&&<Link className="button" href={page===2?"/actions":"/actions?page="+(page-1)}>Previous page</Link>}
+        <span>Page {page}</span>
+        {data.has_more&&<Link className="button" href={"/actions?page="+(page+1)}>Next page</Link>}
+      </nav>}
+    </Panel>}
   </>;
 }
 
@@ -3952,7 +4004,7 @@ export function OrderFulfillment({order,id,kind}:{order?:string;id:string;kind:"
     <div className="page-head"><Link href={order?"/orders/"+order+"/dispositions":"/parcels?tab=outgoing"}>{order?"← Order item instructions":"← Outgoing parcels"}</Link>
       <p className="eyebrow report-eyebrow">CLIENT WORKSPACE / FULFILLMENT</p>
       <h1>{kind==="quotes"?"Fulfillment quote":"Shipment details"}</h1>{order&&<p className="code">{order}</p>}</div>
-    {error&&<ErrorBlock error={error}/>}
+    {error&&<><ErrorBlock error={error}/><button type="button" onClick={()=>{lookup.reload();record.reload();}}>Retry details</button></>}
     {!data&&!error&&<p role="status">Loading the order record…</p>}
     {data&&kind==="quotes"&&<FulfillmentQuote quote={data} onUpdate={record.reload}/>}
     {data&&kind==="shipments"&&<>

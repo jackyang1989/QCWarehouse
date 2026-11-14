@@ -392,14 +392,19 @@ async function verifyMultiServiceScopes({page,call,errors},other) {
   await page.getByLabel("Inspection template").selectOption("tops");
   await nextStep(page);
   await page.getByLabel(/Product name/).fill("Fixture hoodie");
+  await page.getByLabel(/Default supplier/).fill("Fixture supplier");
+  await page.getByLabel(/Default color/).fill("Black");
+  await page.getByLabel(/Default size/).fill("M");
+  await page.getByLabel(/Default domestic waybill/).fill("SF-FIXTURE-DEFAULT");
+  for(const field of ["supplier","color","size","waybill"]) await page.getByLabel("Item 2 "+field,{exact:true}).fill("");
   assert.equal(await page.getByRole("button",{name:"Save scope and add another service"}).count(),0);
   await nextStep(page);
   await ready(page,/Step 4/);
   await page.getByRole("button",{name:"Set targets and tolerances"}).click();
   const point=page.getByRole("spinbutton",{name:/Chest.* target/i}).first();
-  await point.fill("52.125");
+  await point.fill("52.123");
   const pointLabel=(await point.getAttribute("aria-label")).replace(/ target$/,"");
-  await page.getByRole("spinbutton",{name:pointLabel+" tolerance",exact:true}).fill("0.375");
+  await page.getByRole("spinbutton",{name:pointLabel+" tolerance",exact:true}).fill("0.004");
   await page.getByRole("button",{name:"Save scope and add another service"}).click();
   await ready(page,/Step 1/);
   const ref=new URL(page.url()).searchParams.get("draft");
@@ -407,14 +412,15 @@ async function verifyMultiServiceScopes({page,call,errors},other) {
   const path="/orders/"+order.id;
   const firstLine=(await call(path)).lines[0];
   assert.equal(firstLine.template_version_id,tops.template_version_id);
-  assert.equal(firstLine.attributes.tolerances[0].min,51.75);
-  assert.equal(firstLine.attributes.tolerances[0].max,52.5);
+  assert.equal(firstLine.attributes.tolerances[0].min,52.119);
+  assert.equal(firstLine.attributes.tolerances[0].max,52.127);
+  for(const field of ["supplier_alias","color_declared","size_label","tracking_no"]) assert.equal(firstLine.draft_items[1][field],"");
 
   const reopened=await page.context().newPage();
   await reopened.goto("/orders/new?draft="+ref+"&step=3");
   await ready(reopened,/Step 4/);
-  assert.equal(await reopened.getByRole("spinbutton",{name:pointLabel+" target",exact:true}).inputValue(),"52.125");
-  assert.equal(await reopened.getByRole("spinbutton",{name:pointLabel+" tolerance",exact:true}).inputValue(),"0.375");
+  assert.equal(await reopened.getByRole("spinbutton",{name:pointLabel+" target",exact:true}).inputValue(),"52.123");
+  assert.equal(await reopened.getByRole("spinbutton",{name:pointLabel+" tolerance",exact:true}).inputValue(),"0.004");
   await reopened.close();
 
   await page.reload();
@@ -438,6 +444,11 @@ async function verifyMultiServiceScopes({page,call,errors},other) {
   await scopes.getByText("Fixture leggings",{exact:true}).waitFor();
   assert.match(await scopes.innerText(),/1 measurement range/);
   assert.match(await scopes.innerText(),/Record measured values/);
+  const summary=page.getByRole("list",{name:"Service line summaries"});
+  assert.equal(await summary.getByText("Category",{exact:true}).count(),2);
+  assert.equal(await summary.getByText("Service",{exact:true}).count(),2);
+  await summary.getByText("Tops & Knitwear",{exact:true}).waitFor();
+  await summary.getByText("Bottoms & Leggings",{exact:true}).waitFor();
   await captureWizard(page,"multi-service-review",/Step 5/);
   await page.setViewportSize({width:375,height:1000});
   const controls=page.locator(".wizard-controls");
@@ -457,10 +468,191 @@ async function verifyMultiServiceScopes({page,call,errors},other) {
     return total+(offer.rules.package_cents??offer.rules.unit_cents*line.quantity);
   },0);
   assert.equal(quote.amount_cents,expected);
+  await page.setViewportSize({width:1440,height:1000});
+  await scopes.getByRole("button",{name:"Edit Fixture hoodie",exact:true}).click();
+  await ready(page,/Step 3/);
+  assert.equal(await page.getByLabel(/Product name/).inputValue(),"Fixture hoodie");
+  assert.equal(await page.getByLabel("Item 1 waybill",{exact:true}).inputValue(),"SF-FIXTURE-DEFAULT");
+  for(const field of ["supplier","color","size","waybill"]) assert.equal(await page.getByLabel("Item 2 "+field,{exact:true}).inputValue(),"");
+  await page.getByLabel(/Product name/).fill("Updated fixture hoodie");
+  await nextStep(page);
+  await ready(page,/Step 4/);
+  assert.equal(await page.getByRole("spinbutton",{name:pointLabel+" target",exact:true}).inputValue(),"52.123");
+  await page.reload();
+  await ready(page,/Step 4/);
+  assert.equal(await page.getByRole("spinbutton",{name:pointLabel+" tolerance",exact:true}).inputValue(),"0.004");
+  await nextStep(page);
+  await page.getByText("Official quote",{exact:true}).waitFor();
+  await page.getByRole("list",{name:"Inspection scopes"}).getByText("Updated fixture hoodie",{exact:true}).waitFor();
+  const revised=await call(path);
+  assert.equal(revised.lines.length,2);
+  assert(revised.lines.some(line=>line.attributes.name==="Fixture leggings"));
+  assert(revised.lines.some(line=>line.attributes.name==="Updated fixture hoodie"));
+  assert.deepEqual(revised.lines.find(line=>line.attributes.name==="Updated fixture hoodie").attributes.tolerances,firstLine.attributes.tolerances);
   await other.call(path,{status:404});
   assert.deepEqual(errors,[]);
   assert(entries.every(entry=>entry.overflow===0));
   console.log("PASS each service line keeps its own published template, measurement ranges and official quote");
+}
+
+async function verifyWorkspaceStates() {
+  assert(process.env.QCW_BROWSER_FIXTURE_EMAIL?.endsWith("@qcw.test"));
+  const fixture=await session(process.env.QCW_BROWSER_FIXTURE_EMAIL,false,true);
+  const {page,call}=fixture;
+  const desk=await call("/me/desk");
+  const published=(await call("/me/reports?latest=1")).rows[0];
+  assert(published);
+  const order=await call("/orders/"+published.order_id);
+  const orderPath="/orders/"+order.id;
+  const view="/orders/"+order.public_no;
+  const cases=[
+    ["account","/account","/me/desk","Retry workspace"],
+    ["new-inspection","/orders/new","/catalog","Retry services"],
+    ["orders","/orders","/me/orders","Retry orders"],
+    ["actions","/actions","/actions","Refresh actions"],
+    ["reports","/reports","/me/reports","Try again"],
+    ["parcels","/parcels","/me/parcels","Retry parcels"],
+    ["items","/items","/me/inventory","Retry inventory"],
+    ["billing","/account/billing","/me/desk","Retry workspace"],
+    ["notifications","/account/notifications","/me/notifications","Refresh"],
+    ["support","/support","/me/cases","Retry"],
+    ["account-security","/account/security","/me/identities","Retry security"],
+    ["order",view,orderPath,"Retry order"],
+    ["order-payment",view+"/payment",orderPath+"/payment","Retry payment status"],
+    ["order-parcels",view+"/parcels",orderPath,"Retry order"],
+    ["order-items",view+"/dispositions",orderPath,"Retry order"],
+    ["order-storage",view+"/storage",orderPath,"Retry order"],
+    ["report",view+"/report/versions/"+published.version,orderPath+"/report/versions/"+published.version,"Retry report"],
+  ];
+  assert(desk.advices[0]&&desk.shipments[0]&&desk.tickets[0]&&order.quotes[0]&&order.shipments[0]&&order.cases[0]);
+  cases.push(
+    ["parcel","/parcels/"+desk.advices[0].id,"/me/parcels/"+desk.advices[0].id+"/tracking","Retry tracking"],
+    ["shipment","/shipments/"+desk.shipments[0].id,"/shipments/"+desk.shipments[0].id,"Retry details"],
+    ["support-case","/support/cases/"+desk.tickets[0].id,"/cases/"+desk.tickets[0].id,"Retry"],
+    ["order-case",view+"/cases/"+order.cases[0].id,"/cases/"+order.cases[0].id,"Retry"],
+    ["order-quote",view+"/quotes/"+order.quotes[0].id,orderPath+"/quotes/"+order.quotes[0].id,"Retry details"],
+    ["order-shipment",view+"/shipments/"+order.shipments[0].id,orderPath+"/shipments/"+order.shipments[0].id,"Retry details"],
+  );
+  const evidence=[];
+  const message="The service is temporarily unavailable. Please retry.";
+  async function captureState(name,state) {
+    for(const width of [1440,375]) {
+      await page.setViewportSize({width,height:1000});
+      await page.evaluate(async()=>{
+        await document.fonts.ready;
+        window.scrollTo({top:0,behavior:"instant"});
+        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+      });
+      const overflow=await page.evaluate(()=>document.documentElement.scrollWidth-innerWidth);
+      assert(overflow<=1,name+" "+state+" horizontal overflow");
+      await screenshotPage(page,join(out,`state-${name}-${state}-${width}.png`),width);
+      entries.push({name:`state-${name}-${state}`,width,overflow});
+    }
+  }
+  for(const [name,url,read,retry] of cases) {
+    let mode="loading";
+    let release,started;
+    const gate=new Promise(resolve=>{release=resolve;});
+    const pending=new Promise(resolve=>{started=resolve;});
+    const match=url=>url.pathname==="/api/v1"+read;
+    const route=async route=>{
+      if(mode==="loading") {started();await gate;}
+      if(mode==="error") await route.fulfill({status:503,contentType:"application/json",body:JSON.stringify({error:{code:"SERVER_ERROR",message}})});
+      else await route.continue();
+    };
+    await page.route(match,route);
+    await page.goto(url,{waitUntil:"domcontentloaded"});
+    await pending;
+    await page.getByText(/^Loading(?:\s.+)?…$/).filter({visible:true}).first().waitFor();
+    if(name==="new-inspection") assert.equal(await page.locator(".wizard-shell").count(),0);
+    await captureState(name,"loading");
+    const loaded=page.waitForResponse(response=>new URL(response.url()).pathname==="/api/v1"+read&&response.status()===200);
+    mode="normal";
+    release();
+    await loaded;
+    await page.getByText(/^Loading(?:\s.+)?…$/).filter({visible:true}).first().waitFor({state:"hidden"});
+    mode="error";
+    await page.reload({waitUntil:"domcontentloaded"});
+    await page.getByRole("alert").filter({hasText:message}).waitFor();
+    if(name==="new-inspection") assert.equal(await page.locator(".wizard-shell").count(),0);
+    await captureState(name,"error");
+    const recovered=page.waitForResponse(response=>new URL(response.url()).pathname==="/api/v1"+read&&response.status()===200);
+    mode="normal";
+    await page.getByRole("button",{name:retry,exact:true}).click();
+    await recovered;
+    await page.getByRole("alert").filter({hasText:message}).waitFor({state:"hidden"});
+    await page.getByText(/^Loading(?:\s.+)?…$/).filter({visible:true}).first().waitFor({state:"hidden"});
+    assert.equal(await page.locator("main h1").count(),1,name+" main heading");
+    const unnamed=await page.locator("main input:visible,main select:visible,main textarea:visible").evaluateAll(fields=>fields
+      .filter(field=>!field.labels?.length&&!field.getAttribute("aria-label")&&!field.getAttribute("aria-labelledby")&&!field.title)
+      .map(field=>field.outerHTML.slice(0,120)));
+    assert.deepEqual(unnamed,[],name+" unlabeled controls");
+    const buttons=await page.locator("button:visible").evaluateAll(buttons=>buttons.filter(button=>
+      !button.textContent.trim()&&!button.getAttribute("aria-label")&&!button.getAttribute("aria-labelledby")&&!button.title).length);
+    assert.equal(buttons,0,name+" unnamed buttons");
+    const menu=page.getByRole("button",{name:"Open workspace menu",exact:true});
+    await menu.focus();
+    await page.keyboard.press("Enter");
+    await page.getByRole("button",{name:"Close workspace menu",exact:true}).first().waitFor();
+    await page.keyboard.press("Tab");
+    assert(await page.evaluate(()=>Boolean(document.activeElement.closest("#workspace-sidebar-nav"))),name+" drawer keyboard navigation");
+    await page.keyboard.press("Escape");
+    await menu.waitFor();
+    assert(await menu.evaluate(button=>button===document.activeElement),name+" drawer focus return");
+    await page.unroute(match,route);
+    evidence.push({name,url,read,loading:true,error503:true,retry:true,labeled_controls:true,keyboard_menu:true,widths:[1440,375]});
+    await writeFile(join(out,"states.json"),JSON.stringify(evidence,null,2)+"\n");
+    console.log("PASS loading, 503, real retry, labels and keyboard "+name);
+  }
+  assert.deepEqual(fixture.errors,[]);
+  await fixture.context.close();
+}
+
+async function verifyActionPages({page,call,errors},other) {
+  const dbURL=new URL(process.env.QCW_BROWSER_DATABASE_URL);
+  assert.equal(dbURL.hostname,"127.0.0.1");
+  assert.match(dbURL.pathname,/^\/qcw_test-[a-z0-9-]+$/);
+  const {default:pg}=await import("pg");
+  const db=new pg.Client({connectionString:dbURL.href});
+  await db.connect();
+  try {
+    const {actor}=await call("/me");
+    const {offers}=await call("/catalog");
+    const offer=offers.find(row=>row.sku_code==="apparel-inspection-1");
+    const order=await call("/orders",{body:{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},status:201});
+    await db.query(`with created as (
+      insert into orders(id,public_no,org_id,created_by,state,is_test)
+      select gen_random_uuid(),'QW-'||upper(substr(replace(gen_random_uuid()::text,'-',''),1,12)),$1,$2,'draft',true
+      from generate_series(1,205) returning id,org_id
+    ) insert into order_lines(order_id,org_id,offer_id,category_id,template_version_id,quantity,options,attributes,draft_items)
+      select c.id,c.org_id,l.offer_id,l.category_id,l.template_version_id,l.quantity,l.options,l.attributes,l.draft_items
+      from created c cross join order_lines l where l.order_id=$3`,[actor.org,actor.id,order.id]);
+    const expected=(await db.query("select public_no from orders where org_id=$1 order by public_no,id",[actor.org])).rows.map(row=>row.public_no);
+    assert.equal(expected.length,206);
+    const actual=[];
+    await page.goto("/actions");
+    const pages=page.getByRole("navigation",{name:"Action pages"});
+    for(let index=1;index<=11;index++) {
+      await pages.getByText("Page "+index,{exact:true}).waitFor();
+      const links=page.getByRole("link",{name:"Open",exact:true});
+      assert.equal(await links.count(),index===11?6:20);
+      for(const link of await links.all()) actual.push(new URL(await link.getAttribute("href"),"http://localhost").searchParams.get("draft"));
+      if(index<11) await pages.getByRole("link",{name:"Next page",exact:true}).click();
+    }
+    assert.deepEqual(actual,expected);
+    assert.equal(await pages.getByRole("link",{name:"Next page",exact:true}).count(),0);
+    await captureWizard(page,"actions-history-last-page","Action required");
+    await page.goBack();
+    await pages.getByText("Page 10",{exact:true}).waitFor();
+    await page.goForward();
+    await pages.getByText("Page 11",{exact:true}).waitFor();
+    assert.deepEqual(await other.call("/actions?page=11"),{rows:[],has_more:false});
+    await page.getByRole("link",{name:"Open",exact:true}).last().click();
+    await page.getByRole("link",{name:"View order "+expected.at(-1),exact:true}).waitFor();
+    assert.deepEqual(errors,[]);
+    assert(entries.every(entry=>entry.overflow===0));
+    console.log("PASS all 206 owned tasks, 11 action pages, browser history and actionable links");
+  } finally {await db.end();}
 }
 
 async function verifyManualQuoteRenewal({page,call,errors},other) {
@@ -1003,6 +1195,8 @@ try {
   else if(process.env.QCW_BROWSER_PAYMENT_ACTIONS_ONLY==="1") await verifyInspectionPaymentActions(customer,other);
   else if(process.env.QCW_BROWSER_BILLING_ONLY==="1") await verifyBillingHistory(customer,other);
   else if(process.env.QCW_BROWSER_MULTI_SCOPE_ONLY==="1") await verifyMultiServiceScopes(customer,other);
+  else if(process.env.QCW_BROWSER_ACTION_PAGES_ONLY==="1") await verifyActionPages(customer,other);
+  else if(process.env.QCW_BROWSER_STATES_ONLY==="1") await verifyWorkspaceStates();
   else if(process.env.QCW_BROWSER_INTAKE_CLAIM_ONLY==="1") await verifyParcelOwnership(customer,other,process.env.QCW_BROWSER_BIND_OWNER==="1");
   else if(process.env.QCW_BROWSER_INCIDENT_ONLY==="1") await verifyIncidentDecision(customer,other);
   else if(process.env.QCW_BROWSER_SELLER_RETURN_ONLY==="1") await verifySellerReturn(customer,other);

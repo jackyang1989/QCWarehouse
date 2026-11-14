@@ -397,7 +397,10 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   const readNotice=path.match(/^\/me\/notifications\/([a-f0-9-]{36})\/read$/i);
   if(method==="POST"&&readNotice)return extraWrite(req,path,actor,z.object({}).strict(),
     (db,a)=>markNotificationRead(db,a,idSchema.parse(readNotice[1])));
-  if(method==="GET" && path==="/actions") return json(await transaction(db=>customerActions(db,actorRequired(actor))));
+  if(method==="GET" && path==="/actions") {
+    const page=z.coerce.number().int().min(1).max(10000).optional().parse(url.searchParams.get("page")??undefined);
+    return json(await transaction(db=>customerActions(db,actorRequired(actor),page)));
+  }
   const caseRoute=path.match(/^\/cases\/([a-f0-9-]{36})(\/messages)?$/i);
   if(caseRoute&&method==="GET"&&!caseRoute[2]) {
     const customer=actorRequired(actor);organization(customer);
