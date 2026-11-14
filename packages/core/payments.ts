@@ -7,16 +7,22 @@ import { activatePaidOrder, readyOrder } from "./orders";
 import { applyScopePositionsAndAdditions, computeOrderRefundStage, type ScopeAddition } from "./operations";
 import { inspectionScopePath } from "./portal-routes";
 const refundApprovalMfaMinutes=15;
+const stripeCheckoutMinSeconds=30*60;
+const stripeCheckoutMaxSeconds=24*3600;
+const stripeCheckoutClockMarginSeconds=30;
+const checkoutExpirySchedulingLock="checkout-expiry-scheduling";
 
 export const inspectionPaymentForOrder=`left join lateral (
   select c.id,c.amount_cents,q.revision quote_revision,q.expires_at,case
     when c.applied_payment_id is not null or c.free_authorization is not null then 'paid'
     when o.state<>'awaiting_payment' then 'not_due'
+    when exists(select 1 from payments p where p.charge_item_id=c.id and p.state in ('succeeded','partially_refunded','refunded')) then 'processing'
     when exists(select 1 from payments p where p.charge_item_id=c.id and p.state='processing') then 'processing'
     when q.expires_at>now() then 'open'
     when exists(select 1 from payments p where p.charge_item_id=c.id and p.state='requires_payment' and p.provider_ref is not null)
       then 'reconciliation'
-    else 'expired' end state
+    else 'expired' end state,
+    exists(select 1 from payments p where p.charge_item_id=c.id and p.state in ('succeeded','partially_refunded','refunded')) reconciliation_required
   from inspection_quotes q join charge_items c on c.inspection_quote_id=q.id and c.org_id=o.org_id and c.voided_at is null
   where q.order_id=o.id and q.id::text=o.submission_snapshot->>'quote_id' and c.scope_revision_id is null
 ) inspection_payment on true`;
@@ -26,6 +32,7 @@ export async function orderPayment(db:DB,actor:Actor,id:string) {
     where o.id=$1 and o.org_id=$2`,[id,organization(actor)]);
   if(!row.id||row.state==="not_due") return {state:"not_due",charge:null};
   const charge={id:row.id,amount_cents:row.amount_cents,quote_revision:row.quote_revision,expires_at:row.expires_at};
+  if(row.reconciliation_required&&row.state!=="paid") return {state:"processing",charge,reconciliation_required:true};
   if(row.state==="reconciliation") return {state:"open",charge,previous_checkout_expired:true};
   return {state:row.state,charge};
 }
@@ -35,6 +42,51 @@ function stripe() {
   guard(key && mode && webhook,"STRIPE_UNAVAILABLE","Stripe checkout and webhook are not configured.",503);
   guard(mode!=="live" || liveEnabled,"LIVE_PAYMENTS_DISABLED","Live payments have not been enabled.",503);
   return new Stripe(key,{timeout:10000,maxNetworkRetries:1});
+}
+export async function scheduleCheckoutExpirations() {
+  const settings=stripeSettings();
+  if(isDemo()||!settings.key||!settings.webhook||!settings.mode||(settings.mode==="live"&&!settings.liveEnabled))return false;
+  return transaction(async db=>{
+    await lock(db,checkoutExpirySchedulingLock);
+    const result=await db.query(`insert into outbox_events(type,payload,next_attempt_at)
+      select 'payment.checkout_expire',jsonb_build_object('payment_id',p.id),coalesce(i.expires_at,d.expires_at,s.expires_at)
+      from payments p join charge_items c on c.id=p.charge_item_id
+      left join inspection_quotes i on i.id=c.inspection_quote_id left join dispatch_quote_versions d on d.id=c.dispatch_quote_id
+      left join storage_quotes s on s.id=c.storage_quote_id
+      where p.provider='stripe' and p.state='requires_payment' and p.provider_ref like $1
+        and not exists(select 1 from outbox_events j where j.type='payment.checkout_expire' and j.payload->>'payment_id'=p.id::text)
+      order by coalesce(i.expires_at,d.expires_at,s.expires_at),p.id limit 100`,[`cs_${settings.mode}_%`]);
+    return Boolean(result.rowCount);
+  });
+}
+export async function expireCheckout(db:DB,pid:string) {
+  const owner=await one(db,`select c.org_id from payments p join charge_items c on c.id=p.charge_item_id where p.id=$1`,[pid]);
+  await lock(db,"org:"+owner.org_id);
+  const p=await one(db,`select p.*,c.org_id,c.amount_cents expected_amount,c.voided_at,
+      coalesce(i.expires_at,d.expires_at,s.expires_at)<=clock_timestamp() quote_expired
+    from payments p join charge_items c on c.id=p.charge_item_id
+    left join inspection_quotes i on i.id=c.inspection_quote_id left join dispatch_quote_versions d on d.id=c.dispatch_quote_id
+    left join storage_quotes s on s.id=c.storage_quote_id where p.id=$1 for update of p`,[pid]);
+  if(p.state!=="requires_payment")return;
+  const {mode}=stripeSettings();
+  guard(!isDemo()&&p.provider==="stripe"&&mode&&p.provider_ref?.startsWith(`cs_${mode}_`),
+    "CHECKOUT_MODE_MISMATCH","The checkout does not match the configured payment environment.",503);
+  const sessionExpiry=Number(p.provider_data?.requested_checkout_expires_at);
+  guard(p.voided_at||p.quote_expired||(Number.isFinite(sessionExpiry)&&sessionExpiry*1000<=Date.now()),
+    "CHECKOUT_NOT_DUE","This checkout has not reached its expiration deadline.",409);
+  const api=stripe(),session=await api.checkout.sessions.retrieve(p.provider_ref);
+  guard(session.id===p.provider_ref&&session.metadata?.payment_id===pid&&session.metadata.charge_item_id===p.charge_item_id&&
+    session.metadata.org_id===p.org_id&&session.amount_total===p.expected_amount&&session.currency==="usd"&&session.livemode===(mode==="live"),
+    "PAYMENT_MISMATCH","The provider session could not be matched to the charge.",409);
+  if(session.status==="complete") {
+    await db.query("update payments set state='processing',updated_at=now() where id=$1",[pid]);
+    await audit(db,null,"checkout_completed_pending_webhook","payments",pid);
+    return;
+  }
+  const closed=session.status==="expired"?session:await api.checkout.sessions.expire(session.id,{}, {idempotencyKey:"checkout-expire:"+pid});
+  guard(closed.id===session.id&&closed.status==="expired","CHECKOUT_EXPIRY_UNCONFIRMED","Checkout expiration was not confirmed.",503);
+  await db.query("update payments set state='canceled',updated_at=now() where id=$1",[pid]);
+  await audit(db,null,"checkout_expired","payments",pid,{provider_ref:session.id});
 }
 export async function chargeReceipt(actor:Actor,id:string) {
   const org=organization(actor);
@@ -71,6 +123,7 @@ export async function chargeReceipt(actor:Actor,id:string) {
 async function verifyCharge(db:DB,id:string,org:string,rev:number) {
   await lock(db,"org:"+org);
   const fee=await one(db,`select c.*,coalesce(i.revision,d.revision,s.revision) quote_revision,
+    coalesce(i.expires_at,d.expires_at,s.expires_at) quote_expires_at,
     coalesce(i.expires_at,d.expires_at,s.expires_at)>clock_timestamp() quote_valid,o.is_test,o.public_no order_number
     from charge_items c left join inspection_quotes i on i.id=c.inspection_quote_id
     left join orders o on o.id=i.order_id left join dispatch_quote_versions d on d.id=c.dispatch_quote_id
@@ -95,75 +148,119 @@ function requireCurrentQuote(valid:boolean) {
   guard(valid,"QUOTE_EXPIRED","Request a new quote before continuing.");
 }
 
-async function prepareCheckout(db:DB,actor:Actor,id:string,rev:number):Promise<CheckoutResult> {
-  await requireCustomerActive(db,actor);
-  const org=organization(actor);
-  const fee=await verifyCharge(db,id,org,rev);
+type PreparedCheckout={state:"requires_payment";attempt_id:string;reference:string|null;
+  params:Stripe.Checkout.SessionCreateParams|null;fee:Record<string,any>;demo:boolean;mode:string|null};
+async function prepareCheckout(db:DB,fee:Record<string,any>,org:string):Promise<PreparedCheckout|Exclude<CheckoutResult,{state:"requires_payment"}>> {
+  const id=fee.id;
   if(fee.applied_payment_id || fee.free_authorization) return {state:"paid",charge_item_id:id};
+  if((await db.query("select 1 from payments where charge_item_id=$1 and state in ('succeeded','partially_refunded','refunded') limit 1",[id])).rowCount)
+    return {state:"processing",charge_item_id:id};
   const open=await attempt(db,id,fee.amount_cents);
   if(open.state==="processing") return {state:"processing",charge_item_id:id};
   if(isDemo()) {
+    guard(!open.provider_data?.checkout_params&&(!open.provider_ref||open.provider_ref.startsWith("demo_")),
+      "PAYMENT_MODE_MISMATCH","A provider checkout cannot be confirmed in demo mode.",409);
     requireCurrentQuote(fee.quote_valid);
-    return {state:"requires_payment",attempt_id:open.id,checkout_url:appOrigin()+"/checkout/demo/"+open.id};
+    return {state:"requires_payment",attempt_id:open.id,reference:null,params:null,fee,demo:true,mode:null};
   }
   guard(!fee.is_test,"TEST_ORDER","Test orders use the isolated development checkout.");
-  const api=stripe();
-  if(open.provider_ref) {
-    const session=await api.checkout.sessions.retrieve(open.provider_ref);
-    if(session.status==="open" && session.url) {
-      requireCurrentQuote(fee.quote_valid);
-      return {state:"requires_payment",attempt_id:open.id,checkout_url:session.url};
-    }
-    if(session.status==="complete") return {state:"processing",charge_item_id:id};
-    await db.query("update payments set state='canceled' where id=$1",[open.id]);
-  }
-  requireCurrentQuote(fee.quote_valid);
-  const fresh=open.provider_ref?await attempt(db,id,fee.amount_cents):open;
+  stripe();
+  if(!open.provider_ref)requireCurrentQuote(fee.quote_valid);
+  const mode=stripeSettings().mode;
+  guard(open.provider_ref?open.provider_ref.startsWith(`cs_${mode}_`):!open.provider_data?.checkout_params||open.provider_data.checkout_mode===mode,
+    "PAYMENT_MODE_MISMATCH","This payment attempt belongs to a different payment environment.",409);
+  if(open.provider_ref||open.provider_data?.checkout_params)
+    return {state:"requires_payment",attempt_id:open.id,reference:open.provider_ref,params:open.provider_data?.checkout_params??null,fee,demo:false,mode};
   const inspectionPayment=fee.order_number&&!fee.scope_revision_id;
   const returnPath=inspectionPayment?"/orders/"+fee.order_number+"/payment":
     fee.order_number&&fee.scope_revision_id?inspectionScopePath(fee.order_number,fee.scope_revision_id):"/account/billing";
-  const session=await api.checkout.sessions.create({
-    mode:"payment",client_reference_id:id,metadata:{payment_id:fresh.id,charge_item_id:id,org_id:org},
-    payment_intent_data:{metadata:{payment_id:fresh.id,charge_item_id:id,org_id:org}},
+  const requestedExpiry=Math.min(Math.floor(Date.now()/1000)+stripeCheckoutMaxSeconds,
+    Math.max(Math.floor(new Date(fee.quote_expires_at).valueOf()/1000),Math.ceil(Date.now()/1000)+stripeCheckoutMinSeconds+stripeCheckoutClockMarginSeconds));
+  const params:Stripe.Checkout.SessionCreateParams={
+    mode:"payment",client_reference_id:id,metadata:{payment_id:open.id,charge_item_id:id,org_id:org},
+    expires_at:requestedExpiry,
+    custom_text:{submit:{message:`Quote valid until ${new Date(fee.quote_expires_at).toUTCString()}. Payment after this deadline requires review and a new valid quote.`}},
+    payment_intent_data:{metadata:{payment_id:open.id,charge_item_id:id,org_id:org}},
     line_items:[{quantity:1,price_data:{currency:"usd",unit_amount:fee.amount_cents,product_data:{name:`QC Warehouse · ${fee.purpose}`}}}],
     success_url:appOrigin()+returnPath+(inspectionPayment?"?checkout=returned":""),cancel_url:appOrigin()+returnPath,
-  },{idempotencyKey:fresh.id});
-  guard(session.url,"STRIPE_UNAVAILABLE","Checkout could not be started.",503);
-  await db.query("update payments set provider_ref=$2 where id=$1",[fresh.id,session.id]);
-  return {state:"requires_payment",attempt_id:fresh.id,checkout_url:session.url};
+  };
+  await db.query("update payments set provider_data=provider_data||$2::jsonb where id=$1",[open.id,
+    {checkout_params:params,checkout_mode:mode,requested_checkout_expires_at:requestedExpiry,quote_expires_at:fee.quote_expires_at}]);
+  return {state:"requires_payment",attempt_id:open.id,reference:null,params,fee,demo:false,mode};
 }
 
 export async function checkout(actor:Actor,id:string,rev:number,request:{scope:string;key:string}):Promise<CheckoutResult> {
-  const result=await transaction(db=>idempotent(db,request.scope,request.key,{quote_revision:rev},
-    ()=>prepareCheckout(db,actor,id,rev)));
-  if(result.state!=="requires_payment") return result;
-
-  // Keep the remote session reference if its creation crosses the quote deadline.
-  // Recheck every link, including successful responses replayed from an older request.
-  return transaction(async db=>{
-    await requireCustomerActive(db,actor);
-    const fee=await verifyCharge(db,id,organization(actor),rev);
-    if(fee.applied_payment_id||fee.free_authorization) return {state:"paid",charge_item_id:id};
-    const attempt=await one<{state:string}>(db,"select state from payments where id=$1 and charge_item_id=$2",[result.attempt_id,id]);
-    if(attempt.state==="processing") return {state:"processing",charge_item_id:id};
-    requireCurrentQuote(fee.quote_valid);
-    guard(attempt.state==="requires_payment","CHECKOUT_ATTEMPT_EXPIRED","Start a new payment attempt.");
-    return result;
-  });
+  for(let replacement=0;replacement<2;replacement++) {
+    const prepared=await transaction(async db=>{
+      await requireCustomerActive(db,actor);
+      const fee=await verifyCharge(db,id,organization(actor),rev);
+      await idempotent(db,request.scope,request.key,{quote_revision:rev},async()=>({accepted:true}));
+      return prepareCheckout(db,fee,organization(actor));
+    });
+    if(prepared.state!=="requires_payment")return prepared;
+    let session:Stripe.Checkout.Session|undefined;
+    if(!prepared.demo) {
+      guard(stripeSettings().mode===prepared.mode,"PAYMENT_MODE_MISMATCH","Payment environment changed.",409);
+      const api=stripe();
+      guard(prepared.reference||prepared.params,"CHECKOUT_UNAVAILABLE","Payment preparation is incomplete.",503);
+      session=prepared.reference?await api.checkout.sessions.retrieve(prepared.reference):
+        await api.checkout.sessions.create(prepared.params!,{idempotencyKey:prepared.attempt_id});
+    }
+    const result=await transaction(async db=>{
+      await requireCustomerActive(db,actor);
+      const fee=await verifyCharge(db,id,organization(actor),rev);
+      const p=await one(db,"select * from payments where id=$1 and charge_item_id=$2 for update",[prepared.attempt_id,id]);
+      if(session) {
+        guard(!p.provider_ref||p.provider_ref===session.id,"PAYMENT_MISMATCH","The payment attempt has a different provider session.");
+        await db.query("update payments set provider_ref=$2 where id=$1",[p.id,session.id]);
+        await lock(db,checkoutExpirySchedulingLock);
+        await db.query(`insert into outbox_events(type,payload,next_attempt_at)
+          select 'payment.checkout_expire',$1,$2 where not exists(select 1 from outbox_events
+            where type='payment.checkout_expire' and payload->>'payment_id'=$3)`,
+          [{payment_id:p.id},new Date(Math.min(new Date(fee.quote_expires_at).valueOf(),Number(p.provider_data.requested_checkout_expires_at??Infinity)*1000)),p.id]);
+      }
+      if(fee.applied_payment_id||fee.free_authorization)return {state:"paid" as const,charge_item_id:id};
+      if(["processing","succeeded","partially_refunded","refunded"].includes(p.state))return {state:"processing" as const,charge_item_id:id};
+      if(session?.status==="complete") {
+        await db.query("update payments set state='processing',updated_at=now() where id=$1",[p.id]);
+        return {state:"processing" as const,charge_item_id:id};
+      }
+      if(session?.status==="expired") {
+        await db.query("update payments set state='canceled',updated_at=now() where id=$1 and state='requires_payment'",[p.id]);
+        return {retry:true};
+      }
+      if(!fee.quote_valid)return {rejection:new Problem("QUOTE_EXPIRED","Request a new quote before continuing.",409)};
+      guard(p.state==="requires_payment","CHECKOUT_ATTEMPT_EXPIRED","Start a new payment attempt.");
+      const url=prepared.demo?appOrigin()+"/checkout/demo/"+p.id:session?.url;
+      guard(url,"STRIPE_UNAVAILABLE","Checkout could not be started.",503);
+      return {state:"requires_payment" as const,attempt_id:p.id,checkout_url:url};
+    });
+    if("rejection" in result)throw result.rejection;
+    if(result.state!==undefined)return result;
+  }
+  throw new Problem("CHECKOUT_UNAVAILABLE","Checkout expired. Retry to start a new payment attempt.",409);
 }
-async function applyPayment(db:DB,pid:string,providerRef:string,details:object) {
+async function applyPayment(db:DB,pid:string,providerRef:string,details:object,confirmedAt:number) {
   const link=await one(db,`select c.org_id from payments p join charge_items c on c.id=p.charge_item_id where p.id=$1`,[pid]);
   await lock(db,"org:"+link.org_id);
   const payment=await one(db,"select * from payments where id=$1 for update",[pid]);
-  const charge=await one(db,"select * from charge_items where id=$1 for update",[payment.charge_item_id]);
+  const charge=await one(db,`select c.*,coalesce(i.expires_at,d.expires_at,s.expires_at) quote_expires_at
+    from charge_items c left join inspection_quotes i on i.id=c.inspection_quote_id
+    left join dispatch_quote_versions d on d.id=c.dispatch_quote_id left join storage_quotes s on s.id=c.storage_quote_id
+    where c.id=$1 for update of c`,[payment.charge_item_id]);
   if(["succeeded","partially_refunded","refunded"].includes(payment.state)) return;
-  await db.query("update payments set state='succeeded',provider_ref=$2,provider_data=$3,updated_at=now() where id=$1",[pid,providerRef,details]);
-  if(charge.voided_at || charge.applied_payment_id) {
+  await db.query("update payments set state='succeeded',provider_ref=$2,provider_data=provider_data||$3::jsonb,updated_at=now() where id=$1",[pid,providerRef,{...details,confirmed_at:confirmedAt}]);
+  const paidWithinQuote=Number.isSafeInteger(confirmedAt)&&confirmedAt>0&&charge.quote_expires_at&&
+    confirmedAt<Math.floor(new Date(charge.quote_expires_at).valueOf()/1000);
+  if(charge.voided_at || charge.applied_payment_id || !paidWithinQuote) {
     const orderId=charge.inspection_quote_id
       ?(await db.query<{order_id:string}>("select order_id from inspection_quotes where id=$1",[charge.inspection_quote_id])).rows[0]?.order_id??null
       :null;
     await db.query("insert into tickets(id,public_no,org_id,order_id,category,subject,details) values($1,$2,$3,$4,'payment_refund',$5,$6)",
-      [uuid(),code("PAY-"),charge.org_id,orderId,"Reconcile late or duplicate payment",{payment_id:pid}]);
+      [uuid(),code("PAY-"),charge.org_id,orderId,"Reconcile late or duplicate payment",{payment_id:pid,
+        reason:!paidWithinQuote?"quote_expired_or_confirmation_time_unverified":"superseded_or_duplicate",
+        confirmed_at:confirmedAt??null,quote_expires_at:charge.quote_expires_at}]);
+    await audit(db,null,"payment_reconciliation_required","payments",pid,{charge_id:charge.id,confirmed_at:confirmedAt??null,quote_expires_at:charge.quote_expires_at});
     return;
   }
   let confirmedOrderId:string|null=null;
@@ -232,8 +329,10 @@ export async function demoPay(db:DB,actor:Actor,id:string) {
     left join dispatch_quote_versions d on d.id=c.dispatch_quote_id left join storage_quotes s on s.id=c.storage_quote_id
     where p.id=$1 and c.org_id=$2`,[id,org]);
   guard(["requires_payment","succeeded"].includes(p.state),"PAYMENT_UNAVAILABLE","This checkout has ended.");
+  guard(!p.provider_data?.checkout_params&&(!p.provider_ref||p.provider_ref.startsWith("demo_")),
+    "PAYMENT_MODE_MISMATCH","A provider checkout cannot be confirmed in demo mode.",409);
   guard(p.state==="succeeded"||p.quote_valid,"QUOTE_EXPIRED","Request a new quote before continuing.");
-  await applyPayment(db,id,"demo_"+id,{demo:true,payment_intent:"pi_demo_"+id});
+  await applyPayment(db,id,"demo_"+id,{demo:true,payment_intent:"pi_demo_"+id},Math.floor(Date.now()/1000));
   return {state:"paid",...(p.order_number?{order_number:p.order_number}:{}),...(p.scope_revision_id?{scope_revision_id:p.scope_revision_id}:{})};
 }
 export function verifyStripe(raw:string,signature:string) {
@@ -278,7 +377,7 @@ export async function stripeEvent(db:DB,e:Stripe.Event) {
         return rejectedPaymentAmount();
       }
       if((e.type==="checkout.session.completed" || e.type==="checkout.session.async_payment_succeeded") && s.payment_status==="paid") {
-        await applyPayment(db,pid,s.id,{payment_intent:s.payment_intent});
+        await applyPayment(db,pid,s.id,{payment_intent:s.payment_intent},e.created);
       } else {
         await lock(db,"org:"+p.org_id);
         const state=e.type==="checkout.session.expired"?"canceled":e.type==="checkout.session.async_payment_failed"?"failed":"processing";

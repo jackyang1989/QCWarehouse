@@ -1365,6 +1365,57 @@ async function verifyScopeRenewal({page,call,errors},other) {
   } finally {await db.end();}
 }
 
+async function verifyQuoteValidity({page,call,errors},other) {
+  const admin=await session("admin@qcw.test",true),endpoint="/staff/admin/quote-policy";
+  const initial=await admin.call(endpoint);
+  await call(endpoint,{status:403});
+  const offers=(await call("/catalog")).offers,offer=offers.find(row=>row.sku_code==="apparel-inspection-1");
+  const old=await call("/orders",{body:{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},status:201});
+  const oldQuote=await call(`/orders/${old.id}/quotes`,{body:{revision:old.revision},status:201});
+  const dbURL=new URL(process.env.QCW_BROWSER_DATABASE_URL);assert.equal(dbURL.hostname,"127.0.0.1");assert.match(dbURL.pathname,/^\/qcw_test-[a-z0-9-]+$/);
+  const {default:pg}=await import("pg"),db=new pg.Client({connectionString:dbURL.href});await db.connect();
+  try {
+    await admin.page.goto("/admin/config");
+    await admin.page.getByRole("heading",{name:"报价有效期",exact:true}).waitFor();
+    await admin.page.getByLabel("自动质检及范围补款报价（分钟）",{exact:true}).fill("1440");
+    await admin.page.getByLabel("发运报价（分钟）",{exact:true}).fill("4320");
+    await admin.page.getByLabel("续存报价（分钟）",{exact:true}).fill("10080");
+    await admin.page.getByRole("button",{name:"保存报价有效期",exact:true}).click();
+    await admin.page.getByText("报价有效期已保存。已有报价未作修改。",{exact:true}).waitFor();
+    const current=await admin.call(endpoint);assert.equal(current.inspection_minutes,1440);assert.equal(current.storage_minutes,10080);
+    assert.equal((await db.query("select expires_at from inspection_quotes where id=$1",[oldQuote.id])).rows[0].expires_at.toISOString(),oldQuote.expires_at);
+    await captureWizard(admin.page,"admin-quote-validity","报价有效期");
+    const draft=await call("/orders",{body:{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},status:201});
+    const quote=await call(`/orders/${draft.id}/quotes`,{body:{revision:draft.revision},status:201});
+    assert(Math.abs(Date.parse(quote.expires_at)-Date.now()-86400000)<2000);
+    const {terms}=await call("/public/terms");
+    const submit=async(order,q)=>call(`/orders/${order.id}/submit`,{body:{revision:order.revision,quote_id:q.id,terms_version_ids:terms.map(term=>term.id),
+      acknowledgements:{scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true}}});
+    await submit(draft,quote);
+    await page.goto(`/orders/${draft.public_no}/payment`);
+    const countdown=page.locator("[data-quote-countdown]");await countdown.waitFor();
+    const first=await countdown.innerText();
+    await page.waitForFunction(previous=>document.querySelector("[data-quote-countdown]")?.textContent!==previous,first);
+    await captureWizard(page,"customer-quote-countdown","Inspection payment");
+    await other.call(`/orders/${draft.id}/payment`,{status:404});
+    const short=await call("/orders",{body:{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},status:201});
+    const shortQuote=await call(`/orders/${short.id}/quotes`,{body:{revision:short.revision},status:201});
+    await db.query("update inspection_quotes set expires_at=clock_timestamp()+interval '5 seconds' where id=$1 and accepted_at is null",[shortQuote.id]);
+    await submit(short,shortQuote);
+    await page.goto(`/orders/${short.public_no}/payment`);
+    await page.getByText("The quote has expired. Review a new quote for this order.",{exact:true}).waitFor({timeout:15000});
+    assert.equal(await page.getByRole("button",{name:"Resume payment",exact:true}).count(),0);
+    assert.equal((await call(`/orders/${short.id}/payment`)).state,"expired");
+    await captureWizard(page,"customer-quote-expired","Inspection payment");
+    assert.deepEqual([...errors,...admin.errors,...other.errors],[]);assert(entries.every(entry=>entry.overflow===0));
+    console.log("PASS admin quote validity settings, historical snapshot preservation, real countdown, expiry payment block and customer isolation");
+  } finally {
+    const latest=await admin.call(endpoint);
+    await admin.call(endpoint,{body:{inspection_minutes:initial.inspection_minutes,dispatch_minutes:initial.dispatch_minutes,storage_minutes:initial.storage_minutes,expected_updated_at:latest.updated_at}});
+    await db.end();
+  }
+}
+
 async function verifyRejectedPaymentCase(other) {
   const dbURL=new URL(process.env.QCW_BROWSER_DATABASE_URL);
   assert.equal(dbURL.hostname,"127.0.0.1");assert.match(dbURL.pathname,/^\/qcw_test-[a-z0-9-]+$/);
@@ -1857,6 +1908,7 @@ try {
   else if(process.env.QCW_BROWSER_SELLER_RETURN_ONLY==="1") await verifySellerReturn(customer,other);
   else if(process.env.QCW_BROWSER_SUPPORT_ONLY==="1") await verifySupportHistory(customer,other);
   else if(process.env.QCW_BROWSER_PAYMENT_MISMATCH_ONLY==="1") await verifyRejectedPaymentCase(other);
+  else if(process.env.QCW_BROWSER_QUOTE_POLICY_ONLY==="1") await verifyQuoteValidity(customer,other);
   else if(process.env.QCW_BROWSER_SCOPE_ONLY==="1") await verifyScopeRenewal(customer,other);
   else if(process.env.QCW_BROWSER_FULFILLMENT_ONLY==="1") await verifyFulfillmentRenewal(other);
   else if(process.env.QCW_BROWSER_MANUAL_QUOTE_ONLY==="1") await verifyManualQuoteRenewal(customer,other);

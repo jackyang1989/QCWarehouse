@@ -4,6 +4,7 @@ import { currentTerms, requireCustomerActive } from "./auth";
 import { audit, code, event, guard, lock, one, organization, revision, role, uuid, type Actor } from "./common";
 import { validCarrier, waybill } from "./intake";
 import { assertItemNotFrozen, requireSpace } from "./storage";
+import { newQuoteValidity } from "./quote-policy";
 
 type Destination={recipient:string;phone:string;address:string;member_code?:string};
 type InstructionInput={action:string;item_id?:string;destination?:Destination;return_info?:Record<string,unknown>;terms_version_id:string;condition_note?:string;days?:number};
@@ -383,9 +384,10 @@ export async function quoteBatch(
   const nextQuoteRev=(await one<{n:number}>(db,"select coalesce(max(revision),0)::int+1 n from dispatch_quote_versions where batch_id=$1",[id])).n;
   const nextBatchRev=Math.max(rev+1,nextQuoteRev);
   if(previous?.charge_id) await voidExpiredFulfillmentCharge(db,actor,previous.charge_id);
+  const validity=await newQuoteValidity(db,"dispatch");
   const q=await one(db,`insert into dispatch_quote_versions(batch_id,revision,rate_version_id,snapshot,amount_cents,expires_at)
-    values($1,$2,$3,$4,$5,now()+interval '72 hours') returning id as quote_id,revision,amount_cents`,
-    [id,nextBatchRev,rateId,{parcels:planned,handling_cents:r.handling_cents,destination:b.destination_snapshot,...(manualReason?{manual_reason:manualReason.trim()}:{})},total]);
+    values($1,$2,$3,$4,$5,$6) returning id as quote_id,revision,amount_cents`,
+    [id,nextBatchRev,rateId,{parcels:planned,handling_cents:r.handling_cents,destination:b.destination_snapshot,quote_validity:validity.snapshot,...(manualReason?{manual_reason:manualReason.trim()}:{})},total,validity.expires_at]);
   await db.query("update dispatch_batches set state='quoted',revision=$2 where id=$1",[id,nextBatchRev]);
   await audit(db,actor,"quote_batch","dispatch_batches",id,{quote_id:q.quote_id,revision:q.revision});
   await event(db,"dispatch.quoted",{batch_id:id,quote_id:q.quote_id});
@@ -443,8 +445,9 @@ export async function storageQuote(db:DB,actor:Actor,id:string,input?:{days?:num
   const amount=z.number().int().positive().parse(price.value)*days;
   const nextRev=(existing?.revision??0)+1;
   if(existing?.charge_id) await voidExpiredFulfillmentCharge(db,actor,existing.charge_id);
+  const validity=await newQuoteValidity(db,"storage");
   const q=await one(db,`insert into storage_quotes(disposition_id,revision,snapshot,amount_cents,expires_at)
-    values($1,$2,$3,$4,now()+interval '72 hours') returning id as quote_id,revision,amount_cents`,[id,nextRev,{days},amount]);
+    values($1,$2,$3,$4,$5) returning id as quote_id,revision,amount_cents`,[id,nextRev,{days,quote_validity:validity.snapshot},amount,validity.expires_at]);
   await audit(db,actor,"quote_storage","disposition_requests",id,{revision:nextRev,days});
   await event(db,"storage.quoted",{org_id:d.org_id,item_id:d.item_id,quote_id:q.quote_id});
   return q;

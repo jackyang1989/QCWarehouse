@@ -9,6 +9,7 @@ import { actorFrom, appOrigin, closeCustomerAccount, completeRegistration, confi
 import { Problem, audit, guard, hash, idempotent, isDemo, one, organization, role, uuid, type Actor } from "./common";
 import { integrationPreflight, signInMethods } from "./integrations";
 import { failedJobs, retryFailedJob } from "./worker";
+import { quotePolicy, quotePolicyInput, saveQuotePolicy } from "./quote-policy";
 import { customerEmailDeliveryStatus, receivePostmarkWebhook, retryEmailDelivery, staffEmailDeliveries } from "./email";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, savePhoto, unassignItem, waybill } from "./intake";
@@ -1124,6 +1125,8 @@ async function extraWrite<S extends z.ZodType>(req:Request,path:string,actor:Act
 
 // The request is validated against the operation's OpenAPI schema before dispatch.
 async function dispatch(db:DB,actor:Actor,id:string,op:string,b:Record<string,any>,req:Request) {
+  if(op==="getQuotePolicy") {role(actor,"super_admin");return quotePolicy(db);}
+  if(op==="saveQuotePolicy") return saveQuotePolicy(db,actor,quotePolicyInput.parse(b),hash(getCookie(req,"session")));
   switch(op) {
     case "listIntakeClaims": {
       const page=z.coerce.number().int().min(1).max(10000).parse(new URL(req.url).searchParams.get("page")??1);

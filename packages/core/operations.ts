@@ -8,6 +8,7 @@ import { savePhoto } from "./intake";
 import { activatePaidOrder, orderItemReadiness, priceSchema, readyOrder, templateSchema } from "./orders";
 import { scopeSupplementState } from "./scope-payment";
 import { assertItemNotFrozen, assertZonePurpose, requireSpace } from "./storage";
+import { newQuoteValidity } from "./quote-policy";
 
 export async function computeOrderRefundStage(
   db:DB,
@@ -845,10 +846,11 @@ async function createSupplementalScopeCharge(db:DB,actor:Actor,orderId:string,sc
   amountCents:number,lineSnapshot:unknown) {
   const org=organization(actor);
   const nextQuote=await one<{n:number}>(db,"select coalesce(max(revision),0)::int+1 n from inspection_quotes where order_id=$1",[orderId]);
+  const validity=await newQuoteValidity(db,"inspection");
   const quote=await one<{id:string;revision:number}>(db,`insert into inspection_quotes
     (id,order_id,revision,line_snapshot,terms_snapshot,amount_cents,currency,expires_at,accepted_at)
-    values($1,$2,$3,$4,$5,$6,'USD',now()+interval '30 minutes',now()) returning id,revision`,
-  [uuid(),orderId,nextQuote.n,JSON.stringify(lineSnapshot),JSON.stringify({scope_revision_id:scopeId,order_revision:orderRevision}),amountCents]);
+    values($1,$2,$3,$4,$5,$6,'USD',$7,now()) returning id,revision`,
+  [uuid(),orderId,nextQuote.n,JSON.stringify(lineSnapshot),JSON.stringify({scope_revision_id:scopeId,order_revision:orderRevision,quote_validity:validity.snapshot}),amountCents,validity.expires_at]);
   const charge=await one<{id:string}>(db,`insert into charge_items
     (id,org_id,purpose,inspection_quote_id,scope_revision_id,amount_cents,currency,snapshot)
     values($1,$2,'inspection',$3,$4,$5,'USD',$6) returning id`,

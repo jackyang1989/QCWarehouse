@@ -23,7 +23,8 @@ process.env.QCW_DEMO="1";
 process.env.NODE_ENV="test";
 const origin=new URL(process.env.APP_URL??"http://localhost:3000").origin;
 const {handle}=await import("../packages/core/http");
-const {pool}=await import("../packages/db");
+const {pool,transaction}=await import("../packages/db");
+const {expireCheckout}=await import("../packages/core/payments");
 const {workOnce}=await import("../packages/core/worker");
 const {syncTrackingOnce}=await import("../packages/core/logistics");
 const {encryptSecret,decryptSecret,passwordHash}=await import("../packages/core/auth");
@@ -1322,7 +1323,7 @@ test("checkout withholds expired links and retains Stripe sessions for payment r
   const CommonJsStripe:typeof Stripe=createRequire(import.meta.url)("stripe");
   const sessionPrototypes=new Set([Stripe,CommonJsStripe].map(StripeClient=>
     Object.getPrototypeOf(new StripeClient("sk_test_fixture").checkout.sessions)));
-  const remote=new Map<string,{id:string;status:"open"|"complete";url:string|null}>();
+  const remote=new Map<string,{id:string;status:"open"|"complete"|"expired";url:string|null;metadata?:Record<string,string>;amount_total?:number;currency?:string;livemode?:boolean}>();
   let retrieved=0;
   async function waitForExpiry(quoteId:string) {
     await pool.query("select pg_sleep(greatest(0,extract(epoch from expires_at-clock_timestamp()))+.02) from inspection_quotes where id=$1",[quoteId]);
@@ -1330,7 +1331,8 @@ test("checkout withholds expired links and retains Stripe sessions for payment r
   for(const sessions of sessionPrototypes) {
     t.mock.method(sessions,"create",async(params:Stripe.Checkout.SessionCreateParams)=>{
       const id="cs_test_"+randomUUID();
-      const session={id,status:"open" as const,url:"https://checkout.stripe.com/c/pay/"+id};
+      const session={id,status:"open" as const,url:"https://checkout.stripe.com/c/pay/"+id,metadata:params.metadata as Record<string,string>,
+        amount_total:Number(params.line_items?.[0].price_data?.unit_amount),currency:"usd",livemode:false};
       remote.set(id,session);
       if(crossing&&params.client_reference_id===crossing.chargeId) await waitForExpiry(crossing.quote.id);
       return session;
@@ -1340,11 +1342,15 @@ test("checkout withholds expired links and retains Stripe sessions for payment r
       assert(remote.has(id),"Look up only a session created for this fixture");
       return remote.get(id);
     });
+    t.mock.method(sessions,"expire",async(id:string)=>{
+      const session=remote.get(id)!;assert(session);session.status="expired";session.url=null;return session;
+    });
   }
   const key=randomUUID();
   const first=await c.fetch(existing.checkoutPath,existing.body,"POST",200,key);
   assert.deepEqual(await c.fetch(existing.checkoutPath,existing.body,"POST",200,key),first);
   const remoteId=[...remote.keys()][0];
+  const confirmedAt=Math.floor(Date.now()/1000);
   assert.equal(first.checkout_url,remote.get(remoteId)?.url);
   assert.equal(remote.size,1);
 
@@ -1362,7 +1368,7 @@ test("checkout withholds expired links and retains Stripe sessions for payment r
   const resumed=await c.fetch(existing.checkoutPath,existing.body,"POST",409);
   assert.equal(repeated.error.code,"QUOTE_EXPIRED");
   assert.deepEqual(resumed,repeated);
-  assert.equal(retrieved,1);
+  assert.equal(retrieved,3,"Each checkout retry revalidates the current remote session without returning an expired link.");
   assert.equal(remote.size,1);
   assert.equal((await pool.query("select provider_ref,state from payments where id=$1",[first.attempt_id])).rows[0].state,"requires_payment");
 
@@ -1371,7 +1377,7 @@ test("checkout withholds expired links and retains Stripe sessions for payment r
   assert.equal((await c.fetch(existing.path)).state,"awaiting_payment");
   const paymentIntent="pi_fixture_"+randomUUID();
   async function sendEvent(type:string,paymentStatus:string) {
-    const payload=JSON.stringify({id:"evt_fixture_"+randomUUID(),object:"event",livemode:false,type,
+    const payload=JSON.stringify({id:"evt_fixture_"+randomUUID(),object:"event",livemode:false,type,created:confirmedAt,
       data:{object:{id:remoteId,payment_status:paymentStatus,amount_total:existing.quote.amount_cents,currency:"usd",
         payment_intent:paymentIntent,metadata:{payment_id:first.attempt_id,charge_item_id:existing.chargeId,org_id:actor.org}}}});
     const webhook="/webhooks/stripe";
@@ -1398,6 +1404,8 @@ test("checkout withholds expired links and retains Stripe sessions for payment r
   const attempts=(await pool.query("select provider_ref,state from payments where charge_item_id=$1",[crossing.chargeId])).rows;
   assert.deepEqual(attempts,[{provider_ref:[...remote.keys()][1],state:"requires_payment"}]);
   assert.equal(remote.size,2);
+  await transaction(db=>expireCheckout(db,remote.get(attempts[0].provider_ref)!.metadata!.payment_id));
+  assert.equal(remote.get(attempts[0].provider_ref)!.status,"expired");
 });
 
 test("Google and Microsoft authorization requests use PKCE and reject mismatched or replayed callbacks",async t=>{
@@ -1488,7 +1496,7 @@ test("Stripe webhook verifies and deduplicates payments and only exposes receipt
   setFixtureEnv(t,{QCW_DEMO:"0",STRIPE_SECRET_KEY:"sk_test_fixture",STRIPE_WEBHOOK_SECRET:"whsec_fixture"});
   const webhookPath="/webhooks/stripe";
   const eventId="evt_fixture_"+randomUUID();
-  const event={id:eventId,object:"event",livemode:false,type:"checkout.session.completed",
+  const event={id:eventId,object:"event",livemode:false,type:"checkout.session.completed",created:Math.floor(Date.now()/1000),
     data:{object:{id:"cs_test_"+randomUUID(),payment_status:"paid",amount_total:quote.amount_cents,currency:"usd",
       payment_intent:"pi_fixture_"+randomUUID(),metadata:{payment_id:attempt_id,charge_item_id:chargeId,org_id:actor.org}}}};
   function send(payload:object,valid=true) {
@@ -7518,6 +7526,147 @@ test("customer action pages reach every owned task beyond the legacy batch",asyn
   await c.fetch("/actions?page=10001",undefined,"GET",422);
   const staff=await staffLogin("receiving");
   await staff.fetch("/actions?page=1",undefined,"GET",403);
+});
+
+test("Quote validity settings require admin MFA, preserve historical quotes and govern each new quote type",async()=>{
+  const admin=await staffLogin("admin"),receiver=await staffLogin("receiving");
+  const {c,terms}=await signCustomer();
+  const endpoint="/staff/admin/quote-policy",initial=await admin.fetch(endpoint);
+  await c.fetch(endpoint,undefined,"GET",403);await receiver.fetch(endpoint,undefined,"GET",403);
+  const offer=(await c.fetch("/catalog")).offers.find(row=>row.sku_code==="apparel-inspection-1");
+  const draft=await c.fetch("/orders",{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},"POST",201);
+  const oldQuote=await c.fetch(`/orders/${draft.id}/quotes`,{revision:draft.revision},"POST",201);
+  const body={inspection_minutes:1440,dispatch_minutes:2880,storage_minutes:10080,expected_updated_at:initial.updated_at};
+  const mfa=(await pool.query("select mfa_at from sessions where token_hash=$1",[admin.sessionHash()])).rows[0].mfa_at;
+  await pool.query("update sessions set mfa_at=null where token_hash=$1",[admin.sessionHash()]);
+  try {assert.equal((await admin.fetch(endpoint,body,"POST",403)).error.code,"STAFF_REAUTH_REQUIRED");}
+  finally {await pool.query("update sessions set mfa_at=$2 where token_hash=$1",[admin.sessionHash(),mfa]);}
+  await admin.fetch(endpoint,{...body,inspection_minutes:1},"POST",422);
+  let current=await admin.fetch(endpoint,body);
+  try {
+    await admin.fetch(endpoint,body,"POST",409);
+    const responses=await Promise.allSettled([1440,2880].map(inspection_minutes=>admin.fetch(endpoint,
+      {...body,inspection_minutes,expected_updated_at:current.updated_at})));
+    assert.equal(responses.filter(result=>result.status==="fulfilled").length,1);
+    const rejected=responses.find(result=>result.status==="rejected") as PromiseRejectedResult;
+    assert.equal(rejected.reason.actual,409);assert.match(rejected.reason.message,/VERSION_CONFLICT/);
+    current=await admin.fetch(endpoint);
+    const quote=await c.fetch(`/orders/${draft.id}/quotes`,{revision:draft.revision},"POST",201);
+    assert(Math.abs(Date.parse(quote.expires_at)-Date.now()-current.inspection_minutes*60000)<2000);
+    assert.equal((await pool.query("select expires_at from inspection_quotes where id=$1",[oldQuote.id])).rows[0].expires_at.toISOString(),oldQuote.expires_at);
+    const receiving=await c.fetch("/me/receiving-address");
+    const tracking="SF"+randomUUID().replaceAll("-","").slice(0,12).toUpperCase();
+    const advice=await c.fetch("/me/parcels",{address_id:receiving.warehouse_address.id,tracking_no:tracking,carrier_code:"sf"},"POST",201);
+    const photo=new FormData();photo.set("kind","intake_outer");photo.set("photo",new File([new Uint8Array(await sharp({create:{width:40,height:40,channels:3,background:"#16736d"}}).png().toBuffer())],"fixture.png",{type:"image/png"}));
+    const media=await receiver.fetch("/staff/media",photo,"POST",201);
+    const parcel=await receiver.fetch("/staff/intake/check-in",{tracking_no:tracking,carrier_code:"sf",advice_id:advice.id,outer_media_ids:[media.id]},"POST",201);
+    const desk=await receiver.fetch("/staff/desk"),location=desk.locations.find(row=>row.code==="R-01");
+    const unpacked=await receiver.fetch(`/staff/packages/${parcel.id}/items`,{revision:parcel.revision,items:[1,2].map(()=>({code:"S-"+randomUUID(),location_id:location.id}))},"POST",201);
+    const termsId=terms.find(row=>row.kind==="terms")!.id;
+    const retained=await c.fetch(`/me/items/${unpacked.item_ids[0]}/dispositions`,{action:"retain",days:30,terms_version_id:termsId},"POST",201);
+    const storage=await admin.fetch(`/staff/dispositions/${retained.id}/storage-quote`,{});
+    const stored=(await pool.query("select expires_at,snapshot from storage_quotes where id=$1",[storage.quote_id])).rows[0];
+    assert(Math.abs(stored.expires_at.valueOf()-Date.now()-current.storage_minutes*60000)<2000);
+    assert.equal(stored.snapshot.quote_validity.minutes,current.storage_minutes);
+    const forward=await c.fetch(`/me/items/${unpacked.item_ids[1]}/dispositions`,{action:"to_forwarder",terms_version_id:termsId,destination:{recipient:"Fixture forwarder",phone:"13800000000",address:"Isolated destination",member_code:"FIXTURE-MEMBER"}},"POST",201);
+    const batch=await c.fetch("/dispatch-batches",{disposition_ids:[forward.id]},"POST",201);
+    const confirmed=await c.fetch(`/dispatch-batches/${batch.batch_id}/confirm`,{revision:batch.revision});
+    const shipping=await receiver.fetch(`/staff/dispatch-batches/${batch.batch_id}/quote`,{revision:confirmed.revision,rate_version_id:desk.rates[0].id,parcels:[{item_ids:[unpacked.item_ids[1]],weight_g:540}]});
+    const shipped=(await pool.query("select expires_at,snapshot from dispatch_quote_versions where id=$1",[shipping.quote_id])).rows[0];
+    assert(Math.abs(shipped.expires_at.valueOf()-Date.now()-current.dispatch_minutes*60000)<2000);
+    assert.equal(shipped.snapshot.quote_validity.minutes,current.dispatch_minutes);
+  } finally {
+    const latest=await admin.fetch(endpoint);
+    await admin.fetch(endpoint,{inspection_minutes:initial.inspection_minutes,dispatch_minutes:initial.dispatch_minutes,storage_minutes:initial.storage_minutes,expected_updated_at:latest.updated_at});
+  }
+});
+
+test("Checkout deadlines persist across response loss, expire remotely with recovery and distinguish late payments from late callbacks",async t=>{
+  const {c,terms}=await signCustomer(),admin=await staffLogin("admin");
+  const {actor}=await c.fetch("/me"),offer=(await c.fetch("/catalog")).offers.find(row=>row.sku_code==="apparel-inspection-1");
+  const cases=[];
+  for(let index=0;index<3;index++) {
+    const draft=await c.fetch("/orders",{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},"POST",201);
+    const quote=await c.fetch(`/orders/${draft.id}/quotes`,{revision:draft.revision},"POST",201);
+    await pool.query("update inspection_quotes set expires_at=date_trunc('second',clock_timestamp())+interval '4 seconds' where id=$1",[quote.id]);
+    const submitted=await c.fetch(`/orders/${draft.id}/submit`,{revision:draft.revision,quote_id:quote.id,terms_version_ids:terms.map(term=>term.id),
+      acknowledgements:{scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true}});
+    await pool.query("update orders set is_test=false where id=$1",[draft.id]);
+    cases.push({draft,quote,charge:submitted.charge.charge_item_id,key:randomUUID()});
+  }
+  setFixtureEnv(t,{QCW_DEMO:"0",STRIPE_SECRET_KEY:"sk_test_fixture",STRIPE_WEBHOOK_SECRET:"whsec_deadline_fixture"});
+  const CommonJsStripe:typeof Stripe=createRequire(import.meta.url)("stripe");
+  const prototypes=new Set([Stripe,CommonJsStripe].map(Client=>Object.getPrototypeOf(new Client("sk_test_fixture").checkout.sessions)));
+  const sessions=new Map<string,any>(),paramsByKey=new Map<string,Stripe.Checkout.SessionCreateParams>();let loseCreate=true,loseExpiry=true;
+  for(const prototype of prototypes) {
+    t.mock.method(prototype,"create",async(params:Stripe.Checkout.SessionCreateParams,options:{idempotencyKey:string})=>{
+      const previous=paramsByKey.get(options.idempotencyKey);
+      if(previous)assert.deepEqual(params,previous,"A retry must retain the exact native expiry and creation parameters.");
+      else {
+        paramsByKey.set(options.idempotencyKey,structuredClone(params));
+        assert(params.expires_at!>=Math.floor(Date.now()/1000)+1800&&params.expires_at!<=Math.floor(Date.now()/1000)+86400);
+        sessions.set(options.idempotencyKey,{id:"cs_test_"+randomUUID(),status:"open",url:"https://checkout.stripe.com/fixture",
+          metadata:params.metadata,amount_total:Number(params.line_items?.[0].price_data?.unit_amount),currency:"usd",livemode:false});
+      }
+      if(loseCreate){loseCreate=false;throw new Error("Fixture lost session-create response");}
+      return sessions.get(options.idempotencyKey);
+    });
+    t.mock.method(prototype,"retrieve",async(id:string)=>{
+      const session=[...sessions.values()].find(row=>row.id===id);assert(session,"Only isolated fixture sessions may be read");return session;
+    });
+    t.mock.method(prototype,"expire",async(id:string,_body:unknown,options:{idempotencyKey:string})=>{
+      const session=[...sessions.values()].find(row=>row.id===id);assert(session);assert.equal(options.idempotencyKey,"checkout-expire:"+session.metadata.payment_id);
+      session.status="expired";session.url=null;
+      if(loseExpiry){loseExpiry=false;throw new Error("Fixture lost expiration response");}
+      return session;
+    });
+  }
+  const path=(entry:typeof cases[number])=>`/charges/${entry.charge}/checkout`,body=(entry:typeof cases[number])=>({quote_revision:entry.quote.revision});
+  await c.fetch(path(cases[0]),body(cases[0]),"POST",500,cases[0].key);
+  const recovered=await Promise.all([c.fetch(path(cases[0]),body(cases[0]),"POST",200,cases[0].key),c.fetch(path(cases[0]),body(cases[0]))]);
+  const first=recovered[0];assert.deepEqual(recovered[1],first);
+  const second=await c.fetch(path(cases[1]),body(cases[1])),third=await c.fetch(path(cases[2]),body(cases[2]));
+  assert.equal(sessions.size,3);
+  process.env.QCW_DEMO="1";
+  try {
+    assert.equal((await c.fetch(`/checkout/demo/${first.attempt_id}`,{},"POST",409)).error.code,"PAYMENT_MODE_MISMATCH");
+    assert.equal((await c.fetch(path(cases[0]),body(cases[0]),"POST",409)).error.code,"PAYMENT_MODE_MISMATCH");
+  } finally {process.env.QCW_DEMO="0";}
+  assert.equal((await pool.query("select count(*)::int n from payments where charge_item_id=$1",[cases[0].charge])).rows[0].n,1);
+  assert.equal((await pool.query("select count(*)::int n from outbox_events where type='payment.checkout_expire' and payload->>'payment_id'=$1",[first.attempt_id])).rows[0].n,1);
+  const paidBeforeDeadline=Math.floor(Date.now()/1000);
+  sessions.get(first.attempt_id).status="complete";
+  await pool.query("select pg_sleep(greatest(0,extract(epoch from max(expires_at)-clock_timestamp()))+.02) from inspection_quotes where id=any($1::uuid[])",[cases.map(entry=>entry.quote.id)]);
+  sessions.get(third.attempt_id).status="complete";
+  let failed=false;
+  for(let attempt=0;attempt<20&&!failed;attempt++)try{await workOnce();}catch{failed=true;}
+  assert(failed);assert.equal(sessions.get(second.attempt_id).status,"expired");
+  const job=(await pool.query("select id,attempts from outbox_events where type='payment.checkout_expire' and payload->>'payment_id'=$1",[second.attempt_id])).rows[0];
+  assert.equal(job.attempts,1);
+  assert.equal((await pool.query("select state from payments where id=$1",[second.attempt_id])).rows[0].state,"requires_payment");
+  await admin.fetch(`/staff/admin/jobs/${job.id}/retry`,{attempts:job.attempts,reason:"Verify provider expiration after the isolated response loss."});
+  for(let attempt=0;attempt<20;attempt++) {
+    if((await pool.query("select 1 from outbox_events where id=$1 and processed_at is not null",[job.id])).rowCount)break;
+    await workOnce();
+  }
+  assert.equal((await pool.query("select state from payments where id=$1",[second.attempt_id])).rows[0].state,"canceled");
+  async function paid(entry:typeof cases[number],paymentId:string,created:number) {
+    const session=sessions.get(paymentId),event={id:"evt_deadline_"+randomUUID(),object:"event",type:"checkout.session.completed",livemode:false,created,
+      data:{object:{...session,payment_status:"paid",payment_intent:"pi_fixture_"+paymentId}}};
+    const payload=JSON.stringify(event),signature=Stripe.webhooks.generateTestHeaderString({payload,secret:"whsec_deadline_fixture"});
+    const request=()=>handle(new Request(origin+"/api/v1/webhooks/stripe",{method:"POST",headers:{"stripe-signature":signature},body:payload}),"/webhooks/stripe");
+    assert.equal((await request()).status,200);assert.equal((await request()).status,200);
+  }
+  await paid(cases[0],first.attempt_id,paidBeforeDeadline);
+  assert.equal((await c.fetch(`/orders/${cases[0].draft.id}`)).state,"awaiting_samples");
+  await paid(cases[2],third.attempt_id,Math.floor(Date.now()/1000));
+  assert.equal((await c.fetch(`/orders/${cases[2].draft.id}`)).state,"awaiting_payment");
+  assert.equal((await pool.query("select applied_payment_id from charge_items where id=$1",[cases[2].charge])).rows[0].applied_payment_id,null);
+  assert.equal((await pool.query("select count(*)::int n from tickets where details->>'payment_id'=$1",[third.attempt_id])).rows[0].n,1);
+  const payment=await c.fetch(`/orders/${cases[2].draft.id}/payment`);assert.equal(payment.state,"processing");assert.equal(payment.reconciliation_required,true);
+  const bill=(await c.fetch(`/me/desk?include_items=0&include_activity=0&charge=${cases[2].charge}`)).bills[0];assert.equal(bill.state,"processing");
+  await c.fetch(path(cases[1]),body(cases[1]),"POST",409);
+  assert.equal((await pool.query("select count(*)::int n from expected_items e join order_lines l on l.id=e.order_line_id where l.order_id=$1",[cases[2].draft.id])).rows[0].n,0);
 });
 
 test("all core operations have a validated success response",assertCoreCoverage);

@@ -1929,6 +1929,12 @@ button.option-card.disabled, .option-card.disabled {
 .workspace-customer .workspace-top { gap: 12px; }
 .workspace-customer .header-right { min-width: 0; }
 @media (max-width: 1279px) {
+  .workspace-admin .workspace-top { flex-wrap: wrap; padding-block: 10px; }
+  .workspace-admin .workspace-top .topnav,
+  .workspace-admin .header-right { min-width: 0; max-width: 100%; flex-wrap: wrap; }
+  .workspace-admin .header-right .quick-switch { min-width: 0; max-width: 100%; overflow-x: auto; }
+}
+@media (max-width: 1279px) {
   .workspace-customer .topnav { display: none; }
 }
 @media (max-width: 900px) {

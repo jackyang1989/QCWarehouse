@@ -179,6 +179,9 @@ paths:
                   previous_checkout_expired:
                     type: boolean
                     description: 当前报价已过期，旧渠道会话仍可核对
+                  reconciliation_required:
+                    type: boolean
+                    description: 已记录实际到账，需人工核对，不能继续付款或自动履约
                   charge:
                     oneOf:
                     - type: 'null'
@@ -2952,8 +2955,75 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /staff/admin/quote-policy:
+    get:
+      operationId: getQuotePolicy
+      summary: 读取新报价有效期及配置版本
+      security:
+      - cookieSession: []
+      x-roles: [super_admin]
+      parameters: []
+      responses:
+        '200':
+          description: Current policy; absent configuration preserves existing defaults
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuotePolicy'
+        default:
+          description: Authorization or validation failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      operationId: saveQuotePolicy
+      summary: 近期MFA的超管更新新报价期限，不修改历史报价
+      security:
+      - cookieSession: []
+      x-roles: [super_admin]
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [inspection_minutes, dispatch_minutes, storage_minutes, expected_updated_at]
+              properties:
+                inspection_minutes: {type: integer, minimum: 30, maximum: 43200}
+                dispatch_minutes: {type: integer, minimum: 30, maximum: 43200}
+                storage_minutes: {type: integer, minimum: 30, maximum: 43200}
+                expected_updated_at: {type: [string, 'null'], format: date-time}
+              additionalProperties: false
+      responses:
+        '200':
+          description: Saved policy and current version
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuotePolicy'
+        default:
+          description: Authorization, MFA, version conflict or validation failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 components:
   schemas:
+    QuotePolicy:
+      type: object
+      required: [inspection_minutes, dispatch_minutes, storage_minutes, updated_at]
+      properties:
+        inspection_minutes: {type: integer, minimum: 30, maximum: 43200}
+        dispatch_minutes: {type: integer, minimum: 30, maximum: 43200}
+        storage_minutes: {type: integer, minimum: 30, maximum: 43200}
+        updated_at: {type: [string, 'null'], format: date-time}
+      additionalProperties: false
     Error:
       type: object
       required:

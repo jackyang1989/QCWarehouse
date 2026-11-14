@@ -14,7 +14,7 @@ import { draftRecoveryKey, readDraftRecovery, removeDraftRecovery, writeDraftRec
 import { conditionMatches } from "../packages/core/template-conditions";
 import { sumMeasurements } from "../packages/core/measurement-decimals";
 import { billingChargePath, billingQuotePath, customerDestination, inspectionScopePath, legalPages, orderSections, type OrderSection, servicePages } from "../packages/core/portal-routes";
-import { Action, checked, CodeButton, Empty, ErrorBlock, Field, Form, MediaLightbox, ModalDrawer, Panel, Photo, request, RequestError, Select, useWorkspaceStamp, Table, Tabs, Tag, text, useLoad, usd, type Row } from "./ui";
+import { Action, checked, CodeButton, Empty, ErrorBlock, Field, Form, MediaLightbox, ModalDrawer, Panel, Photo, QuoteCountdown, request, RequestError, Select, useWorkspaceStamp, Table, Tabs, Tag, text, useLoad, usd, type Row } from "./ui";
 
 const acknowledged={scope_notice:"I understand which checks are included.",samples_not_batch:"These samples do not represent an entire production batch.",seller_refund_is_mine:"I handle any refund request directly with my seller.",no_certification:"The report is an inspection record and does not provide certification.",restricted_items:"My items comply with the restricted items policy."};
 const states:Record<string,string>={
@@ -2048,6 +2048,7 @@ export function NewOrder({customerId}:{customerId:string}) {
               <strong>{usd(serverQuote!.amount_cents)} {serverQuote!.currency}</strong>
             </div>
             <p className="small muted">Valid until {stamp(serverQuote!.expires_at)}</p>
+            <QuoteCountdown expiresAt={serverQuote?.expires_at}/>
             <ul className="draft-lines">
               {serverQuote!.line_snapshot.map((line:Row)=><li key={line.order_line_id}>
                 <span>{offers.find(offer=>offer.offer_id===line.offer_id)?.title.en??"Inspection service"} × {line.quantity}<br/>
@@ -2097,7 +2098,7 @@ export function NewOrder({customerId}:{customerId:string}) {
 
         {step===5&&<Panel
           title="Step 6 · Payment Preview — Confirm Payment & Receiving Address"
-          subtitle="Complete payment to activate your inspection order and unlock warehouse parcel receiving."
+          subtitle="Confirm the valid quote and pay to activate this inspection."
           badge={<Tag tone="blue">{draftOrder?.public_no??"Ready"}</Tag>}
         >
           {!hasValidQuote || !draftOrder ? (
@@ -2110,6 +2111,7 @@ export function NewOrder({customerId}:{customerId:string}) {
             </div>
           ) : (
             <>
+              <p><QuoteCountdown expiresAt={serverQuote?.expires_at}/></p>
               <div className="grid cols2">
                 <dl className="def"><dt>Order number</dt><dd className="mono">{draftOrder.public_no}</dd></dl>
                 <dl className="def"><dt>Confirmed service fee</dt><dd className="mono">{usd(serverQuote!.amount_cents)} {serverQuote!.currency}</dd></dl>
@@ -2575,10 +2577,14 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
       {(section==="payment"||!section&&o.state==="awaiting_payment")&&<Panel title="Inspection payment">
         {payment.error?<><ErrorBlock error={payment.error}/><button type="button" onClick={payment.reload}>Retry payment status</button></>:!payment.data?<p role="status">Loading the current charge…</p>:<>
           {payment.data.charge&&<p><strong>{usd(payment.data.charge.amount_cents)}</strong> · Quote {payment.data.charge.quote_revision}</p>}
+          {paymentState==="open"&&<p className="small muted">Valid until {stamp(payment.data.charge?.expires_at)}.<br/>
+            <QuoteCountdown expiresAt={payment.data.charge?.expires_at}/></p>}
           {(paymentState==="open"||paymentState==="reconciliation")&&!checkoutNotice?.expired&&<Action primary run={()=>continuePayment(payment.data!.charge.id,payment.data!.charge.quote_revision)}>
             {paymentState==="reconciliation"||manualRenewal?"Check previous payment status":"Resume payment"}</Action>}
           {paymentState==="reconciliation"&&!checkoutNotice?.expired&&<p>The quote has expired. Check the previous checkout before requesting a new quote.</p>}
-          {paymentState==="processing"&&<p role="status">Payment is processing. We will update the order after confirmation.</p>}
+          {paymentState==="processing"&&<p role="status">{payment.data.reconciliation_required?
+            <>Payment was received and needs review before your inspection can start. <Link href="/support">View support cases</Link>.</>:
+            "Payment is processing. We will update the order after confirmation."}</p>}
           {(paymentState==="expired"||checkoutNotice?.expired)&&<>
             <p>The quote has expired. Review a new quote for this order.</p>
             {!manualRenewal&&<Action primary run={async()=>{
@@ -3441,7 +3447,8 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
           b.refunded_cents?usd(b.refunded_cents):"—",
           <Tag tone={shownState==="paid"?"green":shownState==="open"?"yellow":["void","expired"].includes(shownState)?"gray":"blue"}>{
             b.refunded_cents>0?(b.refunded_cents>=b.amount_cents?"Refunded":"Partially refunded"):
-              /^(demo_|cs_test_)/.test(b.paid_ref??"")?"Test payment confirmed":label(shownState)
+              /^(demo_|cs_test_)/.test(b.paid_ref??"")?"Test payment confirmed":
+                shownState==="processing"&&["succeeded","partially_refunded","refunded"].includes(b.latest_attempt_state)?"Payment received · under review":label(shownState)
           }</Tag>,
           stamp(b.posted_at),
           b.receipt_available?<Action run={async()=>{
@@ -3719,6 +3726,7 @@ function FulfillmentQuote({quote,onUpdate,onOpenBatch,focused=false}:{quote:Row;
         <strong>{usd(quote.amount_cents)}</strong>
       </div>
     </div>
+    {["open","accepted"].includes(state)&&<QuoteCountdown expiresAt={quote.expires_at}/>}
     {shipping?<>
       <p><strong>Destination</strong> · {snapshot.destination.recipient} · {snapshot.destination.address}
         {snapshot.destination.member_code&&<> · Member {snapshot.destination.member_code}</>}</p>

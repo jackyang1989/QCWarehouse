@@ -5,7 +5,7 @@ import { useState } from "react";
 import { Empty, ErrorBlock, Form, Panel, request, RequestError, stamp, Table, Tag, text, useLoad, type Row } from "./ui";
 
 const jobNames:Record<string,string>={
-  "report.render":"生成报告 PDF","refund.approved":"执行已审批退款",
+  "report.render":"生成报告 PDF","refund.approved":"执行已审批退款","payment.checkout_expire":"关闭到期付款会话",
   "report.published":"报告发布通知","report.amended":"报告修订通知","ticket.reply":"客服回复通知",
   "account.registered":"注册后续处理","package.received":"实收入仓通知","order.ready":"开检准备通知",
   "order.cancelled":"取消检查通知","dispatch.quoted":"发运报价通知","quote.offered":"人工报价通知",

@@ -103,6 +103,21 @@ function useIsStaffLocale() {
   return isStaffPath(pathname);
 }
 export const usd=(c:number)=>new Intl.NumberFormat("en-US",{style:"currency",currency:"USD"}).format(c/100);
+export function QuoteCountdown({expiresAt}:{expiresAt?:string}) {
+  const [now,setNow]=useState<number|null>(null);
+  useEffect(()=>{
+    setNow(Date.now());
+    const timer=setInterval(()=>setNow(Date.now()),1000);
+    return ()=>clearInterval(timer);
+  },[expiresAt]);
+  if(!expiresAt||!Number.isFinite(Date.parse(expiresAt)))return null;
+  if(now===null)return <span className="small muted">Loading remaining time…</span>;
+  const seconds=Math.max(0,Math.ceil((Date.parse(expiresAt)-now)/1000));
+  if(!seconds)return <span className="notice" role="status">Quote expired. Request a new quote before paying.</span>;
+  const days=Math.floor(seconds/86400),hours=Math.floor(seconds/3600)%24,minutes=Math.floor(seconds/60)%60;
+  const time=[hours,minutes,seconds%60].map(value=>String(value).padStart(2,"0")).join(":");
+  return <span className="small" data-quote-countdown aria-live="off">Time left: {days?`${days}d `:""}{time}</span>;
+}
 export const stamp=(t?:string,zhOverride?:boolean,timeZone?:string)=>{
   if(!t)return "—";
   const d=new Date(t);

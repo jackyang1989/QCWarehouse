@@ -1413,6 +1413,7 @@ export function AdminDesk({actor,path}:{actor:Row;path:string}) {
     </>}
     {page==="finance"&&<FinanceReconciliationPanel onOpenDrawer={setDrawer}/>}
     {(page==="config"||page==="settings")&&superAdmin&&<>
+      <QuotePolicyEditor policy={data.quote_policy} onSave={reload}/>
       <Panel title="仓库收货地址版本" subtitle="切换默认地址不会影响仍发往历史地址的在途包裹入库。">
         <Table headers={["中文地址","英文地址","收件人/电话","关联预报数","状态","操作"]} rows={data.addresses.map((a:Row)=>[
           a.address_zh,
@@ -1627,6 +1628,26 @@ const STAFF_ROLE_OPTIONS:[string,string,string][]=[
   ["template_admin","模板管理员 (template_admin)","规划品类、提交检验能力与编写品类检查模板"],
   ["super_admin","超级管理员 (super_admin)","全局配置、条款发布、价格上架、权限管控与双人终审"],
 ];
+
+function QuotePolicyEditor({policy,onSave}:{policy?:Row;onSave:()=>void}) {
+  const [saved,setSaved]=useState(false);
+  if(!policy)return <p role="status">正在读取报价有效期…</p>;
+  return <Panel title="报价有效期" subtitle="仅影响保存后新生成的报价；历史报价和已提交订单保留原截止时间。人工报价仍可单独指定截止时间。">
+    <p className="muted">单位为分钟：60分钟=1小时，1440分钟=1天。保存需要最近10分钟内完成员工MFA。报价到期后原价失效，已打开的收银台同样需要关闭。</p>
+    <Form key={policy.updated_at??"default"} label="保存报价有效期" run={async fields=>{
+      setSaved(false);
+      await request("/staff/admin/quote-policy","POST",{
+        inspection_minutes:Number(text(fields,"inspection_minutes")),dispatch_minutes:Number(text(fields,"dispatch_minutes")),
+        storage_minutes:Number(text(fields,"storage_minutes")),expected_updated_at:policy.updated_at,
+      });setSaved(true);onSave();
+    }}>
+      <Field name="inspection_minutes" label="自动质检及范围补款报价（分钟）" type="number" min={30} max={43200} step={1} value={policy.inspection_minutes}/>
+      <Field name="dispatch_minutes" label="发运报价（分钟）" type="number" min={30} max={43200} step={1} value={policy.dispatch_minutes}/>
+      <Field name="storage_minutes" label="续存报价（分钟）" type="number" min={30} max={43200} step={1} value={policy.storage_minutes}/>
+    </Form>
+    {saved&&<p role="status">报价有效期已保存。已有报价未作修改。</p>}
+  </Panel>;
+}
 
 function BusinessCalendarEditor({calendar,onSave}:{calendar?:Row;onSave:()=>void}) {
   const [holidays,setHolidays]=useState<string[]>(()=>[...(calendar?.holidays??[])].sort());

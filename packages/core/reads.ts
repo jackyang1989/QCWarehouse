@@ -11,6 +11,7 @@ import { incidentAwaitingCustomer, itemHandlingHoldSql } from "./storage";
 import { hasStaffAccess, staffAccess } from "./staff-access";
 import { effectiveDispatchCharge, pendingDispatchQuote, pendingStorageQuote, renewableFulfillmentQuote, unresolvedQuotePayment } from "./dispatch";
 import { inspectionPaymentForOrder } from "./payments";
+import { quotePolicy } from "./quote-policy";
 
 const inventoryJoins=`from warehouse_items w
     left join order_line_item_links a on a.item_id=w.id and a.unlinked_at is null
@@ -101,7 +102,7 @@ export async function bills(db:DB,actor:Actor,focusedCharge:string|null=null,pag
   const org=organization(actor);
   return (await db.query(`select c.id charge_item_id,c.purpose,c.amount_cents,c.currency,
     case when c.voided_at is not null then 'void' when c.applied_payment_id is not null or c.free_authorization is not null then 'paid'
-      when exists(select 1 from payments p where p.charge_item_id=c.id and p.state='processing') then 'processing' else 'open' end state,
+      when exists(select 1 from payments p where p.charge_item_id=c.id and p.state in ('processing','succeeded','partially_refunded','refunded')) then 'processing' else 'open' end state,
     coalesce((select sum(r.amount_cents)::int from refunds r join payments p on p.id=r.payment_id where p.charge_item_id=c.id and r.state='succeeded'),0) refunded_cents,
     coalesce(linked.order_ids,array[]::uuid[]) order_ids,coalesce(linked.order_numbers,array[]::text[]) order_numbers,
     d.batch_id,c.scope_revision_id,
@@ -730,6 +731,7 @@ export async function adminDesk(db:DB,actor:Actor) {
        from warehouse_addresses w
        order by w.is_default desc,w.active desc,w.created_at desc`
     )).rows:[],
+    quote_policy:actor.roles.includes("super_admin")?await quotePolicy(db):null,
     calendar:actor.roles.includes("super_admin")?await (async()=>{
       const cfg=(await db.query<{key:string;value:unknown}>("select key,value from app_config where key in ('calendar.holidays','business_holidays','calendar.extra_workdays')")).rows;
       const holidays=new Set<string>();

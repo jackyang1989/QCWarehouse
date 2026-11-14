@@ -5,6 +5,7 @@ import { audit, code, event, guard, isDemo, lock, one, organization, revision, r
 import { orderInboundRegistration, orderQuotes, orderShipments } from "./fulfillment-reads";
 import { scopeSupplementForOrder } from "./scope-payment";
 import { itemHandlingHoldSql } from "./storage";
+import { newQuoteValidity } from "./quote-policy";
 
 export const checkSchema = z.object({
   key:z.string().min(1).max(80), label:z.string().min(1).max(120), zh:z.string().min(1).max(120),
@@ -194,7 +195,8 @@ export async function quoteOrder(db:DB,actor:Actor,id:string,rev:number) {
   guard(order.state==="draft" || order.state==="awaiting_payment","ORDER_NOT_EDITABLE","Order is already in fulfillment.");
   const snapshot=await pricedLines(db,id),terms=await currentTerms(db,orderTerms);
   guard(terms.length===4,"TERMS_UNAVAILABLE","Ordering is unavailable until current terms are published.");
-  return storeQuote(db,id,snapshot,{terms:terms.map(t=>t.id),order_revision:rev},new Date(Date.now()+30*60_000));
+  const validity=await newQuoteValidity(db,"inspection");
+  return storeQuote(db,id,snapshot,{terms:terms.map(t=>t.id),order_revision:rev,quote_validity:validity.snapshot},validity.expires_at);
 }
 async function storeQuote(db:DB,id:string,snapshot:Awaited<ReturnType<typeof pricedLines>>,terms:object,expires:Date) {
   const previous=await one<{n:number}>(db,"select coalesce(max(revision),0) n from inspection_quotes where order_id=$1",[id]);

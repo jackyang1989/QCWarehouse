@@ -1,16 +1,16 @@
 import { pool, transaction } from "../db";
 import { publishReport } from "./inspection";
-import { executeRefund } from "./payments";
+import { executeRefund, expireCheckout, scheduleCheckoutExpirations } from "./payments";
 import { consumeTrackingCallback, subscribeTrackingOnce, syncTrackingOnce } from "./logistics";
 import { consumeEmailWebhook, deliverEmailOnce, queueNotificationEmail } from "./email";
 import { cleanupStaleMediaUploads } from "./media";
-import { audit, guard, one, role, type Actor } from "./common";
+import { audit, guard, isDemo, one, role, type Actor } from "./common";
 import { requireStaffMfa } from "./auth";
 import { eligibleManualQuoteOrderSql } from "./orders";
 import { pendingDispatchQuote, pendingStorageQuote } from "./dispatch";
 import type { DB } from "../db";
 
-const businessEvents=["account.registered","report.render","refund.approved","package.received","order.ready","order.identity_mismatch","order.cancelled","dispatch.quoted","storage.quoted","quote.offered","shipment.handed_over","shipment.return_received","payment.confirmed","report.published","report.amended","ticket.reply","tracking.exception_opened"];
+const businessEvents=["payment.checkout_expire","account.registered","report.render","refund.approved","package.received","order.ready","order.identity_mismatch","order.cancelled","dispatch.quoted","storage.quoted","quote.offered","shipment.handed_over","shipment.return_received","payment.confirmed","report.published","report.amended","ticket.reply","tracking.exception_opened"];
 const maxJobAttempts=10;
 
 function eventDedupeKey(j:{id:string;type:string;payload:Record<string,unknown>}):string {
@@ -71,11 +71,15 @@ export async function workOnce() {
   try {
     const worked=await transaction(async db=>{
       const j=(await db.query(`select * from outbox_events where processed_at is null and next_attempt_at<=now() and attempts<$2
-        and type=any($1::text[]) order by id limit 1 for update skip locked`,[businessEvents,maxJobAttempts])).rows[0];
+        and type=any($1::text[]) and (not $3::boolean or type<>'payment.checkout_expire' or exists(
+          select 1 from payments p where p.id::text=outbox_events.payload->>'payment_id' and p.state<>'requires_payment'))
+        order by (type='payment.checkout_expire') desc,id limit 1 for update skip locked`,
+        [businessEvents,maxJobAttempts,isDemo()])).rows[0];
       if(!j) return false;
       jobId=j.id;
       if(j.type==="report.render") await publishReport(db,j.payload.version_id);
       else if(j.type==="refund.approved") await executeRefund(db,j.payload.refund_id);
+      else if(j.type==="payment.checkout_expire") await expireCheckout(db,j.payload.payment_id);
       else {
         if(j.type==="account.registered" && j.payload.warehouse_address_status==="pending") {
           await db.query(`insert into notifications(user_id,template,locale,payload,dedupe_key)
@@ -126,8 +130,9 @@ export async function workOnce() {
   }
 }
 export async function trackingTick() {
+  const scheduled=await scheduleCheckoutExpirations();
   const subscribed=await subscribeTrackingOnce();
   const synced=await syncTrackingOnce();
   const cleaned=(await transaction(cleanupStaleMediaUploads)).cleaned>0;
-  return subscribed||synced||cleaned;
+  return scheduled||subscribed||synced||cleaned;
 }

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect } from "react";
-import { Action, Empty, ErrorBlock, Field, Form, Panel, Select, request, useWorkspaceStamp, text, useLoad, usd, type Row } from "./ui";
+import { Action, Empty, ErrorBlock, Field, Form, Panel, QuoteCountdown, Select, request, useWorkspaceStamp, text, useLoad, usd, type Row } from "./ui";
 
 export function ScopeReview({orderId,staff=false,onSave}:{orderId:string;staff?:boolean;onSave:()=>void}) {
   const stamp=useWorkspaceStamp();
@@ -108,6 +108,7 @@ export function ScopeReview({orderId,staff=false,onSave}:{orderId:string;staff?:
             updated();
           }}>Confirm and renew supplemental quote</Action>
         </>}
+        {!staff&&p.supplemental_charge?.state==="open"&&<QuoteCountdown expiresAt={p.supplemental_charge.expires_at}/>}
         {!staff&&p.supplemental_charge?.state==="open"&&<Action primary run={async()=>{
           const res=await request("/charges/"+p.supplemental_charge.id+"/checkout","POST",{quote_revision:p.supplemental_charge.quote_revision});
           if(res.checkout_url) location.assign(res.checkout_url);
