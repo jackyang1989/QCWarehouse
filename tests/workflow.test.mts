@@ -3535,6 +3535,17 @@ test("intake quarantine, half-unpacking, suit components, post-pay & cross-order
   assert.equal(unmTickets.length,1);
   assert.equal(unmTickets[0].state,"open");
 
+  const other=(await signCustomer()).c;
+  const proof=await sharp({create:{width:100,height:80,channels:3,background:"#11736d"}}).png().toBuffer();
+  async function submitOwnership(client:Client) {
+    const fields=new FormData();
+    fields.set("tracking_no",unmWaybill);
+    fields.set("carrier_code","zto");
+    fields.set("photo",new Blob([new Uint8Array(proof)],{type:"image/png"}),"seller.png");
+    return client.fetch("/me/intake-claims",fields,"POST",201);
+  }
+  const claim=await submitOwnership(c),competing=await submitOwnership(other);
+
   const bound=await receiving.fetch(`/staff/packages/${unmPkg1.id}/bind-owner`,{
     revision:unmPkg1.revision,
     receiving_code:registration.receiving_code,
@@ -3545,6 +3556,13 @@ test("intake quarantine, half-unpacking, suit components, post-pay & cross-order
   assert.equal(bound.receiving_code,registration.receiving_code);
   const {rows:[resolvedUnm]}=await pool.query("select state from tickets where id=$1",[unmTickets[0].id]);
   assert.equal(resolvedUnm.state,"resolved");
+  const customerReview=await c.fetch("/cases/"+claim.id);
+  assert.equal(customerReview.state,"resolved");
+  assert.equal(customerReview.ownership_review.decision,"approve");
+  assert.equal((await c.fetch("/me/parcels/"+customerReview.ownership_review.advice_id+"/tracking")).tracking_no,unmWaybill);
+  assert.equal((await other.fetch("/cases/"+competing.id)).ownership_review.advice_id,null);
+  await other.fetch("/cases/"+claim.id,undefined,"GET",404);
+  assert.equal((await pool.query("select count(*)::int n from outbox_events where payload->>'dedupe_key'=$1",["intake-claim.decision:"+claim.id])).rows[0].n,1);
 
   // 2. TASK-058 & TASK-170 & T101: Half-unpacking (2 batches) + suit sub-component (component_of does not inflate received_quantity)
   const mainCode1="S-"+randomUUID().slice(0,8).toUpperCase();

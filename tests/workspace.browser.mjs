@@ -740,7 +740,7 @@ async function verifyIncidentDecision({page,call,errors},other) {
   console.log("PASS independently approved incident proposal, customer decision, retained action after reply, and separate payout proof");
 }
 
-async function verifyParcelOwnership({page,call,errors},other) {
+async function verifyParcelOwnership({page,call,errors},other,bindByLabel=false) {
   const receiver=await session("receiving@qcw.test",true);
   const admin=await session("admin@qcw.test",true);
   const tracking="ZT"+randomUUID().slice(0,8).toUpperCase();
@@ -779,16 +779,28 @@ async function verifyParcelOwnership({page,call,errors},other) {
   await page.getByText(reply,{exact:true}).waitFor();
   await captureWizard(page,"parcel-claim-in-review","Inbound parcel ownership review");
   await other.call("/cases/"+claim.id,{status:404});
-  await admin.page.goto("/admin/orders#case-"+claim.id);
-  const review=admin.page.locator("#case-"+claim.id);
-  await review.getByRole("link",{name:"查看工单与客户补充回复"}).click();
-  await admin.page.getByText(reply,{exact:true}).waitFor();
-  await admin.page.getByRole("link",{name:"查看认领核验"}).click();
-  await review.locator('select[name="decision"]').selectOption("approve");
   const staffNote="Matched the physical label with private seller evidence.";
-  await review.getByLabel("核验证据和原因").fill(staffNote);
-  await review.getByRole("button",{name:"记录核验结论"}).click();
-  await review.locator("summary").filter({hasText:"approve"}).waitFor();
+  if(bindByLabel) {
+    const label=await receiver.context.request.post("/api/v1/staff/media",{
+      headers:{origin,"Idempotency-Key":randomUUID(),"X-CSRF-Token":csrf},
+      multipart:{kind:"label_photo",photo:{name:"label.png",mimeType:"image/png",buffer:photo}},
+    });
+    assert.equal(label.status(),201);
+    const address=await call("/me/receiving-address");
+    const bound=await receiver.call("/staff/packages/"+parcel.id+"/bind-owner",{body:{revision:parcel.revision,
+      receiving_code:address.receiving_code,evidence_ids:[(await label.json()).id],reason:staffNote}});
+    assert.equal(bound.state,"checked_in");
+  } else {
+    await admin.page.goto("/admin/orders#case-"+claim.id);
+    const review=admin.page.locator("#case-"+claim.id);
+    await review.getByRole("link",{name:"查看工单与客户补充回复"}).click();
+    await admin.page.getByText(reply,{exact:true}).waitFor();
+    await admin.page.getByRole("link",{name:"查看认领核验"}).click();
+    await review.locator('select[name="decision"]').selectOption("approve");
+    await review.getByLabel("核验证据和原因").fill(staffNote);
+    await review.getByRole("button",{name:"记录核验结论"}).click();
+    await review.locator("summary").filter({hasText:"approve"}).waitFor();
+  }
   const approved=(await call("/me/intake-claims")).rows[0];
   assert.equal(approved.decision,"approve");
   assert(approved.advice_id);
@@ -837,7 +849,7 @@ try {
   if(resumeMatrix) await verifyWorkspaceViews(customer,other);
   else if(process.env.QCW_BROWSER_PARCELS_ONLY==="1") await verifyParcelPagination(customer,other);
   else if(process.env.QCW_BROWSER_PAYMENT_ACTIONS_ONLY==="1") await verifyInspectionPaymentActions(customer,other);
-  else if(process.env.QCW_BROWSER_INTAKE_CLAIM_ONLY==="1") await verifyParcelOwnership(customer,other);
+  else if(process.env.QCW_BROWSER_INTAKE_CLAIM_ONLY==="1") await verifyParcelOwnership(customer,other,process.env.QCW_BROWSER_BIND_OWNER==="1");
   else if(process.env.QCW_BROWSER_INCIDENT_ONLY==="1") await verifyIncidentDecision(customer,other);
   else if(process.env.QCW_BROWSER_SELLER_RETURN_ONLY==="1") await verifySellerReturn(customer,other);
   else if(process.env.QCW_BROWSER_SUPPORT_ONLY==="1") await verifySupportHistory(customer,other);
