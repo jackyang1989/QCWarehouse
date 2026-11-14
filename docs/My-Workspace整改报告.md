@@ -394,3 +394,5 @@ flowchart TD
 脚本同时设置本机隔离实例、Playwright模块及证据目录，具体环境沿用前文复现方式。证据分别位于 `qcwarehouse-completion-full`、`qcwarehouse-completion-scope-fixed`、`qcwarehouse-completion-actions-fixed`、`qcwarehouse-completion-recovery` 和 `qcwarehouse-state-acceptance`。初始五项失败反例仍在 `qcwarehouse-completion-audit`。
 
 五项代码反例及本轮证据缺口已经消除。正式供应商、实仓和业务决定的 OPEN 清单仍按前文记录。客户自行关闭/重开工单、未委托包裹的独立申报、语言/通知偏好等既有后端缺口继续明示，未创建静态模拟能力。
+
+修复提交为 `5f8fc79`。当前图集入口为本机交付目录 `qcwarehouse-completion-full/index.html`，汇总308张原图、23个入口状态断言及七份运行日志。预览3000已同步相同实现并通过健康检查，仍使用历史验证副本。源库业务计数保持77笔订单、50个包裹、134件实物、12份已发布报告。
