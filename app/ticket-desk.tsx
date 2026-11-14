@@ -51,11 +51,12 @@ export function ParcelOwnershipReviews({carriers,carrierError,onReloadCarriers,p
       !carriers?<p role="status">Loading review carriers…</p>:<details className="card" ref={formSection}>
       <summary>Find a missing parcel</summary>
       <p className="muted">Enter the seller’s tracking number for the missing parcel and attach their shipment proof. Our team will verify ownership against the warehouse record.</p>
-      <Form key={submitted?.public_no} label="Request ownership review" run={async fields=>{
-        const result=await request("/me/intake-claims","POST",fields);
-        setSubmitted(result);
-        if(formSection.current)formSection.current.open=false;
-        claims.reload();
+      <Form key={submitted?.public_no} label="Request ownership review" idempotent run={async (fields,key)=>{
+        try {
+          const result=await request("/me/intake-claims","POST",fields,key);
+          setSubmitted(result);
+          if(formSection.current)formSection.current.open=false;
+        } finally {claims.reload();}
       }}>
         <Field name="tracking_no" label="Seller’s tracking number"/>
         <Select name="carrier_code" label="Carrier" choices={carriers.map(carrier=>({id:carrier.code,label:carrier.labels.en}))}/>
@@ -121,11 +122,11 @@ export function CustomerCase({id,order}:{id:string;order?:string}) {
         {incident.proposal_summary_en&&<p>{incident.proposal_summary_en}</p>}
         {incident.customer_decision&&<p role="status">{incident.customer_decision==="accept"?"You accepted this proposal.":"You requested further review."}</p>}
         {incident.paid&&incident.payout_reference&&<p className="muted">Payout reference <span className="code">{incident.payout_reference}</span></p>}
-        {incident.decision_required&&<Form label="Submit compensation decision" run={async fields=>{
+        {incident.decision_required&&<Form label="Submit compensation decision" idempotent run={async (fields,key)=>{
           await request("/me/incidents/"+incident.id+"/response","POST",{
             decision:text(fields,"decision"),
             note:text(fields,"note")||undefined,
-          });
+          },key);
           reload();
         }}>
           <div className="field"><label htmlFor="incident-decision-choice">Decision</label><select id="incident-decision-choice" name="decision" required defaultValue="">
@@ -137,12 +138,12 @@ export function CustomerCase({id,order}:{id:string;order?:string}) {
         </Form>}
       </Panel></div>}
       {isOpen(data.state)&&<Panel title="Reply to support">
-        <Form key={sent} label="Send reply" run={async fields=>{
+        <Form key={sent} label="Send reply" idempotent run={async (fields,key)=>{
           const photo=fields.get("photo");
           const message={revision:data.revision,body:text(fields,"body")};
           const payload=photo instanceof File&&photo.size?fields:message;
           if(payload instanceof FormData)payload.set("revision",String(message.revision));
-          const result=await request(api+"/messages","POST",payload);
+          const result=await request(api+"/messages","POST",payload,key);
           setSent(result.revision);reload();
         }}><label>Reply<textarea name="body" required minLength={2} maxLength={2000}/></label>
           <label>Evidence photo (optional)<FileInput name="photo"/></label>

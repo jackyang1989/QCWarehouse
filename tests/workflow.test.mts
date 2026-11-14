@@ -2968,7 +2968,29 @@ test("Stripe webhook signature/amount guards, order hold/resume during payment, 
   assert.equal((await c.fetch("/orders/"+mismatchOrder.draft.id)).state,"awaiting_payment");
   assert((await pool.query("select 1 from tickets where category='payment_refund' and details->>'payment_id'=$1",[mismatchOrder.checkout.attempt_id])).rowCount!>=1);
 
+  const mismatchRetries=await Promise.all(Array.from({length:15},()=>handle(new Request(origin+"/api/v1/webhooks/stripe",{
+    method:"POST",headers:{"content-type":"application/json","stripe-signature":mismatchSig},body:mismatchPayload,
+  }),"/webhooks/stripe")));
+  for(const retry of mismatchRetries) {
+    assert.equal(retry.status,409);
+    assert.equal((await retry.json()).error.code,"PAYMENT_AMOUNT_MISMATCH");
+  }
+  const mismatchTickets=(await pool.query<{id:string}>(
+    "select id from tickets where category='payment_refund' and details->>'event_id'=$1",
+    [JSON.parse(mismatchPayload).id])).rows;
+  assert.equal(mismatchTickets.length,1,"A retried rejected callback must not create duplicate customer reconciliation cases.");
+  assert.equal((await c.fetch("/orders/"+mismatchOrder.draft.id)).state,"awaiting_payment");
+  assert.equal((await pool.query("select applied_payment_id from charge_items where id=$1",[mismatchOrder.submitted.charge.charge_item_id])).rows[0].applied_payment_id,null);
+  assert.equal((await pool.query("select count(*)::int n from payment_events where provider='stripe' and event_id=$1 and processed_at is not null",[JSON.parse(mismatchPayload).id])).rows[0].n,1);
+  assert.equal((await pool.query("select count(*)::int n from audit_events where action='payment_amount_mismatch' and after->>'event_id'=$1",[JSON.parse(mismatchPayload).id])).rows[0].n,1);
+  const mismatchHistory=await c.fetch("/me/cases?q="+mismatchOrder.draft.public_no);
+  assert.equal(mismatchHistory.rows.filter(row=>row.id===mismatchTickets[0].id).length,1);
+  await c.fetch("/cases/"+mismatchTickets[0].id);
+
   process.env.QCW_DEMO="1";
+  const foreignMismatchCustomer=await signCustomer();
+  await foreignMismatchCustomer.c.fetch("/cases/"+mismatchTickets[0].id,undefined,"GET",404);
+  assert.equal((await foreignMismatchCustomer.c.fetch("/me/cases")).rows.length,0);
 
   const holdOrder=await submitNewOrder();
   const held=await admin.fetch(`/staff/orders/${holdOrder.draft.id}/hold`,{

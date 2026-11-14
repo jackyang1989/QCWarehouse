@@ -245,10 +245,18 @@ export function verifyStripe(raw:string,signature:string) {
   guard(event.livemode===(mode==="live"),"PAYMENT_MODE_MISMATCH","Webhook does not match the configured Stripe mode.",400);
   return event;
 }
+function rejectedPaymentAmount() {
+  return {rejection:new Problem("PAYMENT_AMOUNT_MISMATCH","Callback amount does not match the charge snapshot.",409)};
+}
 export async function stripeEvent(db:DB,e:Stripe.Event) {
   const inserted=await db.query(`insert into payment_events(id,provider,event_id,type,payload) values($1,'stripe',$2,$3,$4)
     on conflict(provider,event_id) do nothing`,[uuid(),e.id,e.type,e]);
-  if(!inserted.rowCount) return {received:true};
+  if(!inserted.rowCount) {
+    const rejected=await db.query(`select 1 from audit_events where action='payment_amount_mismatch'
+      and entity_type='payments' and after->>'event_id'=$1 limit 1`,[e.id]);
+    if(rejected.rowCount) return rejectedPaymentAmount();
+    return {received:true};
+  }
   if(["checkout.session.completed","checkout.session.async_payment_succeeded",
     "checkout.session.async_payment_failed","checkout.session.expired"].includes(e.type)) {
     const s=e.data.object as Stripe.Checkout.Session;
@@ -261,12 +269,13 @@ export async function stripeEvent(db:DB,e:Stripe.Event) {
         const orderId=p.inspection_quote_id
           ?(await db.query<{order_id:string}>("select order_id from inspection_quotes where id=$1",[p.inspection_quote_id])).rows[0]?.order_id??null
           :null;
-        await pool.query("insert into tickets(id,public_no,org_id,order_id,category,subject,details) values($1,$2,$3,$4,'payment_refund',$5,$6)",
+        await db.query("insert into tickets(id,public_no,org_id,order_id,category,subject,details) values($1,$2,$3,$4,'payment_refund',$5,$6)",
           [uuid(),code("PAY-"),p.org_id,orderId,"Reconcile payment amount or currency mismatch",{
             payment_id:pid,expected_cents:p.amount_cents,actual_cents:s.amount_total??null,currency:s.currency??null,event_id:e.id,
           }]);
-        await audit(pool,null,"payment_amount_mismatch","payments",pid,{expected_cents:p.amount_cents,actual_cents:s.amount_total??null,currency:s.currency??null});
-        guard(false,"PAYMENT_AMOUNT_MISMATCH","Callback amount does not match the charge snapshot.",409);
+        await audit(db,null,"payment_amount_mismatch","payments",pid,{event_id:e.id,expected_cents:p.amount_cents,actual_cents:s.amount_total??null,currency:s.currency??null});
+        await db.query("update payment_events set processed_at=now() where provider='stripe' and event_id=$1",[e.id]);
+        return rejectedPaymentAmount();
       }
       if((e.type==="checkout.session.completed" || e.type==="checkout.session.async_payment_succeeded") && s.payment_status==="paid") {
         await applyPayment(db,pid,s.id,{payment_intent:s.payment_intent});

@@ -3479,16 +3479,17 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     </Panel></div></>}
     {isHelp&&<><div className="page-head"><p className="eyebrow">MY WORKSPACE · ACCOUNT</p><h1>Support</h1><p className="muted">Open a case about an order, parcel, report or payment, and follow the warehouse team&apos;s replies.</p></div>
       <Panel title="Open a support case">
-        <Form key={createdCase?.id??search.get("parcel")} label="Submit case" run={async f=>{
+        <Form key={createdCase?.id??search.get("parcel")} label="Submit case" idempotent run={async (f,key)=>{
           const orderId=text(f,"order_id"),category=text(f,"category"),parcelId=text(f,"parcel_id");
           if(category&&!orderId) throw new Error("Select the related order for this issue type.");
           const photo=f.get("photo");
-          const result=await request("/me/cases","POST",photo instanceof File&&photo.size?f:{
-            subject:text(f,"subject"),message:text(f,"message"),...(orderId?{order_id:orderId}:{}),
-            ...(category?{category}:{}),...(parcelId?{parcel_id:parcelId}:{}),
-          });
-          setCreatedCase(result);
-          caseList.reload();
+          try {
+            const result=await request("/me/cases","POST",photo instanceof File&&photo.size?f:{
+              subject:text(f,"subject"),message:text(f,"message"),...(orderId?{order_id:orderId}:{}),
+              ...(category?{category}:{}),...(parcelId?{parcel_id:parcelId}:{}),
+            },key);
+            setCreatedCase(result);
+          } finally {caseList.reload();}
         }}>
           <Select name="category" label="Issue type" required={false} choices={[
             {id:"receipt_mismatch",label:"Received items do not match"},

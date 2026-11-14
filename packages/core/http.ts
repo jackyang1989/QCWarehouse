@@ -360,7 +360,10 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   }
   if(method==="POST" && path==="/webhooks/stripe") {
     const event=verifyStripe(await req.text(),req.headers.get("stripe-signature")??"");
-    return json(await transaction(db=>stripeEvent(db,event)));
+    const result=await transaction(db=>stripeEvent(db,event));
+    // Rejected payment evidence must commit before returning its error response.
+    if("rejection" in result) throw result.rejection;
+    return json(result);
   }
   if(method==="POST" && path==="/webhooks/email/postmark") {
     const raw=await req.text();

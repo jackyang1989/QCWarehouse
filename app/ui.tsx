@@ -18,7 +18,10 @@ export async function request(path:string,method="GET",body?:unknown,idempotency
   const r=await fetch("/api/v1"+path,{method,signal,cache:"no-store",headers:method==="GET"?{}:{
     ...(!form?{"content-type":"application/json"}:{}),"Idempotency-Key":idempotencyKey??crypto.randomUUID(),
     ...(csrf?{"X-CSRF-Token":csrf}:{}),
-  },...(body!==undefined?{body:form?body:JSON.stringify(body)}:{})});
+  },...(body!==undefined?{body:form?body:JSON.stringify(body)}:{})}).catch(error=>{
+    if(error instanceof TypeError)throw new RequestError("The connection was interrupted. Check your connection and try again.","NETWORK_ERROR");
+    throw error;
+  });
   const data=await r.json().catch(()=>null);
   if(!r.ok) throw new RequestError(data?.error?.message??"The request failed. Try again.",data?.error?.code,r.status);
   if(data===null) throw new RequestError("The server response could not be read. Try again.");
@@ -59,7 +62,7 @@ async function withUploadRetry<T>(fn:()=>Promise<T>,attempts=3):Promise<T> {
       return await fn();
     } catch(err) {
       lastError=err;
-      if(err instanceof RequestError && err.code && !["SERVER_ERROR"].includes(err.code)) throw err;
+      if(err instanceof RequestError && err.code && !["SERVER_ERROR","NETWORK_ERROR"].includes(err.code)) throw err;
       if(i+1<attempts) await new Promise(r=>setTimeout(r,300*(2**i)));
     }
   }
@@ -328,12 +331,28 @@ export function Action({children,run,primary=false,disabled=false,sm=false}:{chi
     set(true);err("");try {await run();}catch(e){err(e instanceof Error?e.message:"Failed");}finally{set(false);}
   }}>{busy?"…":children}</button>{error&&<span className="notice error" role="alert">{error}</span>}</span>;
 }
-export function Form({children,run,label,inline=false}:{children:ReactNode;run:(f:FormData)=>Promise<unknown>;label:string;inline?:boolean}) {
+export function Form({children,run,label,inline=false,idempotent=false}:{children:ReactNode;run:(f:FormData,key?:string)=>Promise<unknown>;label:string;inline?:boolean;idempotent?:boolean}) {
   const [busy,set]=useState(false),[error,err]=useState("");
+  const inFlight=useRef(false),attempt=useRef<{fingerprint:string;key:string}|null>(null);
   async function submit(e:FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if(inFlight.current)return;
     const fields=new FormData(e.currentTarget);
-    set(true);err("");try {await run(fields);}catch(e){err(e instanceof Error?e.message:"Failed");}finally{set(false);}
+    inFlight.current=true;
+    set(true);err("");
+    try {
+      if(idempotent) {
+        const values=[];
+        for(const [name,value] of fields) values.push([name,typeof value==="string"?value:
+          {type:value.type,sha256:await sha256Hex(await value.arrayBuffer())}]);
+        const fingerprint=JSON.stringify(values);
+        if(attempt.current?.fingerprint!==fingerprint)attempt.current={fingerprint,key:crypto.randomUUID()};
+      }
+      await run(fields,idempotent?attempt.current?.key:undefined);
+      attempt.current=null;
+    } catch(e){err(idempotent&&e instanceof RequestError&&e.code==="NETWORK_ERROR"
+      ?"Connection lost. Your request may already be saved. Retry to check the same request.":e instanceof Error?e.message:"Failed");}
+    finally{inFlight.current=false;set(false);}
   }
   return <form className={"form"+(inline?" inline-form":"")} onSubmit={submit}><fieldset disabled={busy} style={{display:"contents"}}>
     {children}<button type="submit" className="button primary" disabled={busy}>{busy?"…":label}</button></fieldset>

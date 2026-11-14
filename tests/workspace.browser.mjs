@@ -1365,7 +1365,118 @@ async function verifyScopeRenewal({page,call,errors},other) {
   } finally {await db.end();}
 }
 
+async function verifyRejectedPaymentCase(other) {
+  const dbURL=new URL(process.env.QCW_BROWSER_DATABASE_URL);
+  assert.equal(dbURL.hostname,"127.0.0.1");assert.match(dbURL.pathname,/^\/qcw_test-[a-z0-9-]+$/);
+  const {default:pg}=await import("pg"),db=new pg.Client({connectionString:dbURL.href});await db.connect();
+  try {
+    const {rows}=await db.query(`select t.id,t.public_no,o.public_no order_number,e.normalized_email email,
+      t.details->>'event_id' event_id,t.details->>'payment_id' payment_id,c.applied_payment_id,
+      (select count(*)::int from tickets k where k.details->>'event_id'=t.details->>'event_id') case_count,
+      (select count(*)::int from payment_events pe where pe.event_id=t.details->>'event_id' and pe.processed_at is not null) event_count
+      from tickets t join memberships m on m.org_id=t.org_id
+      join user_emails e on e.user_id=m.user_id and e.is_primary
+      join orders o on o.id=t.order_id and o.org_id=t.org_id
+      join payments p on p.id::text=t.details->>'payment_id' join charge_items c on c.id=p.charge_item_id
+      where t.subject='Reconcile payment amount or currency mismatch' order by t.created_at desc limit 1`);
+    const record=rows[0];assert(record?.email.endsWith("@qcw.test"));
+    assert.equal(record.case_count,1);assert.equal(record.event_count,1);assert.equal(record.applied_payment_id,null);
+    const customer=await session(record.email,false,true),{page,call,errors}=customer;
+    const cases=await call("/me/cases?q="+record.order_number);
+    assert.deepEqual(cases.rows.map(row=>row.id),[record.id]);
+    await page.goto("/support?q="+record.order_number);
+    const link=page.getByRole("link",{name:record.public_no,exact:true});await link.waitFor();
+    assert.equal(await page.getByRole("row").count(),2);
+    await captureWizard(page,"payment-rejection-single-case","My support cases");
+    await link.click();await ready(page,"Reconcile payment amount or currency mismatch");
+    await captureWizard(page,"payment-rejection-case-detail","Reconcile payment amount or currency mismatch");
+    await other.call("/cases/"+record.id,{status:404});
+    assert.equal((await other.call("/me/cases?q="+record.order_number)).rows.length,0);
+    assert.deepEqual([...errors,...other.errors],[]);
+    assert(entries.every(entry=>entry.overflow<=1));
+    console.log("PASS signed rejected callback produces one persisted customer case, unchanged unpaid charge, real list/detail and tenant isolation");
+  } finally {await db.end();}
+}
+
 async function verifySupportHistory({page,call,errors},other) {
+  await page.goto("/support");
+  const recoverySubject="Support response recovery "+randomUUID();
+  await page.getByLabel("Subject",{exact:true}).fill(recoverySubject);
+  await page.getByLabel("Message",{exact:true}).fill("Keep the same support case when its response is lost.");
+  let savedCase,originalKey;
+  const dropResponse=async route=>{
+    if(route.request().method()!=="POST")return route.continue();
+    originalKey=route.request().headers()["idempotency-key"];
+    const response=await route.fetch();assert.equal(response.status(),200);savedCase=await response.json();
+    await route.abort("failed");
+  };
+  await page.route("**/api/v1/me/cases",dropResponse);
+  await page.getByRole("button",{name:"Submit case",exact:true}).click();
+  const submissionError=page.locator("form .notice.error[role='alert']");
+  await submissionError.waitFor();
+  assert(savedCase?.id&&originalKey,"Expected a committed support request before dropping its response: "+await submissionError.innerText());
+  await submissionError.getByText("Connection lost. Your request may already be saved. Retry to check the same request.",{exact:true}).waitFor();
+  await page.getByRole("link",{name:savedCase.public_no,exact:true}).waitFor();
+  assert.equal((await call("/me/cases")).rows.filter(row=>row.subject===recoverySubject).length,1);
+  await page.unroute("**/api/v1/me/cases",dropResponse);
+  const replay=page.waitForResponse(response=>response.request().method()==="POST"&&new URL(response.url()).pathname==="/api/v1/me/cases");
+  await page.getByRole("button",{name:"Submit case",exact:true}).click();
+  const replayed=await replay;assert.equal(replayed.status(),200);
+  assert.equal(replayed.request().headers()["idempotency-key"],originalKey,"An unchanged support submission must replay its original request key.");
+  assert.equal((await replayed.json()).id,savedCase.id);
+  assert.equal((await call("/me/cases")).rows.filter(row=>row.subject===recoverySubject).length,1);
+  await captureWizard(page,"support-create-replayed","My support cases");
+  await other.call("/cases/"+savedCase.id,{status:404});
+  await page.getByLabel("Subject",{exact:true}).fill("x".repeat(151));
+  await page.getByLabel("Message",{exact:true}).fill("Keep editable fields after server validation.");
+  const invalid=page.waitForResponse(response=>response.request().method()==="POST"&&new URL(response.url()).pathname==="/api/v1/me/cases");
+  await page.getByRole("button",{name:"Submit case",exact:true}).click();
+  const invalidResponse=await invalid;assert.equal(invalidResponse.status(),422);
+  await submissionError.waitFor();
+  await captureWizard(page,"support-validation-error","My support cases");
+  await page.getByLabel("Subject",{exact:true}).fill("Corrected support subject "+randomUUID());
+  const corrected=page.waitForResponse(response=>response.request().method()==="POST"&&new URL(response.url()).pathname==="/api/v1/me/cases");
+  await page.getByRole("button",{name:"Submit case",exact:true}).click();
+  const correctedResponse=await corrected;assert.equal(correctedResponse.status(),200);
+  assert.notEqual(correctedResponse.request().headers()["idempotency-key"],invalidResponse.request().headers()["idempotency-key"]);
+  await page.goto("/support/cases/"+savedCase.id);
+  await ready(page,recoverySubject);
+  const replyBody="Reply response recovery "+randomUUID();
+  const photo={name:"reply-proof.png",mimeType:"image/png",buffer:await sharp({create:{width:100,height:80,channels:3,background:"#14736d"}}).png().toBuffer()};
+  await page.getByLabel("Reply",{exact:true}).fill(replyBody);
+  await page.locator('input[type="file"]').setInputFiles(photo);
+  let savedReply,replyKey;
+  const replyPath="/api/v1/cases/"+savedCase.id+"/messages";
+  const dropReply=async route=>{
+    replyKey=route.request().headers()["idempotency-key"];
+    const response=await route.fetch();assert.equal(response.status(),200);savedReply=await response.json();
+    await route.abort("failed");
+  };
+  await page.route("**"+replyPath,dropReply);
+  await page.getByRole("button",{name:"Send reply",exact:true}).click();
+  await page.locator("form .notice.error[role='alert']").waitFor();
+  assert(savedReply?.revision&&replyKey);
+  const beforeReplay=await call("/cases/"+savedCase.id);
+  assert.equal(beforeReplay.events.filter(event=>event.body===replyBody).length,1);
+  await page.unroute("**"+replyPath,dropReply);
+  const replyReplay=page.waitForResponse(response=>response.request().method()==="POST"&&new URL(response.url()).pathname===replyPath);
+  await page.getByRole("button",{name:"Send reply",exact:true}).click();
+  const replyResponse=await replyReplay;assert.equal(replyResponse.status(),200);
+  assert.equal(replyResponse.request().headers()["idempotency-key"],replyKey);
+  assert.equal((await replyResponse.json()).revision,savedReply.revision);
+  await page.getByText("Your reply was sent.",{exact:true}).waitFor();
+  const detail=await call("/cases/"+savedCase.id);
+  const message=detail.events.filter(event=>event.body===replyBody);assert.equal(message.length,1);assert.equal(message[0].media_ids.length,1);
+  await other.call("/cases/"+savedCase.id,{status:404});
+  assert.equal((await other.context.request.get("/api/v1/media/"+message[0].media_ids[0])).status(),404);
+  await captureWizard(page,"support-reply-replayed",recoverySubject);
+  await page.getByLabel("Reply",{exact:true}).fill(replyBody);
+  await page.locator('input[type="file"]').setInputFiles(photo);
+  const newReply=page.waitForResponse(response=>response.request().method()==="POST"&&new URL(response.url()).pathname===replyPath);
+  await page.getByRole("button",{name:"Send reply",exact:true}).click();
+  const newReplyResponse=await newReply;assert.equal(newReplyResponse.status(),200);
+  assert.notEqual(newReplyResponse.request().headers()["idempotency-key"],replyKey);
+  assert.equal((await call("/cases/"+savedCase.id)).events.filter(event=>event.body===replyBody).length,2);
   const history=[];
   for(let index=0;index<21;index++) {
     history.push(await call("/me/cases",{body:{subject:`Support history fixture ${index+1}`,message:"A message in the local support history fixture."}}));
@@ -1393,7 +1504,7 @@ async function verifySupportHistory({page,call,errors},other) {
   await other.page.getByText("No support cases match these filters.").waitFor();
   assert.deepEqual(errors,[]);
   assert(entries.every(entry=>entry.overflow<=1));
-  console.log("PASS support history pagination, case search, browser back, and customer isolation");
+  console.log("PASS support create/reply lost-response replay, attachment isolation, successful attempt reset, history pagination, case search and browser back");
 }
 
 async function verifySellerReturn({page,call,errors},other) {
@@ -1569,7 +1680,23 @@ async function verifyIncidentDecision({page,call,errors},other) {
   assert.equal((await call("/actions")).rows.find(row=>row.id===incident.ticket_id).state,"incident_decision");
   await captureWizard(page,"incident-decision-required",subject);
   await page.getByLabel("Decision",{exact:true}).selectOption("accept");
+  const decisionPath="/api/v1"+customerPath+"/response";
+  let decisionKey;
+  const dropDecision=async route=>{
+    decisionKey=route.request().headers()["idempotency-key"];
+    const response=await route.fetch();assert.equal(response.status(),200);
+    await route.abort("failed");
+  };
+  await page.route("**"+decisionPath,dropDecision);
   await page.getByRole("button",{name:"Submit compensation decision"}).click();
+  await page.locator("form .notice.error[role='alert']").waitFor();
+  assert.equal((await call(customerPath)).customer_decision,"accept");
+  await captureWizard(page,"incident-decision-response-lost",subject);
+  await page.unroute("**"+decisionPath,dropDecision);
+  const decisionReplay=page.waitForResponse(response=>response.request().method()==="POST"&&new URL(response.url()).pathname===decisionPath);
+  await page.getByRole("button",{name:"Submit compensation decision"}).click();
+  const confirmedDecision=await decisionReplay;assert.equal(confirmedDecision.status(),200);
+  assert.equal(confirmedDecision.request().headers()["idempotency-key"],decisionKey);
   await page.getByText("You accepted this proposal.").waitFor();
   assert.equal((await call(customerPath)).paid,false);
   assert(!(await call("/actions")).rows.some(row=>row.id===incident.ticket_id));
@@ -1610,10 +1737,30 @@ async function verifyParcelOwnership({page,call,errors},other,bindByLabel=false)
   await reviews.locator('select[name="carrier_code"]').selectOption("zto");
   await reviews.getByLabel(/^Seller shipment proof/).setInputFiles({name:"seller.png",mimeType:"image/png",buffer:photo});
   await captureWizard(page,"parcel-claim-form","Parcels");
+  let claimKey,committedClaim;
+  const dropClaim=async route=>{
+    if(route.request().method()!=="POST")return route.continue();
+    claimKey=route.request().headers()["idempotency-key"];
+    const response=await route.fetch();assert.equal(response.status(),201);committedClaim=await response.json();
+    await route.abort("failed");
+  };
+  await page.route("**/api/v1/me/intake-claims",dropClaim);
   await page.getByRole("button",{name:"Request ownership review"}).click();
+  await reviews.locator("form .notice.error[role='alert']").waitFor();
+  assert(committedClaim?.id&&claimKey);
+  await reviews.getByRole("link",{name:committedClaim.public_no,exact:true}).waitFor();
+  assert.equal((await call("/me/intake-claims")).rows.length,1);
+  await captureWizard(page,"parcel-claim-response-lost","Parcels");
+  await page.unroute("**/api/v1/me/intake-claims",dropClaim);
+  const claimReplay=page.waitForResponse(response=>response.request().method()==="POST"&&new URL(response.url()).pathname==="/api/v1/me/intake-claims");
+  await page.getByRole("button",{name:"Request ownership review"}).click();
+  const claimReplayed=await claimReplay;assert.equal(claimReplayed.status(),201);
+  assert.equal(claimReplayed.request().headers()["idempotency-key"],claimKey);
+  assert.equal((await claimReplayed.json()).id,committedClaim.id);
   const confirmed=page.getByRole("status").filter({hasText:"is with support"});
   await confirmed.waitFor();
   const claim=(await call("/me/intake-claims")).rows[0];
+  assert.equal(claim.id,committedClaim.id);assert.equal((await call("/me/intake-claims")).rows.length,1);
   assert.equal(claim.tracking_no,tracking);
   assert.equal(claim.advice_id,null);
   assert.deepEqual((await other.call("/me/intake-claims")).rows,[]);
@@ -1707,6 +1854,7 @@ try {
   else if(process.env.QCW_BROWSER_INCIDENT_ONLY==="1") await verifyIncidentDecision(customer,other);
   else if(process.env.QCW_BROWSER_SELLER_RETURN_ONLY==="1") await verifySellerReturn(customer,other);
   else if(process.env.QCW_BROWSER_SUPPORT_ONLY==="1") await verifySupportHistory(customer,other);
+  else if(process.env.QCW_BROWSER_PAYMENT_MISMATCH_ONLY==="1") await verifyRejectedPaymentCase(other);
   else if(process.env.QCW_BROWSER_SCOPE_ONLY==="1") await verifyScopeRenewal(customer,other);
   else if(process.env.QCW_BROWSER_FULFILLMENT_ONLY==="1") await verifyFulfillmentRenewal(other);
   else if(process.env.QCW_BROWSER_MANUAL_QUOTE_ONLY==="1") await verifyManualQuoteRenewal(customer,other);
