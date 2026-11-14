@@ -3,7 +3,7 @@ import { z } from "zod";
 import { guard, hash, one, organization, role, type Actor } from "./common";
 import { receiving } from "./auth";
 import { customerEmailDeliveryStatus } from "./email";
-import { eligibleManualQuoteOrderSql, expiredManualInspectionPaymentSql, orderAcceptsSampleAssignmentSql, orderDTO } from "./orders";
+import { eligibleManualQuoteOrderSql, expiredManualInspectionPaymentSql, orderAcceptsSampleAssignmentSql, orderDTO, referenceCategorySql } from "./orders";
 import { declaredItemTracking, orderInboundRegistration, orderShipments } from "./fulfillment-reads";
 import { getIntakeContext, pendingIntakeClaimSql, waybill } from "./intake";
 import { scopeSupplementForOrder, scopeSupplementState } from "./scope-payment";
@@ -268,6 +268,16 @@ export async function listCustomerParcels(db:DB,actor:Actor,tab:z.infer<typeof c
   return {rows:rows.slice(0,size),page,has_more:rows.length>size};
 }
 
+export async function referenceSamples(db:DB,actor:Actor) {
+  const org=organization(actor);
+  return (await db.query(`select r.id reference_id,r.item_id,r.state,r.expires_at,
+    r.authorization_snapshot->>'seal_code' seal_code,r.authorization_snapshot->>'safe_location_code' safe_location_code,
+    w.code,${referenceCategorySql} category_id,
+    exists(select 1 from reference_reservations rr where rr.reference_id=r.id and rr.released_at is null) in_use
+    from reference_samples r join warehouse_items w on w.id=r.item_id and w.org_id=r.org_id
+    where r.org_id=$1 order by r.expires_at desc`,[org])).rows;
+}
+
 export async function customerDesk(db:DB,actor:Actor,includeItems=true,focusedCharge:string|null=null,includeActivity=true,
   chargePage?:number,refundPage?:number) {
   const org=organization(actor);
@@ -337,10 +347,7 @@ export async function customerDesk(db:DB,actor:Actor,includeItems=true,focusedCh
     r.authorization_snapshot->>'safe_location_code' safe_location_code,
     r.expires_at<=now() expired,
     exists(select 1 from reference_reservations rr where rr.reference_id=r.id and rr.released_at is null) in_use,
-    coalesce(
-      (select l.category_id from order_line_item_links a join order_lines l on l.id=a.order_line_id where a.item_id=w.id order by a.linked_at desc limit 1),
-      (r.authorization_snapshot->>'category_id')::uuid
-    ) category_id,
+    ${referenceCategorySql} category_id,
     w.code,w.custody_state
     from reference_samples r join warehouse_items w on w.id=r.item_id
     where r.org_id=$1 order by r.expires_at desc,r.revision desc limit 100`,[org])).rows;

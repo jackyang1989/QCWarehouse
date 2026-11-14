@@ -16,7 +16,7 @@ import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, cr
 import { acceptQuote, amendDispatchBatch, calculateShippingPreview, cancelDisposition, checkStorageReminders, closeCompletedOrder, confirmBatch, handover, instruct, packShipment, planBatch, publishShippingRate, quoteBatch, readDispatchBatch, receiveReturn, releaseReferenceSample, storageQuote } from "./dispatch";
 import { chargeReceipt, checkout, demoPay, orderPayment, orderRefundPayments, refundApprove, refundRequest, resolvePaymentDispute, stripeEvent, verifyStripe } from "./payments";
 import { approveTrackingTranslation, correctCustomerParcelTracking, correctStaffTracking, providerCallback, refreshTracking, submitTrackingTranslation, tracking, trackingAdmin, trackingMonitor, updateTrackingAlert, verificationState, verifyTracking } from "./logistics";
-import { adminDesk, bills, customerActions, customerDesk, customerInventory, customerNotifications, customerParcelTab, dispatchQueueStates, items, listCustomerOrders, listCustomerParcels, markNotificationRead, orderLedger, orderLedgerCsv, readOrderByPublicNumber, readStaffObjectSummary, reconcileFinance, searchStaffOrders, staffOrderDetail, staffOrderFilters, warehouseDesk, warehouseDispatchBatch, warehouseDispatchQueue, warehouseItem, warehousePackage } from "./reads";
+import { adminDesk, bills, customerActions, customerDesk, customerInventory, customerNotifications, customerParcelTab, dispatchQueueStates, items, listCustomerOrders, listCustomerParcels, markNotificationRead, orderLedger, orderLedgerCsv, readOrderByPublicNumber, readStaffObjectSummary, reconcileFinance, referenceSamples, searchStaffOrders, staffOrderDetail, staffOrderFilters, warehouseDesk, warehouseDispatchBatch, warehouseDispatchQueue, warehouseItem, warehousePackage } from "./reads";
 import { staffAccess } from "./staff-access";
 import { customerDestination, withDestination } from "./portal-routes";
 import { customerFulfillmentQuote, customerShipment, orderFulfillmentRecord } from "./fulfillment-reads";
@@ -1163,7 +1163,7 @@ async function dispatch(db:DB,actor:Actor,id:string,op:string,b:Record<string,an
       ...(x.batch_id?{batch_id:x.batch_id}:{}),
       ...(x.latest_attempt_state?{latest_attempt_state:x.latest_attempt_state}:{}),
     }))};
-    case "references": return {items:(await db.query(`select id reference_id,item_id,state,expires_at,authorization_snapshot->>'seal_code' seal_code,authorization_snapshot->>'safe_location_code' safe_location_code from reference_samples where org_id=$1 order by expires_at desc`,[organization(actor)])).rows};
+    case "references": return {items:await referenceSamples(db,actor)};
     case "requestRefund": return refundRequest(db,actor,b.payment_id,b.amount_cents,b.reason,id);
     case "requestPaymentRefund": return refundRequest(db,actor,id,b.amount_cents,b.reason);
     case "approveRefund": return refundApprove(db,actor,id,b.revision,hash(getCookie(req,"session")));

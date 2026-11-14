@@ -1557,7 +1557,11 @@ button.option-card.disabled, .option-card.disabled {
 .evidence-dialog { width: min(840px, calc(100vw - 32px)); max-height: calc(100svh - 32px); padding: 18px; color: var(--ink); background: var(--white); border: 1px solid var(--border); border-radius: 12px; }
 .evidence-dialog::backdrop { background: rgba(16, 26, 43, 0.78); }
 .evidence-dialog > img { display: block; width: 100%; max-height: 70svh; object-fit: contain; background: var(--paper); margin: 12px 0; }
-.report-comparison th:first-child, .report-comparison td:first-child { position: sticky; left: 0; border-right: 1px solid var(--line); }
+.report-comparison th:first-child, .report-comparison td:first-child {
+  position: sticky; left: 0; border-right: 1px solid var(--line);
+  width: 176px; min-width: 176px; word-break: normal; overflow-wrap: normal;
+}
+.report-comparison th:not(:first-child), .report-comparison td:not(:first-child) { min-width: 180px; }
 .report-comparison td:first-child { background: var(--white); }
 
 .dispatch-assignment { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr)); gap: 10px; }
@@ -1992,5 +1996,4 @@ button.option-card.disabled, .option-card.disabled {
     font-weight: 500;
     margin-bottom: 4px;
   }
-  .workspace-customer .report-comparison .table-wrap > table { min-width: 520px; }
 }

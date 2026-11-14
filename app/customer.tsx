@@ -1473,14 +1473,14 @@ export function NewOrder({customerId}:{customerId:string}) {
                   onChange={e=>{setReferenceId(e.target.value);setServerQuote(undefined);}}>
                   <option value="">— Select an active Golden Sample —</option>
                   {activeRefs.map((r:Row)=><option key={r.reference_id} value={r.reference_id}>
-                    {(r.code??r.item_id)} · Sealed until {stamp(r.expires_at)}
+                    {(r.code??r.item_id)} · {r.in_use?"In use for another comparison":"Sealed until "+stamp(r.expires_at)}
                   </option>)}
                 </select>
               </label>
               {refs.error&&<><ErrorBlock error={refs.error}/><button type="button" onClick={refs.reload}>Retry Golden Samples</button></>}
               {!refs.data&&!refs.error&&<p role="status">Loading Golden Samples…</p>}
               {refs.data&&!refs.error&&activeRefs.length===0&&<div className="line-note warning" style={{marginTop:8}}>
-                No active Golden Samples are currently sealed in your workspace. After completing a Product Inspection or Sample Comparison, you can convert any approved item into a Golden Sample from the <strong>Items</strong> page.
+                No active Golden Samples are available for this product category. After completing a Product Inspection or Sample Comparison, you can convert an approved item into a Golden Sample from the <strong>Items</strong> page.
               </div>}
             </div>}
 

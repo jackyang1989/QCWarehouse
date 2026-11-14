@@ -497,6 +497,80 @@ async function verifyMultiServiceScopes({page,call,errors},other) {
   console.log("PASS each service line keeps its own published template, measurement ranges and official quote");
 }
 
+async function verifyReferenceCatalogAndComparison(other) {
+  assert(process.env.QCW_BROWSER_INVENTORY_EMAIL?.endsWith("@qcw.test"));
+  const customer=await session(process.env.QCW_BROWSER_INVENTORY_EMAIL,false,true);
+  const {page,call}=customer;
+  const offers=(await call("/catalog")).offers;
+  const matching=offers.find(offer=>offer.service==="reference_match"&&offer.category_slug==="apparel");
+  const foreign=offers.find(offer=>offer.category_slug==="bags");
+  assert(matching&&foreign);
+  const references=(await call("/me/reference-samples")).items;
+  const current=references.find(reference=>reference.category_id===matching.category_id&&reference.state==="active"&&!reference.in_use&&Date.parse(reference.expires_at)>Date.now());
+  assert(current?.code.startsWith("S-"));
+  const dbURL=new URL(process.env.QCW_BROWSER_DATABASE_URL);
+  assert.equal(dbURL.hostname,"127.0.0.1");assert.match(dbURL.pathname,/^\/qcw_test-[a-z0-9-]+$/);
+  const {default:pg}=await import("pg");const db=new pg.Client({connectionString:dbURL.href});await db.connect();
+  const itemId=randomUUID(),referenceId=randomUUID(),code="S-"+randomUUID();
+  try {
+    await db.query(`insert into warehouse_items(id,code,org_id,package_id,intake_batch_id,identity_state,condition_state,custody_state,location_id,received_at,storage_until)
+      select $1,$2,w.org_id,w.package_id,w.intake_batch_id,w.identity_state,w.condition_state,w.custody_state,w.location_id,w.received_at,w.storage_until
+      from warehouse_items w join reference_samples r on r.item_id=w.id where r.id=$3`,[itemId,code,current.reference_id]);
+    await db.query(`insert into reference_samples(id,item_id,org_id,revision,authorization_snapshot,expires_at,state)
+      select $1,w.id,w.org_id,1,jsonb_build_object('category_id',$3::text,'seal_code','FIXTURE-CATALOG','safe_location_code','FIXTURE-PRIVATE'),
+      now()+interval '90 days','active' from warehouse_items w where w.id=$2`,[referenceId,itemId,foreign.category_id]);
+    const actual=(await call("/me/reference-samples")).items.find(reference=>reference.reference_id===referenceId);
+    assert.equal(actual.category_id,foreign.category_id);assert.equal(actual.code,code);assert.equal(actual.in_use,false);
+    assert(!(await other.call("/me/reference-samples")).items.some(reference=>reference.reference_id===referenceId));
+    const rejected=await call("/orders",{status:422,body:{lines:[{category_id:matching.category_id,offer_id:matching.offer_id,quantity:1,options:{reference_id:referenceId}}]}});
+    assert.equal(rejected.error.code,"INCOMPATIBLE_SAMPLES");
+    await page.goto("/orders/new");
+    await page.getByRole("radio",{name:/Golden Sample Matching/}).click();await nextStep(page);
+    const selector=page.getByLabel("Active Golden Sample in warehouse vault");
+    await selector.getByRole("option").filter({hasText:current.code}).waitFor({state:"attached"});
+    assert.equal(await selector.locator(`option[value='${referenceId}']`).count(),0);
+    await selector.selectOption(current.reference_id);
+    for(const width of widths) {
+      await page.setViewportSize({width,height:1000});await capture(page,"golden-category-options",width,/Step 2/);
+    }
+    await nextStep(page);await ready(page,/Step 3/);
+  } finally {
+    await db.query("delete from reference_samples where id=$1",[referenceId]);
+    await db.query("delete from warehouse_items where id=$1",[itemId]);await db.end();await customer.context.close();
+  }
+
+  assert(process.env.QCW_BROWSER_COMPARISON_EMAIL?.endsWith("@qcw.test"));
+  const comparison=await session(process.env.QCW_BROWSER_COMPARISON_EMAIL,false,true);
+  let row;
+  for(const candidate of (await comparison.call("/me/reports?latest=1")).rows) {
+    const report=await comparison.call(`/orders/${candidate.order_id}/report/versions/${candidate.version}`);
+    if(report.snapshot.sections.some(section=>["compare","reference_match"].includes(section.service))) {row=candidate;break;}
+  }
+  assert(row);
+  await comparison.page.goto(`/orders/${row.order_number}/report/versions/${row.version}`);
+  for(const width of widths) {
+    await comparison.page.setViewportSize({width,height:1000});
+    const table=comparison.page.locator(".report-comparison table").first();await table.waitFor();
+    const layout=await table.evaluate(table=>{
+      const cells=[...table.querySelectorAll("td:first-child")];let splitWords=[];
+      for(const cell of cells) {
+        const walker=document.createTreeWalker(cell,NodeFilter.SHOW_TEXT);let node;
+        while(node=walker.nextNode())for(const word of node.textContent.matchAll(/[A-Za-z]{4,}/g)) {
+          const range=document.createRange();range.setStart(node,word.index);range.setEnd(node,word.index+word[0].length);
+          if(new Set([...range.getClientRects()].map(rect=>Math.round(rect.top))).size>1)splitWords.push(word[0]);
+        }
+      }
+      return {minimum:Math.min(...cells.map(cell=>cell.getBoundingClientRect().width)),splitWords,
+        scrollable:table.parentElement.scrollWidth>table.parentElement.clientWidth};
+    });
+    assert(layout.minimum>=176);assert.deepEqual(layout.splitWords,[]);
+    if(width<=768)assert(layout.scrollable);
+    await capture(comparison.page,"report-comparison-readable",width,row.report_number);
+  }
+  assert.deepEqual([...customer.errors,...comparison.errors],[]);await comparison.context.close();
+  console.log("PASS owned reference codes/categories, incompatible reference rejection, and readable comparison columns at six widths");
+}
+
 async function verifyEvidenceRecovery(other) {
   assert(process.env.QCW_BROWSER_FIXTURE_EMAIL?.endsWith("@qcw.test"));
   const fixture=await session(process.env.QCW_BROWSER_FIXTURE_EMAIL,false,true);
@@ -1628,6 +1702,7 @@ try {
   else if(process.env.QCW_BROWSER_STATES_ONLY==="1") await verifyWorkspaceStates();
   else if(process.env.QCW_BROWSER_DEPENDENCIES_ONLY==="1") await verifySecondaryReads(customer,other);
   else if(process.env.QCW_BROWSER_MEDIA_ONLY==="1") await verifyEvidenceRecovery(other);
+  else if(process.env.QCW_BROWSER_REFERENCE_CATALOG_ONLY==="1") await verifyReferenceCatalogAndComparison(other);
   else if(process.env.QCW_BROWSER_INTAKE_CLAIM_ONLY==="1") await verifyParcelOwnership(customer,other,process.env.QCW_BROWSER_BIND_OWNER==="1");
   else if(process.env.QCW_BROWSER_INCIDENT_ONLY==="1") await verifyIncidentDecision(customer,other);
   else if(process.env.QCW_BROWSER_SELLER_RETURN_ONLY==="1") await verifySellerReturn(customer,other);

@@ -78,18 +78,22 @@ async function validateLineSamples(db:DB,org:string,line:{category_id:string;opt
   }
   if(service==="reference_match") {
     const ref=z.object({reference_id:z.string().uuid()}).parse(line.options);
-    const sample=(await db.query<{id:string;state:string;not_expired:boolean;snapshot_cat:string|null;linked_cat:string|null}>(`
+    const sample=(await db.query<{id:string;state:string;not_expired:boolean;category_id:string|null}>(`
       select r.id,r.state,r.expires_at>now() not_expired,
-        r.authorization_snapshot->>'category_id' snapshot_cat,
-        (select l.category_id::text from order_line_item_links a join order_lines l on l.id=a.order_line_id
-         where a.item_id=r.item_id order by a.linked_at desc limit 1) linked_cat
+        ${referenceCategorySql} category_id
       from reference_samples r where r.id=$1 and r.org_id=$2`,[ref.reference_id,org])).rows[0];
     guard(sample,"NOT_FOUND","Record not found.",404);
-    const sampleCat=sample.linked_cat??sample.snapshot_cat;
+    const sampleCat=sample.category_id;
     guard(!sampleCat || sampleCat===line.category_id,"INCOMPATIBLE_SAMPLES","The reference sample belongs to a different product category.",422);
     guard(sample.state==="active" && sample.not_expired,"REFERENCE_UNAVAILABLE","The selected reference sample is expired or unavailable.");
   }
 }
+export const referenceCategorySql=`coalesce(
+  (select l.category_id::text from order_line_item_links a join order_lines l on l.id=a.order_line_id
+   where a.item_id=r.item_id order by a.linked_at desc limit 1),
+  r.authorization_snapshot->>'category_id'
+)`;
+
 const offersSql=`
   select o.id offer_id,o.sku_code,o.title,c.id category_id,c.slug category_slug,c.labels category,c.admission_snapshot,t.id template_version_id,t.content,
     st.code service,p.id price_version,p.rules

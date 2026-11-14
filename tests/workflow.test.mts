@@ -2705,10 +2705,13 @@ test("reference sample reservation, active comparison lock, outbound shipping co
     seal_code:pendingRef.seal_code,
   });
 
-  const refList=(await c.fetch("/me/reference-samples")).items as {reference_id:string;item_id:string;state:string;expires_at:string}[];
+  const refList=(await c.fetch("/me/reference-samples")).items as {reference_id:string;item_id:string;state:string;expires_at:string;code:string;category_id:string;in_use:boolean}[];
   assert.equal(refList.length,1);
   assert.equal(refList[0].item_id,seedItemId);
   assert.equal(refList[0].state,"active");
+  assert.equal(refList[0].code,pendingRef.item_code);
+  assert.equal(refList[0].category_id,apparelInspect.category_id);
+  assert.equal(refList[0].in_use,false);
   const refId=refList[0].reference_id;
 
   const {draft:matchOrder}=await createAndPay(c,[{
@@ -2723,6 +2726,7 @@ test("reference sample reservation, active comparison lock, outbound shipping co
   const deskDuringLock=await c.fetch("/me/desk");
   const lockedRef=deskDuringLock.references.find((r:{reference_id:string})=>r.reference_id===refId);
   assert.equal(lockedRef.in_use,true);
+  assert.equal((await c.fetch("/me/reference-samples")).items.find((reference:{reference_id:string})=>reference.reference_id===refId).in_use,true);
 
   const shipWhileInUse=await c.fetch(`/me/items/${seedItemId}/dispositions`,{
     action:"to_domestic_address",

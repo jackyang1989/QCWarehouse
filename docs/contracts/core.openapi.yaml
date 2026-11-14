@@ -2236,6 +2236,16 @@ paths:
                           type:
                           - string
                           - 'null'
+                        code:
+                          type: string
+                          minLength: 1
+                        category_id:
+                          type:
+                          - string
+                          - 'null'
+                          format: uuid
+                        in_use:
+                          type: boolean
                       additionalProperties: false
                     minItems: 0
                 additionalProperties: false
