@@ -379,8 +379,11 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   }
   if(method==="GET" && path==="/me/desk") {
     const charge=idSchema.nullable().parse(url.searchParams.get("charge"));
+    const page=z.coerce.number().int().min(1).max(10000).optional();
+    const chargePage=page.parse(url.searchParams.get("charge_page")??undefined);
+    const refundPage=page.parse(url.searchParams.get("refund_page")??undefined);
     return json(await transaction(db=>customerDesk(db,actorRequired(actor),url.searchParams.get("include_items")!=="0",charge,
-      url.searchParams.get("include_activity")!=="0")));
+      url.searchParams.get("include_activity")!=="0",chargePage,refundPage)));
   }
   if(method==="GET" && path==="/me/email-delivery-status") return json(await transaction(db=>customerEmailDeliveryStatus(db,actorRequired(actor))));
   if(method==="GET" && path==="/me/privacy/export") return json(await transaction(db=>exportCustomerPrivacyData(db,actorRequired(actor))));

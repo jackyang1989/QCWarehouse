@@ -7431,6 +7431,36 @@ test("billing uses business dates and resolves a historical charge within the ow
   assert.deepEqual(selected[0].order_numbers,[draft.public_no]);
   assert.equal(selected[0].state,"void");
   assert.deepEqual((await other.fetch(focus)).bills,[]);
+
+  const paymentId=randomUUID();
+  await pool.query(`insert into payments(id,charge_item_id,provider,amount_cents,state,idempotency_key)
+    values($1::uuid,$2,'stripe',$3,'partially_refunded',$1::uuid::text)`,[paymentId,historical,quote.amount_cents]);
+  await pool.query(`insert into refunds(id,payment_id,source,amount_cents,reason,state,created_at)
+    select gen_random_uuid(),$1,'provider_dashboard',1,'Fixture refund','succeeded',now()-i*interval '1 day'
+    from generate_series(1,21) i`,[paymentId]);
+  const history="/me/desk?include_items=0&include_activity=0";
+  const firstPage=await c.fetch(history+"&charge_page=1&refund_page=1");
+  assert.equal(firstPage.has_more_charges,true);
+  assert.equal(firstPage.has_more_refunds,true);
+  assert.equal(firstPage.bills.length,20);
+  assert.equal(firstPage.refunds.length,20);
+  assert.deepEqual(firstPage.bills.map(row=>row.charge_item_id),regular.slice(0,20).map(row=>row.charge_item_id));
+  const finalPage=await c.fetch(history+"&charge_page=11&refund_page=2");
+  assert.equal(finalPage.has_more_charges,false);
+  assert.equal(finalPage.has_more_refunds,false);
+  assert.equal(finalPage.bills.length,5);
+  assert.equal(finalPage.bills.at(-1).charge_item_id,historical);
+  assert.equal(finalPage.bills.at(-1).refunded_cents,21);
+  assert.equal(finalPage.refunds.length,1);
+  assert(!firstPage.refunds.some(row=>row.id===finalPage.refunds[0].id));
+  assert.deepEqual(finalPage.refunds[0].order_numbers,[draft.public_no]);
+  const focusedPage=await c.fetch(focus+"&charge_page=1&refund_page=2");
+  assert.equal(focusedPage.bills[0].charge_item_id,historical);
+  assert.equal(focusedPage.refunds[0].id,finalPage.refunds[0].id);
+  const foreignPage=await other.fetch(focus+"&charge_page=1&refund_page=2");
+  assert.deepEqual(foreignPage.bills,[]);
+  assert.deepEqual(foreignPage.refunds,[]);
+  await c.fetch(history+"&charge_page=0",undefined,"GET",422);
 });
 
 test("all core operations have a validated success response",assertCoreCoverage);

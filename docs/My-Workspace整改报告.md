@@ -272,3 +272,9 @@ flowchart TD
 续做基线 `737db82`。账单对当前质检收费使用与订单付款页相同的服务端状态。报价过期且渠道仍有旧会话时可回原单核对，渠道已发来处理中事件时可跟踪结果，确认无旧款时可回原单重报。发运、续存、范围补款仍由其各自的流程处理。
 
 `npm run check`、`npm run build`、`python3 docs/contracts/check.py`、空库关系校验和隔离集成退出 0。集成 63/63，包含签名异步事件引起的账单状态变化。Chrome `QCW_BROWSER_PAYMENT_ACTIONS_ONLY=1` 退出 0，验证待办、原单付款页和过期账单。六档 18 张原图无整页横向溢出，证据位于 `qcwarehouse-billing-payment`。Stripe 渠道测试由隔离响应及签名事件驱动，实际沙盒验收仍为 OPEN。
+
+## 收费与退款历史分页
+
+续做基线 `e2421e7`。账单的收费和退款各按每页 20 条独立翻页，保留原业务日期排序与历史收费定位。已在页面打开期间过期的报价会自动刷新付款入口。无分页参数的核心资金接口保留原响应。
+
+隔离 PostgreSQL 集成 63/63，验证超过旧上限的收费、独立退款页、关联订单、退款总额、非法页码及租户隔离。Chrome `QCW_BROWSER_BILLING_ONLY=1` 和 `QCW_BROWSER_PAYMENT_ACTIONS_ONLY=1` 退出 0，验证独立翻页、历史收费焦点、真实到期自动更新和原单重报。六档截图位于 `qcwarehouse-billing-history` 与 `qcwarehouse-billing-payment`。类型、构建、契约和空库关系校验退出 0。

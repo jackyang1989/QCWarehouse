@@ -95,7 +95,9 @@ const chargeOrderOriginsSql=`left join lateral(
     ) related
   ) linked on true`;
 
-export async function bills(db:DB,actor:Actor,focusedCharge:string|null=null) {
+const billingPageSize=20;
+
+export async function bills(db:DB,actor:Actor,focusedCharge:string|null=null,page?:number) {
   const org=organization(actor);
   return (await db.query(`select c.id charge_item_id,c.purpose,c.amount_cents,c.currency,
     case when c.voided_at is not null then 'void' when c.applied_payment_id is not null or c.free_authorization is not null then 'paid'
@@ -125,7 +127,8 @@ export async function bills(db:DB,actor:Actor,focusedCharge:string|null=null) {
     left join lateral(select min(a.at) paid_at from audit_events a
       where a.entity_type='charge_items' and a.entity_id=c.id and a.action='payment_confirmed') confirmation on true
     ${chargeOrderOriginsSql}
-    where c.org_id=$1 order by (c.id=$2::uuid) desc nulls last,posted_at desc nulls last,c.id desc limit 200`,[org,focusedCharge])).rows;
+    where c.org_id=$1 order by (c.id=$2::uuid) desc nulls last,posted_at desc nulls last,c.id desc limit $3 offset $4`,
+  [org,focusedCharge,page?billingPageSize+1:200,page?(page-1)*billingPageSize:0])).rows;
 }
 const currentOfferedManualQuote=`from manual_quote_requests m join orders o on o.id=m.order_id and o.revision=m.revision
     join inspection_quotes q on q.id=m.accepted_quote_id and q.order_id=o.id
@@ -264,7 +267,8 @@ export async function listCustomerParcels(db:DB,actor:Actor,tab:z.infer<typeof c
   return {rows:rows.slice(0,size),page,has_more:rows.length>size};
 }
 
-export async function customerDesk(db:DB,actor:Actor,includeItems=true,focusedCharge:string|null=null,includeActivity=true) {
+export async function customerDesk(db:DB,actor:Actor,includeItems=true,focusedCharge:string|null=null,includeActivity=true,
+  chargePage?:number,refundPage?:number) {
   const org=organization(actor);
   const orders=(await db.query(customerOrderSelect+" where o.org_id=$1 order by updated_at desc,o.id desc limit 200",[org])).rows;
   const advices=(await db.query(`select ${customerAdviceFields},a.address_snapshot,
@@ -321,7 +325,8 @@ export async function customerDesk(db:DB,actor:Actor,includeItems=true,focusedCh
     left join inspection_quotes i on i.id=c.inspection_quote_id left join orders o on o.id=i.order_id and o.org_id=c.org_id
     left join storage_quotes s on s.id=c.storage_quote_id
     ${chargeOrderOriginsSql}
-    where c.org_id=$1 order by r.created_at desc,r.id desc limit 100`,[org])).rows;
+    where c.org_id=$1 order by r.created_at desc,r.id desc limit $2 offset $3`,
+  [org,refundPage?billingPageSize+1:100,refundPage?(refundPage-1)*billingPageSize:0])).rows;
   const inspectionQuotes=(await db.query(`select q.id,q.amount_cents,q.currency,q.expires_at,o.public_no order_number
     ${currentOfferedManualQuote}
     order by q.expires_at,q.id`,[org])).rows;
@@ -351,9 +356,13 @@ export async function customerDesk(db:DB,actor:Actor,includeItems=true,focusedCh
     where e.entity_type='warehouse_addresses' and e.entity_id=$1 and e.action='set_default_address'
       and e.after->>'previous_default_address_id' is not null and e.at>=p.created_at
     order by e.at desc limit 1`,[profile.warehouse_address?.id??null,actor.id])).rows[0];
-  return {summary,orders,advices,shipments,quotes,inspectionQuotes,batches,active_batches,recent_destinations,reports,tickets,refunds,notices,references,
+  const charges=await bills(db,actor,focusedCharge,chargePage);
+  return {summary,orders,advices,shipments,quotes,inspectionQuotes,batches,active_batches,recent_destinations,reports,tickets,
+    refunds:refundPage?refunds.slice(0,billingPageSize):refunds,notices,references,
     profile,warehouse_address_changed_at:addressChange?.at??null,email_delivery:await customerEmailDeliveryStatus(db,actor),
-    items:includeItems?await items(db,actor):[],bills:await bills(db,actor,focusedCharge)};
+    items:includeItems?await items(db,actor):[],bills:chargePage?charges.slice(0,billingPageSize):charges,
+    ...(chargePage?{has_more_charges:charges.length>billingPageSize}:{}),
+    ...(refundPage?{has_more_refunds:refunds.length>billingPageSize}:{})};
 }
 export async function customerNotifications(db:DB,actor:Actor,unread=false,before:string|null=null,pageSize=50) {
   const org=organization(actor);

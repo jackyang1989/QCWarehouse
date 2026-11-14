@@ -282,7 +282,7 @@ async function verifyInspectionPaymentActions({page,call,errors},other) {
     const draft=await call("/orders",{body:{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},status:201});
     const path="/orders/"+draft.id;
     const quote=await call(path+"/quotes",{body:{revision:draft.revision},status:201});
-    const {rows:[fixtureQuote]}=await db.query("update inspection_quotes set expires_at=now()+interval '12 seconds' where id=$1 and accepted_at is null returning expires_at",[quote.id]);
+    const {rows:[fixtureQuote]}=await db.query("update inspection_quotes set expires_at=now()+interval '15 seconds' where id=$1 and accepted_at is null returning expires_at",[quote.id]);
     const {terms}=await call("/public/terms");
     const submitted=await call(path+"/submit",{body:{revision:draft.revision,quote_id:quote.id,terms_version_ids:terms.map(term=>term.id),
       acknowledgements:{scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true}}});
@@ -290,7 +290,14 @@ async function verifyInspectionPaymentActions({page,call,errors},other) {
     await page.goto("/actions");
     await row.getByRole("cell",{name:"Review inspection payment",exact:true}).waitFor();
     assert.equal(Date.parse((await call("/actions")).rows.find(action=>action.id===draft.id).due_at),fixtureQuote.expires_at.valueOf());
+    const billingPage=await page.context().newPage();
+    await billingPage.goto("/account/billing?charge="+submitted.charge.charge_item_id);
+    const billingRow=billingPage.getByRole("row").filter({hasText:draft.public_no});
+    await billingRow.getByRole("button",{name:"Pay",exact:true}).waitFor();
     await db.query("select pg_sleep(greatest(0,extract(epoch from expires_at-clock_timestamp()))+.02) from inspection_quotes where id=$1",[quote.id]);
+    await billingRow.getByRole("link",{name:"Review expired quote"}).waitFor();
+    assert.equal(await billingRow.getByRole("button",{name:"Pay",exact:true}).count(),0);
+    await billingPage.close();
     await page.getByRole("button",{name:"Refresh actions"}).click();
     await row.getByRole("cell",{name:"Review expired inspection quote",exact:true}).waitFor();
     await captureWizard(page,"expired-inspection-action","Action required");
@@ -315,6 +322,63 @@ async function verifyInspectionPaymentActions({page,call,errors},other) {
     assert(entries.every(entry=>entry.overflow===0));
     console.log("PASS inspection quote expiry updates the task and original payment route without a payable link");
   } finally {await db.end();}
+}
+
+async function verifyBillingHistory({page,call,errors},other) {
+  const dbURL=new URL(process.env.QCW_BROWSER_DATABASE_URL);
+  assert.equal(dbURL.hostname,"127.0.0.1");
+  assert.match(dbURL.pathname,/^\/qcw_test-[a-z0-9-]+$/);
+  const {default:pg}=await import("pg");
+  const db=new pg.Client({connectionString:dbURL.href});
+  await db.connect();
+  let historicalCharge;
+  try {
+    const {actor}=await call("/me");
+    const {offers}=await call("/catalog");
+    const offer=offers.find(row=>row.sku_code==="apparel-inspection-1");
+    const order=await call("/orders",{body:{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},status:201});
+    const quote=await call("/orders/"+order.id+"/quotes",{body:{revision:order.revision},status:201});
+    const {rows:[oldest]}=await db.query(`with quoted as (
+      insert into inspection_quotes(order_id,revision,line_snapshot,terms_snapshot,amount_cents,currency,accepted_at,expires_at)
+      select q.order_id,100+i,q.line_snapshot,q.terms_snapshot,q.amount_cents,q.currency,now()-i*interval '1 day',
+        now()-i*interval '1 day'+interval '30 minutes'
+      from inspection_quotes q cross join generate_series(1,21) i where q.id=$1 returning *
+    ), charges as (
+      insert into charge_items(org_id,purpose,inspection_quote_id,amount_cents,currency,snapshot,voided_at)
+      select $2,'inspection',id,amount_cents,currency,jsonb_build_object('order_id',order_id,'quote_revision',revision),expires_at
+      from quoted returning id,inspection_quote_id,amount_cents
+    ) select c.id,c.amount_cents from charges c join quoted q on q.id=c.inspection_quote_id order by q.accepted_at limit 1`,[quote.id,actor.org]);
+    historicalCharge=oldest.id;
+    const payment=randomUUID();
+    await db.query(`insert into payments(id,charge_item_id,provider,amount_cents,state,idempotency_key)
+      values($1::uuid,$2,'stripe',$3,'partially_refunded',$1::uuid::text)`,[payment,historicalCharge,oldest.amount_cents]);
+    await db.query(`insert into refunds(id,payment_id,source,amount_cents,reason,state,created_at)
+      select gen_random_uuid(),$1,'provider_dashboard',1,'Fixture refund','succeeded',now()-i*interval '1 day'
+      from generate_series(1,21) i`,[payment]);
+  } finally {await db.end();}
+  const charges=page.getByRole("navigation",{name:"Charge pages"});
+  const refunds=page.getByRole("navigation",{name:"Refund pages"});
+  const charge=page.locator("#charge-"+historicalCharge);
+  await page.goto("/account/billing");
+  await charges.getByRole("link",{name:"Next page"}).click();
+  await charge.waitFor();
+  await refunds.getByRole("link",{name:"Next page"}).click();
+  await page.waitForURL("**/account/billing?charge_page=2&refund_page=2#billing-refunds");
+  await refunds.getByText("Page 2",{exact:true}).waitFor();
+  assert.equal(await page.locator("#billing-refunds tbody tr").count(),1);
+  assert.equal(await page.locator("#billing-charges tbody tr").count(),1);
+  assert.equal(await charges.getByRole("link",{name:"Next page"}).count(),0);
+  await captureWizard(page,"billing-history-last-page","Billing");
+  await page.goto("/account/billing?charge="+historicalCharge);
+  await charge.waitFor();
+  assert.equal(await charge.evaluate(node=>document.activeElement===node),true);
+  await other.page.goto("/account/billing?charge="+historicalCharge+"&refund_page=2");
+  await other.page.getByText("This charge is unavailable.",{exact:true}).waitFor();
+  assert.equal(await other.page.locator("#charge-"+historicalCharge).count(),0);
+  assert.equal(await other.page.locator("#billing-refunds tbody tr").count(),0);
+  assert.deepEqual(errors,[]);
+  assert(entries.every(entry=>entry.overflow===0));
+  console.log("PASS independent billing and refund history, historical charge focus, and tenant isolation");
 }
 
 async function verifyManualQuoteRenewal({page,call,errors},other) {
@@ -855,6 +919,7 @@ try {
   if(resumeMatrix) await verifyWorkspaceViews(customer,other);
   else if(process.env.QCW_BROWSER_PARCELS_ONLY==="1") await verifyParcelPagination(customer,other);
   else if(process.env.QCW_BROWSER_PAYMENT_ACTIONS_ONLY==="1") await verifyInspectionPaymentActions(customer,other);
+  else if(process.env.QCW_BROWSER_BILLING_ONLY==="1") await verifyBillingHistory(customer,other);
   else if(process.env.QCW_BROWSER_INTAKE_CLAIM_ONLY==="1") await verifyParcelOwnership(customer,other,process.env.QCW_BROWSER_BIND_OWNER==="1");
   else if(process.env.QCW_BROWSER_INCIDENT_ONLY==="1") await verifyIncidentDecision(customer,other);
   else if(process.env.QCW_BROWSER_SELLER_RETURN_ONLY==="1") await verifySellerReturn(customer,other);

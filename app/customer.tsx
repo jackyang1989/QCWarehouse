@@ -2958,8 +2958,19 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   const [createdCase,setCreatedCase]=useState<Row>();
   const requestedCharge=isBills?(search.get("charge")??legacyCharge)?.toLowerCase():undefined;
   const requestedQuote=isBills?search.get("quote")?.toLowerCase():undefined;
+  const chargePage=Number(search.get("charge_page")??1);
+  const refundPage=Number(search.get("refund_page")??1);
+  function billingPageHref(section:"charge"|"refund",page:number) {
+    const params=new URLSearchParams(search);
+    if(requestedCharge)params.set("charge",requestedCharge);
+    const key=section+"_page";
+    if(page>1)params.set(key,String(page));
+    else params.delete(key);
+    return "/account/billing"+(params.size?"?"+params:"")+"#"+(section==="charge"?"billing-charges":"billing-refunds");
+  }
   const focusedQuote=useLoad(requestedQuote?"/quotes/"+encodeURIComponent(requestedQuote):null);
   const {data,error,reload}=useLoad("/me/desk?include_items=0"+(path==="/account"?"":"&include_activity=0")+
+    (isBills?"&"+new URLSearchParams({charge_page:String(chargePage),refund_page:String(refundPage)}):"")+
     (requestedCharge?"&charge="+encodeURIComponent(requestedCharge):"")),carriers=useLoad("/carriers");
   const focusedChargeAvailable=Boolean(requestedCharge&&data?.bills.some((bill:Row)=>bill.charge_item_id===requestedCharge));
   const focusedQuoteAvailable=Boolean(data&&requestedQuote&&focusedQuote.data?.id===requestedQuote);
@@ -2990,11 +3001,21 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     return ()=>window.removeEventListener("hashchange",readHash);
   },[isBills]);
   useEffect(()=>{
-    if(focusedChargeAvailable) document.getElementById("charge-"+requestedCharge)?.focus();
+    if(focusedChargeAvailable&&!["#billing-charges","#billing-refunds"].includes(location.hash))
+      document.getElementById("charge-"+requestedCharge)?.focus();
   },[focusedChargeAvailable,requestedCharge]);
   useEffect(()=>{
     if(focusedQuoteAvailable) document.getElementById("quote-"+requestedQuote)?.focus();
   },[focusedQuoteAvailable,requestedQuote]);
+  useEffect(()=>{
+    if(!isBills||!data) return;
+    const now=Date.now();
+    const expiry=Math.min(...data.bills.filter((bill:Row)=>bill.state==="open")
+      .map((bill:Row)=>Date.parse(bill.expires_at)).filter((time:number)=>time>now));
+    if(!Number.isFinite(expiry)) return;
+    const timer=setTimeout(reload,Math.min(expiry-now+50,2_147_483_647));
+    return ()=>clearTimeout(timer);
+  },[data,isBills,reload]);
   useEffect(()=>{
     const item=focusedItem.data?.rows[0];
     if(item) setItemTarget(item);
@@ -3002,7 +3023,8 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   useEffect(()=>{
     if(!data)return;
     const id=location.hash.slice(1);
-    if(/^(case|quote|charge|item)-[a-zA-Z0-9-]{1,64}$/.test(id)) document.getElementById(id)?.scrollIntoView({block:"start"});
+    if(/^(case|quote|charge|item)-[a-zA-Z0-9-]{1,64}$/.test(id)||id==="billing-charges"||id==="billing-refunds")
+      document.getElementById(id)?.scrollIntoView({block:"start"});
   },[data,path]);
   if(error)return <ErrorBlock error={error}/>;
   if(!data)return <p>Loading your account…</p>;
@@ -3292,8 +3314,8 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         <Link className="button" href={"/orders/"+quote.order_number+"#inspection-quote"}>Review inspection quote</Link>
       </div>)}
       {!otherQuotes.length&&!data.inspectionQuotes.length&&<Empty>{focusedQuote.data?.state==="open"?"No other quotes to approve.":"No new quotes."}</Empty>}
-    </Panel><Panel title="Payments & charges" subtitle="Inspection, shipping and storage charges. Payment is confirmed only after server-side verification.">
-      {requestedCharge&&!focusedChargeAvailable&&<p role="status">This charge is unavailable.</p>}
+    </Panel><div id="billing-charges" className="billing-charge-anchor"><Panel title="Payments & charges" subtitle="Inspection, shipping and storage charges. Payment is confirmed only after server-side verification.">
+      {requestedCharge&&chargePage===1&&!focusedChargeAvailable&&<p role="status">This charge is unavailable.</p>}
       <Table headers={["Purpose","Order / Batch","Amount","Refunded","Status","Date","Details",""]} rows={data.bills.map((b:Row)=>{
         const quoteExpired=b.state==="open"&&b.expires_at&&Date.parse(b.expires_at)<=Date.now();
         const shownState=b.inspection_payment_state??(quoteExpired?(b.unresolved_payment?"processing":"expired"):b.state);
@@ -3326,7 +3348,12 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
             :shownState==="open"?<Action run={()=>goCheckout(b.charge_item_id,b.quote_revision)}>Pay</Action>:null
         ];
       })} empty="No charges yet."/>
-    </Panel><Panel title="Refunds" subtitle="Platform fee refunds issued by QCWarehouse. Seller refunds are handled on your seller's platform and are not shown here.">
+      {(chargePage>1||data.has_more_charges)&&<nav className="actions" aria-label="Charge pages">
+        {chargePage>1&&<Link className="button" href={billingPageHref("charge",chargePage-1)}>Previous page</Link>}
+        <span>Page {chargePage}</span>
+        {data.has_more_charges&&<Link className="button" href={billingPageHref("charge",chargePage+1)}>Next page</Link>}
+      </nav>}
+    </Panel></div><div id="billing-refunds" className="billing-charge-anchor"><Panel title="Refunds" subtitle="Platform fee refunds issued by QCWarehouse. Seller refunds are handled on your seller's platform and are not shown here.">
       <Table headers={["Requested","Purpose","Order","Amount","Status"]} rows={(data.refunds??[]).map((r:Row)=>[
         stamp(r.created_at),
         label(r.purpose),
@@ -3334,7 +3361,12 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         usd(r.amount_cents),
         <Tag tone={r.state==="succeeded"?"green":r.state==="failed"?"red":"yellow"}>{label(r.state)}</Tag>,
       ])} empty="No refunds have been issued."/>
-    </Panel></>}
+      {(refundPage>1||data.has_more_refunds)&&<nav className="actions" aria-label="Refund pages">
+        {refundPage>1&&<Link className="button" href={billingPageHref("refund",refundPage-1)}>Previous page</Link>}
+        <span>Page {refundPage}</span>
+        {data.has_more_refunds&&<Link className="button" href={billingPageHref("refund",refundPage+1)}>Next page</Link>}
+      </nav>}
+    </Panel></div></>}
     {isHelp&&<><div className="page-head"><p className="eyebrow">MY WORKSPACE · ACCOUNT</p><h1>Support</h1><p className="muted">Open a case about an order, parcel, report or payment, and follow the warehouse team&apos;s replies.</p></div>
       <Panel title="Open a support case">
         <Form key={createdCase?.id??search.get("parcel")} label="Submit case" run={async f=>{
