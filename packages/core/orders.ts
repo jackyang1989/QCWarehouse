@@ -59,10 +59,13 @@ export const priceSchema=z.object({
 export type LineInput={category_id:string; offer_id:string; template_version_id?:string; quantity:number; options?:object; attributes?:object; items?:object[]};
 async function validateLineSamples(db:DB,org:string,line:{category_id:string;options?:unknown;attributes?:unknown;items?:unknown[];draft_items?:unknown[]},service:string) {
   const items=(Array.isArray(line.items)?line.items:Array.isArray(line.draft_items)?line.draft_items:[]) as {category_id?:string;size_label?:string;size?:string;attachment_ids?:unknown}[];
-  const lineAttachments=Array.isArray((line.attributes as {attachment_ids?:unknown})?.attachment_ids)
-    ?((line.attributes as {attachment_ids:unknown[]}).attachment_ids):[];
+  const attrs=(line.attributes??{}) as {attachment_ids?:unknown;purchase_evidences?:unknown};
+  const lineAttachments=Array.isArray(attrs.attachment_ids)?attrs.attachment_ids:[];
+  const evidenceMediaIds=Array.isArray(attrs.purchase_evidences)
+    ?(attrs.purchase_evidences as {media_id?:unknown}[]).map(e=>e?.media_id).filter(Boolean)
+    :[];
   const itemAttachments=items.flatMap(item=>Array.isArray(item?.attachment_ids)?item.attachment_ids:[]);
-  const allAttachments=[...new Set([...lineAttachments,...itemAttachments])];
+  const allAttachments=[...new Set([...lineAttachments,...evidenceMediaIds,...itemAttachments])];
   for(const rawId of allAttachments) {
     const mediaId=z.string().uuid().parse(rawId);
     const media=(await db.query("select 1 from media_assets where id=$1 and org_id=$2 and kind='attachment' and status='ready'",[mediaId,org])).rowCount;
@@ -183,6 +186,10 @@ async function pricedLines(db:DB,id:string,manual=false) {
   for(const line of lines) {
     const {offer,p}=await eligible(db,line,manual);
     guard(offer.template_version_id===line.template_version_id,"TEMPLATE_CHANGED","Review the latest inspection template.");
+    const pendingEvidence=(Array.isArray(line.attributes?.purchase_evidences)?line.attributes.purchase_evidences:[])
+      .some((ev:{extraction_status?:unknown;candidates?:unknown})=>
+        ev?.extraction_status==="needs_confirmation" && Array.isArray(ev?.candidates) && ev.candidates.length>0);
+    guard(!pendingEvidence,"VALIDATION_FAILED","Confirm or discard pending extracted purchase rows before requesting an official quote.",422);
     await validateLineSamples(db,line.org_id,line,offer.service);
     snapshot.push({order_line_id:line.id,category_id:line.category_id,offer_id:line.offer_id,template_version_id:line.template_version_id,
       quantity:line.quantity,price_version:offer.price_version,amount_cents:p.package_cents??p.unit_cents!*line.quantity,
@@ -412,6 +419,217 @@ export async function readyOrder(db:DB,id:string) {
     [id,businessDeadline(new Date(),days,holidays,extraWorkdays)]);
   await event(db,"order.ready",{order_id:id});
 }
+export type ExpectedLineBreakdown={
+  order_line_id:string;
+  expected_line_id:string;
+  sku_code:string;
+  product_name:string;
+  color_declared:string;
+  size_label:string;
+  supplier_alias:string;
+  tracking_no:string;
+  carrier_code:string;
+  purchase_order_ref:string;
+  unit_price_note:string;
+  expected_qty:number;
+  arrived_qty:number;
+  identified_qty:number;
+  mismatch_qty:number;
+  inspected_qty:number;
+  outstanding_qty:number;
+  evidence_ids:string[];
+};
+
+export function summarizeExpectedLines(
+  lines:{id:string;quantity:number;attributes?:Record<string,unknown>|null;draft_items?:unknown[]|null}[],
+  expectedRows:{
+    id?:string;
+    expected_item_id?:string;
+    order_line_id:string;
+    position?:number;
+    declared_fields?:Record<string,unknown>|null;
+    item_id?:string|null;
+    linked_item_id?:string|null;
+    identity_state?:string|null;
+    inspection_stage?:string|null;
+  }[]
+) {
+  const breakdown:ExpectedLineBreakdown[]=[];
+  const purchaseEvidences:Record<string,unknown>[]=[];
+  const plannedParcels:Record<string,unknown>[]=[];
+  const supplierSet=new Set<string>();
+  const waybillSet=new Set<string>();
+  const normTrack=(v:unknown)=>String(v??"").replace(/\s+/g,"").toUpperCase();
+
+  for(const line of lines) {
+    const attrs=(line.attributes??{}) as Record<string,unknown>;
+    if(Array.isArray(attrs.purchase_evidences)) {
+      for(const ev of attrs.purchase_evidences) {
+        if(ev && typeof ev==="object") purchaseEvidences.push({...(ev as Record<string,unknown>),order_line_id:line.id});
+      }
+    }
+    if(Array.isArray(attrs.planned_parcels)) {
+      for(const pp of attrs.planned_parcels) {
+        if(pp && typeof pp==="object") {
+          const rec=pp as Record<string,unknown>;
+          plannedParcels.push({...rec,order_line_id:line.id});
+          const tn=normTrack(rec.tracking_no);
+          if(tn && tn.length>=5) waybillSet.add(tn);
+          const sup=String(rec.supplier_alias??"").trim();
+          if(sup) supplierSet.add(sup);
+        }
+      }
+    }
+    const lineRows=expectedRows.filter(r=>r.order_line_id===line.id && (r.id || r.expected_item_id));
+    const draftFallback=Array.isArray(line.draft_items)?(line.draft_items as Record<string,unknown>[]):[];
+    const declaredExpected=Array.isArray(attrs.expected_lines)?(attrs.expected_lines as Record<string,unknown>[]):[];
+
+    if(declaredExpected.length>0) {
+      const assignedRowIds=new Set<string>();
+      for(let idx=0;idx<declaredExpected.length;idx++) {
+        const el=declaredExpected[idx]??{};
+        const elId=String(el.id??`EL-${idx+1}`);
+        const skuCode=String(el.sku_code??"").trim();
+        const productName=String(el.product_name??attrs.name??"").trim();
+        const colorDeclared=String(el.color_declared??"").trim();
+        const sizeLabel=String(el.size_label??"").trim();
+        const supplierAlias=String(el.supplier_alias??attrs.supplier_alias??attrs.supplier_ref??"").trim();
+        const trackingNo=normTrack(el.tracking_no??attrs.tracking_no);
+        const carrierCode=String(el.carrier_code??"").trim().toUpperCase();
+        const poRef=String(el.purchase_order_ref??"").trim();
+        const unitPriceNote=String(el.unit_price_note??"").trim();
+        const declaredQty=Math.max(0,Number(el.quantity??0)||0);
+        if(supplierAlias) supplierSet.add(supplierAlias);
+        if(trackingNo && trackingNo.length>=5) waybillSet.add(trackingNo);
+
+        const matched=lineRows.filter(r=>{
+          const rowKey=String(r.expected_item_id??r.id);
+          if(assignedRowIds.has(rowKey)) return false;
+          const df=(r.declared_fields??{}) as Record<string,unknown>;
+          if(df.expected_line_id && String(df.expected_line_id)===elId) return true;
+          const rSku=String(df.sku_code??df.sample_code??"").trim();
+          const rColor=String(df.color_declared??df.color??"").trim();
+          const rSize=String(df.size_label??df.size??"").trim();
+          return !df.expected_line_id && (rSku===skuCode || (!skuCode && rColor===colorDeclared && rSize===sizeLabel));
+        });
+        const boundedMatched=matched.slice(0,declaredQty||matched.length);
+        for(const m of boundedMatched) assignedRowIds.add(String(m.expected_item_id??m.id));
+
+        const arrivedQty=boundedMatched.filter(r=>Boolean(r.item_id||r.linked_item_id)).length;
+        const identifiedQty=boundedMatched.filter(r=>r.identity_state==="identified").length;
+        const mismatchQty=boundedMatched.filter(r=>r.identity_state==="mismatch").length;
+        const inspectedQty=boundedMatched.filter(r=>r.inspection_stage==="inspected").length;
+        const evidenceIds=Array.isArray(el.evidence_ids)?el.evidence_ids.map(x=>String(x)):[];
+        breakdown.push({
+          order_line_id:line.id,
+          expected_line_id:elId,
+          sku_code:skuCode,
+          product_name:productName,
+          color_declared:colorDeclared,
+          size_label:sizeLabel,
+          supplier_alias:supplierAlias,
+          tracking_no:trackingNo,
+          carrier_code:carrierCode,
+          purchase_order_ref:poRef,
+          unit_price_note:unitPriceNote,
+          expected_qty:declaredQty,
+          arrived_qty:arrivedQty,
+          identified_qty:identifiedQty,
+          mismatch_qty:mismatchQty,
+          inspected_qty:inspectedQty,
+          outstanding_qty:Math.max(0,declaredQty-identifiedQty),
+          evidence_ids:evidenceIds,
+        });
+      }
+      continue;
+    }
+
+    // Legacy / item-level fallback: group identical variant tuples
+    const groupMap=new Map<string,{item:ExpectedLineBreakdown;ids:Set<string>}>();
+    const sourceRows=lineRows.length>0
+      ?lineRows.map(r=>({
+        rowId:String(r.expected_item_id??r.id),
+        df:(r.declared_fields??{}) as Record<string,unknown>,
+        arrived:Boolean(r.item_id||r.linked_item_id),
+        identified:r.identity_state==="identified",
+        mismatch:r.identity_state==="mismatch",
+        inspected:r.inspection_stage==="inspected",
+      }))
+      :draftFallback.map((df,idx)=>({
+        rowId:`draft-${idx}`,
+        df,
+        arrived:false,
+        identified:false,
+        mismatch:false,
+        inspected:false,
+      }));
+    for(const entry of sourceRows) {
+      const df=entry.df;
+      const sku=String(df.sku_code??df.sample_code??attrs.sample_code_prefix??"").trim();
+      const prod=String(df.name??attrs.name??"").trim();
+      const color=String(df.color_declared??df.color??attrs.color_declared??"").trim();
+      const size=String(df.size_label??df.size??attrs.size_label??"").trim();
+      const sup=String(df.supplier_alias??df.supplier??attrs.supplier_alias??attrs.supplier_ref??"").trim();
+      const track=normTrack(df.declared_tracking_no??df.tracking_no??attrs.tracking_no);
+      if(sup) supplierSet.add(sup);
+      if(track && track.length>=5) waybillSet.add(track);
+      const groupKey=[line.id,prod,color,size,sup,track,sourceRows.length<=3?sku:""].join("|");
+      let bucket=groupMap.get(groupKey);
+      if(!bucket) {
+        bucket={
+          item:{
+            order_line_id:line.id,
+            expected_line_id:String(df.expected_line_id??`LEGACY-${groupMap.size+1}`),
+            sku_code:sku,
+            product_name:prod,
+            color_declared:color,
+            size_label:size,
+            supplier_alias:sup,
+            tracking_no:track,
+            carrier_code:String(df.carrier_code??"").trim().toUpperCase(),
+            purchase_order_ref:String(df.purchase_order_ref??"").trim(),
+            unit_price_note:String(df.unit_price_note??"").trim(),
+            expected_qty:0,
+            arrived_qty:0,
+            identified_qty:0,
+            mismatch_qty:0,
+            inspected_qty:0,
+            outstanding_qty:0,
+            evidence_ids:[],
+          },
+          ids:new Set(),
+        };
+        groupMap.set(groupKey,bucket);
+      }
+      bucket.item.expected_qty+=1;
+      if(entry.arrived) bucket.item.arrived_qty+=1;
+      if(entry.identified) bucket.item.identified_qty+=1;
+      if(entry.mismatch) bucket.item.mismatch_qty+=1;
+      if(entry.inspected) bucket.item.inspected_qty+=1;
+      bucket.item.outstanding_qty=Math.max(0,bucket.item.expected_qty-bucket.item.identified_qty);
+    }
+    for(const b of groupMap.values()) breakdown.push(b.item);
+  }
+
+  const expectedUnitsTotal=breakdown.reduce((s,r)=>s+r.expected_qty,0) || lines.reduce((s,l)=>s+(Number(l.quantity)||0),0);
+  const arrivedUnitsTotal=breakdown.reduce((s,r)=>s+r.arrived_qty,0);
+  const identifiedUnitsTotal=breakdown.reduce((s,r)=>s+r.identified_qty,0);
+  const inspectedUnitsTotal=breakdown.reduce((s,r)=>s+r.inspected_qty,0);
+  return {
+    lines_breakdown:breakdown,
+    expected_lines_count:breakdown.length,
+    expected_units_total:expectedUnitsTotal,
+    arrived_units_total:arrivedUnitsTotal,
+    identified_units_total:identifiedUnitsTotal,
+    inspected_units_total:inspectedUnitsTotal,
+    outstanding_units_total:Math.max(0,expectedUnitsTotal-identifiedUnitsTotal),
+    suppliers:[...supplierSet],
+    declared_waybills:[...waybillSet],
+    purchase_evidences:purchaseEvidences,
+    planned_parcels:plannedParcels,
+  };
+}
+
 export async function orderDetail(db:DB,actor:Actor,id:string) {
   const order=await ownOrder(db,actor,id);
   const lines=(await db.query(`select l.id,l.offer_id,l.category_id,l.template_version_id,l.quantity,l.options,l.attributes,l.draft_items,
@@ -444,7 +662,8 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
       and q.expires_at>now() and q.accepted_at is null
     where r.order_id=$1 and r.revision=$2`,[id,order.revision])).rows[0]:null;
   const parcels=(await db.query(`select ao.advice_id id,t.tracking_norm,t.carrier_code,c.labels->>'en' carrier_name,
-    t.transport_state,t.sync_state,p.code package_code,p.state warehouse_state
+    t.transport_state,t.sync_state,p.code package_code,p.state warehouse_state,p.received_quantity,
+    (select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null) logged_item_count
     from advice_orders ao join tracking_records t on t.advice_id=ao.advice_id and t.org_id=ao.org_id and t.closed_at is null
     left join packages p on p.id=t.package_id and p.org_id=ao.org_id
     left join carriers c on c.code=t.carrier_code
@@ -458,10 +677,11 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
   const shipments=await orderShipments(db,id,order.org_id);
   const quotes=(await orderQuotes(db,id,order.org_id)).map(({id,revision,purpose,action,state,amount_cents,expires_at,batch_id,item_codes})=>
     ({id,revision,purpose,action,state,amount_cents,expires_at,batch_id:batch_id??null,item_codes:item_codes??null}));
+  const expected_lines_summary=summarizeExpectedLines(lines,rows);
   return {...orderDTO(order as Parameters<typeof orderDTO>[0]),price_cents:order.price_cents,
     customer_notes:order.customer_notes??null,held_at:order.held_at??null,held_from_state:order.held_from_state??null,hold_reason:order.hold_reason??null,
     created_at:order.created_at,report_published_at:order.report_published_at??null,closed_at:order.closed_at??null,paid_at:order.paid_at??null,samples_ready_at:order.samples_ready_at??null,sla_due_at:order.sla_due_at??null,
-    lines,items:rows,report_version:progress.published_version??null,scope_payment:progress.scope_payment,manual_quote:manual??null,manual_quote_renewable:manualQuoteRenewable,
+    lines,items:rows,expected_lines_summary,report_version:progress.published_version??null,scope_payment:progress.scope_payment,manual_quote:manual??null,manual_quote_renewable:manualQuoteRenewable,
     parcel_registration_due:progress.parcel_registration_due,unregistered_waybills:progress.unregistered_waybills,
     parcels,cases,shipments,quotes,consents};
 }

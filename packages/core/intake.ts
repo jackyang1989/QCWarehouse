@@ -3,7 +3,7 @@ import { audit, code, event, guard, hash, isDemo, lock, one, organization, revis
 import { requireCustomerActive } from "./auth";
 import { demoWarehouseAddressZh, usableWarehouseAddressSql } from "./demo-fixtures";
 import { processImageBytes } from "./media";
-import { orderAcceptsSampleAssignmentSql, readyOrder } from "./orders";
+import { orderAcceptsSampleAssignmentSql, readyOrder, summarizeExpectedLines } from "./orders";
 import { assertZonePurpose, requireSpace } from "./storage";
 
 export function waybill(value:string) {
@@ -12,8 +12,9 @@ export function waybill(value:string) {
   return normalized;
 }
 export async function validCarrier(db:DB,carrier:string) {
-  await one(db,"select code from carriers where code=$1 and enabled",[carrier]);
-  return carrier;
+  const normalized=carrier.trim().toLowerCase();
+  await one(db,"select code from carriers where code=$1 and enabled",[normalized]);
+  return normalized;
 }
 export async function advise(db:DB,actor:Actor,input:{tracking_no:string;address_id:string;carrier_code?:string;order_ids?:string[]}) {
   const org=organization(actor),tracking=waybill(input.tracking_no);
@@ -81,12 +82,13 @@ export async function savePhoto(db:DB,actor:Actor,bytes:Buffer,kind:string) {
   else if(kind==="attachment") role(actor,"receiver","inspector","warehouse_admin","support","finance","super_admin");
   else role(actor,"receiver","inspector","warehouse_admin","super_admin");
   guard(bytes.length>0 && bytes.length<=25_000_000,"FILE_INVALID","Upload a photo up to 25 MB.",422);
+  const rawSha=hash(bytes);
   const {fullData,thumbData,width,height,capturedAt}=await processImageBytes(bytes);
   const id=uuid(), key="media/"+id, thumbKey="thumb/"+id;
   await db.query("insert into private_files(key,data,mime) values($1,$2,'image/jpeg'),($3,$4,'image/jpeg')",[key,fullData,thumbKey,thumbData]);
   await db.query(`insert into media_assets(id,kind,object_key,thumb_key,mime,size_bytes,width,height,sha256,status,captured_at,uploaded_by,org_id)
     values($1,$2,$3,$4,'image/jpeg',$5,$6,$7,$8,'ready',$9,$10,$11)`,[id,kind,key,thumbKey,fullData.length,width,height,hash(fullData),capturedAt,actor.id,org]);
-  return {id};
+  return {id,sha256:rawSha,processed_sha256:hash(fullData),width,height,size_bytes:fullData.length};
 }
 export async function attachEvidence(db:DB,actor:Actor,ids:string[],kind:string,scope:{org:string|null;package?:string;task?:string}) {
   guard(new Set(ids).size===ids.length && ids.length>0,"EVIDENCE_REQUIRED","Provide distinct supporting photos.",422);
@@ -879,6 +881,23 @@ export async function getIntakeContext(
       };
     });
 
+    const orderLines=(await db.query<{id:string;quantity:number;attributes:Record<string,unknown>;draft_items:unknown[]}>(
+      "select id,quantity,attributes,draft_items from order_lines where order_id=$1 order by id",
+      [ord.id]
+    )).rows;
+    const expectedLinesSummary=summarizeExpectedLines(
+      orderLines,
+      declaredItems.map(d=>({
+        id:d.expected_item_id,
+        expected_item_id:d.expected_item_id,
+        order_line_id:d.order_line_id,
+        position:d.position,
+        declared_fields:d.declared_fields,
+        linked_item_id:d.linked_item_id,
+        identity_state:d.identity_state,
+      }))
+    );
+
     const totalDeclaredQty=declaredItems.length;
     const cumulativeReceivedQty=advisedParcels.reduce((sum,p)=>sum+Number(p.received_quantity||0),0);
     const cumulativeLinkedQty=declaredItems.filter(d=>Boolean(d.linked_item_id)).length;
@@ -897,6 +916,7 @@ export async function getIntakeContext(
       remaining_unlinked_qty:Math.max(0,totalDeclaredQty-cumulativeLinkedQty),
       in_transit_parcels_count:inTransitParcelsCount,
       advised_parcels:advisedParcels,
+      expected_lines_summary:expectedLinesSummary,
       declared_items:declaredItems.map(d=>({
         ...d,
         order_id:ord.id,

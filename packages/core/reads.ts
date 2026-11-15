@@ -64,6 +64,7 @@ export async function items(db:DB,actor:Actor,options?:{page:number;filter:keyof
     }));
 }
 export async function customerInventory(db:DB,actor:Actor,page:number,filter:keyof typeof itemFilters,code?:string) {
+  const org=organization(actor);
   const rows=(await items(db,actor,{page:code?1:page,filter:code?"all":filter,code})).map(({location_code,reference_sample,...row})=>{
     if(!reference_sample) return {...row,reference_sample:null};
     const {safe_location_code,...reference}=reference_sample;
@@ -78,8 +79,16 @@ export async function customerInventory(db:DB,actor:Actor,page:number,filter:key
     count(*) filter (where ${awaitingItemInstructions})::int handling,
     count(*) filter (where ${inspectedItem})::int inspected,
     count(*) filter (where ${activeReference})::int reference
-    ${inventoryJoins} where w.org_id=$1 and w.parent_item_id is null`,[organization(actor)]);
-  return {rows:rows.slice(0,20),has_more:rows.length>20,summary};
+    ${inventoryJoins} where w.org_id=$1 and w.parent_item_id is null`,[org]);
+  const awaiting_arrival_orders=(await db.query(`select o.id,o.public_no,o.state,
+    inbound_registration.parcel_registration_due,
+    (select count(*)::int from order_lines l join expected_items e on e.order_line_id=l.id and e.in_scope where l.order_id=o.id) expected_units,
+    (select count(*)::int from order_lines l join expected_items e on e.order_line_id=l.id and e.in_scope
+      join order_line_item_links a on a.expected_item_id=e.id and a.unlinked_at is null where l.order_id=o.id) arrived_units
+    from orders o ${orderInboundRegistration}
+    where o.org_id=$1 and o.paid_at is not null and o.state in ('awaiting_samples','on_hold')
+    order by o.created_at desc limit 20`,[org])).rows;
+  return {rows:rows.slice(0,20),has_more:rows.length>20,summary,awaiting_arrival_orders};
 }
 const chargeOrderOriginsSql=`left join lateral(
     select array_agg(related.id order by related.public_no) order_ids,
@@ -226,6 +235,16 @@ const customerOrderSelect=`select o.id,o.public_no,o.state,o.revision,o.price_ce
       (select max(a.at) from audit_events a where a.entity_type='orders' and a.entity_id=o.id)) updated_at,
     o.sla_due_at,${scopeSupplementForOrder} scope_payment,inbound_registration.parcel_registration_due,
     (select coalesce(sum(l.quantity),0)::int from order_lines l where l.order_id=o.id) item_count,
+    (select coalesce(sum(case when jsonb_typeof(l.attributes->'expected_lines')='array' and jsonb_array_length(l.attributes->'expected_lines')>0
+      then jsonb_array_length(l.attributes->'expected_lines') else 1 end),0)::int from order_lines l where l.order_id=o.id) expected_lines_count,
+    (select count(distinct nullif(trim(sup.s),''))::int from (
+      select l.attributes->>'supplier_alias' s from order_lines l where l.order_id=o.id
+      union all
+      select el->>'supplier_alias' s from order_lines l,jsonb_array_elements(coalesce(l.attributes->'expected_lines','[]'::jsonb)) el where l.order_id=o.id
+    ) sup) supplier_count,
+    (select count(*)::int from advice_orders ao where ao.order_id=o.id and ao.org_id=o.org_id) parcel_count,
+    (select count(*)::int from order_lines l join expected_items e on e.order_line_id=l.id and e.in_scope
+      join order_line_item_links a on a.expected_item_id=e.id and a.unlinked_at is null where l.order_id=o.id) arrived_item_count,
     (select s.title->>'en' from order_lines l join service_offers s on s.id=l.offer_id where l.order_id=o.id order by l.id limit 1) service_title,
     (select st.code from order_lines l join service_offers s on s.id=l.offer_id join service_types st on st.id=s.service_type_id where l.order_id=o.id order by l.id limit 1) service_code,
     (select r.published_version from reports r where r.order_id=o.id limit 1) report_version,
@@ -240,10 +259,31 @@ export async function listCustomerOrders(db:DB,actor:Actor,query:string,state:st
   return {rows:rows.slice(0,pageSize),has_more:rows.length>pageSize};
 }
 
-const customerAdviceFields=`a.id,t.tracking_norm,t.carrier_code,t.transport_state,t.sync_state,p.state warehouse_state,p.received_quantity,
+const customerAdviceFields=`a.id,t.tracking_norm,t.carrier_code,t.transport_state,t.sync_state,p.code package_code,p.state warehouse_state,p.received_quantity,p.condition_note,
+    (select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null) logged_item_count,
     array(select order_id from advice_orders where advice_id=a.id) order_ids,
     array(select o.public_no from advice_orders ao join orders o on o.id=ao.order_id where ao.advice_id=a.id order by o.public_no) order_numbers,
-    planned.item_count declared_item_count,planned.suppliers declared_suppliers`;
+    planned.item_count declared_item_count,planned.suppliers declared_suppliers,
+    (select coalesce(jsonb_agg(jsonb_build_object(
+      'order_no',g.order_no,'sku_code',g.sku_code,'product_name',g.product_name,
+      'color_declared',g.color_declared,'size_label',g.size_label,'supplier_alias',g.supplier_alias,'qty',g.qty
+    ) order by g.order_no,g.sku_code),'[]'::jsonb)
+    from (
+      select o.public_no order_no,
+        coalesce(nullif(e.declared_fields->>'sku_code',''),nullif(e.declared_fields->>'sample_code',''),'') sku_code,
+        coalesce(nullif(e.declared_fields->>'name',''),'') product_name,
+        coalesce(nullif(e.declared_fields->>'color_declared',''),nullif(e.declared_fields->>'color',''),'') color_declared,
+        coalesce(nullif(e.declared_fields->>'size_label',''),'') size_label,
+        coalesce(nullif(e.declared_fields->>'supplier_alias',''),'') supplier_alias,
+        count(*)::int qty
+      from advice_orders ao
+      join orders o on o.id=ao.order_id and o.org_id=ao.org_id
+      join order_lines l on l.order_id=o.id and l.org_id=o.org_id
+      join expected_items e on e.order_line_id=l.id and e.in_scope
+      where ao.advice_id=a.id and ao.org_id=a.org_id
+        and (${declaredItemTracking}=t.tracking_norm or (${declaredItemTracking}='' and (select count(*) from advice_orders ao2 where ao2.order_id=o.id and ao2.org_id=o.org_id)=1))
+      group by o.public_no,2,3,4,5,6
+    ) g) declared_line_breakdown`;
 const customerAdviceSource=`
     from package_advices a
     join tracking_records t on t.advice_id=a.id and t.org_id=a.org_id and t.closed_at is null

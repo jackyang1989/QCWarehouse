@@ -84,10 +84,11 @@ function actorRequired(actor:Actor|null):Actor {
   guard(actor,"SIGN_IN_REQUIRED","Sign in to continue.",401);
   return actor;
 }
-function csrf(req:Request) {
+function csrf(req:Request,mode:"session"|"onboarding"|"origin_only"="session") {
   const origin=req.headers.get("origin");
   guard(origin===appOrigin(),"ORIGIN_REJECTED","This request must come from QC Warehouse.",403);
-  const secret=getCookie(req,"session")||getCookie(req,"qcw_onboarding");
+  if(mode==="origin_only") return;
+  const secret=mode==="onboarding"?getCookie(req,"qcw_onboarding"):getCookie(req,"session")||getCookie(req,"qcw_onboarding");
   if(secret) {
     guard(verifyCsrfToken(secret,req.headers.get("x-csrf-token")??""),"CSRF_INVALID","Session security token is missing or invalid.",403);
   }
@@ -95,9 +96,9 @@ function csrf(req:Request) {
 function authResult(result:{state:string;secret:string;kind:string}) {
   if(result.state==="signed_in") {
     const age=result.kind==="customer"?2592000:43200;
-    return [cookie("session",result.secret,age),csrfCookie(csrfTokenFor(result.secret),age),cookie("qcw_provider","",0)];
+    return [cookie("session",result.secret,age),csrfCookie(csrfTokenFor(result.secret),age),cookie("qcw_onboarding","",0),cookie("qcw_provider","",0)];
   }
-  return [cookie("qcw_onboarding",result.secret,1200),csrfCookie(csrfTokenFor(result.secret),1200),cookie("qcw_provider","",0)];
+  return [cookie("qcw_onboarding",result.secret,1200),csrfCookie(csrfTokenFor(result.secret),1200),cookie("session","",0),cookie("qcw_provider","",0)];
 }
 function binary(file:{data:Buffer;mime:string}) {
   return new Response(new Uint8Array(file.data),{headers:{"content-type":file.mime,"cache-control":"private, no-store","x-content-type-options":"nosniff"}});
@@ -192,7 +193,7 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     return json({categories:await transaction(inquiryCategories)},200,[cookie("qcw_browser",browser,3600)]);
   }
   if(method==="POST" && path==="/public/inquiries") {
-    csrf(req);
+    csrf(req,actor?"session":"origin_only");
     const data=publicInquiry.parse(await input(req));
     const key=idSchema.parse(req.headers.get("idempotency-key"));
     const customer=actor?.kind==="customer"?actor:null;
@@ -228,8 +229,10 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     }
   }
   if(method==="POST" && path==="/auth/otp/request") {
-    csrf(req);
+    csrf(req,"origin_only");
     const {email,purpose}=z.object({email:emailSchema,purpose:z.enum(["signin","recovery","link"]).optional()}).parse(await input(req));
+    const otpPurpose=purpose??"signin";
+    if(otpPurpose==="link") csrf(req,"session");
     const browser=browserKey(req);
     let identity:ReturnType<typeof pendingProvider>;
     try {
@@ -238,18 +241,17 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
       if(!(error instanceof Problem)) throw error;
       return json({error:{code:error.code,message:error.message}},error.status,[cookie("qcw_provider","",0)]);
     }
-    const otpPurpose=purpose??"signin";
     const initiatorId=otpPurpose==="link"?actorRequired(actor).id:undefined;
     return json(await startOtp(email,browser,identity,otpPurpose,initiatorId),202,[cookie("qcw_browser",browser,3600)]);
   }
   if(method==="POST" && path==="/auth/otp/verify") {
-    csrf(req);
+    csrf(req,"origin_only");
     const {challenge_id,code}=z.object({challenge_id:idSchema,code:z.string().regex(/^\d{6}$/)}).parse(await input(req));
     const result=await verifyOtp(challenge_id,code,getCookie(req,"qcw_browser"));
     return json({state:result.state,kind:result.kind},200,authResult(result));
   }
   if(method==="POST" && path==="/auth/demo/switch") {
-    csrf(req);
+    csrf(req,"origin_only");
     const {email}=z.object({email:emailSchema}).parse(await input(req));
     const result=await demoSwitchAccount(email);
     return json({state:result.state,kind:result.kind},200,authResult(result));
@@ -265,7 +267,7 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     return json(await verifyCustomerReauth(actorRequired(actor),hash(getCookie(req,"session")),challenge_id,code,getCookie(req,"qcw_browser")));
   }
   if(method==="POST" && path==="/auth/recovery/request") {
-    csrf(req);
+    csrf(req,"origin_only");
     const key=idSchema.parse(req.headers.get("idempotency-key"));
     const browser=browserKey(req);
     const body=z.object({
@@ -347,11 +349,11 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     }),(db,a,b)=>staffUpdateUserStatus(db,a,idSchema.parse(staffUserStatus[1]),b,hash(getCookie(req,"session"))));
   }
   if(method==="POST" && path==="/staff/auth/login") {
-    csrf(req);
+    csrf(req,"origin_only");
     const data=z.object({email:emailSchema,password:z.string().min(1).max(256),otp:z.string().regex(/^\d{6}$/)}).parse(await input(req));
     const secret=await staffSignIn(data.email,data.password,data.otp);
     guard(secret,"LOGIN_FAILED","The staff credentials are invalid.",401);
-    return json({state:"signed_in",kind:"staff"},200,[cookie("session",secret,43200),csrfCookie(csrfTokenFor(secret),43200)]);
+    return json({state:"signed_in",kind:"staff"},200,[cookie("session",secret,43200),csrfCookie(csrfTokenFor(secret),43200),cookie("qcw_onboarding","",0),cookie("qcw_provider","",0)]);
   }
   if(method==="POST" && path==="/auth/logout") {
     csrf(req);
@@ -1207,7 +1209,7 @@ export async function handle(req:Request,path:string) {
       if(pathParams[i]?.schema.type==="integer") z.coerce.number().int().positive().parse(arg);
       else idSchema.parse(arg);
     }
-    if(req.method!=="GET") csrf(req);
+    if(req.method!=="GET") csrf(req,op.operationId==="completeRegistration"?"onboarding":"session");
     const data=validate?await input(req):{};
     if(validate && !validate(data)) throw new Problem("INVALID_REQUEST",`Check the submitted fields: ${validate.errors?.[0]?.instancePath??""} ${validate.errors?.[0]?.message??""}`,422);
     const key=op.parameters.some(p=>p.in==="header" && p.name.toLowerCase()==="idempotency-key")

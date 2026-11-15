@@ -7703,4 +7703,164 @@ test("Checkout deadlines persist across response loss, expire remotely with reco
   assert.equal((await pool.query("select count(*)::int n from expected_items e join order_lines l on l.id=e.order_line_id where l.order_id=$1",[cases[2].draft.id])).rows[0].n,0);
 });
 
+test("expected product lines batch (50 units / 6 SKUs), unconfirmed evidence guard, media isolation, and 50 vs 47 parcel discrepancy",async()=>{
+  const {c,terms,registration}=await signCustomer();
+  const {c:other}=await signCustomer();
+  const receiver=await staffLogin("receiving");
+  const {offers}=await c.fetch("/catalog");
+  const offer=offers.find((row:{category_slug:string;service:string;rules:{minimum:number;maximum:number}})=>
+    row.category_slug==="apparel"&&row.service==="inspection"&&row.rules.minimum<=50&&row.rules.maximum>=50);
+  assert(offer,"Expected an online apparel inspection offer supporting 50 units.");
+
+  const rawImg=await sharp({create:{width:120,height:90,channels:3,background:"#1d4ed8"}}).png().toBuffer();
+  const form=new FormData();
+  form.set("photo",new Blob([new Uint8Array(rawImg)],{type:"image/png"}),"po-1688.png");
+  const uploaded=await c.fetch("/me/media",form,"POST",201);
+  assert(uploaded.id && uploaded.sha256);
+
+  const waybill="SF"+randomUUID().replaceAll("-","").slice(0,10).toUpperCase();
+  const unconfirmedDraft=await c.fetch("/orders",{lines:[{
+    category_id:offer.category_id,
+    offer_id:offer.offer_id,
+    quantity:2,
+    attributes:{
+      name:"Heavyweight Cotton Hoodie",
+      purchase_evidences:[{
+        id:"EV-1",
+        media_id:uploaded.id,
+        file_name:"po-1688.png",
+        mime_type:"image/png",
+        size_bytes:rawImg.length,
+        sha256:uploaded.sha256,
+        extraction_status:"needs_confirmation",
+        candidates:[{id:"CAND-1",sku_code:"HD-BLK-S",product_name:"Heavyweight Cotton Hoodie",color_declared:"Black",size_label:"S",quantity:2}],
+      }],
+    },
+  }]},"POST",201);
+  const blockedQuote=await c.fetch(`/orders/${unconfirmedDraft.id}/quotes`,{revision:unconfirmedDraft.revision},"POST",422);
+  assert.equal(blockedQuote.error.code,"VALIDATION_FAILED");
+
+  const specs=[
+    {id:"EL-1",sku_code:"HD-BLK-S",color_declared:"Black",size_label:"S",quantity:9},
+    {id:"EL-2",sku_code:"HD-BLK-M",color_declared:"Black",size_label:"M",quantity:9},
+    {id:"EL-3",sku_code:"HD-BLK-L",color_declared:"Black",size_label:"L",quantity:8},
+    {id:"EL-4",sku_code:"HD-GRY-S",color_declared:"Gray",size_label:"S",quantity:8},
+    {id:"EL-5",sku_code:"HD-GRY-M",color_declared:"Gray",size_label:"M",quantity:8},
+    {id:"EL-6",sku_code:"HD-GRY-L",color_declared:"Gray",size_label:"L",quantity:8},
+  ];
+  const expectedLines=specs.map(s=>({
+    ...s,
+    product_name:"Heavyweight Cotton Hoodie",
+    supplier_alias:"Hangzhou Knitwear",
+    tracking_no:waybill,
+    carrier_code:"SF",
+    evidence_ids:[uploaded.id],
+  }));
+  const items:Record<string,unknown>[]=[];
+  let pos=1;
+  for(const el of expectedLines) {
+    for(let i=0;i<el.quantity;i++) {
+      items.push({
+        position:pos++,
+        expected_line_id:el.id,
+        sample_code:`${el.sku_code}-${String(i+1).padStart(2,"0")}`,
+        sku_code:el.sku_code,
+        name:el.product_name,
+        color_declared:el.color_declared,
+        size_label:el.size_label,
+        supplier_alias:el.supplier_alias,
+        tracking_no:waybill,
+        declared_tracking_no:waybill,
+        carrier_code:"SF",
+        attachment_ids:[uploaded.id],
+      });
+    }
+  }
+  assert.equal(items.length,50);
+
+  const patched=await c.fetch(`/orders/${unconfirmedDraft.id}`,{
+    revision:unconfirmedDraft.revision,
+    lines:[{
+      category_id:offer.category_id,
+      offer_id:offer.offer_id,
+      quantity:50,
+      attributes:{
+        name:"Heavyweight Cotton Hoodie",
+        supplier_alias:"Hangzhou Knitwear",
+        tracking_no:waybill,
+        attachment_ids:[uploaded.id],
+        expected_lines:expectedLines,
+        purchase_evidences:[{
+          id:"EV-1",
+          media_id:uploaded.id,
+          file_name:"po-1688.png",
+          mime_type:"image/png",
+          size_bytes:rawImg.length,
+          sha256:uploaded.sha256,
+          extraction_status:"confirmed",
+          candidates:[],
+        }],
+        planned_parcels:[{id:"PKG-1",tracking_no:waybill,carrier_code:"SF",supplier_alias:"Hangzhou Knitwear",carton_count:1,contains_all_items:true,allocations:[]}],
+        parcel_mode:"single",
+      },
+      items,
+    }],
+  },"PATCH");
+
+  // Media isolation for purchase evidence attachments referenced inside order_lines
+  assert((await c.fetch(`/media/${uploaded.id}`)).image.length>0);
+  await other.fetch(`/media/${uploaded.id}`,undefined,"GET",404);
+  assert((await receiver.fetch(`/media/${uploaded.id}`)).image.length>0);
+
+  const quote=await c.fetch(`/orders/${patched.id}/quotes`,{revision:patched.revision},"POST",201);
+  assert.equal(quote.line_snapshot[0].quantity,50);
+  const consent={scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true};
+  const submitted=await c.fetch(`/orders/${patched.id}/submit`,{
+    revision:patched.revision,
+    quote_id:quote.id,
+    terms_version_ids:terms.map(t=>t.id),
+    acknowledgements:consent,
+  });
+  const pay=await c.fetch(`/charges/${submitted.charge.charge_item_id}/checkout`,{quote_revision:quote.revision});
+  await c.fetch(`/checkout/demo/${pay.attempt_id}`,{});
+
+  const orderView=await c.fetch(`/orders/${patched.id}`);
+  assert.equal(orderView.state,"awaiting_samples");
+  assert.equal(orderView.expected_lines_summary.expected_lines_count,6);
+  assert.equal(orderView.expected_lines_summary.expected_units_total,50);
+  assert.equal(orderView.expected_lines_summary.outstanding_units_total,50);
+  assert.deepEqual(orderView.unregistered_waybills,[{tracking_no:waybill,item_count:50}]);
+
+  const preArrivalInv=await c.fetch("/me/inventory");
+  const awaitingEntry=preArrivalInv.awaiting_arrival_orders.find((row:{id:string})=>row.id===patched.id);
+  assert(awaitingEntry,"Paid awaiting_samples order must surface in inventory awaiting_arrival_orders.");
+  assert.equal(awaitingEntry.expected_units,50);
+  assert.equal(awaitingEntry.arrived_units,0);
+
+  const advice=await c.fetch("/me/parcels",{
+    address_id:registration.warehouse_address.id,
+    tracking_no:waybill,
+    carrier_code:"sf",
+    order_ids:[patched.id],
+  },"POST",201);
+  const pkg=await receiver.fetch("/staff/intake/check-in",{
+    tracking_no:waybill,
+    advice_id:advice.id,
+    carrier_code:"sf",
+    outer_media_ids:[await receiver.photo("intake_outer")],
+  },"POST",201);
+  const receiving=(await receiver.fetch("/staff/desk")).locations.find((row:{code:string})=>row.code==="R-01");
+  await receiver.fetch(`/staff/packages/${pkg.id}/items`,{
+    revision:pkg.revision,
+    items:Array.from({length:47},()=>({code:"S-"+randomUUID(),location_id:receiving.id})),
+  },"POST",201);
+
+  const receivedParcels=(await c.fetch("/me/parcels?tab=received")).rows;
+  const parcelRow=receivedParcels.find((row:{id:string})=>row.id===advice.id);
+  assert(parcelRow,"Checked-in parcel should appear in received parcels tab.");
+  assert.equal(parcelRow.declared_item_count,50);
+  assert.equal(parcelRow.logged_item_count,47);
+  assert.equal(parcelRow.declared_line_breakdown.length,6);
+});
+
 test("all core operations have a validated success response",assertCoreCoverage);

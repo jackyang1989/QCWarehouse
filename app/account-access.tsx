@@ -5,7 +5,7 @@ import { useState, type ReactNode } from "react";
 import type { SignInMethods } from "../packages/core/integrations";
 import { staffDestination, staffHome, withDestination } from "../packages/core/portal-routes";
 import { Brand } from "./chrome";
-import { ErrorBlock, Form, request, text, useLoad } from "./ui";
+import { ErrorBlock, Form, RequestError, request, text, useLoad } from "./ui";
 
 const oauthMessages:Record<string,string>={
   cancelled:"Sign-in was cancelled. Choose a sign-in method to continue.",
@@ -31,6 +31,8 @@ export function Login({staff,methods,next,verify,oauth}:{
   const [challenge,setChallenge]=useState<Challenge>();
   const [email,setEmail]=useState("");
   const [showEmail,setShowEmail]=useState(verify||methods.demo||!methods.google&&!methods.microsoft);
+  const [demoBusy,setDemoBusy]=useState(false);
+  const [demoError,setDemoError]=useState("");
   const emailAvailable=methods.email||methods.demo;
 
   async function after(result:SignInResult) {
@@ -49,13 +51,30 @@ export function Login({staff,methods,next,verify,oauth}:{
   }
 
   async function quickDemoSignIn(address:string) {
-    const c:Challenge=await request("/auth/otp/request","POST",{email:address});
-    if(c.demo_code) {
-      const res:SignInResult=await request("/auth/otp/verify","POST",{challenge_id:c.challenge_id,code:c.demo_code});
-      await after(res);
-    } else {
-      setChallenge(c);
-      setEmail(address);
+    setDemoError("");
+    setDemoBusy(true);
+    try {
+      try {
+        const switched:SignInResult=await request("/auth/demo/switch","POST",{email:address});
+        await after(switched);
+        return;
+      } catch(error) {
+        if(!(error instanceof RequestError) || !["DEMO_UNAVAILABLE","ACCOUNT_NOT_FOUND"].includes(error.code??"")) {
+          throw error;
+        }
+      }
+      const c:Challenge=await request("/auth/otp/request","POST",{email:address});
+      if(c.demo_code) {
+        const res:SignInResult=await request("/auth/otp/verify","POST",{challenge_id:c.challenge_id,code:c.demo_code});
+        await after(res);
+      } else {
+        setChallenge(c);
+        setEmail(address);
+      }
+    } catch(error) {
+      setDemoError(error instanceof Error?error.message:"Sign-in failed. Try again.");
+    } finally {
+      setDemoBusy(false);
     }
   }
 
@@ -83,13 +102,14 @@ export function Login({staff,methods,next,verify,oauth}:{
             ["receiving@qcw.test","收货与仓管 (receiving)"],
             ["inspector@qcw.test","质检员 / 模板管理 (inspector)"],
             ["reviewer@qcw.test","报告复核员 (reviewer)"],
-          ].map(([addr,label])=><button key={addr} type="button" className="button sm primary" onClick={()=>quickDemoSignIn(addr)}>{label}</button>)
+          ].map(([addr,label])=><button key={addr} type="button" className="button sm primary" disabled={demoBusy} onClick={()=>void quickDemoSignIn(addr)}>{label}</button>)
         ):(
-          <button type="button" className="button sm primary" onClick={()=>quickDemoSignIn("customer@qcw.test")}>
-            One-click sign in: Demo Customer (customer@qcw.test) →
+          <button type="button" className="button sm primary" disabled={demoBusy} onClick={()=>void quickDemoSignIn("customer@qcw.test")}>
+            {demoBusy?"Signing in…":"One-click sign in: Demo Customer (customer@qcw.test) →"}
           </button>
         )}
       </div>
+      {demoError&&<ErrorBlock error={demoError}/>}
     </div>}
     {staff&&<Form label="密码与验证器登录" run={async f=>after(await request("/staff/auth/login","POST",{
       email:text(f,"email"),password:String(f.get("password")??""),otp:text(f,"otp"),

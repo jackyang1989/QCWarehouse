@@ -399,8 +399,24 @@ export async function authorizeMediaRead(db: DB, actor: Actor, id: string) {
   }
   if (actor.kind === "customer") {
     const org = organization(actor);
-    if (m.kind === "attachment" && m.org_id === org && m.uploaded_by === actor.id) {
-      return m;
+    if (m.kind === "attachment" && m.org_id === org) {
+      if (m.uploaded_by === actor.id) {
+        return m;
+      }
+      const orgOrderAttachment = (
+        await db.query(
+          `select 1 from order_lines
+           where org_id=$2 and (
+             (attributes->'attachment_ids') ? $1
+             or exists(select 1 from jsonb_array_elements(coalesce(attributes->'purchase_evidences','[]'::jsonb)) pe where pe->>'media_id' = $1)
+             or exists(select 1 from jsonb_array_elements(draft_items) item where (item->'attachment_ids') ? $1)
+           ) limit 1`,
+          [id, org]
+        )
+      ).rowCount;
+      if (orgOrderAttachment) {
+        return m;
+      }
     }
     guard(m.org_id === org && Boolean(m.result_id || m.shot_code || m.point_code), "NOT_FOUND", "Photo not found.", 404);
     await one(
@@ -441,10 +457,13 @@ export async function authorizeMediaRead(db: DB, actor: Actor, id: string) {
       ).rowCount;
     const orderAttachment =
       m.kind === "attachment" &&
-      actor.roles.some(r => ["inspector", "reviewer", "support", "warehouse_admin", "super_admin"].includes(r)) &&
+      actor.roles.some(r => ["receiver", "inspector", "reviewer", "support", "warehouse_admin", "super_admin"].includes(r)) &&
       (
         await db.query(
-          "select 1 from order_lines where (attributes->'attachment_ids') ? $1 or exists(select 1 from jsonb_array_elements(draft_items) item where (item->'attachment_ids') ? $1)",
+          `select 1 from order_lines
+           where (attributes->'attachment_ids') ? $1
+             or exists(select 1 from jsonb_array_elements(coalesce(attributes->'purchase_evidences','[]'::jsonb)) pe where pe->>'media_id' = $1)
+             or exists(select 1 from jsonb_array_elements(draft_items) item where (item->'attachment_ids') ? $1)`,
           [id]
         )
       ).rowCount;

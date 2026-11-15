@@ -5,12 +5,18 @@ import { ScopeReview } from "./scope-review";
 import { ReportShares } from "./report-sharing";
 import { RecentUpdates } from "./notifications";
 import { ParcelOwnershipReviews } from "./ticket-desk";
-import { PlatformIcon } from "./chrome";
+import { categoryIconName, PlatformIcon } from "./chrome";
 import { ApparelIllustration } from "./report-guide";
 import { CategoryTiles } from "./category-coverage";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { draftRecoveryKey, readDraftRecovery, removeDraftRecovery, writeDraftRecovery, type DraftEditor, type DraftRecovery } from "./draft-recovery";
+import {
+  deriveExpectedLinesFromServerLine, draftRecoveryKey, expandExpectedLinesToDraftItems, missingLineFields,
+  normalizeTrackingCode, parseStructuredPurchaseText, readDraftRecovery, removeDraftRecovery, sha256FileHex,
+  sumExpectedLineQuantity, writeDraftRecovery,
+  type DraftEditor, type DraftRecovery, type ExpectedProductLine, type ExtractedCandidateLine,
+  type ParcelMode, type PlannedParcelEntry, type PurchaseEvidenceItem,
+} from "./draft-recovery";
 import { conditionMatches } from "../packages/core/template-conditions";
 import { sumMeasurements } from "../packages/core/measurement-decimals";
 import { billingChargePath, billingQuotePath, customerDestination, inspectionScopePath, legalPages, orderSections, type OrderSection, servicePages } from "../packages/core/portal-routes";
@@ -63,12 +69,12 @@ const serviceDetails={
 };
 
 const prototypeCategories=[
-  {id:"apparel",name:"Apparel",state:"ACTIVE",desc:"T-shirts, leggings, sportswear and dresses",icon:"♧"},
-  {id:"footwear",name:"Footwear",state:"PLANNED",desc:"Shoes, sneakers and footwear",icon:"◈"},
-  {id:"bags",name:"Bags & Accessories",state:"PLANNED",desc:"Handbags, backpacks and accessories",icon:"▢"},
-  {id:"home",name:"Home & Lifestyle",state:"PLANNED",desc:"Home textiles, decor and everyday goods",icon:"⌂"},
-  {id:"electronics",name:"Electronics",state:"RESTRICTED",desc:"Limited visual checks only; no electrical certification",icon:"▤"},
-  {id:"toys",name:"Toys & Children’s Products",state:"RESTRICTED",desc:"Safety-critical checks require separate capability review",icon:"◇"},
+  {id:"apparel",name:"Apparel",state:"ACTIVE",desc:"T-shirts, leggings, sportswear and dresses",icon:categoryIconName("apparel")},
+  {id:"footwear",name:"Footwear",state:"PLANNED",desc:"Shoes, sneakers and footwear",icon:categoryIconName("footwear")},
+  {id:"bags",name:"Bags & Accessories",state:"PLANNED",desc:"Handbags, backpacks and accessories",icon:categoryIconName("bags")},
+  {id:"home",name:"Home & Lifestyle",state:"PLANNED",desc:"Home textiles, decor and everyday goods",icon:categoryIconName("home")},
+  {id:"electronics",name:"Electronics",state:"RESTRICTED",desc:"Limited visual checks only; no electrical certification",icon:categoryIconName("electronics")},
+  {id:"toys",name:"Toys & Children’s Products",state:"RESTRICTED",desc:"Safety-critical checks require separate capability review",icon:categoryIconName("toys")},
 ] as const;
 
 export function Catalog({path}:{path:string}) {
@@ -115,7 +121,7 @@ export function Catalog({path}:{path:string}) {
       name:o.category?.en??"Approved Category",
       state:"ACTIVE" as const,
       desc:"Approved inspection templates, capabilities and versioned pricing active.",
-      icon:"◈",
+      icon:categoryIconName(`${o.category_slug??""} ${o.category?.en??""}`),
       liveOffer:o,
     })),
   ];
@@ -207,7 +213,7 @@ export function Catalog({path}:{path:string}) {
           const liveOffer=c.liveOffer;
           return <div className="card flat" key={c.id}>
             <div className="category-card">
-              <div className="glyph">{c.icon}</div>
+              <div className="glyph" aria-hidden="true"><PlatformIcon name={c.icon}/></div>
               <div style={{flex:1}}>
                 <div className="row between">
                   <strong>{c.name}</strong>
@@ -306,7 +312,7 @@ export function Catalog({path}:{path:string}) {
 
     {!isCategories&&!isPricing&&<>
       {path==="/catalog"&&<div className="land-services catalog-coverage" style={{marginBottom:18}}>
-        {Object.entries(servicePages).map(([href,code])=><Link className="land-svc" href={href} key={href}><span className="symbol"><PlatformIcon name={code==="compare"?"compare":code==="inspection"?"inspection":"packages"}/></span>
+        {Object.entries(servicePages).map(([href,code])=><Link className="land-svc" href={href} key={href}><span className="symbol"><PlatformIcon name={code==="compare"?"service_compare":code==="inspection"?"service_inspection":"service_reference"}/></span>
           <h3>{serviceDetails[code].title}</h3><p>{serviceDetails[code].description}</p><span className="go">View service →</span></Link>)}
       </div>}
 
@@ -422,11 +428,11 @@ export function HowItWorks() {
   </>;
 }
 const wizardCategoryCatalog=[
-  {key:"apparel",name:"Apparel",icon:"♧",fallbackState:"ACTIVE"},
-  {key:"footwear",name:"Footwear",icon:"◈",fallbackState:"PLANNED"},
-  {key:"bags",name:"Bags & Accessories",icon:"▢",fallbackState:"PLANNED"},
-  {key:"home",name:"Home & Lifestyle",icon:"⌂",fallbackState:"PLANNED"},
-  {key:"electronics",name:"Electronics",icon:"▤",fallbackState:"RESTRICTED"},
+  {key:"apparel",name:"Apparel",icon:"category_apparel",fallbackState:"ACTIVE"},
+  {key:"footwear",name:"Footwear",icon:"category_footwear",fallbackState:"PLANNED"},
+  {key:"bags",name:"Bags & Accessories",icon:"category_bags",fallbackState:"PLANNED"},
+  {key:"home",name:"Home & Lifestyle",icon:"category_home",fallbackState:"PLANNED"},
+  {key:"electronics",name:"Electronics",icon:"category_electronics",fallbackState:"RESTRICTED"},
 ] as const;
 
 const wizardServiceCards=[
@@ -435,21 +441,21 @@ const wizardServiceCards=[
     title:"Product Inspection",
     desc:"Check individual items for measurements, workmanship, labels, and visible defects.",
     unitLabel:"Per item",
-    icon:"⌕",
+    icon:"service_inspection",
   },
   {
     service:"compare",
     title:"Sample Comparison",
     desc:"Compare 2 or 3 supplier samples side-by-side under the exact same checklist and camera angles.",
     unitLabel:"2 or 3 sample package",
-    icon:"≍",
+    icon:"service_compare",
   },
   {
     service:"reference_match",
     title:"Golden Sample Matching",
     desc:"Check new restock or pre-shipment items against your sealed, approved reference sample in our vault.",
     unitLabel:"Per candidate item",
-    icon:"▧",
+    icon:"service_reference",
   },
 ] as const;
 
@@ -525,6 +531,28 @@ export function NewOrder({customerId}:{customerId:string}) {
   const [referenceId,setReferenceId]=useState("");
   const [sizeMismatchConfirmed,setSizeMismatchConfirmed]=useState(false);
   const [itemRows,setItemRows]=useState<Partial<Record<"sku"|"size"|"color"|"supplier"|"tracking_no",string>>[]>([]);
+  const [expectedLines,setExpectedLines]=useState<ExpectedProductLine[]>([]);
+  const [expectedUndoStack,setExpectedUndoStack]=useState<ExpectedProductLine[][]>([]);
+  const [purchaseEvidences,setPurchaseEvidences]=useState<PurchaseEvidenceItem[]>([]);
+  const [plannedParcels,setPlannedParcels]=useState<PlannedParcelEntry[]>([]);
+  const [parcelMode,setParcelMode]=useState<ParcelMode>("single");
+  const [syncQuantityFromLines,setSyncQuantityFromLines]=useState(true);
+  const [showMatrixBuilder,setShowMatrixBuilder]=useState(false);
+  const [matrixProductName,setMatrixProductName]=useState("");
+  const [matrixSkuPrefix,setMatrixSkuPrefix]=useState("");
+  const [matrixColors,setMatrixColors]=useState("Black, Gray");
+  const [matrixSizes,setMatrixSizes]=useState("M, L, XL");
+  const [matrixDefaultQty,setMatrixDefaultQty]=useState(8);
+  const [matrixSupplier,setMatrixSupplier]=useState("");
+  const [showPasteImport,setShowPasteImport]=useState(false);
+  const [pasteImportText,setPasteImportText]=useState("");
+  const [pasteSupplier,setPasteSupplier]=useState("");
+  const [pastePoRef,setPastePoRef]=useState("");
+  const [pasteTracking,setPasteTracking]=useState("");
+  const [evidenceDuplicateWarning,setEvidenceDuplicateWarning]=useState("");
+  const [showAdvancedUnits,setShowAdvancedUnits]=useState(false);
+  const [bulkSupplierInput,setBulkSupplierInput]=useState("");
+  const [bulkTrackingInput,setBulkTrackingInput]=useState("");
   const [itemPage,setItemPage]=useState(0);
   const [showFullChecklist,setShowFullChecklist]=useState(false);
   const [notes,setNotes]=useState("");
@@ -551,17 +579,23 @@ export function NewOrder({customerId}:{customerId:string}) {
   const offers:Row[]=data?.offers??[];
 
   // Match prototype category key or dynamic category_id to real backend category_id
+  function matchesCategoryOffer(key:string,offer:Row,name?:string) {
+    const slug=String(offer.category_slug??"").toLowerCase();
+    const en=String(offer.category?.en??"").toLowerCase();
+    return offer.category_id===key||slug===key||(key==="home"&&slug==="home_goods")||
+      (Boolean(en)&&(en===key.toLowerCase()||(name!==undefined&&en===name.toLowerCase())));
+  }
   function resolveCategoryId(key:string):string|undefined {
-    return offers.find(offer=>offer.category_id===key||offer.category_slug===key)?.category_id;
+    return offers.find(offer=>matchesCategoryOffer(key,offer))?.category_id;
   }
 
   const catalogCategories=[...new Map(offers.map(offer=>[offer.category_id,offer])).values()];
   const wizardCategories:{key:string;name:string;icon:string;fallbackState:string}[]=wizardCategoryCatalog.filter(category=>
     resolveCategoryId(category.key)||!catalogCategories.some(offer=>offer.category?.en?.toLowerCase()===category.name.toLowerCase())
-  ).map(category=>({...category,name:catalogCategories.find(offer=>offer.category_slug===category.key)?.category?.en??category.name}));
+  ).map(category=>({...category,name:catalogCategories.find(offer=>matchesCategoryOffer(category.key,offer,category.name))?.category?.en??category.name}));
   for(const offer of catalogCategories) {
-    if(!wizardCategories.some(category=>category.key===offer.category_slug)) {
-      wizardCategories.push({key:offer.category_slug??offer.category_id,name:offer.category?.en??"Available category",icon:"◈",fallbackState:"ACTIVE"});
+    if(!wizardCategories.some(category=>matchesCategoryOffer(category.key,offer,category.name))) {
+      wizardCategories.push({key:offer.category_slug??offer.category_id,name:offer.category?.en??"Available category",icon:categoryIconName(`${offer.category_slug??""} ${offer.category?.en??""}`),fallbackState:"ACTIVE"});
     }
   }
 
@@ -596,6 +630,12 @@ export function NewOrder({customerId}:{customerId:string}) {
     setReferenceId(editor.referenceId);
     setSizeMismatchConfirmed(editor.sizeMismatchConfirmed);
     setItemRows(editor.itemRows);
+    setExpectedLines(Array.isArray(editor.expectedLines)?editor.expectedLines:[]);
+    setExpectedUndoStack([]);
+    setPurchaseEvidences(Array.isArray(editor.purchaseEvidences)?editor.purchaseEvidences:[]);
+    setPlannedParcels(Array.isArray(editor.plannedParcels)?editor.plannedParcels:[]);
+    setParcelMode(editor.parcelMode??"single");
+    setSyncQuantityFromLines(editor.syncQuantityFromLines??true);
     setNotes(editor.notes);
     setAttachmentId(editor.attachmentId);
     setAttachmentName(editor.attachmentName);
@@ -639,6 +679,11 @@ export function NewOrder({customerId}:{customerId:string}) {
       supplier:item.supplier_alias===(attrs.supplier_ref??attrs.supplier_alias)?undefined:item.supplier_alias,
       tracking_no:item.tracking_no===attrs.tracking_no?undefined:item.tracking_no,
     })));
+    setExpectedLines(deriveExpectedLinesFromServerLine(line));
+    setExpectedUndoStack([]);
+    setPurchaseEvidences(Array.isArray(attrs.purchase_evidences)?attrs.purchase_evidences:[]);
+    setPlannedParcels(Array.isArray(attrs.planned_parcels)?attrs.planned_parcels:[]);
+    setParcelMode((attrs.parcel_mode as ParcelMode)??"single");
     setItemPage(0);
     setShowFullChecklist(false);
     setManualQuoteMode(false);
@@ -773,9 +818,23 @@ export function NewOrder({customerId}:{customerId:string}) {
   const clampedQty=Number.isInteger(qty)&&qty>0&&qty<=maximumDraftItems?qty:0;
   const validQuantity=Boolean(activeOffer&&clampedQty);
   const availableTemplates=apparelTemplateOptions.filter(opt=>serviceOffers.some(o=>templateVariantFor(o)===opt.variant));
-  const scopeAttributes={garment_type:activeGarmentType,name:itemName,size_label:baseSize,color_declared:baseColor,
-    supplier_ref:supplierRef,supplier_alias:supplierRef,product_url:productLink,tracking_no:baseTrackingNo,
-    ...(attachmentId?{attachment_ids:[attachmentId]}:{})};
+  const allAttachmentIds=[...new Set([
+    ...(attachmentId?[attachmentId]:[]),
+    ...purchaseEvidences.map(ev=>ev.media_id).filter((id):id is string=>Boolean(id)),
+  ])];
+  const expectedTotalQty=sumExpectedLineQuantity(expectedLines);
+  const unconfirmedEvidences=purchaseEvidences.filter(ev=>ev.extraction_status==="needs_confirmation"&&ev.candidates.length>0);
+  const pendingCandidateCount=unconfirmedEvidences.reduce((sum,ev)=>sum+ev.candidates.length,0);
+  const effectiveDisplayName=itemName.trim()||expectedLines.find(l=>l.product_name.trim())?.product_name.trim()||expectedLines[0]?.sku_code.trim()||"";
+  const singleLineName=effectiveDisplayName;
+  const effectiveSupplier=supplierRef.trim()||expectedLines.find(l=>l.supplier_alias.trim())?.supplier_alias.trim()||"";
+
+  const scopeAttributes={garment_type:activeGarmentType,name:effectiveDisplayName,
+    size_label:baseSize||expectedLines[0]?.size_label||"",
+    color_declared:baseColor||expectedLines[0]?.color_declared||"",
+    supplier_ref:effectiveSupplier,supplier_alias:effectiveSupplier,product_url:productLink,
+    tracking_no:baseTrackingNo||(parcelMode==="single"?plannedParcels[0]?.tracking_no??"":""),
+    ...(allAttachmentIds.length?{attachment_ids:allAttachmentIds}:{})};
   const allOfferChecks:Row[]=Array.isArray(configuredOffer?.content?.checks)?configuredOffer.content.checks:[];
   const filteredChecks=allOfferChecks.filter(c=>conditionMatches(c.applies_if,scopeAttributes)&&conditionMatches(c.required_if,scopeAttributes));
   const measurementChecks=filteredChecks.filter(c=>c.type==="number"&&c.unit);
@@ -800,6 +859,396 @@ export function NewOrder({customerId}:{customerId:string}) {
   function selectTemplateVariant(variant:string) {
     const match=offerFor(serviceOffers,variant,qty)??serviceOffers.find(o=>templateVariantFor(o)===variant);
     if(match) chooseOffer(match);
+  }
+
+  function applyExpectedLinesUpdate(nextLines:ExpectedProductLine[],options?:{recordUndo?:boolean;forceSync?:boolean}) {
+    if(options?.recordUndo!==false) {
+      setExpectedUndoStack(prev=>[...prev.slice(-9),expectedLines]);
+    }
+    setExpectedLines(nextLines);
+    const firstNamed=nextLines.find(l=>l.product_name.trim())?.product_name.trim();
+    if(!itemName.trim()&&firstNamed) setItemName(firstNamed);
+    const nextSum=sumExpectedLineQuantity(nextLines);
+    if(nextSum>0&&(syncQuantityFromLines||options?.forceSync)) {
+      if(serviceKind==="compare") {
+        const match=offerFor(serviceOffers,templateVariant,nextSum);
+        if(match) {
+          setQty(nextSum);
+          setSelectedOfferId(match.offer_id);
+        }
+      } else if(nextSum<=maxOnlineQty) {
+        setQty(nextSum);
+        const match=offerFor(templateOffers,templateVariant,nextSum);
+        if(match) setSelectedOfferId(match.offer_id);
+      }
+    }
+    setServerQuote(undefined);
+    setSavedNotice("");
+  }
+
+  function undoLastExpectedBatch() {
+    if(!expectedUndoStack.length) return;
+    const prev=expectedUndoStack[expectedUndoStack.length-1];
+    setExpectedUndoStack(stack=>stack.slice(0,-1));
+    applyExpectedLinesUpdate(prev,{recordUndo:false});
+  }
+
+  function addExpectedLine() {
+    const newLine:ExpectedProductLine={
+      id:`EL-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,5)}`,
+      sku_code:baseSku&&baseSku!=="ITEM"?`${baseSku}-${expectedLines.length+1}`:"",
+      product_name:itemName.trim()||expectedLines[0]?.product_name||"",
+      color_declared:baseColor.trim(),
+      size_label:baseSize.trim(),
+      quantity:1,
+      supplier_alias:supplierRef.trim()||expectedLines[0]?.supplier_alias||"",
+      tracking_no:parcelMode==="later"?"":normalizeTrackingCode(plannedParcels[0]?.tracking_no||baseTrackingNo),
+      source_kind:"manual",
+    };
+    applyExpectedLinesUpdate([...expectedLines,newLine]);
+  }
+
+  function updateExpectedLine(id:string,patch:Partial<ExpectedProductLine>) {
+    const next=expectedLines.map(line=>line.id===id?{...line,...patch}:line);
+    applyExpectedLinesUpdate(next,{recordUndo:false});
+  }
+
+  function duplicateExpectedLine(line:ExpectedProductLine) {
+    const copy:ExpectedProductLine={
+      ...line,
+      id:`EL-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,5)}`,
+    };
+    const idx=expectedLines.findIndex(l=>l.id===line.id);
+    const next=[...expectedLines];
+    next.splice(idx+1,0,copy);
+    applyExpectedLinesUpdate(next);
+  }
+
+  function removeExpectedLine(id:string) {
+    applyExpectedLinesUpdate(expectedLines.filter(l=>l.id!==id));
+  }
+
+  function mergeDuplicateExpectedLines() {
+    const merged=new Map<string,ExpectedProductLine>();
+    for(const line of expectedLines) {
+      const key=[
+        line.sku_code.trim().toUpperCase(),
+        line.product_name.trim().toLowerCase(),
+        line.color_declared.trim().toLowerCase(),
+        line.size_label.trim().toUpperCase(),
+        line.supplier_alias.trim().toLowerCase(),
+        normalizeTrackingCode(line.tracking_no),
+      ].join("|");
+      const existing=merged.get(key);
+      if(existing) {
+        existing.quantity+=Math.max(1,Math.floor(Number(line.quantity)||0));
+        existing.evidence_ids=[...new Set([...(existing.evidence_ids??[]),...(line.evidence_ids??[])])];
+      } else {
+        merged.set(key,{...line,tracking_no:normalizeTrackingCode(line.tracking_no)});
+      }
+    }
+    applyExpectedLinesUpdate([...merged.values()]);
+  }
+
+  function bulkFillExpectedLines(mode:"empty"|"all") {
+    const sup=bulkSupplierInput.trim();
+    const trk=normalizeTrackingCode(bulkTrackingInput);
+    if(!sup&&!trk) return;
+    const next=expectedLines.map(line=>({
+      ...line,
+      supplier_alias:sup?(mode==="all"||!line.supplier_alias.trim()?sup:line.supplier_alias):line.supplier_alias,
+      tracking_no:trk?(mode==="all"||!line.tracking_no?.trim()?trk:line.tracking_no):line.tracking_no,
+    }));
+    applyExpectedLinesUpdate(next);
+  }
+
+  function applyMatrixLines() {
+    const colors=matrixColors.split(/[,，\n]/).map(s=>s.trim()).filter(Boolean);
+    const sizes=matrixSizes.split(/[,，\n]/).map(s=>s.trim()).filter(Boolean);
+    const finalColors=colors.length?colors:[""];
+    const finalSizes=sizes.length?sizes:[""];
+    const unitQty=Math.max(1,Math.min(200,Math.floor(Number(matrixDefaultQty)||1)));
+    const pName=(matrixProductName||itemName).trim();
+    const prefix=(matrixSkuPrefix||(baseSku!=="ITEM"?baseSku:"SKU")).trim();
+    const sup=(matrixSupplier||supplierRef).trim();
+    const trk=parcelMode==="single"?normalizeTrackingCode(plannedParcels[0]?.tracking_no||baseTrackingNo):"";
+    const generated:ExpectedProductLine[]=[];
+    for(const col of finalColors) {
+      for(const sz of finalSizes) {
+        const skuParts=[prefix,col?col.slice(0,3).toUpperCase():"",sz?sz.toUpperCase():""].filter(Boolean);
+        generated.push({
+          id:`EL-${Date.now().toString(36)}-${generated.length+1}`,
+          sku_code:skuParts.join("-"),
+          product_name:pName,
+          color_declared:col,
+          size_label:sz,
+          quantity:unitQty,
+          supplier_alias:sup,
+          tracking_no:trk,
+          source_kind:"matrix",
+        });
+      }
+    }
+    if(pName&&!itemName.trim()) setItemName(pName);
+    if(sup&&!supplierRef.trim()) setSupplierRef(sup);
+    applyExpectedLinesUpdate([...expectedLines,...generated]);
+    setShowMatrixBuilder(false);
+  }
+
+  async function handleEvidenceFiles(files:File[]) {
+    if(!files.length) return;
+    setEvidenceDuplicateWarning("");
+    setWizardError("");
+    const seenHashes=new Set(purchaseEvidences.map(ev=>ev.sha256));
+    for(const file of files) {
+      const sha256=await sha256FileHex(file);
+      if(seenHashes.has(sha256)) {
+        setEvidenceDuplicateWarning(`Duplicate file skipped: "${file.name}" matches existing evidence (SHA-256 ${sha256.slice(0,12)}…). Review existing files below instead of uploading twice.`);
+        continue;
+      }
+      seenHashes.add(sha256);
+      const evId=`EV-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`;
+      if(file.type.startsWith("image/")) {
+        try {
+          setBusyMessage(`Uploading purchase screenshot ${file.name}…`);
+          const uploadForm=new FormData();
+          uploadForm.set("photo",file);
+          const uploaded=await request("/me/media","POST",uploadForm);
+          const newEv:PurchaseEvidenceItem={
+            id:evId,
+            media_id:uploaded.id,
+            file_name:file.name,
+            mime_type:file.type,
+            size_bytes:file.size,
+            sha256,
+            supplier_alias:supplierRef.trim(),
+            platform_source:"1688 / Taobao",
+            purchase_order_ref:"",
+            uploaded_at:new Date().toISOString(),
+            extraction_status:"manual_only",
+            extraction_note:"Image archived with SHA-256 verification. External vision OCR API is OPEN (not enabled) — paste text or add lines manually to extract candidates.",
+            candidates:[],
+          };
+          setPurchaseEvidences(prev=>[...prev,newEv]);
+          if(!attachmentId) {
+            setAttachmentId(uploaded.id);
+            setAttachmentName(file.name);
+          }
+        } catch(err) {
+          setWizardError(err instanceof Error?err.message:`Upload failed for ${file.name}.`);
+        } finally {
+          setBusyMessage("");
+        }
+      } else if(/\.(csv|tsv|txt)$/i.test(file.name)||file.type.startsWith("text/")) {
+        const rawText=await file.text();
+        const candidates=parseStructuredPurchaseText(rawText,{
+          evidenceId:evId,
+          defaultProductName:itemName.trim()||undefined,
+          defaultSupplier:supplierRef.trim()||undefined,
+          defaultTracking:normalizeTrackingCode(plannedParcels[0]?.tracking_no||baseTrackingNo)||undefined,
+        });
+        const newEv:PurchaseEvidenceItem={
+          id:evId,
+          file_name:file.name,
+          mime_type:file.type||"text/plain",
+          size_bytes:file.size,
+          sha256,
+          supplier_alias:supplierRef.trim(),
+          platform_source:"CSV / Export",
+          purchase_order_ref:"",
+          uploaded_at:new Date().toISOString(),
+          extraction_status:candidates.length?"needs_confirmation":"manual_only",
+          extraction_note:candidates.length
+            ?`Parsed ${candidates.length} candidate row(s). Review missing fields and confirm before adding to your order.`
+            :"No structured SKU rows detected in this file. Paste structured rows below or add lines directly.",
+          candidates,
+        };
+        setPurchaseEvidences(prev=>[...prev,newEv]);
+      } else {
+        const newEv:PurchaseEvidenceItem={
+          id:evId,
+          file_name:file.name,
+          mime_type:file.type||"application/pdf",
+          size_bytes:file.size,
+          sha256,
+          supplier_alias:supplierRef.trim(),
+          platform_source:"PDF / Order Sheet",
+          purchase_order_ref:"",
+          uploaded_at:new Date().toISOString(),
+          extraction_status:"manual_only",
+          extraction_note:"Recorded PDF metadata & SHA-256. Binary PDF upload & automated PDF OCR are OPEN — paste order text below or upload screenshots for visual reference.",
+          candidates:[],
+        };
+        setPurchaseEvidences(prev=>[...prev,newEv]);
+      }
+    }
+    setServerQuote(undefined);
+  }
+
+  async function runPasteExtract() {
+    if(!pasteImportText.trim()) return;
+    setEvidenceDuplicateWarning("");
+    const normalized=pasteImportText.trim();
+    const textBlob=new File([normalized],"pasted-order.txt",{type:"text/plain"});
+    const sha256=await sha256FileHex(textBlob);
+    if(purchaseEvidences.some(ev=>ev.sha256===sha256)) {
+      setEvidenceDuplicateWarning(`Duplicate text batch detected (SHA-256 ${sha256.slice(0,12)}…). Edit or clear the existing candidate queue below.`);
+      return;
+    }
+    const evId=`EV-${Date.now().toString(36)}`;
+    const candidates=parseStructuredPurchaseText(normalized,{
+      evidenceId:evId,
+      defaultProductName:itemName.trim()||undefined,
+      defaultSupplier:pasteSupplier.trim()||supplierRef.trim()||undefined,
+      defaultPoRef:pastePoRef.trim()||undefined,
+      defaultTracking:normalizeTrackingCode(pasteTracking||plannedParcels[0]?.tracking_no||baseTrackingNo)||undefined,
+    });
+    if(!candidates.length) {
+      setWizardError("No rows could be parsed. Use CSV, tab-separated spreadsheet rows, or one SKU/Color/Size/Qty line per row.");
+      return;
+    }
+    const ev:PurchaseEvidenceItem={
+      id:evId,
+      file_name:`Pasted Order (${candidates.length} rows)`,
+      mime_type:"text/plain",
+      size_bytes:normalized.length,
+      sha256,
+      supplier_alias:pasteSupplier.trim()||supplierRef.trim(),
+      platform_source:"Pasted Order Text",
+      purchase_order_ref:pastePoRef.trim(),
+      uploaded_at:new Date().toISOString(),
+      extraction_status:"needs_confirmation",
+      extraction_note:`Parsed ${candidates.length} candidate line(s). Unconfirmed lines are blocked from quoting until reviewed and confirmed.`,
+      candidates,
+    };
+    setPurchaseEvidences(prev=>[...prev,ev]);
+    setPasteImportText("");
+    setShowPasteImport(false);
+    setServerQuote(undefined);
+  }
+
+  function updateCandidateRow(evidenceId:string,candidateId:string,patch:Partial<ExtractedCandidateLine>) {
+    setPurchaseEvidences(prev=>prev.map(ev=>{
+      if(ev.id!==evidenceId) return ev;
+      return {
+        ...ev,
+        candidates:ev.candidates.map(c=>{
+          if(c.id!==candidateId) return c;
+          const next={...c,...patch};
+          next.missing_fields=missingLineFields(next);
+          next.confidence=next.missing_fields.length===0?"structured":"needs_review";
+          return next;
+        }),
+      };
+    }));
+    setServerQuote(undefined);
+  }
+
+  function addManualCandidateRow(evidenceId:string) {
+    setPurchaseEvidences(prev=>prev.map(ev=>{
+      if(ev.id!==evidenceId) return ev;
+      const newCand:ExtractedCandidateLine={
+        id:`EXT-${Date.now().toString(36)}-${ev.candidates.length+1}`,
+        evidence_id:ev.id,
+        sku_code:"",
+        product_name:itemName.trim(),
+        color_declared:"",
+        size_label:"",
+        quantity:1,
+        supplier_alias:ev.supplier_alias||supplierRef.trim(),
+        purchase_order_ref:ev.purchase_order_ref,
+        tracking_no:normalizeTrackingCode(plannedParcels[0]?.tracking_no||baseTrackingNo),
+        source_kind:"evidence_extract",
+        confidence:"needs_review",
+        needs_confirmation:true,
+        missing_fields:["color","size"],
+        selected:true,
+        confirmed:false,
+      };
+      return {
+        ...ev,
+        extraction_status:"needs_confirmation",
+        candidates:[...ev.candidates,newCand],
+      };
+    }));
+    setServerQuote(undefined);
+  }
+
+  function confirmEvidenceCandidates(evidenceId:string) {
+    const ev=purchaseEvidences.find(item=>item.id===evidenceId);
+    if(!ev) return;
+    const chosen=ev.candidates.filter(c=>c.selected);
+    if(!chosen.length) {
+      setWizardError("Select at least one candidate row to confirm, or discard the candidate queue.");
+      return;
+    }
+    const incomplete=chosen.find(c=>missingLineFields(c).length>0);
+    if(incomplete) {
+      setWizardError(`Complete missing fields (${missingLineFields(incomplete).join(", ")}) on checked candidate rows before confirming.`);
+      return;
+    }
+    const confirmedLines:ExpectedProductLine[]=chosen.map((c,idx)=>({
+      id:`EL-${Date.now().toString(36)}-${idx}-${Math.random().toString(36).slice(2,5)}`,
+      sku_code:c.sku_code.trim(),
+      product_name:c.product_name.trim(),
+      color_declared:c.color_declared.trim(),
+      size_label:c.size_label.trim(),
+      quantity:Math.max(1,Math.floor(Number(c.quantity)||1)),
+      supplier_alias:(c.supplier_alias||ev.supplier_alias||supplierRef).trim(),
+      purchase_order_ref:(c.purchase_order_ref||ev.purchase_order_ref||"").trim(),
+      unit_price_note:c.unit_price_note,
+      tracking_no:normalizeTrackingCode(c.tracking_no),
+      carrier_code:c.carrier_code,
+      carton_no:c.carton_no,
+      inspection_note:c.inspection_note,
+      evidence_ids:ev.media_id?[ev.media_id]:[],
+      source_kind:ev.media_id?"evidence_extract":"paste",
+    }));
+    setPurchaseEvidences(prev=>prev.map(item=>item.id===evidenceId?{
+      ...item,
+      extraction_status:"confirmed",
+      extraction_note:`Confirmed ${confirmedLines.length} line(s) (${sumExpectedLineQuantity(confirmedLines)} units) into expected order lines.`,
+      candidates:[],
+    }:item));
+    applyExpectedLinesUpdate([...expectedLines,...confirmedLines]);
+    setWizardError("");
+  }
+
+  function discardEvidenceQueue(evidenceId:string,removeEntireEvidence:boolean) {
+    setPurchaseEvidences(prev=>removeEntireEvidence
+      ?prev.filter(item=>item.id!==evidenceId)
+      :prev.map(item=>item.id===evidenceId?{
+        ...item,
+        extraction_status:"manual_only",
+        extraction_note:"Candidate rows discarded by user.",
+        candidates:[],
+      }:item));
+    setServerQuote(undefined);
+  }
+
+  function autoGroupParcelsFromLines(preserveMulti=false) {
+    const groups=new Map<string,{tracking_no:string;supplier_alias:string;allocations:Array<{expected_line_id:string;quantity:number}>}>();
+    for(const line of expectedLines) {
+      const trk=normalizeTrackingCode(line.tracking_no);
+      const sup=line.supplier_alias.trim();
+      const key=`${trk}|${sup}`;
+      const existing=groups.get(key)??{tracking_no:trk,supplier_alias:sup,allocations:[]};
+      existing.allocations.push({expected_line_id:line.id,quantity:line.quantity});
+      groups.set(key,existing);
+    }
+    const next:PlannedParcelEntry[]=[...groups.values()].map((g,idx)=>({
+      id:`PKG-${idx+1}-${Date.now().toString(36)}`,
+      tracking_no:g.tracking_no,
+      carrier_code:"sf",
+      supplier_alias:g.supplier_alias,
+      carton_count:1,
+      contains_all_items:preserveMulti?false:groups.size===1,
+      allocations:g.allocations,
+      note:`Box ${idx+1}`,
+    }));
+    setPlannedParcels(next);
+    setParcelMode(preserveMulti||next.length>1?"multi":"single");
+    setServerQuote(undefined);
   }
 
   function updateItemRow(index:number,changes:Partial<(typeof itemRows)[number]>) {
@@ -840,25 +1289,32 @@ export function NewOrder({customerId}:{customerId:string}) {
     if(!offer||(!validQuantity&&overrideQty===undefined)) return null;
     const effectiveQty=overrideQty??clampedQty;
     const tolRules=buildToleranceRules();
-    const items=Array.from({length:effectiveQty},(_,idx)=>{
-      const custom=itemRows[idx];
-      const rowSku=custom?.sku?.trim()||`${baseSku||"SKU"}-${String(idx+1).padStart(2,"0")}`;
-      const rowSize=(custom?.size??baseSize).trim();
-      const rowColor=(custom?.color??baseColor).trim();
-      const rowSupplier=(custom?.supplier??supplierRef).trim();
-      const rowTracking=(custom?.tracking_no??baseTrackingNo).trim();
-      return {
-        position:idx+1,
-        sample_code:rowSku.slice(0,40),
-        ...(itemName.trim()?{name:itemName.trim().slice(0,120)}:{}),
-        ...(rowSize||custom?.size!==undefined?{size_label:rowSize}:{}),
-        ...(rowColor||custom?.color!==undefined?{color_declared:rowColor}:{}),
-        ...(rowSupplier||custom?.supplier!==undefined?{supplier_alias:rowSupplier}:{}),
-        ...(rowTracking||custom?.tracking_no!==undefined?{tracking_no:rowTracking}:{}),
-        ...(activeGarmentType?{garment_type:activeGarmentType}:{}),
-        ...(attachmentId?{attachment_ids:[attachmentId]}:{}),
-      };
+    const resolvedTracking=parcelMode==="single"
+      ?normalizeTrackingCode(plannedParcels[0]?.tracking_no||baseTrackingNo)
+      :parcelMode==="multi"
+        ?normalizeTrackingCode(plannedParcels.find(p=>p.tracking_no.trim())?.tracking_no||baseTrackingNo)
+        :"";
+    const items=expandExpectedLinesToDraftItems({
+      expectedLines,
+      plannedParcels,
+      parcelMode,
+      itemRows,
+      effectiveQty,
+      defaults:{
+        itemName:singleLineName,
+        supplierRef:effectiveSupplier,
+        baseSku,
+        baseColor,
+        baseSize,
+        baseTrackingNo:resolvedTracking,
+        garmentType:activeGarmentType,
+        attachmentIds:allAttachmentIds,
+      },
     });
+    const compactEvidences=purchaseEvidences.map(ev=>({
+      ...ev,
+      candidates:ev.extraction_status==="needs_confirmation"?ev.candidates:[],
+    }));
     return {
       category_id:offer.category_id,
       offer_id:offer.offer_id,
@@ -871,21 +1327,25 @@ export function NewOrder({customerId}:{customerId:string}) {
       },
       attributes:{
         sample_code_prefix:baseSku||"ITEM",
-        ...(baseTrackingNo.trim()?{tracking_no:baseTrackingNo.trim()}:{}),
-        ...(itemName.trim()?{name:itemName.trim().slice(0,120)}:{}),
-        ...(supplierRef.trim()?{supplier_ref:supplierRef.trim(),supplier_alias:supplierRef.trim()}:{}),
+        ...(resolvedTracking?{tracking_no:resolvedTracking}:{}),
+        ...(singleLineName?{name:singleLineName.slice(0,120)}:{}),
+        ...(effectiveSupplier?{supplier_ref:effectiveSupplier,supplier_alias:effectiveSupplier}:{}),
         ...(activeGarmentType?{garment_type:activeGarmentType}:{}),
         ...(productLink.trim()?{product_url:productLink.trim()}:{}),
         ...(baseSize.trim()?{size_label:baseSize.trim()}:{}),
         ...(baseColor.trim()?{color_declared:baseColor.trim()}:{}),
         ...(tolRules.length>0?{tolerances:tolRules}:{}),
-        ...(attachmentId?{attachment_ids:[attachmentId]}:{}),
+        ...(allAttachmentIds.length?{attachment_ids:allAttachmentIds}:{}),
+        ...(expectedLines.length?{expected_lines:expectedLines}:{}),
+        ...(compactEvidences.length?{purchase_evidences:compactEvidences}:{}),
+        ...(plannedParcels.length?{planned_parcels:plannedParcels}:{}),
+        parcel_mode:parcelMode,
       },
       items,
     };
   }
 
-  const currentLine=addingServiceLine&&!itemName.trim()?null:buildCurrentLine();
+  const currentLine=addingServiceLine&&!effectiveDisplayName?null:buildCurrentLine();
   const allLines=extraLines.length>0?(currentLine?[...extraLines,currentLine]:extraLines):(currentLine?[currentLine]:[]);
   const totalItems=allLines.reduce((sum,l)=>sum+(Number(l.quantity)||0),0);
 
@@ -893,7 +1353,8 @@ export function NewOrder({customerId}:{customerId:string}) {
   const fingerprint=JSON.stringify(draftPayload);
   const editor:DraftEditor={step,categoryKey,serviceKind,selectedOfferId,templateVariant,qty,manualQuoteMode,manualBatchQty,manualQuoteReason,
     itemName,supplierRef,baseSku,baseColor,baseSize,baseTrackingNo,productLink,toleranceMode,pointTolerances,referenceId,
-    sizeMismatchConfirmed,itemRows,notes,attachmentId,attachmentName,extraLines,addingServiceLine};
+    sizeMismatchConfirmed,itemRows,expectedLines,purchaseEvidences,plannedParcels,parcelMode,syncQuantityFromLines,
+    notes,attachmentId,attachmentName,extraLines,addingServiceLine};
   const editorContent=JSON.stringify({...editor,step:0});
   useLayoutEffect(()=>{
     if(!recoveryReady||draftLoadFailed||!recoveryKey) return;
@@ -943,6 +1404,12 @@ export function NewOrder({customerId}:{customerId:string}) {
     if(!lines.length) throw new Error("Choose an available service and quantity.");
     if(lines.length>20||lines.reduce((sum,line)=>sum+line.quantity,0)>maximumDraftItems) {
       throw new Error("Orders can include up to 20 service lines and 300 items. Contact Support for a larger request.");
+    }
+    if(unconfirmedEvidences.length>0) {
+      throw new Error("Confirm or discard pending extracted candidate rows before saving or requesting a quote.");
+    }
+    if(expectedLines.length>0&&expectedTotalQty!==clampedQty) {
+      throw new Error(`Expected product lines total ${expectedTotalQty} items, which does not match the commissioned quantity (${clampedQty}). Sync commissioned quantity or update your lines.`);
     }
     if(notes.trim().length>500) throw new Error("Keep special instructions within 500 characters.");
     if(productLink.trim()&&!/^https?:\/\//i.test(productLink.trim())) throw new Error("Enter a product link beginning with https:// or http://.");
@@ -1050,13 +1517,23 @@ export function NewOrder({customerId}:{customerId:string}) {
 
   function addServiceLine() {
     return runWizard("Saving inspection scope…",async()=>{
-      if(!currentLine||!itemName.trim()) throw new Error("Review the service, quantity and product name before adding another service.");
+      if(!currentLine||!effectiveDisplayName) throw new Error("Review the service, quantity and product lines before adding another service.");
+      if(unconfirmedEvidences.length>0) throw new Error("Confirm or discard pending extracted candidate rows first.");
       if(allLines.length>=20||totalItems>=maximumDraftItems) throw new Error("This order has reached its service line or item limit.");
       const saved=await persistDraft();
       setExtraLines(allLines);
       setAddingServiceLine(true);
       setItemName("");
       setItemRows([]);
+      setExpectedLines([]);
+      setExpectedUndoStack([]);
+      setPurchaseEvidences([]);
+      setPlannedParcels([]);
+      setParcelMode("single");
+      setShowMatrixBuilder(false);
+      setShowPasteImport(false);
+      setShowAdvancedUnits(false);
+      setEvidenceDuplicateWarning("");
       setItemPage(0);
       setSupplierRef("");
       setBaseSku("ITEM");
@@ -1097,7 +1574,8 @@ export function NewOrder({customerId}:{customerId:string}) {
       setServerQuote(undefined);
       setConsents({});
       setPolicyAccepted(false);
-      if(!currentLine||!itemName.trim()) throw new Error("Review the service, quantity and product name before requesting a quote.");
+      if(unconfirmedEvidences.length>0) throw new Error("Confirm or discard pending extracted candidate rows before requesting a quote.");
+      if(!currentLine||!effectiveDisplayName) throw new Error("Review the service, quantity and product lines before requesting a quote.");
       const order=await persistDraft();
       if(!quoteWrite.current||quoteWrite.current.revision!==order.revision) quoteWrite.current={revision:order.revision,key:crypto.randomUUID()};
       const quote=await request("/orders/"+order.id+"/quotes","POST",{revision:order.revision},
@@ -1119,14 +1597,14 @@ export function NewOrder({customerId}:{customerId:string}) {
   function submitManualBatchQuoteRequest() {
     return runWizard("Submitting quote request…",async()=>{
       if(!Number.isInteger(manualBatchQty)||manualBatchQty<=maxOnlineQty||manualBatchQty>maximumDraftItems||
-        !itemName.trim()||serviceKind!=="inspection"||!configuredOffer) {
+        !effectiveDisplayName||serviceKind!=="inspection"||!configuredOffer) {
         throw new Error("Enter the product name and a quantity above the online limit, up to 300 items.");
       }
       const line=buildCurrentLine(manualBatchQty);
       if(!line) throw new Error("Select an available inspection service.");
       const lines=[...extraLines,line].map(({title,...payloadLine})=>payloadLine);
       const order=await persistDraft({lines,customer_notes:notes.trim()});
-      const reason=`${manualBatchQty} items · ${itemName.trim()}${manualQuoteReason.trim()?` · ${manualQuoteReason.trim()}`:""}`;
+      const reason=`${manualBatchQty} items · ${effectiveDisplayName}${manualQuoteReason.trim()?` · ${manualQuoteReason.trim()}`:""}`;
       const result=await request("/orders/"+order.id+"/manual-quote-request","POST",{revision:order.revision,reason});
       setManualQuoteSubmitted({orderNo:order.public_no,requestState:result.state,qty:manualBatchQty});
       syncDraftUrl(order.public_no,1);
@@ -1137,7 +1615,7 @@ export function NewOrder({customerId}:{customerId:string}) {
     if(inFlight.current||!recoveryReady||draftLoadFailed||targetStep<0||targetStep>5||targetStep>step+1) return;
     setWizardError("");
     if(targetStep<step) {
-      if(step>=2&&step<=3&&itemName.trim()&&currentLine&&fingerprint!==savedFingerprint.current) {
+      if(step>=2&&step<=3&&effectiveDisplayName&&currentLine&&fingerprint!==savedFingerprint.current&&unconfirmedEvidences.length===0&&(!expectedLines.length||expectedTotalQty===clampedQty)) {
         await runWizard("Saving draft…",async()=>{
           const saved=await persistDraft();
           syncDraftUrl(saved.public_no,targetStep);
@@ -1166,12 +1644,24 @@ export function NewOrder({customerId}:{customerId:string}) {
       setWizardError("Select an active Golden Sample before continuing.");
       return;
     }
-    if(targetStep>=3&&!itemName.trim()) {
-      setWizardError("Enter a product name before continuing.");
+    if(targetStep>=3&&unconfirmedEvidences.length>0) {
+      setWizardError("Confirm or discard pending extracted candidate rows in 3A before continuing.");
+      return;
+    }
+    if(targetStep>=3&&expectedLines.some(l=>missingLineFields(l).length>0)) {
+      setWizardError("Complete Product Name, Color, Size, and valid Quantity (> 0) on every expected product line in 3B before continuing.");
+      return;
+    }
+    if(targetStep>=3&&expectedLines.length>0&&expectedTotalQty!==clampedQty) {
+      setWizardError(`Expected product lines total ${expectedTotalQty} units, which differs from your commissioned quantity (${clampedQty}). Sync commissioned quantity or update lines before continuing.`);
+      return;
+    }
+    if(targetStep>=3&&!effectiveDisplayName) {
+      setWizardError("Enter a product name or add at least one expected product line before continuing.");
       return;
     }
     if(targetStep===3||(targetStep===2&&draftOrder)) {
-      if(targetStep===2&&addingServiceLine&&!itemName.trim()) {
+      if(targetStep===2&&addingServiceLine&&!effectiveDisplayName) {
         setStep(targetStep);
         return;
       }
@@ -1236,7 +1726,7 @@ export function NewOrder({customerId}:{customerId:string}) {
 
   const latestAutoSave=useRef<()=>void>(undefined);
   latestAutoSave.current=()=>{
-    if(inFlight.current||busyMessage||!recoveryReady||draftLoadFailed||conflict||!navigator.onLine||manualQuoteMode||!currentLine||!itemName.trim()||
+    if(inFlight.current||busyMessage||!recoveryReady||draftLoadFailed||conflict||!navigator.onLine||manualQuoteMode||!currentLine||!effectiveDisplayName||
       fingerprint===savedFingerprint.current||hasValidQuote) return;
     try {checkDraftInputs(allLines);} catch {return;}
     void saveDraftOnly();
@@ -1275,6 +1765,32 @@ export function NewOrder({customerId}:{customerId:string}) {
     const defSku=`${baseSku||"SKU"}-${String(idx+1).padStart(2,"0")}`;
     return (r.sku&&r.sku!==defSku)||(r.size&&r.size!==baseSize)||(r.color&&r.color!==baseColor)||(r.supplier&&r.supplier!==supplierRef)||Boolean(r.tracking_no);
   }).length;
+  const declaredSuppliers=[...new Set([
+    ...(effectiveSupplier?[effectiveSupplier]:[]),
+    ...expectedLines.map(l=>l.supplier_alias.trim()).filter(Boolean),
+    ...plannedParcels.map(p=>p.supplier_alias.trim()).filter(Boolean),
+    ...extraLines.flatMap((l:Row)=>Array.isArray(l.attributes?.expected_lines)?l.attributes.expected_lines.map((el:Row)=>String(el.supplier_alias??"").trim()).filter(Boolean):[]),
+  ])];
+  const declaredWaybills=[...new Set([
+    ...(parcelMode==="later"?[]:plannedParcels.map(p=>normalizeTrackingCode(p.tracking_no)).filter(Boolean)),
+    ...(parcelMode==="later"?[]:expectedLines.map(l=>normalizeTrackingCode(l.tracking_no)).filter(Boolean)),
+    ...(parcelMode==="single"&&baseTrackingNo.trim()?[normalizeTrackingCode(baseTrackingNo)]:[]),
+    ...extraLines.flatMap((l:Row)=>Array.isArray(l.attributes?.planned_parcels)?l.attributes.planned_parcels.map((p:Row)=>normalizeTrackingCode(p.tracking_no)).filter(Boolean):[]),
+  ])];
+  const totalExpectedLineCount=extraLines.reduce((sum,l)=>sum+(Array.isArray(l.attributes?.expected_lines)?l.attributes.expected_lines.length:(l.quantity>0?1:0)),0)+(expectedLines.length>0?expectedLines.length:currentLine?1:0);
+  const totalEvidenceCount=extraLines.reduce((sum,l)=>sum+(Array.isArray(l.attributes?.purchase_evidences)?l.attributes.purchase_evidences.length:0),0)+purchaseEvidences.length;
+  const allocatedUnitMap=new Map<string,number>();
+  if(parcelMode==="multi") {
+    for(const parcel of plannedParcels) {
+      if(parcel.contains_all_items) {
+        for(const line of expectedLines) allocatedUnitMap.set(line.id,line.quantity);
+      } else {
+        for(const alloc of parcel.allocations) {
+          allocatedUnitMap.set(alloc.expected_line_id,(allocatedUnitMap.get(alloc.expected_line_id)??0)+alloc.quantity);
+        }
+      }
+    }
+  }
 
   return <>
     <div className="page-head">
@@ -1338,7 +1854,7 @@ export function NewOrder({customerId}:{customerId:string}) {
             {wizardCategories.map(cat=>{
               const catId=resolveCategoryId(cat.key);
               const isAvailable=Boolean(catId);
-              const isSelected=categoryKey===cat.key;
+              const isSelected=Boolean(catId&&activeCategoryId===catId)||categoryKey===cat.key;
               return <button
                 key={cat.key}
                 type="button"
@@ -1358,7 +1874,7 @@ export function NewOrder({customerId}:{customerId:string}) {
                   setSavedNotice("");
                 }}
               >
-                <span className="icon" aria-hidden="true">{cat.icon}</span>
+                <span className="icon" aria-hidden="true"><PlatformIcon name={cat.icon}/></span>
                 <strong>{cat.name}</strong>
                 <p>{isAvailable?"Available now":cat.fallbackState==="PLANNED"?"Planned · Not open":"Restricted"}</p>
               </button>;
@@ -1399,7 +1915,7 @@ export function NewOrder({customerId}:{customerId:string}) {
                 }}
               >
                 <div className="row between" style={{width:"100%"}}>
-                  <span className="icon" aria-hidden="true">{card.icon}</span>
+                  <span className="icon" aria-hidden="true"><PlatformIcon name={card.icon}/></span>
                   <Tag tone={isSelected?"blue":"gray"}>{priceText}</Tag>
                 </div>
                 <strong>{card.title}</strong>
@@ -1597,7 +2113,7 @@ export function NewOrder({customerId}:{customerId:string}) {
                 <div className="label">SELECTED TEMPLATE &amp; TURNAROUND SLA</div>
                 <strong>{serviceLabel} · {templateLabel}</strong>
                 {manualQuoteMode?<p className="small muted">The team will confirm turnaround with your quote.</p>:activeOffer&&
-                  <p className="small muted">Catalog turnaround for this offer is {activeOffer.rules.business_days} business days after all items are received and identified.</p>}
+                  <p className="small muted">Catalog SLA: {activeOffer.rules.business_days} business days starting only after all commissioned items physically arrive, are scanned into warehouse intake, and pass ownership identification.</p>}
               </div>
               {activeOffer&&<Tag tone="green">{usd(activeOffer.rules.unit_cents??activeOffer.rules.package_cents)} {activeOffer.rules.unit_cents!=null?"/ item":"/ set"}</Tag>}
             </div>
@@ -1608,23 +2124,217 @@ export function NewOrder({customerId}:{customerId:string}) {
         </>}
 
         {step===2&&<Panel
-          title="Step 3 · Sample Details — Product & Item-Level Mapping"
-          subtitle="Define product-level defaults once, then override individual item sizes, colors, suppliers, or domestic tracking numbers only where they differ."
-          badge={<Tag tone="blue">{clampedQty} {clampedQty===1?"Physical Sample":"Physical Samples"}</Tag>}
+          title="Step 3 · Purchase Evidence, Expected Product Lines & Inbound Parcels"
+          subtitle="Upload purchase screenshots or paste SKU rows for human confirmation, manage multi-SKU quantities cleanly, and map domestic parcels without editing 50 individual rows."
+          badge={<Tag tone={expectedLines.length&&expectedTotalQty!==clampedQty?"red":"blue"}>
+            {expectedLines.length?`${expectedLines.length} lines · ${expectedTotalQty} units`:`${clampedQty} ${clampedQty===1?"Unit":"Units"}`}
+          </Tag>}
         >
-          <div className="row between flexwrap" style={{marginBottom:10}}>
-            <div className="label">3A · PRODUCT-LEVEL DEFAULTS (AUTO-APPLIED TO ALL {clampedQty} ITEMS)</div>
+          {/* 3A · PURCHASE ORDER EVIDENCE & CANDIDATE EXTRACTION QUEUE */}
+          <div className="wizard-section-head">
+            <div>
+              <div className="label">3A · PURCHASE ORDER EVIDENCE &amp; STRUCTURED EXTRACTION</div>
+              <p className="small muted" style={{margin:"4px 0 0"}}>
+                Attach 1688/Taobao order screenshots, packing lists, CSV/TSV sheets, or PDF order records. Unconfirmed candidate rows never become formal items or billing basis until you confirm them.
+              </p>
+            </div>
+            <div className="wizard-batch-actions">
+              <label className="button sm primary" style={{cursor:"pointer"}}>
+                Upload Screenshots / CSV / PDF
+                <input
+                  type="file"
+                  multiple
+                  accept="image/*,.pdf,.csv,.tsv,.txt"
+                  style={{display:"none"}}
+                  onChange={e=>{
+                    const picked=Array.from(e.target.files??[]);
+                    e.currentTarget.value="";
+                    void handleEvidenceFiles(picked);
+                  }}
+                />
+              </label>
+              <button
+                type="button"
+                className={`button sm ${showPasteImport?"primary":""}`}
+                onClick={()=>setShowPasteImport(open=>!open)}
+              >{showPasteImport?"Close Paste Box":"Paste Order / CSV / 1688 Text"}</button>
+            </div>
           </div>
 
-          <div className="fields">
+          <div className="line-note" style={{marginTop:8}}>
+            <strong>Vision / PDF OCR Status (OPEN):</strong> Automated vision/PDF OCR API is not yet enabled on this server (<strong>OPEN</strong>). You can still upload screenshots (SHA-256 deduplicated &amp; stored on server) and either paste CSV/TSV/1688 order text below for deterministic parsing or transcribe candidate lines manually next to each screenshot for warehouse verification.
+          </div>
+
+          {evidenceDuplicateWarning&&<div className="notice warning" role="alert" style={{marginTop:10}}>
+            <strong>Duplicate evidence blocked:</strong> {evidenceDuplicateWarning}
+          </div>}
+
+          {showPasteImport&&<div className="card flat" style={{marginTop:10}}>
+            <div className="row between flexwrap" style={{marginBottom:8}}>
+              <strong>Paste Order Sheet, CSV/TSV, or 1688/Taobao Rows</strong>
+              <span className="small muted">Supports columns: SKU, Product Name, Color, Size, Qty, Supplier, Tracking, PO Ref</span>
+            </div>
+            <div className="fields" style={{marginBottom:8}}>
+              <div className="field">
+                <label>Default supplier for batch
+                  <input value={pasteSupplier} onChange={e=>setPasteSupplier(e.target.value)} placeholder={supplierRef||"e.g. Hangzhou Knitwear"}/>
+                </label>
+              </div>
+              <div className="field">
+                <label>Purchase order ref (optional)
+                  <input value={pastePoRef} onChange={e=>setPastePoRef(e.target.value)} placeholder="e.g. PO-1688-202611"/>
+                </label>
+              </div>
+              <div className="field">
+                <label>Default domestic waybill (optional)
+                  <input value={pasteTracking} onChange={e=>setPasteTracking(e.target.value)} placeholder="e.g. SF1234567890"/>
+                </label>
+              </div>
+            </div>
+            <textarea
+              className="input"
+              rows={5}
+              aria-label="Paste structured purchase rows"
+              value={pasteImportText}
+              onChange={e=>setPasteImportText(e.target.value)}
+              placeholder={"SKU,Product Name,Color,Size,Qty,Supplier,Tracking\nHD-BLK-S,Heavyweight Cotton Hoodie,Black,S,8,Hangzhou Knitwear,SF1000500001\nHD-BLK-M,Heavyweight Cotton Hoodie,Black,M,8,Hangzhou Knitwear,SF1000500001"}
+            />
+            <div className="actions" style={{marginTop:8,marginBottom:0}}>
+              <button type="button" className="button sm primary" onClick={()=>void runPasteExtract()}>Parse into Candidate Confirmation Queue</button>
+              <button type="button" className="button sm" onClick={()=>setShowPasteImport(false)}>Cancel</button>
+            </div>
+          </div>}
+
+          {purchaseEvidences.length>0&&<div className="evidence-list" style={{marginTop:10}}>
+            {purchaseEvidences.map(ev=><div key={ev.id} className={`card flat candidate-card ${ev.extraction_status==="needs_confirmation"&&ev.candidates.length>0?"needs-confirm":""}`}>
+              <div className="row between flexwrap" style={{gap:10}}>
+                <div className="row" style={{gap:10,alignItems:"flex-start"}}>
+                  {ev.media_id&&<img className="thumb" src={`/api/v1/media/${ev.media_id}`} alt={ev.file_name} style={{width:56,height:56,objectFit:"cover",borderRadius:8}}/>}
+                  <div>
+                    <strong>{ev.file_name}</strong>
+                    <div className="small muted">
+                      SHA-256 <span className="mono">{ev.sha256.slice(0,12)}</span> · {(ev.size_bytes/1024).toFixed(1)} KB
+                      {ev.extraction_note&&<> · {ev.extraction_note}</>}
+                    </div>
+                  </div>
+                </div>
+                <div className="row" style={{gap:6}}>
+                  <Tag tone={ev.extraction_status==="confirmed"?"green":ev.extraction_status==="needs_confirmation"&&ev.candidates.length>0?"yellow":"gray"}>
+                    {ev.extraction_status==="confirmed"?"Confirmed":ev.extraction_status==="needs_confirmation"&&ev.candidates.length>0?"Needs confirmation":"Reference only"}
+                  </Tag>
+                  <button type="button" className="button sm" onClick={()=>addManualCandidateRow(ev.id)}>+ Transcribe Row</button>
+                  <button type="button" className="button sm" onClick={()=>discardEvidenceQueue(ev.id,true)}>Remove File</button>
+                </div>
+              </div>
+
+              <div className="fields" style={{marginTop:10}}>
+                <div className="field">
+                  <label>Source supplier
+                    <input
+                      value={ev.supplier_alias}
+                      onChange={e=>setPurchaseEvidences(prev=>prev.map(x=>x.id===ev.id?{...x,supplier_alias:e.target.value}:x))}
+                      placeholder="Supplier / shop name"
+                    />
+                  </label>
+                </div>
+                <div className="field">
+                  <label>Platform / channel
+                    <input
+                      value={ev.platform_source}
+                      onChange={e=>setPurchaseEvidences(prev=>prev.map(x=>x.id===ev.id?{...x,platform_source:e.target.value}:x))}
+                      placeholder="1688 / Taobao / Factory"
+                    />
+                  </label>
+                </div>
+                <div className="field">
+                  <label>Purchase order number
+                    <input
+                      value={ev.purchase_order_ref}
+                      onChange={e=>setPurchaseEvidences(prev=>prev.map(x=>x.id===ev.id?{...x,purchase_order_ref:e.target.value}:x))}
+                      placeholder="PO / seller order no."
+                    />
+                  </label>
+                </div>
+              </div>
+
+              {ev.candidates.length>0&&<div className="candidate-queue" style={{marginTop:10}}>
+                <div className="row between flexwrap" style={{marginBottom:6}}>
+                  <strong className="small">Pending Confirmation Queue ({ev.candidates.length} candidate rows — excluded from order &amp; quote until confirmed)</strong>
+                  <div className="row" style={{gap:6}}>
+                    <button type="button" className="button sm primary" onClick={()=>confirmEvidenceCandidates(ev.id)}>Confirm Selected &amp; Add to Order</button>
+                    <button type="button" className="button sm" onClick={()=>discardEvidenceQueue(ev.id,false)}>Discard Queue</button>
+                  </div>
+                </div>
+                <div className="table-wrap wizard-items">
+                  <table className="tbl">
+                    <thead>
+                      <tr>
+                        <th style={{width:36}}>Use</th>
+                        <th>SKU / Style</th>
+                        <th>Product Name *</th>
+                        <th>Color *</th>
+                        <th>Size *</th>
+                        <th>Qty *</th>
+                        <th>Supplier</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ev.candidates.map(cand=>{
+                        const missing=missingLineFields(cand);
+                        return <tr key={cand.id}>
+                          <td data-label="Use">
+                            <input
+                              type="checkbox"
+                              aria-label={`Select candidate ${cand.sku_code||cand.product_name||cand.id}`}
+                              checked={cand.selected}
+                              onChange={e=>updateCandidateRow(ev.id,cand.id,{selected:e.target.checked})}
+                            />
+                          </td>
+                          <td data-label="SKU"><input className="input" style={{minWidth:96}} value={cand.sku_code} onChange={e=>updateCandidateRow(ev.id,cand.id,{sku_code:e.target.value})} placeholder="SKU"/></td>
+                          <td data-label="Product Name"><input className={`input ${missing.includes("product_name")?"input-warn":""}`} style={{minWidth:130}} value={cand.product_name} onChange={e=>updateCandidateRow(ev.id,cand.id,{product_name:e.target.value})} placeholder="Product name"/></td>
+                          <td data-label="Color"><input className={`input ${missing.includes("color")?"input-warn":""}`} style={{minWidth:84}} value={cand.color_declared} onChange={e=>updateCandidateRow(ev.id,cand.id,{color_declared:e.target.value})} placeholder="Color"/></td>
+                          <td data-label="Size"><input className={`input ${missing.includes("size")?"input-warn":""}`} style={{minWidth:64}} value={cand.size_label} onChange={e=>updateCandidateRow(ev.id,cand.id,{size_label:e.target.value})} placeholder="Size"/></td>
+                          <td data-label="Qty"><input className={`input ${missing.includes("quantity")?"input-warn":""}`} type="number" min={1} max={300} style={{width:72}} value={cand.quantity||""} onChange={e=>updateCandidateRow(ev.id,cand.id,{quantity:Number(e.target.value)||0})}/></td>
+                          <td data-label="Supplier"><input className="input" style={{minWidth:110}} value={cand.supplier_alias} onChange={e=>updateCandidateRow(ev.id,cand.id,{supplier_alias:e.target.value})} placeholder="Supplier"/></td>
+                          <td data-label="Status">
+                            {missing.length>0?<Tag tone="yellow">Missing: {missing.join(", ")}</Tag>:<Tag tone="blue">Ready to confirm</Tag>}
+                          </td>
+                        </tr>;
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>}
+            </div>)}
+          </div>}
+
+          <div className="sep"/>
+
+          {/* 3B · EXPECTED PRODUCT LINES (SKU × COLOR × SIZE × QTY BATCH MANAGEMENT) */}
+          <div className="wizard-section-head">
+            <div>
+              <div className="label">3B · EXPECTED PRODUCT LINES ({expectedLines.length>0?`${expectedLines.length} SKUs / Variants · ${expectedTotalQty} units`:"Single Style or Multi-SKU Batch"})</div>
+              <p className="small muted" style={{margin:"4px 0 0"}}>
+                Group items by SKU, color, size, and supplier instead of editing 50 identical physical rows. Physical Sample IDs are expanded automatically for warehouse intake.
+              </p>
+            </div>
+            <div className="wizard-batch-actions">
+              <button type="button" className="button sm primary" onClick={addExpectedLine}>+ Add Product Line</button>
+              <button type="button" className={`button sm ${showMatrixBuilder?"primary":""}`} onClick={()=>setShowMatrixBuilder(open=>!open)}>Quick Matrix (Color × Size)</button>
+              {expectedLines.length>1&&<button type="button" className="button sm" onClick={mergeDuplicateExpectedLines}>Merge Duplicates</button>}
+              {expectedUndoStack.length>0&&<button type="button" className="button sm" onClick={undoLastExpectedBatch}>Undo Batch</button>}
+            </div>
+          </div>
+
+          <div className="fields" style={{marginTop:10}}>
             <div className="field">
-              <label>Product name / style *
+              <label>Order primary product / style name *
                 <input
                   value={itemName}
                   maxLength={120}
                   onChange={e=>{setItemName(e.target.value);setServerQuote(undefined);}}
                   placeholder="e.g. Heavyweight Cotton Hoodie"
-                  required
                 />
               </label>
             </div>
@@ -1648,204 +2358,531 @@ export function NewOrder({customerId}:{customerId:string}) {
               </label>
             </div>
             <div className="field">
-              <label>Default color / variant
-                <input
-                  value={baseColor}
-                  onChange={e=>{setBaseColor(e.target.value);setServerQuote(undefined);}}
-                  placeholder="e.g. Charcoal Gray"
-                />
-              </label>
-            </div>
-            <div className="field">
-              <label>{isApparelCategory?"Default size":"Default specification"}
-                <input
-                  value={baseSize}
-                  onChange={e=>{setBaseSize(e.target.value);setServerQuote(undefined);}}
-                  placeholder={isApparelCategory?"M":"Standard"}
-                />
-              </label>
-            </div>
-            <div className="field">
-              <label>Default domestic waybill (optional)
-                <input
-                  value={baseTrackingNo}
-                  onChange={e=>{setBaseTrackingNo(e.target.value);setServerQuote(undefined);}}
-                  placeholder="e.g. SF1234567890 (can also add later)"
-                />
-              </label>
-            </div>
-          </div>
-
-          <div className="fields" style={{marginTop:14}}>
-            <div className="field">
-              <label>Product listing or spec URL (optional)
+              <label>Product listing or tech pack URL (optional)
                 <input
                   type="url"
                   value={productLink}
                   onChange={e=>setProductLink(e.target.value)}
-                  placeholder="https://item.taobao.com/... or tech pack link"
+                  placeholder="https://detail.1688.com/... or tech pack URL"
+                />
+              </label>
+            </div>
+          </div>
+
+          {showMatrixBuilder&&<div className="card flat" style={{marginTop:12}}>
+            <div className="row between flexwrap" style={{marginBottom:8}}>
+              <strong>Quick Matrix Generator (Colors × Sizes)</strong>
+              <span className="small muted">Creates expected product lines in one click without manual repetition</span>
+            </div>
+            <div className="fields">
+              <div className="field">
+                <label>Product name
+                  <input value={matrixProductName} onChange={e=>setMatrixProductName(e.target.value)} placeholder={itemName||"Heavyweight Hoodie"}/>
+                </label>
+              </div>
+              <div className="field">
+                <label>SKU prefix
+                  <input value={matrixSkuPrefix} onChange={e=>setMatrixSkuPrefix(e.target.value)} placeholder={baseSku!=="ITEM"?baseSku:"HD-2026"}/>
+                </label>
+              </div>
+              <div className="field">
+                <label>Colors (comma-separated)
+                  <input value={matrixColors} onChange={e=>setMatrixColors(e.target.value)} placeholder="Black, Heather Gray"/>
+                </label>
+              </div>
+              <div className="field">
+                <label>Sizes (comma-separated)
+                  <input value={matrixSizes} onChange={e=>setMatrixSizes(e.target.value)} placeholder="S, M, L, XL"/>
+                </label>
+              </div>
+              <div className="field">
+                <label>Qty per combination
+                  <input type="number" min={1} max={200} value={matrixDefaultQty} onChange={e=>setMatrixDefaultQty(Number(e.target.value)||1)}/>
+                </label>
+              </div>
+              <div className="field">
+                <label>Supplier (optional)
+                  <input value={matrixSupplier} onChange={e=>setMatrixSupplier(e.target.value)} placeholder={supplierRef||"Supplier name"}/>
+                </label>
+              </div>
+            </div>
+            <div className="actions" style={{marginTop:10,marginBottom:0}}>
+              <button type="button" className="button sm primary" onClick={applyMatrixLines}>Generate Matrix Lines</button>
+              <button type="button" className="button sm" onClick={()=>setShowMatrixBuilder(false)}>Close</button>
+            </div>
+          </div>}
+
+          {expectedLines.length>0&&(
+            <>
+              <div className="wizard-batch-toolbar" style={{marginTop:12}}>
+                <div className="row flexwrap" style={{gap:8}}>
+                  <input
+                    className="input"
+                    style={{maxWidth:180}}
+                    placeholder="Bulk supplier name"
+                    value={bulkSupplierInput}
+                    onChange={e=>setBulkSupplierInput(e.target.value)}
+                  />
+                  <input
+                    className="input"
+                    style={{maxWidth:180}}
+                    placeholder="Bulk waybill (optional)"
+                    value={bulkTrackingInput}
+                    onChange={e=>setBulkTrackingInput(e.target.value)}
+                  />
+                  <button type="button" className="button sm" onClick={()=>bulkFillExpectedLines("empty")}>Fill Empty Fields</button>
+                  <button type="button" className="button sm" onClick={()=>bulkFillExpectedLines("all")}>Overwrite All Lines</button>
+                </div>
+                <label className="checkrow" style={{margin:0}}>
+                  <input
+                    type="checkbox"
+                    checked={syncQuantityFromLines}
+                    onChange={e=>setSyncQuantityFromLines(e.target.checked)}
+                  />
+                  <span className="small">Auto-sync Step 2 commissioned quantity ({clampedQty}) to line total ({expectedTotalQty})</span>
+                </label>
+              </div>
+
+              <div className="table-wrap wizard-items" style={{marginTop:10}}>
+                <table className="tbl">
+                  <thead>
+                    <tr>
+                      <th className="col-idx" style={{width:44}}>#</th>
+                      <th>SKU / Style</th>
+                      <th>Product Name *</th>
+                      <th>Color *</th>
+                      <th>{isApparelCategory?"Size *":"Spec *"}</th>
+                      <th>Qty *</th>
+                      <th>Supplier</th>
+                      <th>Waybill</th>
+                      <th>Note</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {expectedLines.map((line,idx)=>{
+                      const missing=missingLineFields(line);
+                      return <tr key={line.id}>
+                        <td className="mono col-idx">{String(idx+1).padStart(2,"0")}</td>
+                        <td data-label="SKU"><input className="input" style={{minWidth:96}} aria-label={`Line ${idx+1} SKU`} value={line.sku_code} onChange={e=>updateExpectedLine(line.id,{sku_code:e.target.value})} placeholder="HD-BLK-M"/></td>
+                        <td data-label="Product Name"><input className={`input ${missing.includes("product_name")?"input-warn":""}`} style={{minWidth:132}} aria-label={`Line ${idx+1} product name`} value={line.product_name} onChange={e=>updateExpectedLine(line.id,{product_name:e.target.value})} placeholder="Product name"/></td>
+                        <td data-label="Color"><input className={`input ${missing.includes("color")?"input-warn":""}`} style={{minWidth:86}} aria-label={`Line ${idx+1} color`} value={line.color_declared} onChange={e=>updateExpectedLine(line.id,{color_declared:e.target.value})} placeholder="Color"/></td>
+                        <td data-label="Size"><input className={`input ${missing.includes("size")?"input-warn":""}`} style={{minWidth:68}} aria-label={`Line ${idx+1} size`} value={line.size_label} onChange={e=>updateExpectedLine(line.id,{size_label:e.target.value})} placeholder="M"/></td>
+                        <td data-label="Qty"><input className={`input ${missing.includes("quantity")?"input-warn":""}`} type="number" min={1} max={300} style={{width:72}} aria-label={`Line ${idx+1} quantity`} value={line.quantity||""} onChange={e=>updateExpectedLine(line.id,{quantity:Math.max(0,Math.floor(Number(e.target.value)||0))})}/></td>
+                        <td data-label="Supplier"><input className="input" style={{minWidth:112}} aria-label={`Line ${idx+1} supplier`} value={line.supplier_alias} onChange={e=>updateExpectedLine(line.id,{supplier_alias:e.target.value})} placeholder={supplierRef||"Supplier"}/></td>
+                        <td data-label="Waybill"><input className="input" style={{minWidth:118}} aria-label={`Line ${idx+1} waybill`} value={line.tracking_no??""} onChange={e=>updateExpectedLine(line.id,{tracking_no:e.target.value})} placeholder="Optional"/></td>
+                        <td data-label="Note"><input className="input" style={{minWidth:96}} aria-label={`Line ${idx+1} note`} value={line.inspection_note??""} onChange={e=>updateExpectedLine(line.id,{inspection_note:e.target.value})} placeholder="Check note"/></td>
+                        <td data-label="Actions">
+                          <div className="row" style={{gap:4,flexWrap:"nowrap"}}>
+                            <button type="button" className="button sm" title="Duplicate line" onClick={()=>duplicateExpectedLine(line)}>Copy</button>
+                            <button type="button" className="button sm" title="Remove line" onClick={()=>removeExpectedLine(line.id)}>Remove</button>
+                          </div>
+                        </td>
+                      </tr>;
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {expectedTotalQty!==clampedQty&&(
+                <div className="notice warning" role="status" style={{marginTop:10}}>
+                  <div className="row between flexwrap" style={{gap:8}}>
+                    <span>
+                      <strong>Quantity mismatch:</strong> Expected lines total <strong>{expectedTotalQty}</strong> units, while commissioned inspection quantity is <strong>{clampedQty}</strong>.
+                      {expectedTotalQty>maxOnlineQty&&<> ({expectedTotalQty} exceeds the online template cap of {maxOnlineQty} units.)</>}
+                    </span>
+                    <div className="row" style={{gap:8}}>
+                      {expectedTotalQty>0&&expectedTotalQty<=maxOnlineQty&&offerFor(serviceKind==="compare"?serviceOffers:templateOffers,templateVariant,expectedTotalQty)&&(
+                        <button
+                          type="button"
+                          className="button sm primary"
+                          onClick={()=>applyExpectedLinesUpdate(expectedLines,{recordUndo:false,forceSync:true})}
+                        >Sync Commissioned Qty to {expectedTotalQty}</button>
+                      )}
+                      {expectedTotalQty>maxOnlineQty&&expectedTotalQty<=maximumDraftItems&&serviceKind==="inspection"&&(
+                        <button
+                          type="button"
+                          className="button sm primary"
+                          onClick={()=>{
+                            setManualBatchQty(expectedTotalQty);
+                            setManualQuoteMode(true);
+                            setStep(1);
+                          }}
+                        >Switch to Manual Batch Quote ({expectedTotalQty} units)</button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {expectedLines.length===0&&(
+            <div className="fields" style={{marginTop:10}}>
+              <div className="field">
+                <label>Default color / variant
+                  <input value={baseColor} onChange={e=>{setBaseColor(e.target.value);setServerQuote(undefined);}} placeholder="e.g. Charcoal Gray"/>
+                </label>
+              </div>
+              <div className="field">
+                <label>{isApparelCategory?"Default size":"Default specification"}
+                  <input value={baseSize} onChange={e=>{setBaseSize(e.target.value);setServerQuote(undefined);}} placeholder={isApparelCategory?"M":"Standard"}/>
+                </label>
+              </div>
+              <div className="field">
+                <label>Reference photo / size chart (optional)
+                  <span className="file-picker">
+                    <span className="file-picker-btn">Choose file</span>
+                    <span className="file-picker-name">{attachmentName||"No file chosen"}</span>
+                    <input type="file" accept="image/*" onChange={async e=>{
+                      const file=e.target.files?.[0];
+                      if(!file) return;
+                      try {
+                        setBusyMessage("Uploading reference image…");
+                        const uploadForm=new FormData();
+                        uploadForm.set("photo",file);
+                        const uploaded=await request("/me/media","POST",uploadForm);
+                        setAttachmentId(uploaded.id);
+                        setAttachmentName(file.name);
+                        setServerQuote(undefined);
+                      } catch(err) {
+                        setWizardError(err instanceof Error?err.message:"Photo upload failed.");
+                      } finally {
+                        setBusyMessage("");
+                      }
+                    }}/>
+                  </span>
+                </label>
+                {attachmentName&&<small className="ok">Attached: {attachmentName}</small>}
+              </div>
+            </div>
+          )}
+
+          <div className="sep"/>
+
+          {/* 3C · INBOUND PARCELS & CARTON ALLOCATION */}
+          <div className="wizard-section-head">
+            <div>
+              <div className="label">3C · INBOUND PARCELS &amp; CARTON ALLOCATION</div>
+              <p className="small muted" style={{margin:"4px 0 0"}}>
+                Map one mixed-SKU parcel, multiple supplier parcels, or defer tracking registration until sellers ship.
+              </p>
+            </div>
+          </div>
+
+          <div className="parcel-mode-grid" role="radiogroup" aria-label="Inbound parcel mode" style={{marginTop:10}}>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={parcelMode==="single"}
+              className={`option-card ${parcelMode==="single"?"selected":""}`}
+              onClick={()=>{
+                setParcelMode("single");
+                if(!plannedParcels.length) {
+                  setPlannedParcels([{
+                    id:"PKG-SINGLE",
+                    tracking_no:normalizeTrackingCode(baseTrackingNo),
+                    carrier_code:"SF",
+                    supplier_alias:effectiveSupplier,
+                    carton_count:1,
+                    contains_all_items:true,
+                    allocations:[],
+                    note:"Mixed SKUs in 1 carton",
+                  }]);
+                }
+                setServerQuote(undefined);
+              }}
+            >
+              <strong>Single Parcel / One Box</strong>
+              <p>All {clampedQty} items (even across multiple SKUs) ship together in one domestic parcel.</p>
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={parcelMode==="multi"}
+              className={`option-card ${parcelMode==="multi"?"selected":""}`}
+              onClick={()=>{
+                setParcelMode("multi");
+                if(!plannedParcels.length) {
+                  if(expectedLines.some(l=>l.tracking_no?.trim()||l.supplier_alias.trim())) {
+                    autoGroupParcelsFromLines(true);
+                  } else {
+                    setPlannedParcels([{
+                      id:`PKG-1-${Date.now().toString(36)}`,
+                      tracking_no:"",
+                      carrier_code:"SF",
+                      supplier_alias:effectiveSupplier,
+                      carton_count:1,
+                      contains_all_items:false,
+                      allocations:expectedLines.map(l=>({expected_line_id:l.id,quantity:l.quantity})),
+                      note:"Box 1",
+                    }]);
+                  }
+                }
+                setServerQuote(undefined);
+              }}
+            >
+              <strong>Multiple Parcels / Suppliers</strong>
+              <p>Split SKUs and quantities across multiple tracking numbers or seller shops.</p>
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={parcelMode==="later"}
+              className={`option-card ${parcelMode==="later"?"selected":""}`}
+              onClick={()=>{
+                setParcelMode("later");
+                setServerQuote(undefined);
+              }}
+            >
+              <strong>Add Tracking After Payment</strong>
+              <p>Sellers have not shipped yet. Pay &amp; lock scope now, then register waybills in Orders / Parcels.</p>
+            </button>
+          </div>
+
+          {parcelMode==="single"&&<div className="fields" style={{marginTop:12}}>
+            <div className="field">
+              <label>Domestic waybill (optional)
+                <input
+                  value={plannedParcels[0]?.tracking_no??baseTrackingNo}
+                  onChange={e=>{
+                    const val=e.target.value;
+                    setBaseTrackingNo(val);
+                    setPlannedParcels([{
+                      id:plannedParcels[0]?.id??"PKG-SINGLE",
+                      tracking_no:val,
+                      carrier_code:plannedParcels[0]?.carrier_code??"SF",
+                      supplier_alias:plannedParcels[0]?.supplier_alias??effectiveSupplier,
+                      carton_count:plannedParcels[0]?.carton_count??1,
+                      contains_all_items:true,
+                      allocations:[],
+                      note:plannedParcels[0]?.note??"Mixed SKUs in 1 carton",
+                    }]);
+                    setServerQuote(undefined);
+                  }}
+                  placeholder="e.g. SF1000500001 (or add later after payment)"
                 />
               </label>
             </div>
             <div className="field">
-              <label>Size chart or reference photo (optional)
-                <span className="file-picker">
-                  <span className="file-picker-btn">Choose file</span>
-                  <span className="file-picker-name">{attachmentName||"No file chosen"}</span>
-                  <input type="file" accept="image/*" onChange={async e=>{
-                    const file=e.target.files?.[0];
-                    if(!file) return;
-                    try {
-                      setBusyMessage("Uploading reference image…");
-                      const uploadForm=new FormData();
-                      uploadForm.set("photo",file);
-                      const uploaded=await request("/me/media","POST",uploadForm);
-                      setAttachmentId(uploaded.id);
-                      setAttachmentName(file.name);
-                      setServerQuote(undefined);
-                    } catch(err) {
-                      setWizardError(err instanceof Error?err.message:"Photo upload failed.");
-                    } finally {
-                      setBusyMessage("");
-                    }
-                  }}/>
-                </span>
+              <label>Carrier (optional)
+                <select
+                  value={(plannedParcels[0]?.carrier_code??"sf").toLowerCase()}
+                  onChange={e=>{
+                    const c=e.target.value;
+                    setPlannedParcels([{
+                      id:plannedParcels[0]?.id??"PKG-SINGLE",
+                      tracking_no:plannedParcels[0]?.tracking_no??baseTrackingNo,
+                      carrier_code:c,
+                      supplier_alias:plannedParcels[0]?.supplier_alias??effectiveSupplier,
+                      carton_count:plannedParcels[0]?.carton_count??1,
+                      contains_all_items:true,
+                      allocations:[],
+                      note:plannedParcels[0]?.note??"Mixed SKUs in 1 carton",
+                    }]);
+                    setServerQuote(undefined);
+                  }}
+                >
+                  <option value="sf">SF Express (顺丰)</option>
+                  <option value="yto">YTO (圆通)</option>
+                  <option value="zto">ZTO (中通)</option>
+                  <option value="yd">Yunda (韵达)</option>
+                  <option value="jd">JD Logistics (京东)</option>
+                  <option value="other">Other domestic carrier</option>
+                </select>
               </label>
-              {attachmentName&&<small className="ok">Attached: {attachmentName}</small>}
             </div>
+            <div className="field">
+              <label>Carton / packing note
+                <input
+                  value={plannedParcels[0]?.note??""}
+                  onChange={e=>{
+                    const n=e.target.value;
+                    setPlannedParcels([{
+                      id:plannedParcels[0]?.id??"PKG-SINGLE",
+                      tracking_no:plannedParcels[0]?.tracking_no??baseTrackingNo,
+                      carrier_code:plannedParcels[0]?.carrier_code??"SF",
+                      supplier_alias:plannedParcels[0]?.supplier_alias??effectiveSupplier,
+                      carton_count:plannedParcels[0]?.carton_count??1,
+                      contains_all_items:true,
+                      allocations:[],
+                      note:n,
+                    }]);
+                    setServerQuote(undefined);
+                  }}
+                  placeholder="e.g. 1 master carton · 6 SKUs bagged separately"
+                />
+              </label>
+            </div>
+          </div>}
+
+          {parcelMode==="multi"&&<div className="card flat" style={{marginTop:12}}>
+            <div className="row between flexwrap" style={{marginBottom:10}}>
+              <strong>Planned Multi-Parcel List ({plannedParcels.length})</strong>
+              <div className="row" style={{gap:8}}>
+                {expectedLines.length>0&&<button type="button" className="button sm" onClick={()=>autoGroupParcelsFromLines(true)}>Auto-group from Line Waybills/Suppliers</button>}
+                <button type="button" className="button sm primary" onClick={()=>{
+                  setPlannedParcels(prev=>[...prev,{
+                    id:`PKG-${prev.length+1}-${Date.now().toString(36)}`,
+                    tracking_no:"",
+                    carrier_code:"SF",
+                    supplier_alias:"",
+                    carton_count:1,
+                    contains_all_items:false,
+                    allocations:[],
+                    note:`Box ${prev.length+1}`,
+                  }]);
+                  setServerQuote(undefined);
+                }}>+ Add Parcel</button>
+              </div>
+            </div>
+            <div style={{display:"grid",gap:10}}>
+              {plannedParcels.map((parcel,pIdx)=><div key={parcel.id} className="card flat" style={{background:"#fff"}}>
+                <div className="row between flexwrap" style={{marginBottom:8}}>
+                  <strong>Parcel {pIdx+1}</strong>
+                  {plannedParcels.length>1&&<button type="button" className="button sm" onClick={()=>{
+                    setPlannedParcels(prev=>prev.filter(p=>p.id!==parcel.id));
+                    setServerQuote(undefined);
+                  }}>Remove</button>}
+                </div>
+                <div className="fields">
+                  <div className="field">
+                    <label>Tracking No.
+                      <input value={parcel.tracking_no} onChange={e=>{
+                        const v=e.target.value;
+                        setPlannedParcels(prev=>prev.map(p=>p.id===parcel.id?{...p,tracking_no:v}:p));
+                        setServerQuote(undefined);
+                      }} placeholder="e.g. SF1000500001"/>
+                    </label>
+                  </div>
+                  <div className="field">
+                    <label>Carrier
+                      <select value={(parcel.carrier_code||"sf").toLowerCase()} onChange={e=>{
+                        const v=e.target.value;
+                        setPlannedParcels(prev=>prev.map(p=>p.id===parcel.id?{...p,carrier_code:v}:p));
+                      }}>
+                        <option value="sf">SF Express</option>
+                        <option value="yto">YTO</option>
+                        <option value="zto">ZTO</option>
+                        <option value="yd">Yunda</option>
+                        <option value="jd">JD</option>
+                        <option value="other">Other</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="field">
+                    <label>Supplier
+                      <input value={parcel.supplier_alias} onChange={e=>{
+                        const v=e.target.value;
+                        setPlannedParcels(prev=>prev.map(p=>p.id===parcel.id?{...p,supplier_alias:v}:p));
+                      }} placeholder="Shop / factory name"/>
+                    </label>
+                  </div>
+                </div>
+                {expectedLines.length>0&&<div style={{marginTop:8}}>
+                  <div className="small muted" style={{marginBottom:6}}>Qty from each product line inside this parcel:</div>
+                  <div className="row flexwrap" style={{gap:10}}>
+                    {expectedLines.map(line=>{
+                      const currentAlloc=parcel.allocations.find(a=>a.expected_line_id===line.id)?.quantity??0;
+                      const totalAssigned=allocatedUnitMap.get(line.id)??0;
+                      return <label key={line.id} className="small" style={{display:"flex",alignItems:"center",gap:6}}>
+                        <span>{line.sku_code||line.product_name} ({line.color_declared}/{line.size_label}, {totalAssigned}/{line.quantity}):</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={line.quantity}
+                          className="input"
+                          style={{width:64}}
+                          value={currentAlloc||""}
+                          onChange={e=>{
+                            const nextQ=Math.max(0,Math.min(line.quantity,Math.floor(Number(e.target.value)||0)));
+                            setPlannedParcels(prev=>prev.map(p=>{
+                              if(p.id!==parcel.id) return p;
+                              const rest=p.allocations.filter(a=>a.expected_line_id!==line.id);
+                              return {...p,contains_all_items:false,allocations:nextQ>0?[...rest,{expected_line_id:line.id,quantity:nextQ}]:rest};
+                            }));
+                            setServerQuote(undefined);
+                          }}
+                        />
+                      </label>;
+                    })}
+                  </div>
+                </div>}
+              </div>)}
+            </div>
+          </div>}
+
+          {parcelMode==="later"&&<div className="notice" style={{marginTop:12}}>
+            <strong>Deferred parcel tracking active:</strong> This order will submit with empty pre-advised waybills. As soon as each seller ships, register the domestic tracking number in <strong>Order Detail → Register Parcel</strong> or <strong>Parcels</strong>.
+          </div>}
+
+          <div className="line-note" style={{marginTop:12}}>
+            <strong>Parcel pre-advice vs. physical receipt:</strong> Registering a waybill helps warehouse intake match incoming packages. Parcels move to <em>Received at warehouse</em> only upon physical scan, and counts are reconciled against your expected product lines above.
           </div>
 
           <div className="sep"/>
 
+          {/* COLLAPSIBLE ADVANCED INDIVIDUAL UNIT OVERRIDES */}
           <div className="row between flexwrap">
             <div>
-              <h3 style={{margin:0}}>3B · Individual Sample Mapping ({clampedQty} physical {clampedQty===1?"unit":"units"})</h3>
-              <p className="small muted" style={{margin:"4px 0 0"}}>
-                Each row generates a unique warehouse Sample ID barcode upon check-in ({customizedRowCount>0?`${customizedRowCount} row(s) customized`:"all rows currently inherit product defaults above"}). Supports multiple suppliers and multiple domestic tracking numbers in a single order.
+              <div className="label">ADVANCED · INDIVIDUAL PHYSICAL UNIT OVERRIDES ({clampedQty} UNITS)</div>
+              <p className="small muted" style={{margin:"2px 0 0"}}>
+                Optional per-unit overrides ({customizedRowCount>0?`${customizedRowCount} custom override(s)`:expectedLines.length>0?"generated automatically from 3B Expected Product Lines":"all rows inherit defaults"}).
               </p>
             </div>
-            <div className="actions" style={{margin:0}}>
-              {(serviceKind==="compare"?[2,3]:[1,5,30]).filter(n=>offerFor(templateOffers,effectiveVariant,n)).map(n=><button
-                key={n}
-                type="button"
-                className={`button sm ${clampedQty===n?"primary":""}`}
-                onClick={()=>{
-                  setQty(n);
-                  if(serviceKind==="compare") {
-                    const match=offerFor(serviceOffers,effectiveVariant,n);
-                    if(match) setSelectedOfferId(match.offer_id);
-                  }
-                  setServerQuote(undefined);
-                }}
-              >{n} {n===1?"item":"items"}</button>)}
+            <button
+              type="button"
+              className="button sm"
+              aria-expanded={showAdvancedUnits}
+              onClick={()=>setShowAdvancedUnits(open=>!open)}
+            >{showAdvancedUnits?"Hide Individual Units":`Inspect / Override ${clampedQty} Physical Units`}</button>
+          </div>
+
+          {showAdvancedUnits&&<>
+            <div className="table-wrap wizard-items" style={{marginTop:10}}>
+              <table className="tbl">
+                <thead>
+                  <tr>
+                    <th className="col-idx" style={{width:52,minWidth:52,whiteSpace:"nowrap",textAlign:"center"}}>#</th>
+                    <th>Sample SKU / Label</th>
+                    <th>{isApparelCategory?"Size":"Size / Spec"}</th>
+                    <th>Color / Variant</th>
+                    <th>Supplier / Shop</th>
+                    <th>Domestic Waybill (optional)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Array.from({length:visibleRowLimit},(_,rowIndex)=>{
+                    const idx=firstItemIndex+rowIndex;
+                    const row=itemRows[idx];
+                    const defaultRowSku=`${baseSku||"SKU"}-${String(idx+1).padStart(2,"0")}`;
+                    return <tr key={idx}>
+                      <td className="mono col-idx" style={{width:52,minWidth:52,whiteSpace:"nowrap",textAlign:"center"}}>{String(idx+1).padStart(2,"0")}</td>
+                      <td data-label="Sample label"><input className="input" style={{minWidth:118}} aria-label={`Item ${idx+1} SKU`} value={row?.sku??defaultRowSku} onChange={e=>updateItemRow(idx,{sku:e.target.value})}/></td>
+                      <td data-label="Size / specification"><input className="input" style={{minWidth:72}} aria-label={`Item ${idx+1} size`} value={row?.size??baseSize} onChange={e=>updateItemRow(idx,{size:e.target.value})}/></td>
+                      <td data-label="Color / variant"><input className="input" style={{minWidth:92}} aria-label={`Item ${idx+1} color`} value={row?.color??baseColor} onChange={e=>updateItemRow(idx,{color:e.target.value})}/></td>
+                      <td data-label="Supplier"><input className="input" style={{minWidth:120}} aria-label={`Item ${idx+1} supplier`} placeholder={supplierRef||"Shop / seller"} value={row?.supplier??supplierRef} onChange={e=>updateItemRow(idx,{supplier:e.target.value})}/></td>
+                      <td data-label="Domestic waybill">
+                        <input className="input" style={{minWidth:128}} aria-label={`Item ${idx+1} waybill`} placeholder={baseTrackingNo||"Optional"} value={row?.tracking_no??baseTrackingNo} onChange={e=>updateItemRow(idx,{tracking_no:e.target.value})}/>
+                      </td>
+                    </tr>;
+                  })}
+                </tbody>
+              </table>
             </div>
-          </div>
-
-          <div className="table-wrap wizard-items" style={{marginTop:10}}>
-            <table className="tbl">
-              <thead>
-                <tr>
-                  <th className="col-idx" style={{width:52,minWidth:52,whiteSpace:"nowrap",textAlign:"center"}}>#</th>
-                  <th>Sample SKU / Label</th>
-                  <th>{isApparelCategory?"Size":"Size / Spec"}</th>
-                  <th>Color / Variant</th>
-                  <th>Supplier / Shop</th>
-                  <th>Domestic Waybill (optional)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {Array.from({length:visibleRowLimit},(_,rowIndex)=>{
-                  const idx=firstItemIndex+rowIndex;
-                  const row=itemRows[idx];
-                  const defaultRowSku=`${baseSku||"SKU"}-${String(idx+1).padStart(2,"0")}`;
-                  return <tr key={idx}>
-                    <td className="mono col-idx" style={{width:52,minWidth:52,whiteSpace:"nowrap",textAlign:"center",wordBreak:"keep-all",overflowWrap:"normal"}}>
-                      {String(idx+1).padStart(2,"0")}
-                    </td>
-                    <td data-label="Sample label">
-                      <input
-                        className="input"
-                        style={{minWidth:118}}
-                        aria-label={`Item ${idx+1} SKU`}
-                        value={row?.sku??defaultRowSku}
-                        onChange={e=>updateItemRow(idx,{sku:e.target.value})}
-                      />
-                    </td>
-                    <td data-label="Size / specification">
-                      <input
-                        className="input"
-                        style={{minWidth:72}}
-                        aria-label={`Item ${idx+1} size`}
-                        value={row?.size??baseSize}
-                        onChange={e=>updateItemRow(idx,{size:e.target.value})}
-                      />
-                    </td>
-                    <td data-label="Color / variant">
-                      <input
-                        className="input"
-                        style={{minWidth:92}}
-                        aria-label={`Item ${idx+1} color`}
-                        value={row?.color??baseColor}
-                        onChange={e=>updateItemRow(idx,{color:e.target.value})}
-                      />
-                    </td>
-                    <td data-label="Supplier">
-                      <input
-                        className="input"
-                        style={{minWidth:120}}
-                        aria-label={`Item ${idx+1} supplier`}
-                        placeholder={supplierRef||"Shop / seller"}
-                        value={row?.supplier??supplierRef}
-                        onChange={e=>updateItemRow(idx,{supplier:e.target.value})}
-                      />
-                    </td>
-                    <td data-label="Domestic waybill">
-                      <div className="row" style={{gap:4,flexWrap:"nowrap"}}>
-                        <input
-                          className="input"
-                          style={{minWidth:128}}
-                          aria-label={`Item ${idx+1} waybill`}
-                          placeholder={baseTrackingNo||"e.g. SF1234567890"}
-                          value={row?.tracking_no??baseTrackingNo}
-                          onChange={e=>updateItemRow(idx,{tracking_no:e.target.value})}
-                        />
-                        {idx>0 && (
-                          <button
-                            type="button"
-                            className="button sm"
-                            title="Copy supplier & waybill from row above"
-                            onClick={()=>{
-                              const prev=itemRows[idx-1];
-                              updateItemRow(idx,{supplier:prev?.supplier,tracking_no:prev?.tracking_no});
-                            }}
-                          >
-                            ↓
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>;
-                })}
-              </tbody>
-            </table>
-          </div>
-          {clampedQty>rowsPerPage&&<div className="actions" aria-label="Sample rows">
-            <button type="button" className="button" disabled={firstItemIndex===0}
-              onClick={()=>setItemPage(firstItemIndex/rowsPerPage-1)}>Previous items</button>
-            <span className="small">Items {firstItemIndex+1}–{firstItemIndex+visibleRowLimit} of {clampedQty}</span>
-            <button type="button" className="button" disabled={firstItemIndex/rowsPerPage===lastItemPage}
-              onClick={()=>setItemPage(firstItemIndex/rowsPerPage+1)}>Next items</button>
-          </div>}
-
-          <div className="line-note" style={{marginTop:12}}>
-            <strong>Parcel pre-advice vs. physical receipt:</strong> Entering a domestic waybill here helps our intake desk match your seller&apos;s parcel upon arrival, or you can register tracking numbers later after payment. A parcel is marked <em>Received at Warehouse</em> only after physical barcode scan at our facility.
-          </div>
+            {clampedQty>rowsPerPage&&<div className="actions" aria-label="Sample rows">
+              <button type="button" className="button" disabled={firstItemIndex===0}
+                onClick={()=>setItemPage(firstItemIndex/rowsPerPage-1)}>Previous items</button>
+              <span className="small">Items {firstItemIndex+1}–{firstItemIndex+visibleRowLimit} of {clampedQty}</span>
+              <button type="button" className="button" disabled={firstItemIndex/rowsPerPage===lastItemPage}
+                onClick={()=>setItemPage(firstItemIndex/rowsPerPage+1)}>Next items</button>
+            </div>}
+          </>}
 
           {serviceKind==="compare"&&<label className="checkrow" style={{marginTop:12}}>
             <input type="checkbox" checked={sizeMismatchConfirmed} onChange={e=>setSizeMismatchConfirmed(e.target.checked)}/>
             <span>I understand comparing samples of different declared sizes affects side-by-side measurement difference interpretation.</span>
           </label>}
-
         </Panel>}
 
         {step===3&&<Panel
@@ -2017,7 +3054,7 @@ export function NewOrder({customerId}:{customerId:string}) {
 
         {step===4&&<Panel
           title="Step 5 · Review & Terms — Official Server Quote & Policies"
-          subtitle="Verify your order configuration, confirm the authoritative server-calculated quote, and accept the required service disclosures."
+          subtitle="Verify your expected product lines, confirm the authoritative server-calculated quote, and accept the required service disclosures."
           badge={hasValidQuote?<Tag tone="green">Official quote</Tag>:busyMessage?<Tag tone="yellow">Calculating…</Tag>:<Tag tone="red">Quote Required</Tag>}
         >
           <div className="grid cols2">
@@ -2026,8 +3063,31 @@ export function NewOrder({customerId}:{customerId:string}) {
               <dl className="def"><dt>Inspection service</dt><dd>{serviceLabel}</dd></dl>
               <dl className="def"><dt>Inspection template</dt><dd>{templateLabel}</dd></dl>
             </>}
-            <dl className="def"><dt>Physical quantity</dt><dd>{totalItems} {totalItems===1?"item":"items"}</dd></dl>
+            <dl className="def"><dt>Commissioned quantity</dt><dd>{totalItems} {totalItems===1?"unit":"units"} across {totalExpectedLineCount} line(s)</dd></dl>
           </div>
+
+          {expectedLines.length>0&&<div style={{marginTop:14}}>
+            <div className="label" style={{marginBottom:6}}>EXPECTED PRODUCT LINES BREAKDOWN ({expectedLines.length} SKUS · {expectedTotalQty} UNITS)</div>
+            <div className="table-wrap">
+              <table className="tbl">
+                <thead>
+                  <tr><th>SKU</th><th>Product</th><th>Color</th><th>Size</th><th>Qty</th><th>Supplier</th><th>Waybill</th></tr>
+                </thead>
+                <tbody>
+                  {expectedLines.map(line=><tr key={line.id}>
+                    <td className="mono">{line.sku_code||"—"}</td>
+                    <td>{line.product_name}</td>
+                    <td>{line.color_declared}</td>
+                    <td>{line.size_label}</td>
+                    <td><strong>{line.quantity}</strong></td>
+                    <td>{line.supplier_alias||"—"}</td>
+                    <td className="mono">{line.tracking_no||(parcelMode==="later"?"Add later":"—")}</td>
+                  </tr>)}
+                </tbody>
+              </table>
+            </div>
+          </div>}
+
           {extraLines.length>0&&<ul className="draft-lines" aria-label="Inspection scopes">
             {allLines.map((line,idx)=>{
               const rangeCount=line.attributes.tolerances?.length??0;
@@ -2055,7 +3115,7 @@ export function NewOrder({customerId}:{customerId:string}) {
             <ul className="draft-lines">
               {serverQuote!.line_snapshot.map((line:Row)=><li key={line.order_line_id}>
                 <span>{offers.find(offer=>offer.offer_id===line.offer_id)?.title.en??"Inspection service"} × {line.quantity}<br/>
-                  <small>{line.business_days} business days after receipt and identification</small></span>
+                  <small>{line.business_days} business days after all items arrive and pass identification</small></span>
                 <strong>{usd(line.amount_cents)}</strong>
               </li>)}
             </ul>
@@ -2128,9 +3188,13 @@ export function NewOrder({customerId}:{customerId:string}) {
               <div className="card flat" style={{marginBottom:14}}>
                 <div className="label">WHAT HAPPENS IMMEDIATELY AFTER PAYMENT</div>
                 <ol className="small" style={{margin:"8px 0 0",paddingLeft:18,lineHeight:1.6}}>
-                  <li>After payment is confirmed, your order will show <strong>Awaiting items</strong>.</li>
-                  <li><strong>Ship samples to our China warehouse:</strong> Provide the permanent receiving code and current warehouse address shown in <Link href="/account">your account</Link> to your supplier.</li>
-                  <li>Add each seller’s tracking number in <strong>Parcels</strong>.</li>
+                  <li>After payment is confirmed, your order moves to <strong>Awaiting items</strong>.</li>
+                  <li><strong>Ship to China facility:</strong> Give your seller your permanent code <span className="mono">{receiving.data?.receiving_code??"—"}</span> and warehouse address in <Link href="/account">Account</Link>.</li>
+                  <li>
+                    {declaredWaybills.length>0
+                      ?<>Pre-declared waybills (<span className="mono">{declaredWaybills.join(", ")}</span>) can be 1-click registered on <Link href={"/orders/"+draftOrder.public_no}>Order {draftOrder.public_no}</Link> or in <Link href="/parcels">Parcels</Link>.</>
+                      :<>Register each seller&apos;s domestic waybill in <Link href={"/orders/"+draftOrder.public_no}>Order Detail</Link> or <Link href="/parcels">Parcels</Link> once shipped.</>}
+                  </li>
                 </ol>
               </div>
 
@@ -2176,7 +3240,7 @@ export function NewOrder({customerId}:{customerId:string}) {
           <div className="card-head">
             <div>
               <h3>Order Summary</h3>
-              <p>Live configuration &amp; pricing status.</p>
+              <p>Live configuration &amp; readiness.</p>
             </div>
             <Tag tone={hasValidQuote?"green":"yellow"}>{draftOrder?draftOrder.public_no:"DRAFT"}</Tag>
           </div>
@@ -2186,8 +3250,18 @@ export function NewOrder({customerId}:{customerId:string}) {
               <div><div className="k">Service</div><div className="v">{serviceLabel}</div></div>
               <div><div className="k">Template</div><div className="v">{isApparelCategory?templateLabel.split(" (")[0]:"Standard"}</div></div></>:
               <div><div className="k">Services</div><div className="v">{allLines.length} service lines</div></div>}
-            <div><div className="k">Quantity</div><div className="v">{manualQuoteMode?`${manualBatchQty} (Manual)`:`${totalItems} ${totalItems===1?"item":"items"}`}</div></div>
+            <div><div className="k">Product lines</div><div className="v">{totalExpectedLineCount} line(s)</div></div>
+            <div><div className="k">Units (Exp / Fee)</div><div className="v">{manualQuoteMode?`${manualBatchQty} (Manual)`:`${expectedLines.length?expectedTotalQty:totalItems} / ${totalItems}`}</div></div>
+            <div><div className="k">Suppliers</div><div className="v">{declaredSuppliers.length||"—"}</div></div>
+            <div><div className="k">Parcels / Waybills</div><div className="v">{parcelMode==="later"?"Add after pay":declaredWaybills.length?`${declaredWaybills.length} waybill(s)`:"Pending"}</div></div>
+            <div><div className="k">Purchase evidence</div><div className="v">{totalEvidenceCount} file(s)</div></div>
           </div>
+          {pendingCandidateCount>0&&<div className="notice warning" style={{marginTop:10,padding:"8px 10px",fontSize:12}}>
+            <strong>{pendingCandidateCount} unconfirmed row(s)</strong> pending review in 3A.
+          </div>}
+          {expectedLines.length>0&&expectedTotalQty!==clampedQty&&<div className="notice warning" style={{marginTop:10,padding:"8px 10px",fontSize:12}}>
+            Expected qty ({expectedTotalQty}) differs from commissioned qty ({clampedQty}).
+          </div>}
           {extraLines.length>0&&<ul className="wizard-summary-lines" aria-label="Service line summaries" tabIndex={0}>
             {allLines.map((line,index)=>{
               const offer=offers.find(row=>row.offer_id===line.offer_id);
@@ -2533,9 +3607,39 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
         <Panel title="Register new seller tracking for this order">
           {receiving.error||carriers.error?<><ErrorBlock error={receiving.error||carriers.error}/>
             <button type="button" onClick={()=>{receiving.reload();carriers.reload();}}>Retry parcel registration</button></>:
-            !receiving.data||!carriers.data?<p role="status">Loading parcel registration…</p>:
-            <InboundParcelForm address={receiving.data.warehouse_address} carriers={carriers.data.carriers} orderId={o.id}
-              pendingWaybills={o.unregistered_waybills} onSave={()=>{detail.reload();desk.reload();}}/>}
+            !receiving.data||!carriers.data?<p role="status">Loading parcel registration…</p>:<>
+              {Array.isArray(o.unregistered_waybills)&&o.unregistered_waybills.length>0&&receiving.data?.warehouse_address?.id&&(
+                <div className="notice" style={{marginBottom:12}}>
+                  <div className="row between flexwrap" style={{gap:8}}>
+                    <span>
+                      <strong>{o.unregistered_waybills.length} pre-declared waybill(s) awaiting parcel registration:</strong>{" "}
+                      <span className="mono">{o.unregistered_waybills.map((w:Row)=>`${w.tracking_no} (${w.item_count})`).join(", ")}</span>
+                    </span>
+                    <Action primary run={async()=>{
+                      const addrId=receiving.data?.warehouse_address?.id;
+                      if(!addrId) throw new Error("Warehouse address unavailable.");
+                      const plannedList:Row[]=o.expected_lines_summary?.planned_parcels??[];
+                      const breakdownList:Row[]=o.expected_lines_summary?.lines_breakdown??[];
+                      for(const wb of o.unregistered_waybills) {
+                        const match=plannedList.find((p:Row)=>String(p.tracking_no??"").toUpperCase()===String(wb.tracking_no).toUpperCase())
+                          ??breakdownList.find((b:Row)=>String(b.tracking_no??"").toUpperCase()===String(wb.tracking_no).toUpperCase());
+                      const rawCarrier=match?.carrier_code?String(match.carrier_code).trim().toLowerCase():undefined;
+                      const carrierCode=rawCarrier&&rawCarrier!=="other"?rawCarrier:undefined;
+                      await request("/me/parcels","POST",{
+                        address_id:addrId,
+                        tracking_no:wb.tracking_no,
+                        ...(carrierCode?{carrier_code:carrierCode}:{}),
+                        order_ids:[o.id],
+                      });
+                      }
+                      detail.reload();desk.reload();
+                    }}>Register all declared waybills ({o.unregistered_waybills.length})</Action>
+                  </div>
+                </div>
+              )}
+              <InboundParcelForm address={receiving.data.warehouse_address} carriers={carriers.data.carriers} orderId={o.id}
+                pendingWaybills={o.unregistered_waybills} onSave={()=>{detail.reload();desk.reload();}}/>
+            </>}
         </Panel>
       </>}
       {(section==="dispositions"||section==="storage")&&<OrderHandling
@@ -2612,6 +3716,45 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
         <small className="muted">Linked seller waybills:</small>
         {o.parcels.map((p:Row)=><CodeButton key={p.id} code={p.tracking_norm} title="Preview carrier & warehouse tracking" onClick={()=>setTrackTarget({kind:"parcels",id:p.id,code:p.tracking_norm})}/>)}
       </div>}
+      {Array.isArray(o.expected_lines_summary?.lines_breakdown)&&o.expected_lines_summary.lines_breakdown.length>0&&(
+        <div style={{marginBottom:16}}>
+          <div className="row between flexwrap" style={{marginBottom:8}}>
+            <strong>Expected Product Lines &amp; Intake Reconciliation</strong>
+            <div className="row" style={{gap:6}}>
+              <Tag tone="blue">{o.expected_lines_summary.expected_lines_count} SKU line(s)</Tag>
+              <Tag tone={o.expected_lines_summary.identified_units_total===o.expected_lines_summary.expected_units_total?"green":"yellow"}>
+                {o.expected_lines_summary.identified_units_total}/{o.expected_lines_summary.expected_units_total} identified · {o.expected_lines_summary.inspected_units_total} inspected
+              </Tag>
+            </div>
+          </div>
+          <Table
+            headers={["SKU / Product","Color / Size","Supplier & Waybill","Expected","Arrived","Identified","Inspected","Outstanding"]}
+            rows={o.expected_lines_summary.lines_breakdown.map((b:Row)=>[
+              <div className="cell-stack"><strong>{b.product_name||b.sku_code||"—"}</strong>{b.sku_code&&<small className="mono">{b.sku_code}</small>}</div>,
+              [b.color_declared,b.size_label].filter(Boolean).join(" / ")||"—",
+              <div className="cell-stack"><span>{b.supplier_alias||"—"}</span>{b.tracking_no&&<small className="mono">{b.tracking_no}</small>}</div>,
+              <strong>{b.expected_qty}</strong>,
+              b.arrived_qty,
+              b.identified_qty,
+              b.inspected_qty,
+              b.outstanding_qty>0?<Tag tone="yellow">{b.outstanding_qty} pending</Tag>:<Tag tone="green">0</Tag>,
+            ])}
+          />
+          {Array.isArray(o.expected_lines_summary.purchase_evidences)&&o.expected_lines_summary.purchase_evidences.length>0&&(
+            <div className="row flexwrap" style={{gap:10,marginTop:8}}>
+              {o.expected_lines_summary.purchase_evidences.map((ev:Row,idx:number)=>(
+                <div key={ev.id??idx} className="evidence-chip">
+                  {ev.media_id&&<img src={`/api/v1/media/${ev.media_id}`} alt={ev.file_name??"Evidence"} style={{width:36,height:36,objectFit:"cover",borderRadius:6}}/>}
+                  <div className="cell-stack">
+                    <span className="small"><strong>{ev.file_name??"Purchase record"}</strong></span>
+                    <small className="muted">{[ev.supplier_alias,ev.purchase_order_ref].filter(Boolean).join(" · ")||ev.platform_source||"Attached evidence"}</small>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       <Table headers={["Service","Position","Warehouse item","Package","Custody"]} rows={o.items.map((i:Row)=>[
         i.title.en,
         i.position??i.quantity,
@@ -2666,14 +3809,18 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
       </details>)}
     </Panel>}
     {section==="parcels"&&<Panel title="Inbound parcels linked to this order">
-      <Table headers={["Seller tracking number","Carrier","Sync status","Carrier status","Warehouse intake",""]} rows={o.parcels.map((p:Row)=>[
-        <CodeButton code={p.tracking_norm} onClick={()=>setTrackTarget({kind:"parcels",id:p.id,code:p.tracking_norm})}/>,
-        p.carrier_name??"—",
-        p.sync_state?label(p.sync_state):"—",
-        label(p.transport_state),
-        p.warehouse_state?`${label(p.warehouse_state)}${p.package_code?` (${p.package_code})`:""}`:"Awaiting physical receipt",
-        <Link className="small" href={"/parcels/"+p.id}>Full page →</Link>,
-      ])} empty="No seller waybills are linked to this order."/>
+      <Table headers={["Seller tracking number","Carrier","Sync status","Carrier status","Warehouse intake",""]} rows={o.parcels.map((p:Row)=>{
+        const logged=p.logged_item_count??p.received_quantity;
+        return [
+          <CodeButton code={p.tracking_norm} onClick={()=>setTrackTarget({kind:"parcels",id:p.id,code:p.tracking_norm})}/>,
+          p.carrier_name??"—",
+          p.sync_state?label(p.sync_state):"—",
+          label(p.transport_state),
+          p.warehouse_state?<div className="cell-stack"><span>{label(p.warehouse_state)}{p.package_code?` (${p.package_code})`:""}</span>
+            {logged!=null&&<small>{logged} item(s) logged</small>}</div>:"Awaiting physical receipt",
+          <Link className="small" href={"/parcels/"+p.id}>Full page →</Link>,
+        ];
+      })} empty="No seller waybills are linked to this order."/>
       <div className="actions"><Link href="/account">View your warehouse address</Link><Link href="/parcels">Open all parcels</Link></div>
     </Panel>}
     {!section&&<ScopeReview key={o.revision} orderId={id} onSave={detail.reload}/>}
@@ -3190,6 +4337,12 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
       </div>}
         <Panel title="China Warehouse Receiving Address" subtitle="Include your permanent receiving code on the seller’s shipping label."
           badge={demo?<Tag tone="yellow">Test address</Tag>:addr?<Tag tone="green">Current address</Tag>:undefined}>
+          {demo&&<div className="demo-address-alert" role="note">
+            <strong>Sandbox / Test Warehouse Address — Do Not Ship Real Commercial Cargo</strong>
+            <p className="small" style={{margin:"4px 0 0"}}>
+              You are viewing a local/test receiving address for <span className="mono">{data.profile.receiving_code}</span>. Only use a verified production receiving address before dispatching physical inventory.
+            </p>
+          </div>}
           {data.warehouse_address_changed_at&&<p className="notice" role="status">The warehouse address changed on {stamp(data.warehouse_address_changed_at)}. Use the current address below for new shipments.</p>}
           <div className="receiving-code"><span className="eyebrow">PERMANENT PERSONAL RECEIVING CODE</span><strong className="code">{data.profile.receiving_code}</strong></div>
           {addr?<>
@@ -3237,7 +4390,14 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
       {isOrders&&!orderList.data&&!orderList.error&&<p role="status">Loading orders…</p>}
       {visibleOrders.length?<Table headers={isHome?["Order","Service","Inspection status","Next action"]:["Order","Service & items","Inspection status","Payment","Report","Updated","Next action"]} rows={visibleOrders.map(o=>{
         const nextAction=orderNextAction(o);
-        const service=<div className="cell-stack"><span>{o.service_title??"—"}</span>{o.item_count!=null&&<small>{o.item_count} {o.item_count===1?"item":"items"}</small>}</div>;
+        const lineSummary=[
+          o.expected_lines_count>1?`${o.expected_lines_count} lines`:null,
+          o.item_count!=null?`${o.item_count} ${o.item_count===1?"unit":"units"}`:null,
+          o.supplier_count>1?`${o.supplier_count} suppliers`:null,
+          o.parcel_count>0?`${o.parcel_count} ${o.parcel_count===1?"parcel":"parcels"}`:null,
+          o.arrived_item_count>0?`${o.arrived_item_count}/${o.item_count} arrived`:null,
+        ].filter(Boolean).join(" · ");
+        const service=<div className="cell-stack"><span>{o.service_title??"—"}</span>{lineSummary&&<small>{lineSummary}</small>}</div>;
         const statusCell=<Tag tone={o.state==="on_hold"?"red":["report_ready","action_pending"].includes(o.state)?"green":o.state==="draft"?"gray":"blue"}>{label(o.state)}</Tag>;
         const next=<Link className="small" href={nextAction.href}>{nextAction.label} →</Link>;
         const orderLink=<Link className="code" href={"/orders/"+o.public_no}>{o.public_no}</Link>;
@@ -3306,6 +4466,10 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
           <div className="cell-stack">
             <div className="actions">{linkedNos.length?linkedNos.map((no:string)=><Link key={no} className="code-btn" href={"/orders/"+no}>{no}</Link>):<span className="muted">Unlinked</span>}</div>
             {a.declared_item_count>0&&<small>{a.declared_item_count} expected {a.declared_item_count===1?"item":"items"}{a.declared_suppliers?.length?` · ${a.declared_suppliers.join(", ")}`:""}</small>}
+            {Array.isArray(a.declared_line_breakdown)&&a.declared_line_breakdown.length>0&&<div className="small muted">
+              {a.declared_line_breakdown.slice(0,4).map((line:Row)=>[line.sku_code||line.product_name,line.color_declared,line.size_label].filter(Boolean).join("/")+` ×${line.qty}`).join(" · ")}
+              {a.declared_line_breakdown.length>4&&` +${a.declared_line_breakdown.length-4} more`}
+            </div>}
             {candidates.length>0&&<details className="small">
               <summary style={{cursor:"pointer"}}>+ Link to order</summary>
               <Form label="Link" run={async f=>{
@@ -3317,8 +4481,17 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
               </Form>
             </details>}
           </div>,
-          <div className="cell-stack"><span>{label(a.warehouse_state??"awaiting_warehouse")}</span>
-            {a.received_quantity!=null&&<small>{a.received_quantity} recorded by warehouse</small>}
+          <div className="cell-stack">
+            <span>{label(a.warehouse_state??"awaiting_warehouse")}{a.package_code?` · ${a.package_code}`:""}</span>
+            {(a.logged_item_count!=null||a.received_quantity!=null)&&(()=>{
+              const logged=a.logged_item_count??a.received_quantity;
+              const mismatch=a.declared_item_count>0&&logged!==a.declared_item_count;
+              return <>
+                <small>{logged} logged at warehouse{a.declared_item_count>0?` vs ${a.declared_item_count} expected`:""}</small>
+                {mismatch&&<Tag tone="yellow">Quantity discrepancy ({logged}/{a.declared_item_count})</Tag>}
+                {a.condition_note&&<small className="muted">Note: {a.condition_note}</small>}
+              </>;
+            })()}
           </div>,
           label(a.transport_state),
         ];
@@ -3356,6 +4529,19 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     {handlingItems.length>0&&<div className="customer-selection-tools" role="region" aria-label="Selected item actions">
       <strong>{handlingItems.length} selected</strong><a className="button primary" href="#item-instructions">Review instructions</a>
     </div>}
+    {(inventory.data?.awaiting_arrival_orders?.length??0)>0&&<Panel title="Awaiting warehouse arrival" subtitle="Paid orders whose items have not yet passed physical warehouse intake check-in.">
+      <Table
+        headers={["Order","Status","Expected / Arrived","Action"]}
+        rows={(inventory.data?.awaiting_arrival_orders??[]).map((ord:Row)=>[
+          <Link className="code" href={"/orders/"+ord.public_no}>{ord.public_no}</Link>,
+          <Tag tone={ord.state==="on_hold"?"red":"blue"}>{label(ord.state)}</Tag>,
+          `${ord.arrived_units??0} / ${ord.expected_units??0} arrived`,
+          ord.parcel_registration_due
+            ?<Link className="button sm primary" href={`/orders/${ord.public_no}/parcels`}>Register seller waybill →</Link>
+            :<Link className="small" href={`/orders/${ord.public_no}`}>View order →</Link>,
+        ])}
+      />
+    </Panel>}
     <Panel title="Your items">
       <label>Show items <select value={itemFilter} onChange={event=>router.push(inventoryHref(1,event.target.value),{scroll:false})}>
         <option value="all">All items</option><option value="inspection">Awaiting or in inspection</option>
