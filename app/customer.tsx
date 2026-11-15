@@ -27,6 +27,9 @@ const states:Record<string,string>={
   reconciliation:"Payment status to verify",
 };
 const label=(state:string|null|undefined)=>state?states[state]??(state.charAt(0).toUpperCase()+state.slice(1).replaceAll("_"," ")):"—";
+const itemInspectionLabel=(item:Row)=>item.inspection_stage==="inspected"?"Inspection complete":item.inspection_stage==="in_inspection"?"Inspection underway":
+  item.inspection_stage==="pending"||["awaiting_samples","samples_ready","queued","inspecting","qa_review"].includes(item.order_state)?"Awaiting inspection":
+  item.order_no?"No active inspection":"Not commissioned";
 const parcelLinkStates=["draft","awaiting_payment","awaiting_samples","on_hold"];
 const orderNext:Record<string,string>={
   draft:"Review the inspection scope and calculate a quote.",
@@ -2299,6 +2302,7 @@ function CustomerItemDrawer({
             :(item.inbound_tracking_norm?<span className="code">{item.inbound_tracking_norm}</span>:"—")}
         </dd></dl>
         <dl className="def"><dt>Inspection order</dt><dd>{item.order_no?<Link className="code-btn" href={`/orders/${item.order_no}`} onClick={onClose}>{item.order_no}</Link>:"Uncommissioned"}</dd></dl>
+        <dl className="def"><dt>Inspection status</dt><dd>{itemInspectionLabel(item)}</dd></dl>
         <dl className="def"><dt>Reference sample</dt><dd>{item.reference_sample?`${item.reference_sample.state==="active"?(item.reference_sample.expired?"Expired":"Active"):label(item.reference_sample.state)}${item.reference_sample.in_use?" · In comparison":""}`:"—"}</dd></dl>
         <dl className="def"><dt>Free storage through</dt><dd>{stamp(item.storage_until)}</dd></dl>
         <dl className="def"><dt>Paid storage through</dt><dd>{stamp(item.paid_storage_until)}</dd></dl>
@@ -2611,7 +2615,7 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
       <Table headers={["Service","Position","Warehouse item","Package","Custody"]} rows={o.items.map((i:Row)=>[
         i.title.en,
         i.position??i.quantity,
-        i.code?<CodeButton code={i.code} onClick={()=>setItemTarget({...i,order_no:number})}/>:"Awaiting assignment",
+        i.code?<CodeButton code={i.code} onClick={()=>setItemTarget({...i,order_no:number,order_state:o.state})}/>:"Awaiting assignment",
         i.package_code?<span className="code">{i.package_code}</span>:"—",
         i.custody_state?label(i.custody_state):"—",
       ])}/>
@@ -3320,8 +3324,10 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     <Panel title="Your items">
       <label>Show items <select value={itemFilter} onChange={event=>router.push(inventoryHref(1,event.target.value),{scroll:false})}>
         <option value="all">All items</option><option value="inspection">Awaiting or in inspection</option>
+        <option value="inspected">Inspection complete</option>
         <option value="handling">Awaiting instructions</option><option value="reference">Active Golden Samples</option>
       </select></label>
+      {itemCounts&&<p className="small muted">{itemCounts.inspected} {itemCounts.inspected===1?"item has":"items have"} completed inspection. Reports and handling instructions follow their own status.</p>}
       {focusedItem.error&&<><ErrorBlock error={focusedItem.error}/><button type="button" onClick={focusedItem.reload}>Retry item details</button></>}
       {requestedItem&&!focusedItem.data&&!focusedItem.error&&<p role="status">Loading selected item…</p>}
       {inventory.error&&<><ErrorBlock error={inventory.error}/><button className="button sm" onClick={inventory.reload}>Retry inventory</button></>}
@@ -3336,7 +3342,9 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
           <span className="code">{w.package_code??"—"}</span>
           {w.inbound_advice_id&&w.inbound_tracking_norm&&<small><CodeButton code={w.inbound_tracking_norm} onClick={()=>setTrackTarget({kind:"parcels",id:w.inbound_advice_id,code:w.inbound_tracking_norm})}/></small>}
         </div>,
-        w.order_no?<div className="cell-stack"><Link className="code-btn" href={"/orders/"+w.order_no}>{w.order_no}</Link><small>{label(w.order_state)}</small></div>:"Uncommissioned",
+        <div className="cell-stack">{w.order_no?<Link className="code-btn" href={"/orders/"+w.order_no}>{w.order_no}</Link>:<span>Uncommissioned</span>}
+          <Tag tone={w.inspection_stage==="inspected"?"green":w.inspection_stage==="in_inspection"?"blue":"outline"}>{itemInspectionLabel(w)}</Tag>
+          {w.order_no&&<small>Order: {label(w.order_state)}</small>}</div>,
         w.identity_state==="quarantined"?"Quarantined":label(w.custody_state),
         stamp(w.storage_until),
         <div className="cell-stack">

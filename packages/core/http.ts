@@ -152,7 +152,7 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   }
   if(method==="GET"&&path==="/me/inventory") {
     const page=z.coerce.number().int().min(1).max(10000).parse(url.searchParams.get("page")??"1");
-    const filter=z.enum(["all","inspection","handling","reference"]).parse(url.searchParams.get("filter")??"all");
+    const filter=z.enum(["all","inspection","inspected","handling","reference"]).parse(url.searchParams.get("filter")??"all");
     const code=z.string().regex(/^S-[a-zA-Z0-9-]{1,64}$/).optional().parse(url.searchParams.get("code")??undefined);
     return json(await transaction(db=>customerInventory(db,actorRequired(actor),page,filter,code)));
   }

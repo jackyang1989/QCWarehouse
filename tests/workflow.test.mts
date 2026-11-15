@@ -624,7 +624,13 @@ test("33 physical items from three parcels share one order, report and selective
       },"POST",409);
       assert.equal(incomplete.error.code,"REPORT_INCOMPLETE");
     }
+    if(task.group_id) {
+      const members=(await c.fetch(path)).items.filter(item=>item.service==="compare");
+      assert.equal(members.length,3);assert(members.every(item=>item.inspection_stage==="in_inspection"));
+      for(const item of members)assert.equal((await staff.fetch("/staff/items/by-code?code="+item.code)).item.inspection_stage,"in_inspection");
+    }
     await submitRequiredChecks(inspector,task.id,started.revision,view);
+    if(task.group_id)assert((await c.fetch(path)).items.filter(item=>item.service==="compare").every(item=>item.inspection_stage==="inspected"));
   }
   const current=await c.fetch(path);
   const report=await inspector.fetch("/staff/orders/"+draft.id+"/report/submit",{revision:current.revision,task_ids:tasks.map(t=>t.id)});
@@ -7311,7 +7317,7 @@ test("a standalone 30-item inspection splits a documented defect, a reference sa
     assert.equal(parcel.received_quantity,10);
   }
   const secondInventory=await c.fetch("/me/inventory?filter=inspection&page=2");
-  assert.deepEqual(firstInventory.summary,{total:30,inspection:30,handling:0,reference:0});
+  assert.deepEqual(firstInventory.summary,{total:30,inspection:30,handling:0,inspected:0,reference:0});
   assert.equal(firstInventory.has_more,true);
   assert.equal(secondInventory.has_more,false);
   assert.deepEqual(new Set([...firstInventory.rows,...secondInventory.rows].map(row=>row.item_id)),new Set(physical.map(item=>item.id)));
@@ -7327,7 +7333,30 @@ test("a standalone 30-item inspection splits a documented defect, a reference sa
   assert.equal(tasks.length,30);
   for(const task of tasks) {
     const taskPath="/staff/inspection-tasks/"+task.id;
+    if(task===tasks[1]) {
+      const completed=physical.find(item=>item.id===tasks[0].item_id)!;
+      const inventory=await c.fetch("/me/inventory?filter=inspected");
+      assert.deepEqual(inventory.summary,{total:30,inspection:29,handling:0,inspected:1,reference:0});
+      assert.deepEqual(inventory.rows.map(item=>item.item_id),[completed.id]);
+      assert.equal((await receiver.fetch("/staff/items/by-code?code="+completed.code)).item.inspection_stage,"inspected");
+      assert.equal((await c.fetch(path)).items.find(item=>item.item_id===completed.id).inspection_stage,"inspected");
+    }
     const started=await inspector.fetch(taskPath+"/start",{revision:task.revision});
+    if(task===tasks[0]) {
+      const current=physical.find(item=>item.id===task.item_id)!;
+      const untouched=physical.find(item=>item.id===tasks[1].item_id)!;
+      assert.equal((await receiver.fetch("/staff/items/by-code?code="+current.code)).item.inspection_stage,"in_inspection");
+      assert.equal((await receiver.fetch("/staff/items/by-code?code="+untouched.code)).item.inspection_stage,"pending",
+        "Starting one assignment must not mark another item on the same order line as inspecting.");
+      const currentCustomer=(await c.fetch("/me/inventory?code="+current.code)).rows[0];
+      const untouchedCustomer=(await c.fetch("/me/inventory?code="+untouched.code)).rows[0];
+      assert.equal(currentCustomer.inspection_stage,"in_inspection");assert.equal(untouchedCustomer.inspection_stage,"pending");
+      const pkg=(await pool.query("select package_id from warehouse_items where id=$1",[current.id])).rows[0].package_id;
+      const warehouse=(await receiver.fetch("/staff/packages/"+pkg)).items;
+      assert.equal(warehouse.find(item=>item.id===current.id).inspection_stage,"in_inspection");
+      const otherInPackage=warehouse.filter(item=>item.id!==current.id);
+      assert.equal(otherInPackage.length,9);assert(otherInPackage.every(item=>item.inspection_stage==="pending"));
+    }
     const view=await inspector.fetch(taskPath) as InspectionView;
     if(task.item_id!==physical[0].id) {
       await submitRequiredChecks(inspector,task.id,started.revision,view);
@@ -7344,6 +7373,9 @@ test("a standalone 30-item inspection splits a documented defect, a reference sa
     const written=await inspector.fetch(taskPath+"/results",{revision:started.revision,results},"PUT");
     await inspector.fetch(taskPath+"/submit",{revision:written.revision});
   }
+  const checkedInventory=await c.fetch("/me/inventory?filter=inspection");
+  assert.deepEqual(checkedInventory.rows,[]);
+  assert.deepEqual(checkedInventory.summary,{total:30,inspection:0,handling:0,inspected:30,reference:0});
   const order=await c.fetch(path);
   const submitted=await inspector.fetch("/staff/orders/"+draft.id+"/report/submit",{revision:order.revision,task_ids:tasks.map(task=>task.id)});
   await reviewer.fetch("/staff/reports/"+submitted.id+"/approve",{revision:1,checklist:["reviewed_en","evidence_checked"]},"POST",202);
@@ -7351,7 +7383,7 @@ test("a standalone 30-item inspection splits a documented defect, a reference sa
   const report=await c.fetch(path+"/report");
   assert.equal(report.snapshot.sections.length,30);
   const {summary:readyInventory}=await c.fetch("/me/inventory?filter=handling");
-  assert.deepEqual(readyInventory,{total:30,inspection:0,handling:30,reference:0});
+  assert.deepEqual(readyInventory,{total:30,inspection:0,handling:30,inspected:30,reference:0});
   assert.equal((await c.fetch("/me/desk?include_items=0")).summary.awaiting_instructions,readyInventory.handling);
   const defect=report.snapshot.sections.flatMap((section:{results:object[]})=>section.results)
     .find((result:{item:string;status:string})=>result.item===physical[0].code&&result.status==="OBSERVED_ISSUE");

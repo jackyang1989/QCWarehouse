@@ -36,7 +36,7 @@ async function session(email = randomUUID()+"@qcw.test", staff = false, existing
     const csrf = (await context.cookies()).find(cookie => cookie.name === "qcw_csrf")?.value;
     const result = await context.request.fetch("/api/v1"+path, {method,data:options.body,timeout:30000,
       headers:method==="GET"?{}:{origin,"Idempotency-Key":options.key??randomUUID(),...(csrf?{"X-CSRF-Token":csrf}:{})}});
-    assert.equal(result.status(), options.status ?? 200, method+" "+path);
+    assert.equal(result.status(), options.status ?? 200, method+" "+path+(result.status()===(options.status??200)?"":" "+await result.text()));
     if(result.headers()["content-type"]?.startsWith("application/pdf")) return result.body();
     return result.json();
   }
@@ -1365,6 +1365,69 @@ async function verifyScopeRenewal({page,call,errors},other) {
   } finally {await db.end();}
 }
 
+async function verifyItemInspectionStages(other) {
+  const url=new URL(process.env.QCW_BROWSER_DATABASE_URL);assert.equal(url.hostname,"127.0.0.1");assert.match(url.pathname,/^\/qcw_test-[a-z0-9-]+$/);
+  const {default:pg}=await import("pg"),db=new pg.Client({connectionString:url.href});await db.connect();
+  try {
+    const {rows:[fixture]}=await db.query(`select t.id,t.revision,t.state,o.id order_id,o.public_no,e.normalized_email email,w.code
+      from inspection_tasks t join order_lines l on l.id=t.order_line_id join orders o on o.id=l.order_id
+      join order_line_item_links a on a.id=t.assignment_id join warehouse_items w on w.id=a.item_id
+      join memberships m on m.org_id=o.org_id join user_emails e on e.user_id=m.user_id and e.is_primary
+      where t.state in ('IN_PROGRESS','SUBMITTED') and l.quantity=30 and o.is_test
+      order by (t.state='IN_PROGRESS') desc,t.id limit 1`);
+    assert(fixture,"Use the isolated 30-item partial-inspection workflow snapshot.");
+    const customer=await session(fixture.email,false,true),receiver=await session("receiving@qcw.test",true),inspector=await session("inspector@qcw.test",true);
+    const {page,call}=customer,current=(await call("/me/inventory?code="+fixture.code)).rows[0];
+    const continuing=fixture.state==="SUBMITTED";
+    assert.equal(current.inspection_stage,continuing?"inspected":"in_inspection");
+    const unfinished=await call("/me/inventory?filter=inspection");assert.equal(unfinished.summary.inspection,continuing?29:30);assert.equal(unfinished.summary.inspected,continuing?1:0);
+    const untouched=unfinished.rows.find(item=>item.inspection_stage==="pending");assert(untouched);
+    await other.call("/me/inventory?code="+fixture.code,{status:404});await receiver.call("/me/inventory",{status:403});
+    const drawer=page.getByRole("dialog",{name:"Warehouse Item · "+fixture.code,exact:true});
+    if(!continuing) {
+    await page.goto("/items?item="+fixture.code);
+    await drawer.getByText("Inspection underway",{exact:true}).waitFor();
+    await captureWizard(page,"item-inspection-underway","Warehouse items");
+    const view=await inspector.call("/staff/inspection-tasks/"+fixture.id);
+    const image=await sharp({create:{width:100,height:80,channels:3,background:"#11736d"}}).png().toBuffer();
+    const csrf=(await inspector.context.cookies()).find(cookie=>cookie.name==="qcw_csrf").value;
+    const results=[];
+    for(const member of view.components)for(const check of view.content.checks.filter(check=>check.required)) {
+      const uploaded=await inspector.context.request.post("/api/v1/staff/media",{headers:{origin,"Idempotency-Key":randomUUID(),"X-CSRF-Token":csrf},
+        multipart:{kind:"shot",photo:{name:"inspection-fixture.png",mimeType:"image/png",buffer:image}}});
+      assert.equal(uploaded.status(),201);const photo=(await uploaded.json()).id;
+      results.push({item_key:check.key,component:member.id,attempt:1,status:"RECORDED",method:check.method,
+        typed_value:check.type==="number"?0:check.type==="boolean"?false:"Observed",
+        ...(check.unit?{unit:check.unit}:{}),is_final:true,evidence_ids:[photo]});
+    }
+    const saved=await inspector.call("/staff/inspection-tasks/"+fixture.id+"/results",{method:"PUT",body:{revision:view.revision,results}});
+    await inspector.call("/staff/inspection-tasks/"+fixture.id+"/submit",{body:{revision:saved.revision}});
+    } else {
+      const previous=JSON.parse(await readFile(join(out,"viewports.json"),"utf8")).filter(row=>row.name==="item-inspection-underway");
+      assert.equal(previous.length,6);
+      for(const row of previous){assert.equal(row.overflow,0);await access(join(out,`${row.name}-${row.width}.png`));}
+      entries.push(...previous);
+      console.log("RESUME same submitted task after browser assertion failure; retaining its six verified underway captures",fixture.id);
+    }
+    const completed=await call("/me/inventory?filter=inspected");assert.equal(completed.summary.inspection,29);assert.equal(completed.summary.inspected,1);
+    assert.equal(completed.rows.length,1);assert.equal(completed.rows[0].code,fixture.code);assert.equal(completed.summary.handling,0);
+    assert.equal((await receiver.call("/staff/items/by-code?code="+fixture.code)).item.inspection_stage,"inspected");
+    assert.equal((await receiver.call("/staff/items/by-code?code="+untouched.code)).item.inspection_stage,"pending");
+    assert.equal((await call("/orders/"+fixture.order_id)).items.find(item=>item.item_id===current.item_id).inspection_stage,"inspected");
+    await page.goto("/items?filter=inspected");await page.getByRole("button",{name:fixture.code,exact:true}).waitFor();
+    assert.equal(await page.getByRole("row").filter({has:page.getByRole("button",{name:fixture.code,exact:true})}).getByText("Inspection complete",{exact:true}).count(),1);
+    assert.equal(await page.getByLabel("Select "+fixture.code+" for handling",{exact:true}).count(),0);
+    await captureWizard(page,"items-inspection-complete","Warehouse items");
+    await page.getByRole("button",{name:fixture.code,exact:true}).click();await drawer.getByText("Inspection complete",{exact:true}).waitFor();
+    await captureWizard(page,"item-inspection-complete","Warehouse items");
+    await page.goto("/items?filter=inspection&item="+untouched.code);
+    await page.getByRole("dialog",{name:"Warehouse Item · "+untouched.code,exact:true}).getByText("Awaiting inspection",{exact:true}).waitFor();
+    await captureWizard(page,"item-awaiting-inspection","Warehouse items");
+    assert.deepEqual([...customer.errors,...receiver.errors,...inspector.errors,...other.errors],[]);assert(entries.every(entry=>entry.overflow===0));
+    console.log("PASS actual inspector submission, exact customer/warehouse item stages, 29 pending / 1 complete, report gating, tenant isolation and six widths");
+  } finally {await db.end();}
+}
+
 async function verifyQuoteValidity({page,call,errors},other) {
   const admin=await session("admin@qcw.test",true),endpoint="/staff/admin/quote-policy";
   const initial=await admin.call(endpoint);
@@ -1908,6 +1971,7 @@ try {
   else if(process.env.QCW_BROWSER_SELLER_RETURN_ONLY==="1") await verifySellerReturn(customer,other);
   else if(process.env.QCW_BROWSER_SUPPORT_ONLY==="1") await verifySupportHistory(customer,other);
   else if(process.env.QCW_BROWSER_PAYMENT_MISMATCH_ONLY==="1") await verifyRejectedPaymentCase(other);
+  else if(process.env.QCW_BROWSER_ITEM_STAGE_ONLY==="1") await verifyItemInspectionStages(other);
   else if(process.env.QCW_BROWSER_QUOTE_POLICY_ONLY==="1") await verifyQuoteValidity(customer,other);
   else if(process.env.QCW_BROWSER_SCOPE_ONLY==="1") await verifyScopeRenewal(customer,other);
   else if(process.env.QCW_BROWSER_FULFILLMENT_ONLY==="1") await verifyFulfillmentRenewal(other);

@@ -12,6 +12,7 @@ import { hasStaffAccess, staffAccess } from "./staff-access";
 import { effectiveDispatchCharge, pendingDispatchQuote, pendingStorageQuote, renewableFulfillmentQuote, unresolvedQuotePayment } from "./dispatch";
 import { inspectionPaymentForOrder } from "./payments";
 import { quotePolicy } from "./quote-policy";
+import { itemInspectionStageSql } from "./inspection-stage";
 
 const inventoryJoins=`from warehouse_items w
     left join order_line_item_links a on a.item_id=w.id and a.unlinked_at is null
@@ -24,11 +25,12 @@ const awaitingItemInstructions=`(o.id is null or o.state in ('report_ready','act
       and (r.state='pending_safe_storage' or (r.state='active' and r.expires_at>now())))`;
 const activeReference=`exists(select 1 from reference_samples r where r.item_id=w.id and r.org_id=w.org_id
     and r.state='active' and r.expires_at>now())`;
-const awaitingOrInInspection=`o.state in ('awaiting_samples','samples_ready','queued','inspecting','qa_review')`;
-const itemFilters={all:"true",inspection:awaitingOrInInspection,handling:awaitingItemInstructions,reference:activeReference};
+const inspectedItem=`${itemInspectionStageSql}='inspected'`;
+const awaitingOrInInspection=`o.state in ('awaiting_samples','samples_ready','queued','inspecting','qa_review') and coalesce(${itemInspectionStageSql},'pending')<>'inspected'`;
+const itemFilters={all:"true",inspection:awaitingOrInInspection,inspected:inspectedItem,handling:awaitingItemInstructions,reference:activeReference};
 export async function items(db:DB,actor:Actor,options?:{page:number;filter:keyof typeof itemFilters;code?:string}) {
   return (await db.query(`select w.id item_id,w.code,w.custody_state,w.revision,w.identity_state,w.condition_state,w.storage_until,w.received_at,
-    ${itemHandlingHoldSql} handling_hold,
+    ${itemHandlingHoldSql} handling_hold,${itemInspectionStageSql} inspection_stage,
     p.code package_code,p.advice_id inbound_advice_id,
     (select t.tracking_norm from tracking_records t where t.package_id=p.id and t.direction='inbound' and t.closed_at is null order by t.generation desc limit 1) inbound_tracking_norm,
     (select max(sp.ends_at) from storage_periods sp where sp.item_id=w.id) paid_storage_until,
@@ -74,6 +76,7 @@ export async function customerInventory(db:DB,actor:Actor,page:number,filter:key
   const summary=await one(db,`select count(*)::int total,
     count(*) filter (where ${awaitingOrInInspection})::int inspection,
     count(*) filter (where ${awaitingItemInstructions})::int handling,
+    count(*) filter (where ${inspectedItem})::int inspected,
     count(*) filter (where ${activeReference})::int reference
     ${inventoryJoins} where w.org_id=$1 and w.parent_item_id is null`,[organization(actor)]);
   return {rows:rows.slice(0,20),has_more:rows.length>20,summary};
@@ -434,14 +437,7 @@ export async function warehousePackage(db:DB,actor:Actor,value:string,byCode=fal
   const items=(await db.query(`select w.id,w.code,w.revision,w.parent_item_id,w.intake_batch_id,w.identity_state,w.condition_state,w.custody_state,
     l.code location,l.zone location_zone,o.public_no order_number,e.position expected_position,e.declared_fields,
     exists(select 1 from reference_samples r where r.item_id=w.id and r.state='active') is_reference_sample,
-    (select case
-      when t.state='IN_PROGRESS' then 'in_inspection'
-      when t.state in ('SUBMITTED','QA_APPROVED') then 'inspected'
-      else 'pending'
-    end
-    from order_line_item_links a2 join inspection_tasks t on (t.assignment_id=a2.id or t.order_line_id=a2.order_line_id)
-    where a2.item_id=w.id and a2.unlinked_at is null and t.state<>'VOID'
-    order by case when t.state='IN_PROGRESS' then 0 when t.state in ('SUBMITTED','QA_APPROVED') then 1 else 2 end limit 1) inspection_stage
+    ${itemInspectionStageSql} inspection_stage
     from warehouse_items w left join storage_locations l on l.id=w.location_id
     left join order_line_item_links a on a.item_id=w.id and a.unlinked_at is null
     left join expected_items e on e.id=a.expected_item_id
@@ -463,14 +459,7 @@ export async function warehouseItem(db:DB,actor:Actor,code:string) {
     exists(select 1 from reference_samples r where r.item_id=w.id and r.state='active') is_reference_sample,
     (select r.state from reference_samples r where r.item_id=w.id order by r.revision desc limit 1) reference_sample_state,
     (select r.authorization_snapshot->>'seal_code' from reference_samples r where r.item_id=w.id order by r.revision desc limit 1) reference_seal_code,
-    (select case
-      when t.state='IN_PROGRESS' then 'in_inspection'
-      when t.state in ('SUBMITTED','QA_APPROVED') then 'inspected'
-      else 'pending'
-    end
-    from order_line_item_links a2 join inspection_tasks t on (t.assignment_id=a2.id or t.order_line_id=a2.order_line_id)
-    where a2.item_id=w.id and a2.unlinked_at is null and t.state<>'VOID'
-    order by case when t.state='IN_PROGRESS' then 0 when t.state in ('SUBMITTED','QA_APPROVED') then 1 else 2 end limit 1) inspection_stage,
+    ${itemInspectionStageSql} inspection_stage,
     (select coalesce(jsonb_agg(jsonb_build_object('id',c.id,'code',c.code,'custody_state',c.custody_state) order by c.code),'[]'::jsonb)
      from warehouse_items c where c.parent_item_id=w.id) components
     from warehouse_items w join packages p on p.id=w.package_id
