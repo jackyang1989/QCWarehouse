@@ -32,6 +32,8 @@ export type ExtractedCandidateLine = ExpectedProductLine & {
   raw_source?:string;
 };
 
+export type PurchaseEvidencePurpose = "purchase_evidence"|"reference_photo"|"size_chart";
+
 export type PurchaseEvidenceItem = {
   id:string;
   media_id?:string;
@@ -39,11 +41,12 @@ export type PurchaseEvidenceItem = {
   mime_type:string;
   size_bytes:number;
   sha256:string;
+  purpose?:PurchaseEvidencePurpose;
   supplier_alias:string;
   platform_source:string;
   purchase_order_ref:string;
   uploaded_at:string;
-  extraction_status:"needs_confirmation"|"confirmed"|"manual_only";
+  extraction_status:"needs_confirmation"|"confirmed"|"manual_only"|"pending_reassociation";
   extraction_note?:string;
   candidates:ExtractedCandidateLine[];
 };
@@ -96,6 +99,8 @@ export type DraftEditor = {
   notes:string;
   attachmentId?:string;
   attachmentName?:string;
+  attachmentPurpose?:"reference_photo"|"size_chart";
+  attachmentSha256?:string;
   extraLines:Row[];
   addingServiceLine?:boolean;
 };

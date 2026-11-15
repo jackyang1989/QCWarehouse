@@ -71,9 +71,19 @@ async function validateLineSamples(db:DB,org:string,line:{category_id:string;qua
     );
   }
   const lineAttachments=Array.isArray(attrs.attachment_ids)?attrs.attachment_ids:[];
-  const evidenceMediaIds=Array.isArray(attrs.purchase_evidences)
-    ?(attrs.purchase_evidences as {media_id?:unknown}[]).map(e=>e?.media_id).filter(Boolean)
+  const evidences=Array.isArray(attrs.purchase_evidences)
+    ?(attrs.purchase_evidences as {media_id?:unknown;extraction_status?:unknown;candidates?:unknown}[])
     :[];
+  const hasBlockingEvidence=evidences.some(ev=>
+    ev?.extraction_status==="pending_reassociation"
+  );
+  guard(
+    !hasBlockingEvidence,
+    "VALIDATION_FAILED",
+    "Confirm or remove retained purchase evidence from the previous service before saving or requesting a quote.",
+    422
+  );
+  const evidenceMediaIds=evidences.map(e=>e?.media_id).filter(Boolean);
   const itemAttachments=items.flatMap(item=>Array.isArray(item?.attachment_ids)?item.attachment_ids:[]);
   const allAttachments=[...new Set([...lineAttachments,...evidenceMediaIds,...itemAttachments])];
   for(const rawId of allAttachments) {

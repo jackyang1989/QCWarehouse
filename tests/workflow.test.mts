@@ -7904,6 +7904,30 @@ test("expected_lines quantity mismatch returns 422 VALIDATION_FAILED and subcate
   },"PATCH",422);
   assert.equal(patchMismatch.error.code,"VALIDATION_FAILED");
 
+  const patchReassoc=await c.fetch(`/orders/${validDraft.id}`,{
+    revision:validDraft.revision,
+    lines:[{
+      category_id:inspOffer.category_id,
+      offer_id:inspOffer.offer_id,
+      template_version_id:inspOffer.template_version_id,
+      quantity:3,
+      attributes:{
+        garment_type:"tops",
+        name:"Cotton Tee",
+        purchase_evidences:[{
+          id:"EV-STALE-1",
+          file_name:"po.png",
+          mime_type:"image/png",
+          size_bytes:1200,
+          sha256:"a".repeat(64),
+          extraction_status:"pending_reassociation",
+          candidates:[],
+        }],
+      },
+    }],
+  },"PATCH",422);
+  assert.equal(patchReassoc.error.code,"VALIDATION_FAILED");
+
   // Subcategory 3-sample compare offer ($79.00) and subcategory reference_match offers ($39.00)
   for(const sku of [
     "apparel-sub-tops-compare-3",

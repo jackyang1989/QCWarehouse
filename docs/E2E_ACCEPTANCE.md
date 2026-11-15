@@ -1,68 +1,64 @@
 # QCWarehouse — P0/P1 End-to-End Acceptance Report
 
 Date: 2026-11-15
-Target Application: `http://localhost:3000` (`next dev --webpack --port 3000`, `QCW_DEMO=1`, DB `qcw_test-workspace-final`)
-Integration Database: `postgresql://127.0.0.1:5432/qcw_test-workspace`
+Live Local Workspace: `http://localhost:3000` (`next dev --webpack --port 3000`, PID `11253`, `QCW_DEMO=1`, `DATABASE_URL=postgresql://127.0.0.1:5432/qcw_test-workspace-final`) — existing Demo user `f84bf4d6…` (`4` drafts, `8` non-draft orders, `0` active Golden Samples) preserved untouched.
+Isolated User-Journey E2E Server & DB: `http://localhost:3005` (`qcw_test_user_journey_e2e`, stopped cleanly after E2E finished).
 
 ## 1. Automated Verification Summary
 
 | Gate | Command | Scope & Conditions | Observed Result |
 |---|---|---|---|
-| TypeScript check | `npm run check` | `tsc --noEmit` across entire repo | **PASS** (exit `0`) |
+| TypeScript check | `npm run check` | `tsc --noEmit` across entire repository | **PASS** (exit `0`) |
 | Whitespace / patch hygiene | `git diff --check` | All modified tracked files | **PASS** (exit `0`) |
 | Docs & API contract check | `python3 docs/contracts/check.py` | 174 tasks, E1–E236, 69 pages, 111 cases, 46 product gates, 49 ops | **PASS** (exit `0`) |
 | Production Next.js build | `npm run build` | `next build` (Turbopack) | **PASS** (exit `0`) |
-| Empty schema + SQL invariants | `docs/contracts/schema.sql` + `docs/contracts/verify.sql` on `qcw_verify` | Executed in disposable clean Postgres DB before commit | **PASS** (exit `0`, rollback verified) |
-| Backend integration suite | `TEST_DATABASE_URL=postgresql://127.0.0.1:5432/qcw_test-workspace npm run test:integration` | Full `tests/workflow.test.mts` suite including new `expected_lines` 422 & subcategory offer test | **PASS** (`68 / 68` passed, `0` failed, `0` skipped, `30856ms`) |
-| Live Browser P0/P1 E2E Suite | `QCW_PLAYWRIGHT_MODULE=/tmp/qcw-browser-tooling/node_modules/playwright/index.mjs node /Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/scratch/p0_final_e2e.mjs` | Chromium headless against running Next dev server; real session cookies, CSRF, multipart media uploads, Demo Pay, worker publish, warehouse intake & vault sealing | **PASS** (exit `0`, `0` page errors) |
+| Backend integration suite | `TEST_DATABASE_URL=postgresql://127.0.0.1:5432/qcw_test-workspace npm run test:integration` | Full `../tests/workflow.test.mts` including `PATCH /orders/:id` `pending_reassociation` `422` test | **PASS** (`68 / 68` passed, `0` failed, `0` skipped, `29998ms`) |
+| 10-Scenario Real Browser User-Journey Suite | `node /Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/scratch/p0_user_journey_e2e.mjs` | Headless Chrome against isolated `qcw_test_user_journey_e2e` (`http://localhost:3005`); OTP login, registration, multipart uploads, 4 viewports, Demo Pay, warehouse intake & GS sealing | **PASS** (`10 / 10` scenarios, `21 / 21` unique screenshots, `21 / 21` viewport overflow `0px`, `0` page/console errors) |
 
-*(Note: The legacy full-stack `tests/workspace.browser.mjs` runner was not separately executed after the final edit; all customer workspace routes, negative cases, 6 viewports, and all 3 service flows were verified directly via `p0_final_e2e.mjs` + `68 / 68` integration tests.)*
+## 2. Ten-Scenario Real User-Journey Matrix (`p0_user_journey_e2e.mjs`)
 
-## 2. Browser E2E Test Matrix (`p0_final_e2e.mjs`)
+| ID | Scenario & Path Tested | Expected Behavior | Observed Result & Order/Evidence |
+|---|---|---|---|
+| `S1` | Product Inspection · `tops`, 1 style × 3 units (`$35 × 3 = $105.00`) | Fresh account starts at `0 line(s)` + `PROVISIONAL ESTIMATE`, `+ Add 1 Product Line (Qty = 3)` confirms row -> Steps 4–6 + Demo Pay | **PASS** (`QW-85DCCB501DFF`, `$105.00`) |
+| `S2` | Product Inspection · `basic`, 50 units / 6 SKUs / 1 Box (`$29 × 50 = $1,450.00`) + warehouse intake discrepancy | Paste 6 CSV lines -> confirm -> `Single Parcel / One Box` -> pay -> staff logs `48` units -> `/parcels?tab=received` shows `Quantity discrepancy (48/50)` | **PASS** (`QW-99E01DD69B28`, `$1,450.00`, `48/50`) |
+| `S3` | Product Inspection · `basic`, 50 units / 3 Parcels / 2 Suppliers (`$1,450.00`) | Auto-group 3 tracking numbers & 2 suppliers -> `Order Summary` shows `3 waybill(s)` & `SUPPLIERS 2` -> Demo Pay | **PASS** (`QW-6E7DAF4E7614`, `$1,450.00`) |
+| `S4` | Screenshot-Only (No Auto-OCR) + 3A/3B strict separation + Manual Transcription recovery | Upload PO screenshot in 3A -> `Reference only (No Auto-OCR)`, `0 line(s)`, 3B attachment `No file chosen`, `Continue →` disabled with `#wizard-continue-block-reason`; upload Size chart in 3B -> verify 3A unchanged; `+ Transcribe Row` -> confirm -> unblocks | **EXPECTED_BLOCKED -> RECOVERED (`PASS`)** |
+| `S5` | Sample Comparison · 2 Samples (`basic`, `$59.00`) + auto-init + differing-size guard | Switching Step 1 selects `compare-2` (`$59.00`), Step 3 auto-renders 2 rows without clicking init, differing sizes trigger `[data-testid="compare-condition-warning"]` + block Continue until `#step3b-size-mismatch-check` checked -> Demo Pay | **PASS** (`QW-38B1D175B491`, `$59.00`) |
+| `S6` | Sample Comparison · `2 -> 3` toggle (`$79.00`) preserves edits | Edit row 0 (`Atelier Alpha Jacket`) -> Step 2 `3 samples` -> Step 3 keeps row 0 edit and renders 3 rows (`$79.00`) -> Demo Pay | **PASS** (`QW-9983EC2169EB`, `$79.00`) |
+| `S7` | Golden Sample Matching · `0` active samples (`EXPECTED_BLOCKED`) | `#golden-sample-step1-gate` displays `Active sealed: 0`, `Pending vault seal: 0`, blocks `Continue →` across `1440px` and `390px` | **EXPECTED_BLOCKED (`PASS`)** |
+| `S8` | Golden Sample Matching · `pending_safe_storage` only (`EXPECTED_BLOCKED` + backend `422`) | Seed sample inspected, report published, reserved (`reserve_reference`), not yet vaulted: Step 1 shows `Pending vault seal: 1` & blocks Continue; `POST /orders` returns `422` | **EXPECTED_BLOCKED (`PASS`)** |
+| `S9` | Golden Sample Matching · Active vault sample (`GS-20261115-863240`) + Cross-tenant `422` + `$39.00` Checkout | Warehouse seals sample into `A-04-02-03`; cross-tenant buyer rejected (`422`); owner completes Step 1–6 & Demo Pay for 1 candidate unit (`$39.00`) | **PASS** (`QW-5714FC2C66A8`, `$39.00`) |
+| `S10` | Service Switching Hygiene + Reload Draft Recovery + `Pending re-association` Guard | Upload 3A PO + 3B line/photo on `Product Inspection` -> reload restores edits -> switch to `Sample Comparison` shows Step 1 switch banner, clears 3B ref photo, enters Step 3 cleanly via `deferDraftSaveUntilStep3`, blocks Continue under `Pending re-association` until `"Confirm for Sample Comparison"` is clicked | **PASS** |
 
-### A. Negative & Guardrail Cases (`9 / 9 PASS`)
-1. `invalidOfferParam`: `/orders/new?offer=does-not-exist` surfaces warning notice without crashing or silent default masking — **PASS**
-2. `categoryStatusConsistency`: `/` homepage (`Apparel Is Live Today`) and Step 1 agree `Apparel` is active and planned/restricted categories are genuinely disabled — **PASS**
-3. `goldenSampleZeroBlockedStep1`: With `0` active vault samples, `Golden Sample Matching` shows `"Requires an approved reference sample"` and `golden-sample-step1-gate`, and disables `Continue →` and `Step 2` across `1440px` and `390px` — **PASS**
-4. `generalApparelShotsFallback`: Step 2 displays `Standard Studio Camera Angles` when template `shots` list is empty on `General Apparel` — **PASS**
-5. `unconfirmedCandidatesBlocked`: Pasting rows into Step 3A puts `Order Summary` into `Action required` and disables Step 4 navigation until confirmed — **PASS**
-6. `quantityMismatchInvalidatesEstimate`: Editing line qty `2 -> 4` while auto-sync is off marks `CATALOG ESTIMATE` as `Outdated estimate` with zero payable dollar total — **PASS**
-7. `autoSyncImmediateFix`: Checking `Auto-sync Step 2 commissioned quantity` immediately syncs qty to `4` and updates estimate to `$140.00` — **PASS**
-8. `serviceSwitchResetsState`: Returning Step 3 -> Step 1 and switching `Product Inspection` -> `Sample Comparison` clears incompatible lines/parcels/quotes while preserving uploaded `media_id` file (`1 file(s)`) — **PASS**
-9. `evidenceRemoveSyncsCount`: Clicking `Remove File` updates `Order Summary` to `0 file(s)` — **PASS**
+## 3. Visually Verified Screenshot Evidence Inventory (`browser_evidence/user_journey_e2e/`)
 
-### B. Full Positive Service Workflows (`3 / 3 PASS`)
-1. **Product Inspection (Tops & Knitwear · 50 units · 6 SKUs · 2 suppliers · 3 parcels · 48/50 Discrepancy)**:
-   - Order `QW-63A714CB655E`, `$1,750.00 USD` (`Tops & Knitwear × 50`), paid via Demo Pay.
-   - Purchased PO image uploaded (`_fixture_po.png`) + 6 CSV rows parsed (`2` total evidence items verified on Step 5 & Order Summary).
-   - Auto-grouped `Planned Multi-Parcel List (3)`; warehouse checked in 3 parcels and logged `18 + 18 + 12 = 48` units vs `50` expected; `/parcels?tab=received` rendered `Quantity discrepancy (12/14)`.
-2. **Sample Comparison (Tops & Knitwear · 3 samples · 3 suppliers)**:
-   - Order `QW-4EE3CBFA1F50`, `$79.00 USD`, 3 initialized lines (`Supplier Alpha`, `Supplier Beta`, `Supplier Gamma`), Demo Pay completed.
-3. **Golden Sample Matching (Seed -> Vault Sealing -> Match Order)**:
-   - Seed inspection order received, inspected (`2`-pass measurements + required shots), report approved (`202`), published via `workOnce()`, reserved (`reserve_reference`), sealed by warehouse into `A-04-02-03` (`GS-20261115-116026`).
-   - Verified `/items#reference-samples` visibility, booked restock match order `QW-8BE99869AA38` (`$39.00 USD`), Demo Pay completed.
+All `21` screenshots passed size (`>5KB`), zero duplicate SHA-256, and `0px` horizontal overflow checks:
 
-### C. Responsive & DOM Uniqueness Matrix (`0px` horizontal overflow across all checks)
-- Viewports verified: `1440px`, `1280px`, `1024px`, `768px`, `390px`, `375px` (`6` widths on 50-unit Step 3; `1440/1280/768/390/375` across `/account`, `/orders`, `/actions`, `/reports`, `/parcels`, `/items#reference-samples`, `/account/billing`, `/account/notifications`, `/support`).
-- Every `/orders/new` check asserted strictly `order-summary-card === 1`, `order-summary-estimate === 1`, `order-summary-alert <= 1`, and `document.documentElement.scrollWidth - window.innerWidth <= 1` (`0px` observed).
+| File | Route / Viewport | Service / Step | SHA-256 Prefix & Bytes |
+|---|---|---|---|
+| `s1-step1-select-1440.png` | `/orders/new` · `1440x900` | Product Inspection · Step 1 | `9ca06d53ac95` (`262655 B`) |
+| `s1-step2-configure-1440.png` | `/orders/new` · `1440x900` | Product Inspection · Step 2 | `d047475cbdcb` (`231958 B`) |
+| `s1-step3-single-sku-1440.png` | `/orders/new` · `1440x900` | Product Inspection · Step 3 | `4ddbedb396a7` (`411699 B`) |
+| `s1-step3-single-sku-1280.png` | `/orders/new` · `1280x900` | Product Inspection · Step 3 | `e192840509cd` (`407434 B`) |
+| `s1-step3-single-sku-768.png` | `/orders/new` · `768x1024` | Product Inspection · Step 3 | `ab39619564de` (`359094 B`) |
+| `s1-step3-single-sku-390.png` | `/orders/new` · `390x844` | Product Inspection · Step 3 | `388b7b14a35e` (`297952 B`) |
+| `s1-pi-3u-step5-1440.png` | `/orders/new` · `1440x900` | Product Inspection · Step 5 | `b48870bb3bba` (`276358 B`) |
+| `s1-pi-3u-step6-1440.png` | `/orders/new` · `1440x900` | Product Inspection · Step 6 | `9feed0a2ea0a` (`219801 B`) |
+| `s2-50u-6sku-1box-1280.png` | `/orders/new` · `1280x900` | Product Inspection · Step 3 (50u 1 Box) | `e6b0dbbb89ff` (`475517 B`) |
+| `s2-parcels-48-vs-50-1440.png` | `/parcels` · `1440x900` | Warehouse Intake Discrepancy (`48/50`) | `e1ed95252555` (`124208 B`) |
+| `s3-50u-3parcels-768.png` | `/orders/new` · `768x1024` | Product Inspection · Step 3 (3 Parcels / 2 Suppliers) | `5486c0ed5668` (`509859 B`) |
+| `s4-screenshot-only-EXPECTED_BLOCKED-1440.png` | `/orders/new` · `1440x900` | Product Inspection · Step 3 (`EXPECTED_BLOCKED`) | `3c3face80c40` (`474403 B`) |
+| `s5-compare-2samples-1440.png` | `/orders/new` · `1440x900` | Sample Comparison · Step 3 (2 Samples) | `320ed5f1532a` (`456850 B`) |
+| `s6-compare-3samples-1440.png` | `/orders/new` · `1440x900` | Sample Comparison · Step 3 (3 Samples) | `5c78ae42b973` (`463598 B`) |
+| `s7-golden-zero-EXPECTED_BLOCKED-1440.png` | `/orders/new` · `1440x900` | Golden Sample Matching · Step 1 (`EXPECTED_BLOCKED`) | `42197dbc5e2c` (`345430 B`) |
+| `s7-golden-zero-EXPECTED_BLOCKED-390.png` | `/orders/new` · `390x844` | Golden Sample Matching · Step 1 (`EXPECTED_BLOCKED`) | `a9052c7da718` (`226805 B`) |
+| `s8-golden-pending-seal-EXPECTED_BLOCKED-1440.png` | `/orders/new` · `1440x900` | Golden Sample Matching · Step 1 (`EXPECTED_BLOCKED`) | `1f98f95a0e6d` (`354111 B`) |
+| `s9-golden-active-1440.png` | `/orders/new` · `1440x900` | Golden Sample Matching · Step 3 (Active Seal) | `c34da715d898` (`429063 B`) |
+| `s9-golden-step5-1440.png` | `/orders/new` · `1440x900` | Golden Sample Matching · Step 5 | `6cfae2e06830` (`278740 B`) |
+| `s9-golden-step6-1440.png` | `/orders/new` · `1440x900` | Golden Sample Matching · Step 6 | `7d8284eea2eb` (`220841 B`) |
+| `s10-service-switch-reassoc-EXPECTED_BLOCKED-1440.png` | `/orders/new` · `1440x900` | Sample Comparison · Step 3 (`EXPECTED_BLOCKED`) | `0d30378044e9` (`529063 B`) |
 
-## 3. Visually Inspected Screenshot Evidence (`browser_evidence/p0_final/`)
-- `/Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/browser_evidence/p0_final/01-home-category-consistency-1440.png`
-- `/Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/browser_evidence/p0_final/02-step1-golden-blocked-1440.png`
-- `/Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/browser_evidence/p0_final/03-step1-golden-blocked-390.png`
-- `/Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/browser_evidence/p0_final/04-step3-qty-mismatch-outdated-estimate-1440.png`
-- `/Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/browser_evidence/p0_final/05-step3-scrolled-single-summary-1440.png`
-- `/Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/browser_evidence/p0_final/06-flow1-50u-step3-1280.png`
-- `/Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/browser_evidence/p0_final/06-flow1-50u-step3-390.png`
-- `/Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/browser_evidence/p0_final/06-flow1-50u-step3-1440.png`
-- `/Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/browser_evidence/p0_final/07-flow1-50u-step5-quote-1440.png`
-- `/Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/browser_evidence/p0_final/08-flow1-parcels-48-vs-50-discrepancy-1440.png`
-- `/Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/browser_evidence/p0_final/09-flow1-order-detail-discrepancy-1440.png`
-- `/Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/browser_evidence/p0_final/10-flow2-compare-3-step5-1440.png`
-- `/Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/browser_evidence/p0_final/11-flow3-golden-step1-ready-1440.png`
-- `/Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/browser_evidence/p0_final/12-flow3-golden-step5-quote-1440.png`
-- Raw JSON summary: `/Users/jianouyang/.gemini/antigravity/brain/d5ad6ffa-b7ba-43c8-939e-75f0337636c2/browser_evidence/p0_final/summary.json`
+## 4. Open External Dependencies (`OPEN`)
 
-## 4. Known Open Items (`OPEN`)
-- **Automated Vision/PDF OCR service**: Marked `OPEN` cleanly in UI (`Vision / PDF OCR Status (OPEN)`), never faked; deterministic CSV/TSV/1688 text parsing and manual transcription with SHA-256 evidence archival and user confirmation queue are production-ready.
-- **External SaaS & real warehouse environment verification**: Real Stripe live webhook/checkout, Postmark production mail, Kuaidi100 live webhook credentials, and physical scanner/warehouse SOP sign-off remain separate go-live gates.
+- **Automated Vision / PDF OCR Service (`OPEN`)**: No external OCR backend is wired in this environment; Step 3A strictly marks image/PDF uploads `Reference only (No Auto-OCR)` and never fabricates SKU rows or billable quantities.
+- **Production Third-Party Services & Warehouse Sign-off (`OPEN`)**: Production Stripe live keys/webhooks, Postmark email credentials, Kuaidi100 webhook credentials, physical barcode scanner/printer testing, and formal commercial SLA/rate-card approvals remain separate production release gates.
