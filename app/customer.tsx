@@ -7,7 +7,7 @@ import { RecentUpdates } from "./notifications";
 import { ParcelOwnershipReviews } from "./ticket-desk";
 import { categoryIconName, PlatformIcon } from "./chrome";
 import { ApparelIllustration } from "./report-guide";
-import { CategoryTiles } from "./category-coverage";
+import { CategoryTiles, matchShowcaseCategoryOffer, SHOWCASE_CATEGORIES } from "./category-coverage";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
@@ -69,12 +69,16 @@ const serviceDetails={
 };
 
 const prototypeCategories=[
-  {id:"apparel",name:"Apparel",state:"ACTIVE",desc:"T-shirts, leggings, sportswear and dresses",icon:categoryIconName("apparel")},
-  {id:"footwear",name:"Footwear",state:"PLANNED",desc:"Shoes, sneakers and footwear",icon:categoryIconName("footwear")},
-  {id:"bags",name:"Bags & Accessories",state:"PLANNED",desc:"Handbags, backpacks and accessories",icon:categoryIconName("bags")},
-  {id:"home",name:"Home & Lifestyle",state:"PLANNED",desc:"Home textiles, decor and everyday goods",icon:categoryIconName("home")},
-  {id:"electronics",name:"Electronics",state:"RESTRICTED",desc:"Limited visual checks only; no electrical certification",icon:categoryIconName("electronics")},
-  {id:"toys",name:"Toys & Children’s Products",state:"RESTRICTED",desc:"Safety-critical checks require separate capability review",icon:categoryIconName("toys")},
+  ...SHOWCASE_CATEGORIES.map(c=>({
+    id:c.key,
+    name:c.name,
+    state:c.fallbackState,
+    desc:c.desc,
+    slugs:c.slugs,
+    labels:c.labels,
+    icon:categoryIconName(c.key),
+  })),
+  {id:"toys",name:"Toys & Children’s Products",state:"RESTRICTED",desc:"Safety-critical checks require separate capability review",slugs:["toys"],labels:["Toys","Toys & Children’s Products"],icon:categoryIconName("toys")},
 ] as const;
 
 export function Catalog({path}:{path:string}) {
@@ -93,18 +97,9 @@ export function Catalog({path}:{path:string}) {
   const selected=categories.has(activeCategory)?activeCategory:"";
   const isCategories=path==="/categories",isPricing=path==="/pricing";
 
-  const matchProtoOffer=(id:string)=>allOffers.find((o:Row)=>{
-    const en=String(o.category?.en??"").toLowerCase();
-    return id==="apparel"?en.includes("apparel"):
-      id==="footwear"?en.includes("footwear"):
-      id==="bags"?en.includes("bag"):
-      id==="home"?en.includes("home"):
-      id==="electronics"?en.includes("electronic"):
-      id==="toys"?en.includes("toy"):false;
-  });
   const matchedCatIds=new Set<string>();
   const baseCategoryCards=prototypeCategories.map(c=>{
-    const liveOffer=matchProtoOffer(c.id);
+    const liveOffer=allOffers.find((o:Row)=>matchShowcaseCategoryOffer({key:c.id as "apparel",slugs:c.slugs,labels:c.labels},o,c.name));
     if(liveOffer?.category_id) matchedCatIds.add(liveOffer.category_id);
     return {...c,state:liveOffer?"ACTIVE":c.state,liveOffer};
   });
@@ -427,13 +422,14 @@ export function HowItWorks() {
     <div className="actions"><Link className="button primary" href="/catalog">Find an inspection service</Link><Link className="button" href="/faq">Read frequently asked questions</Link></div>
   </>;
 }
-const wizardCategoryCatalog=[
-  {key:"apparel",name:"Apparel",icon:"category_apparel",fallbackState:"ACTIVE"},
-  {key:"footwear",name:"Footwear",icon:"category_footwear",fallbackState:"PLANNED"},
-  {key:"bags",name:"Bags & Accessories",icon:"category_bags",fallbackState:"PLANNED"},
-  {key:"home",name:"Home & Lifestyle",icon:"category_home",fallbackState:"PLANNED"},
-  {key:"electronics",name:"Electronics",icon:"category_electronics",fallbackState:"RESTRICTED"},
-] as const;
+const wizardCategoryCatalog=SHOWCASE_CATEGORIES.map(c=>({
+  key:c.key,
+  name:c.name,
+  slugs:c.slugs,
+  labels:c.labels,
+  icon:categoryIconName(c.key),
+  fallbackState:c.fallbackState,
+}));
 
 const wizardServiceCards=[
   {
@@ -505,7 +501,9 @@ export function NewOrder({customerId}:{customerId:string}) {
   const stepPanel=useRef<HTMLDivElement>(null);
   const previousStep=useRef(step);
   useEffect(()=>{
-    if(previousStep.current!==step) stepPanel.current?.scrollIntoView({block:"start"});
+    if(previousStep.current!==step) {
+      window.scrollTo({top:0,behavior:"smooth"});
+    }
     previousStep.current=step;
   },[step]);
   const [summaryOpen,setSummaryOpen]=useState(false);
@@ -569,6 +567,7 @@ export function NewOrder({customerId}:{customerId:string}) {
   const quoteWrite=useRef<{revision:number;key:string}>(null);
   const submitKey=useRef("");
   const inFlight=useRef(false);
+  const autoSaveTask=useRef<Promise<unknown>|null>(null);
   const [draftOrder,setDraftOrder]=useState<Row>();
   const [serverQuote,setServerQuote]=useState<Row>();
   const [submittedCharge,setSubmittedCharge]=useState<Row>();
@@ -580,9 +579,12 @@ export function NewOrder({customerId}:{customerId:string}) {
 
   // Match prototype category key or dynamic category_id to real backend category_id
   function matchesCategoryOffer(key:string,offer:Row,name?:string) {
+    const spec=SHOWCASE_CATEGORIES.find(c=>c.key===key);
+    if(spec) return matchShowcaseCategoryOffer(spec,offer,name);
+    const catId=String(offer.category_id??"").toLowerCase();
     const slug=String(offer.category_slug??"").toLowerCase();
     const en=String(offer.category?.en??"").toLowerCase();
-    return offer.category_id===key||slug===key||(key==="home"&&slug==="home_goods")||
+    return catId===key.toLowerCase()||slug===key.toLowerCase()||
       (Boolean(en)&&(en===key.toLowerCase()||(name!==undefined&&en===name.toLowerCase())));
   }
   function resolveCategoryId(key:string):string|undefined {
@@ -708,20 +710,18 @@ export function NewOrder({customerId}:{customerId:string}) {
       setRecoveryReady(true);
       return;
     }
-    const requestedOffer=params.get("offer")??"";
-    if(data&&!requestedOffer&&!params.has("draft")) {
-      const first=offers.find(o=>o.category_slug==="apparel"&&o.service==="inspection"&&templateVariantFor(o)==="tops")
-        ??offers.find(o=>o.category_slug==="apparel"&&o.service==="inspection")??offers[0];
-      if(first) {
-        setCategoryKey(first.category_slug??first.category_id);
-        setSelectedOfferId(first.offer_id);
-        setServiceKind(first.service);
-        setTemplateVariant(templateVariantFor(first));
-        setQty(Math.max(first.rules.minimum,Math.min(first.rules.maximum,3)));
-      }
+    const requestedOffer=(params.get("offer")??"").trim();
+    const firstDefault=offers.find(o=>o.category_slug==="apparel"&&o.service==="inspection"&&templateVariantFor(o)==="tops")
+      ??offers.find(o=>o.category_slug==="apparel"&&o.service==="inspection")??offers[0];
+    if(data&&!requestedOffer&&!params.has("draft")&&firstDefault) {
+      setCategoryKey(firstDefault.category_slug??firstDefault.category_id);
+      setSelectedOfferId(firstDefault.offer_id);
+      setServiceKind(firstDefault.service);
+      setTemplateVariant(templateVariantFor(firstDefault));
+      setQty(Math.max(firstDefault.rules.minimum,Math.min(firstDefault.rules.maximum,3)));
     }
-    if(requestedOffer && offers.length>0) {
-      const matched=offers.find(x=>x.offer_id===requestedOffer);
+    if(requestedOffer && offers.length>0 && !requestedDraft) {
+      const matched=offers.find(x=>x.offer_id===requestedOffer||x.sku_code===requestedOffer);
       if(matched) {
         const matchedCat=wizardCategories.find(c=>resolveCategoryId(c.key)===matched.category_id);
         if(matchedCat) setCategoryKey(matchedCat.key);
@@ -729,6 +729,15 @@ export function NewOrder({customerId}:{customerId:string}) {
         setServiceKind(matched.service);
         setTemplateVariant(templateVariantFor(matched));
         setQty(matched.service==="compare"?matched.rules.minimum:Math.max(1,matched.rules.minimum));
+      } else {
+        if(firstDefault) {
+          setCategoryKey(firstDefault.category_slug??firstDefault.category_id);
+          setSelectedOfferId(firstDefault.offer_id);
+          setServiceKind(firstDefault.service);
+          setTemplateVariant(templateVariantFor(firstDefault));
+          setQty(Math.max(firstDefault.rules.minimum,Math.min(firstDefault.rules.maximum,3)));
+        }
+        setWizardError("The requested service offer is unavailable or not yet open for online ordering. Please select an open Apparel service below.");
       }
     }
     if(requestedDraft) {
@@ -829,6 +838,35 @@ export function NewOrder({customerId}:{customerId:string}) {
   const singleLineName=effectiveDisplayName;
   const effectiveSupplier=supplierRef.trim()||expectedLines.find(l=>l.supplier_alias.trim())?.supplier_alias.trim()||"";
 
+  const allRefItems:Row[]=Array.isArray(refs.data?.items)?refs.data.items:[];
+  const categoryRefItems=allRefItems.filter((r:Row)=>!r.category_id||r.category_id===activeCategoryId);
+  const activeRefs=categoryRefItems.filter((r:Row)=>r.state==="active"&&new Date(r.expires_at)>new Date());
+  const pendingCategoryRefs=categoryRefItems.filter((r:Row)=>r.state==="pending_safe_storage");
+  const expiredCategoryRefs=categoryRefItems.filter((r:Row)=>r.state==="expired"||(r.state==="active"&&new Date(r.expires_at)<=new Date()));
+  const otherCategoryActiveRefs=allRefItems.filter((r:Row)=>Boolean(r.category_id)&&r.category_id!==activeCategoryId&&r.state==="active"&&new Date(r.expires_at)>new Date());
+  const selectedRef=activeRefs.find((r:Row)=>r.reference_id===referenceId);
+  const goldenSampleBlockedInStep1=serviceKind==="reference_match"&&Boolean(refs.data)&&!refs.error&&activeRefs.length===0;
+
+  useEffect(()=>{
+    if(serviceKind!=="reference_match"||!refs.data||refs.error||referenceId) return;
+    const readyNonBusy=activeRefs.filter((r:Row)=>!r.in_use);
+    if(readyNonBusy.length===1) setReferenceId(readyNonBusy[0].reference_id);
+  },[serviceKind,refs.data,refs.error,activeCategoryId,referenceId]);
+
+  const hasQuantityMismatch=!manualQuoteMode&&expectedLines.length>0&&expectedTotalQty!==clampedQty;
+  const hasPendingCandidates=pendingCandidateCount>0;
+  const missingReferenceSample=serviceKind==="reference_match"&&Boolean(refs.data)&&!refs.error&&!selectedRef;
+  const estimateInvalidReason=hasQuantityMismatch
+    ?`Expected product lines (${expectedTotalQty} units) differ from commissioned quantity (${clampedQty}). Sync quantities or update lines in Step 3B.`
+    :hasPendingCandidates
+      ?`${pendingCandidateCount} extracted candidate row(s) are unconfirmed in Step 3A.`
+      :missingReferenceSample
+        ?activeRefs.length===0
+          ?"No active Golden Sample is available in warehouse vault for this category."
+          :"Select an active Golden Sample in Step 2 to price this comparison."
+        :"";
+  const isEstimateInvalid=Boolean(estimateInvalidReason);
+
   const scopeAttributes={garment_type:activeGarmentType,name:effectiveDisplayName,
     size_label:baseSize||expectedLines[0]?.size_label||"",
     color_declared:baseColor||expectedLines[0]?.color_declared||"",
@@ -842,23 +880,70 @@ export function NewOrder({customerId}:{customerId:string}) {
   const allOfferShots:Row[]=Array.isArray(configuredOffer?.content?.shots)?configuredOffer.content.shots:[];
   const filteredShots=allOfferShots.filter(shot=>shot.required&&conditionMatches(shot.required_if,scopeAttributes));
 
-  function chooseOffer(offer:Row,quantity=qty) {
+  function chooseOffer(offer:Row,quantity=qty,options?:{preserveLines?:boolean}) {
+    const switchingServiceOrCategory=offer.service!==serviceKind||(Boolean(activeCategoryId)&&offer.category_id!==activeCategoryId);
+    const shouldResetLines=!options?.preserveLines&&switchingServiceOrCategory;
+    const hadServiceSpecificState=expectedLines.length>0||itemRows.length>0||
+      plannedParcels.some(p=>Boolean(p.tracking_no.trim())||p.allocations.length>0)||
+      Boolean(referenceId)||sizeMismatchConfirmed||Boolean(serverQuote);
     setServiceKind(offer.service);
     setTemplateVariant(templateVariantFor(offer));
     setSelectedOfferId(offer.offer_id);
-    setQty(Math.max(offer.rules.minimum,Math.min(offer.rules.maximum,quantity||offer.rules.minimum)));
+    const targetQty=switchingServiceOrCategory
+      ?(offer.service==="compare"||offer.service==="reference_match"?offer.rules.minimum:Math.max(offer.rules.minimum,Math.min(offer.rules.maximum,3)))
+      :Math.max(offer.rules.minimum,Math.min(offer.rules.maximum,quantity||offer.rules.minimum));
+    setQty(targetQty);
     setManualQuoteMode(false);
-    setReferenceId("");
-    setSizeMismatchConfirmed(false);
-    setPointTolerances({});
-    setToleranceMode("record_only");
+    setQuotedFingerprint("");
     setServerQuote(undefined);
-    setSavedNotice("");
+    setConsents({});
+    setPolicyAccepted(false);
+    if(shouldResetLines) {
+      setExpectedLines([]);
+      setExpectedUndoStack([]);
+      setItemRows([]);
+      setPlannedParcels([]);
+      setParcelMode("single");
+      setBaseTrackingNo("");
+      setShowMatrixBuilder(false);
+      setShowAdvancedUnits(false);
+      setShowPasteImport(false);
+      setPurchaseEvidences(prev=>prev.filter(ev=>Boolean(ev.media_id)).map(ev=>({
+        ...ev,
+        candidates:[],
+        extraction_status:"manual_only",
+        extraction_note:"Preserved uploaded media file across service switch. Confirm or re-add product lines for the new service.",
+      })));
+      setReferenceId("");
+      setSizeMismatchConfirmed(false);
+      setPointTolerances({});
+      setToleranceMode("record_only");
+      setWizardError("");
+      setSavedNotice(hadServiceSpecificState
+        ?`Switched to ${wizardServiceCards.find(c=>c.service===offer.service)?.title??offer.title.en}. Incompatible product lines, parcel mappings, and prior quotes were cleared.`
+        :"");
+    } else {
+      if(offer.service!=="reference_match") setReferenceId("");
+      setSizeMismatchConfirmed(false);
+      setPointTolerances({});
+      setToleranceMode("record_only");
+      setSavedNotice("");
+    }
+  }
+
+  function switchToServiceKind(targetService:"inspection"|"compare"|"reference_match",preferredCategoryId=activeCategoryId) {
+    const pool=offers.filter(o=>o.category_id===preferredCategoryId&&o.service===targetService);
+    if(!pool.length) return;
+    const match=offerFor(pool,templateVariant,qty)??
+      pool.find(o=>templateVariantFor(o)===templateVariant)??
+      pool.find(o=>templateVariantFor(o)==="tops")??
+      pool[0];
+    if(match) chooseOffer(match);
   }
 
   function selectTemplateVariant(variant:string) {
     const match=offerFor(serviceOffers,variant,qty)??serviceOffers.find(o=>templateVariantFor(o)===variant);
-    if(match) chooseOffer(match);
+    if(match) chooseOffer(match,qty,{preserveLines:true});
   }
 
   function applyExpectedLinesUpdate(nextLines:ExpectedProductLine[],options?:{recordUndo?:boolean;forceSync?:boolean}) {
@@ -871,12 +956,13 @@ export function NewOrder({customerId}:{customerId:string}) {
     const nextSum=sumExpectedLineQuantity(nextLines);
     if(nextSum>0&&(syncQuantityFromLines||options?.forceSync)) {
       if(serviceKind==="compare") {
-        const match=offerFor(serviceOffers,templateVariant,nextSum);
+        const match=offerFor(serviceOffers,templateVariant,nextSum)??offerFor(serviceOffers,"basic",nextSum);
         if(match) {
           setQty(nextSum);
           setSelectedOfferId(match.offer_id);
+          setTemplateVariant(templateVariantFor(match));
         }
-      } else if(nextSum<=maxOnlineQty) {
+      } else if(nextSum<=maxOnlineQty&&nextSum>=minQty) {
         setQty(nextSum);
         const match=offerFor(templateOffers,templateVariant,nextSum);
         if(match) setSelectedOfferId(match.offer_id);
@@ -1215,14 +1301,23 @@ export function NewOrder({customerId}:{customerId:string}) {
   }
 
   function discardEvidenceQueue(evidenceId:string,removeEntireEvidence:boolean) {
-    setPurchaseEvidences(prev=>removeEntireEvidence
-      ?prev.filter(item=>item.id!==evidenceId)
-      :prev.map(item=>item.id===evidenceId?{
+    if(removeEntireEvidence) {
+      const removed=purchaseEvidences.find(item=>item.id===evidenceId);
+      const remaining=purchaseEvidences.filter(item=>item.id!==evidenceId);
+      setPurchaseEvidences(remaining);
+      if(removed?.media_id&&removed.media_id===attachmentId) {
+        const nextMedia=remaining.find(item=>Boolean(item.media_id));
+        setAttachmentId(nextMedia?.media_id);
+        setAttachmentName(nextMedia?.file_name);
+      }
+    } else {
+      setPurchaseEvidences(prev=>prev.map(item=>item.id===evidenceId?{
         ...item,
         extraction_status:"manual_only",
         extraction_note:"Candidate rows discarded by user.",
         candidates:[],
       }:item));
+    }
     setServerQuote(undefined);
   }
 
@@ -1496,7 +1591,10 @@ export function NewOrder({customerId}:{customerId:string}) {
     setWizardError("");
     setSavedNotice("");
     setBusyMessage(message);
-    try { return await action(); }
+    try {
+      if(autoSaveTask.current) await autoSaveTask.current.catch(()=>{});
+      return await action();
+    }
     catch(error) {
       setWizardError(error instanceof RequestError&&error.code==="VERSION_CONFLICT"
         ?"This draft changed in another window. Reload to review the saved draft and your edits.":
@@ -1507,7 +1605,22 @@ export function NewOrder({customerId}:{customerId:string}) {
     finally {inFlight.current=false;setBusyMessage("");}
   }
 
-  function saveDraftOnly(confirmConflict=false) {
+  function saveDraftOnly(confirmConflict=false,background=false) {
+    if(background) {
+      if(inFlight.current||autoSaveTask.current||!currentLine) return Promise.resolve();
+      let task:Promise<unknown>|null=null;
+      task=(async()=>{
+        try {
+          const record=await persistDraft(draftPayload,false);
+          setSavedNotice(`Draft ${record.public_no} saved.`);
+        } catch {}
+        finally {
+          if(autoSaveTask.current===task) autoSaveTask.current=null;
+        }
+      })();
+      autoSaveTask.current=task;
+      return task;
+    }
     return runWizard("Saving draft…",async()=>{
       if(!currentLine) throw new Error("Choose an available service and quantity.");
       const record=await persistDraft(draftPayload,confirmConflict);
@@ -1614,6 +1727,7 @@ export function NewOrder({customerId}:{customerId:string}) {
   async function goToStep(targetStep:number) {
     if(inFlight.current||!recoveryReady||draftLoadFailed||targetStep<0||targetStep>5||targetStep>step+1) return;
     setWizardError("");
+    if(autoSaveTask.current) await autoSaveTask.current.catch(()=>{});
     if(targetStep<step) {
       if(step>=2&&step<=3&&effectiveDisplayName&&currentLine&&fingerprint!==savedFingerprint.current&&unconfirmedEvidences.length===0&&(!expectedLines.length||expectedTotalQty===clampedQty)) {
         await runWizard("Saving draft…",async()=>{
@@ -1630,6 +1744,10 @@ export function NewOrder({customerId}:{customerId:string}) {
     if(targetStep===step) return;
     if(!categoryOffers.length||!serviceOffers.length) {
       setWizardError("Choose an available product category and service.");
+      return;
+    }
+    if(targetStep>=1&&goldenSampleBlockedInStep1) {
+      setWizardError("Golden Sample Matching requires an active sealed reference sample in our vault before continuing.");
       return;
     }
     if(targetStep>=2&&(!validQuantity||manualQuoteMode)) {
@@ -1729,7 +1847,7 @@ export function NewOrder({customerId}:{customerId:string}) {
     if(inFlight.current||busyMessage||!recoveryReady||draftLoadFailed||conflict||!navigator.onLine||manualQuoteMode||!currentLine||!effectiveDisplayName||
       fingerprint===savedFingerprint.current||hasValidQuote) return;
     try {checkDraftInputs(allLines);} catch {return;}
-    void saveDraftOnly();
+    void saveDraftOnly(false,true);
   };
   useEffect(()=>{
     if(step!==2&&step!==3) return;
@@ -1755,8 +1873,6 @@ export function NewOrder({customerId}:{customerId:string}) {
   const lastItemPage=Math.max(0,Math.ceil(clampedQty/rowsPerPage)-1);
   const firstItemIndex=Math.min(itemPage,lastItemPage)*rowsPerPage;
   const visibleRowLimit=Math.min(rowsPerPage,clampedQty-firstItemIndex);
-  const activeRefs=(refs.data?.items??[]).filter((r:Row)=>r.state==="active"&&new Date(r.expires_at)>new Date()
-    &&(!r.category_id||r.category_id===activeCategoryId));
   const policies:Row[]=terms.data?.terms??[];
   const policyIds=wizardPolicyKinds.map(kind=>policies.find(policy=>policy.kind===kind)?.id).filter(Boolean);
   const allConsentsChecked=policyAccepted&&policyIds.length===wizardPolicyKinds.length&&Object.keys(acknowledged).every(k=>consents[k]);
@@ -1778,7 +1894,7 @@ export function NewOrder({customerId}:{customerId:string}) {
     ...extraLines.flatMap((l:Row)=>Array.isArray(l.attributes?.planned_parcels)?l.attributes.planned_parcels.map((p:Row)=>normalizeTrackingCode(p.tracking_no)).filter(Boolean):[]),
   ])];
   const totalExpectedLineCount=extraLines.reduce((sum,l)=>sum+(Array.isArray(l.attributes?.expected_lines)?l.attributes.expected_lines.length:(l.quantity>0?1:0)),0)+(expectedLines.length>0?expectedLines.length:currentLine?1:0);
-  const totalEvidenceCount=extraLines.reduce((sum,l)=>sum+(Array.isArray(l.attributes?.purchase_evidences)?l.attributes.purchase_evidences.length:0),0)+purchaseEvidences.length;
+  const totalEvidenceCount=extraLines.reduce((sum,l)=>sum+(Array.isArray(l.attributes?.purchase_evidences)?l.attributes.purchase_evidences.length:0),0)+purchaseEvidences.length+(attachmentId&&!purchaseEvidences.some(ev=>ev.media_id===attachmentId)?1:0);
   const allocatedUnitMap=new Map<string,number>();
   if(parcelMode==="multi") {
     for(const parcel of plannedParcels) {
@@ -1860,6 +1976,7 @@ export function NewOrder({customerId}:{customerId:string}) {
                 type="button"
                 role="radio"
                 aria-checked={isSelected}
+                aria-disabled={!isAvailable}
                 disabled={!isAvailable}
                 className={`option-card ${isSelected?"selected":""} ${!isAvailable?"disabled":""}`}
                 onClick={()=>{
@@ -1868,10 +1985,6 @@ export function NewOrder({customerId}:{customerId:string}) {
                   const nextCatOffers=offers.filter(o=>o.category_id===catId);
                   const match=nextCatOffers.find(o=>o.service===serviceKind)??nextCatOffers[0];
                   if(match) chooseOffer(match);
-                  setItemRows([]);
-                  setManualQuoteMode(false);
-                  setServerQuote(undefined);
-                  setSavedNotice("");
                 }}
               >
                 <span className="icon" aria-hidden="true"><PlatformIcon name={cat.icon}/></span>
@@ -1900,6 +2013,7 @@ export function NewOrder({customerId}:{customerId:string}) {
                   ?`${usd(lowestPackage)}${lowestPackage<highestPackage?"–"+usd(highestPackage):""} / set`
                   :isServiceAvailable?"Quote on request":"Not available";
               const isSelected=serviceKind===card.service;
+              const isGoldenService=card.service==="reference_match";
               return <button
                 key={card.service}
                 type="button"
@@ -1910,7 +2024,10 @@ export function NewOrder({customerId}:{customerId:string}) {
                 onClick={()=>{
                   if(!isServiceAvailable) return;
                   if(isSelected) return;
-                  const match=offerFor(matchingOffers,templateVariant,qty)??matchingOffers.find(o=>templateVariantFor(o)===templateVariant)??matchingOffers[0];
+                  const match=offerFor(matchingOffers,templateVariant,qty)
+                    ??matchingOffers.find(o=>templateVariantFor(o)===templateVariant)
+                    ??(isGoldenService?matchingOffers.find(o=>templateVariantFor(o)==="tops"):undefined)
+                    ??matchingOffers[0];
                   if(match) chooseOffer(match);
                 }}
               >
@@ -1920,10 +2037,45 @@ export function NewOrder({customerId}:{customerId:string}) {
                 </div>
                 <strong>{card.title}</strong>
                 <p>{card.desc}</p>
+                {isGoldenService&&refs.data&&!refs.error&&(
+                  <div style={{marginTop:4,marginBottom:4}}>
+                    <Tag tone={activeRefs.length===0?"yellow":"green"}>
+                      {activeRefs.length===0?"Requires an approved reference sample":`${activeRefs.length} active vault sample${activeRefs.length===1?"":"s"} ready`}
+                    </Tag>
+                  </div>
+                )}
                 <span className="price-pill">{card.unitLabel}</span>
               </button>;
             })}
           </div>
+          {goldenSampleBlockedInStep1&&(
+            <div className="card flat" data-testid="golden-sample-step1-gate" role="region" aria-label="Golden Sample Prerequisite" style={{marginTop:14,borderColor:"var(--amber-600,#d97706)",background:"rgba(245,158,11,0.06)"}}>
+              <div className="row between flexwrap" style={{gap:8}}>
+                <strong>Prerequisite not met: no active Golden Sample sealed in vault for {selectedCategoryName}</strong>
+                <Tag tone="yellow">Step 2 Blocked Until Ready</Tag>
+              </div>
+              <p className="small" style={{margin:"8px 0 6px"}}>
+                {pendingCategoryRefs.length>0
+                  ?`You currently have ${pendingCategoryRefs.length} reserved reference sample(s) (${pendingCategoryRefs.map((r:Row)=>r.code??r.item_id).join(", ")}) awaiting warehouse GS-* sealing and vault location assignment.`
+                  :expiredCategoryRefs.length>0
+                    ?`All ${expiredCategoryRefs.length} reference sample(s) previously stored for ${selectedCategoryName} have expired. Reserve a fresh item before booking a new comparison.`
+                    :otherCategoryActiveRefs.length>0
+                      ?`You have ${otherCategoryActiveRefs.length} active Golden Sample(s), but they belong to another product category rather than ${selectedCategoryName}.`
+                      :`Your account currently has 0 active sealed Golden Samples in ${selectedCategoryName}. Golden Sample Matching compares incoming units against an existing approved item stored in our vault.`}
+              </p>
+              <ol className="small muted" style={{margin:"4px 0 10px",paddingLeft:18,lineHeight:1.5}}>
+                <li>Inspect at least one sample under <strong>Product Inspection</strong> or <strong>Sample Comparison</strong> first.</li>
+                <li>Open <strong>Items → Reference samples</strong> after inspection and reserve an approved garment as your reference sample.</li>
+                <li>Our warehouse applies a tamper-evident <code>GS-*</code> seal and scans it into vault location storage.</li>
+                <li>Return here to select your active vault sample and submit candidate restock units for side-by-side comparison.</li>
+              </ol>
+              <div className="actions">
+                <button type="button" className="button sm primary" onClick={()=>switchToServiceKind("inspection")}>Switch to Product Inspection (Inspect a Sample First)</button>
+                <Link className="button sm" href="/items#reference-samples">View My Reference Samples</Link>
+                <Link className="button sm" href="/services/reference">Golden Sample Service Guide</Link>
+              </div>
+            </div>
+          )}
           <div className="wizard-note">
             Every inspection records physical measurements and high-resolution camera evidence at our China facility. Laboratory fiber testing, wash shrinkage, and factory AQL audits are outside scope.
           </div>
@@ -1949,7 +2101,7 @@ export function NewOrder({customerId}:{customerId:string}) {
                   </select>
                 </label>
                 <small className="muted">
-                  {filteredChecks.filter(check=>check.required).length} required checks per item · {filteredShots.length} required photo angles
+                  {filteredChecks.filter(check=>check.required).length} required checks per item · {filteredShots.length>0?`${filteredShots.length} required photo angles`:`${allOfferShots.length} standard studio photo angles`}
                 </small>
               </div>
 
@@ -1992,10 +2144,19 @@ export function NewOrder({customerId}:{customerId:string}) {
                   onChange={e=>{setReferenceId(e.target.value);setServerQuote(undefined);}}>
                   <option value="">— Select an active Golden Sample —</option>
                   {activeRefs.map((r:Row)=><option key={r.reference_id} value={r.reference_id}>
-                    {(r.code??r.item_id)} · {r.in_use?"In use for another comparison":"Sealed until "+stamp(r.expires_at)}
+                    {(r.code??r.item_id)}{r.seal_code?` · Seal ${r.seal_code}`:""}{r.safe_location_code?` · Vault ${r.safe_location_code}`:""} · {r.in_use?"In use for another comparison":"Sealed until "+stamp(r.expires_at)}
                   </option>)}
                 </select>
               </label>
+              {selectedRef&&(
+                <div className="line-note" data-testid="selected-golden-sample-meta" style={{marginTop:8}}>
+                  <strong>Vault reference {selectedRef.code??selectedRef.item_id}</strong>
+                  {selectedRef.seal_code?` · Seal ${selectedRef.seal_code}`:""}
+                  {selectedRef.safe_location_code?` · Vault ${selectedRef.safe_location_code}`:""}
+                  {` · Expires ${stamp(selectedRef.expires_at)}`}
+                  {selectedRef.in_use?" · Currently assigned to another active comparison":""}
+                </div>
+              )}
               {refs.error&&<><ErrorBlock error={refs.error}/><button type="button" onClick={refs.reload}>Retry Golden Samples</button></>}
               {!refs.data&&!refs.error&&<p role="status">Loading Golden Samples…</p>}
               {refs.data&&!refs.error&&activeRefs.length===0&&<div className="line-note warning" style={{marginTop:8}}>
@@ -2130,6 +2291,45 @@ export function NewOrder({customerId}:{customerId:string}) {
             {expectedLines.length?`${expectedLines.length} lines · ${expectedTotalQty} units`:`${clampedQty} ${clampedQty===1?"Unit":"Units"}`}
           </Tag>}
         >
+          {serviceKind==="reference_match"&&(
+            <div className="line-note" data-testid="golden-sample-step3-context" style={{marginBottom:12}}>
+              <strong>Golden Sample Matching Scope:</strong> Declare only the <strong>{clampedQty} incoming candidate unit{clampedQty===1?"":"s"}</strong> below. Your vaulted reference sample {selectedRef?<><strong>{selectedRef.code??selectedRef.item_id}</strong>{selectedRef.seal_code?` (Seal ${selectedRef.seal_code})`:""}</>:"(selected in Step 2)"} stays sealed in warehouse storage and is excluded from incoming shipment counts.
+            </div>
+          )}
+          {serviceKind==="compare"&&expectedLines.length===0&&(
+            <div className="card flat" data-testid="sample-compare-quick-init" style={{marginBottom:12}}>
+              <div className="row between flexwrap" style={{gap:8}}>
+                <div>
+                  <strong>Sample Comparison Setup ({clampedQty}-Sample Package · {usd(activeOffer?.rules.package_cents)})</strong>
+                  <p className="small muted" style={{margin:"4px 0 0"}}>
+                    List the {clampedQty} supplier samples side by side (1 unit per sample line) so warehouse intake keeps Supplier A / B{clampedQty===3?" / C":""} separated.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="button sm primary"
+                  onClick={()=>{
+                    const nextLines:ExpectedProductLine[]=Array.from({length:clampedQty},(_,idx)=>{
+                      const suffix=String.fromCharCode(65+idx);
+                      return {
+                        id:`EL-${Date.now().toString(36)}-${idx+1}`,
+                        sku_code:`${baseSku&&baseSku!=="ITEM"?baseSku:"CMP"}-${suffix}`,
+                        product_name:itemName.trim()||`Comparison Sample ${suffix}`,
+                        color_declared:baseColor.trim()||"Standard",
+                        size_label:baseSize.trim()||"M",
+                        quantity:1,
+                        supplier_alias:supplierRef.trim()||`Supplier ${suffix}`,
+                        tracking_no:parcelMode==="later"?"":normalizeTrackingCode(plannedParcels[0]?.tracking_no||baseTrackingNo),
+                        source_kind:"manual",
+                      };
+                    });
+                    if(!itemName.trim()) setItemName("Multi-Supplier Sample Comparison");
+                    applyExpectedLinesUpdate(nextLines);
+                  }}
+                >+ Initialize {clampedQty} Comparison Sample Lines</button>
+              </div>
+            </div>
+          )}
           {/* 3A · PURCHASE ORDER EVIDENCE & CANDIDATE EXTRACTION QUEUE */}
           <div className="wizard-section-head">
             <div>
@@ -2222,6 +2422,7 @@ export function NewOrder({customerId}:{customerId:string}) {
                   <Tag tone={ev.extraction_status==="confirmed"?"green":ev.extraction_status==="needs_confirmation"&&ev.candidates.length>0?"yellow":"gray"}>
                     {ev.extraction_status==="confirmed"?"Confirmed":ev.extraction_status==="needs_confirmation"&&ev.candidates.length>0?"Needs confirmation":"Reference only"}
                   </Tag>
+                  {ev.media_id&&<a className="button sm" href={`/api/v1/media/${ev.media_id}`} target="_blank" rel="noreferrer">View</a>}
                   <button type="button" className="button sm" onClick={()=>addManualCandidateRow(ev.id)}>+ Transcribe Row</button>
                   <button type="button" className="button sm" onClick={()=>discardEvidenceQueue(ev.id,true)}>Remove File</button>
                 </div>
@@ -2437,7 +2638,11 @@ export function NewOrder({customerId}:{customerId:string}) {
                   <input
                     type="checkbox"
                     checked={syncQuantityFromLines}
-                    onChange={e=>setSyncQuantityFromLines(e.target.checked)}
+                    onChange={e=>{
+                      const next=e.target.checked;
+                      setSyncQuantityFromLines(next);
+                      if(next) applyExpectedLinesUpdate(expectedLines,{recordUndo:false,forceSync:true});
+                    }}
                   />
                   <span className="small">Auto-sync Step 2 commissioned quantity ({clampedQty}) to line total ({expectedTotalQty})</span>
                 </label>
@@ -2464,14 +2669,14 @@ export function NewOrder({customerId}:{customerId:string}) {
                       const missing=missingLineFields(line);
                       return <tr key={line.id}>
                         <td className="mono col-idx">{String(idx+1).padStart(2,"0")}</td>
-                        <td data-label="SKU"><input className="input" style={{minWidth:96}} aria-label={`Line ${idx+1} SKU`} value={line.sku_code} onChange={e=>updateExpectedLine(line.id,{sku_code:e.target.value})} placeholder="HD-BLK-M"/></td>
-                        <td data-label="Product Name"><input className={`input ${missing.includes("product_name")?"input-warn":""}`} style={{minWidth:132}} aria-label={`Line ${idx+1} product name`} value={line.product_name} onChange={e=>updateExpectedLine(line.id,{product_name:e.target.value})} placeholder="Product name"/></td>
-                        <td data-label="Color"><input className={`input ${missing.includes("color")?"input-warn":""}`} style={{minWidth:86}} aria-label={`Line ${idx+1} color`} value={line.color_declared} onChange={e=>updateExpectedLine(line.id,{color_declared:e.target.value})} placeholder="Color"/></td>
-                        <td data-label="Size"><input className={`input ${missing.includes("size")?"input-warn":""}`} style={{minWidth:68}} aria-label={`Line ${idx+1} size`} value={line.size_label} onChange={e=>updateExpectedLine(line.id,{size_label:e.target.value})} placeholder="M"/></td>
-                        <td data-label="Qty"><input className={`input ${missing.includes("quantity")?"input-warn":""}`} type="number" min={1} max={300} style={{width:72}} aria-label={`Line ${idx+1} quantity`} value={line.quantity||""} onChange={e=>updateExpectedLine(line.id,{quantity:Math.max(0,Math.floor(Number(e.target.value)||0))})}/></td>
-                        <td data-label="Supplier"><input className="input" style={{minWidth:112}} aria-label={`Line ${idx+1} supplier`} value={line.supplier_alias} onChange={e=>updateExpectedLine(line.id,{supplier_alias:e.target.value})} placeholder={supplierRef||"Supplier"}/></td>
-                        <td data-label="Waybill"><input className="input" style={{minWidth:118}} aria-label={`Line ${idx+1} waybill`} value={line.tracking_no??""} onChange={e=>updateExpectedLine(line.id,{tracking_no:e.target.value})} placeholder="Optional"/></td>
-                        <td data-label="Note"><input className="input" style={{minWidth:96}} aria-label={`Line ${idx+1} note`} value={line.inspection_note??""} onChange={e=>updateExpectedLine(line.id,{inspection_note:e.target.value})} placeholder="Check note"/></td>
+                        <td data-label="SKU"><input className="input" style={{minWidth:68}} aria-label={`Line ${idx+1} SKU`} value={line.sku_code} onChange={e=>updateExpectedLine(line.id,{sku_code:e.target.value})} placeholder="HD-BLK-M"/></td>
+                        <td data-label="Product Name"><input className={`input ${missing.includes("product_name")?"input-warn":""}`} style={{minWidth:96}} aria-label={`Line ${idx+1} product name`} value={line.product_name} onChange={e=>updateExpectedLine(line.id,{product_name:e.target.value})} placeholder="Product name"/></td>
+                        <td data-label="Color"><input className={`input ${missing.includes("color")?"input-warn":""}`} style={{minWidth:58}} aria-label={`Line ${idx+1} color`} value={line.color_declared} onChange={e=>updateExpectedLine(line.id,{color_declared:e.target.value})} placeholder="Color"/></td>
+                        <td data-label="Size"><input className={`input ${missing.includes("size")?"input-warn":""}`} style={{minWidth:44}} aria-label={`Line ${idx+1} size`} value={line.size_label} onChange={e=>updateExpectedLine(line.id,{size_label:e.target.value})} placeholder="M"/></td>
+                        <td data-label="Qty"><input className={`input ${missing.includes("quantity")?"input-warn":""}`} type="number" min={1} max={300} style={{width:52}} aria-label={`Line ${idx+1} quantity`} value={line.quantity||""} onChange={e=>updateExpectedLine(line.id,{quantity:Math.max(0,Math.floor(Number(e.target.value)||0))})}/></td>
+                        <td data-label="Supplier"><input className="input" style={{minWidth:76}} aria-label={`Line ${idx+1} supplier`} value={line.supplier_alias} onChange={e=>updateExpectedLine(line.id,{supplier_alias:e.target.value})} placeholder={supplierRef||"Supplier"}/></td>
+                        <td data-label="Waybill"><input className="input" style={{minWidth:82}} aria-label={`Line ${idx+1} waybill`} value={line.tracking_no??""} onChange={e=>updateExpectedLine(line.id,{tracking_no:e.target.value})} placeholder="Optional"/></td>
+                        <td data-label="Note"><input className="input" style={{minWidth:64}} aria-label={`Line ${idx+1} note`} value={line.inspection_note??""} onChange={e=>updateExpectedLine(line.id,{inspection_note:e.target.value})} placeholder="Check note"/></td>
                         <td data-label="Actions">
                           <div className="row" style={{gap:4,flexWrap:"nowrap"}}>
                             <button type="button" className="button sm" title="Duplicate line" onClick={()=>duplicateExpectedLine(line)}>Copy</button>
@@ -2485,14 +2690,22 @@ export function NewOrder({customerId}:{customerId:string}) {
               </div>
 
               {expectedTotalQty!==clampedQty&&(
-                <div className="notice warning" role="status" style={{marginTop:10}}>
+                <div className="notice warning" data-testid="step3-qty-mismatch-banner" role="status" style={{marginTop:10}}>
                   <div className="row between flexwrap" style={{gap:8}}>
                     <span>
                       <strong>Quantity mismatch:</strong> Expected lines total <strong>{expectedTotalQty}</strong> units, while commissioned inspection quantity is <strong>{clampedQty}</strong>.
-                      {expectedTotalQty>maxOnlineQty&&<> ({expectedTotalQty} exceeds the online template cap of {maxOnlineQty} units.)</>}
+                      {serviceKind==="compare"&&expectedTotalQty>0&&expectedTotalQty!==2&&expectedTotalQty!==3&&<> Sample Comparison packages only support <strong>2 or 3</strong> supplier samples.</>}
+                      {serviceKind!=="compare"&&expectedTotalQty>maxOnlineQty&&<> ({expectedTotalQty} exceeds the online template cap of {maxOnlineQty} units.)</>}
                     </span>
-                    <div className="row" style={{gap:8}}>
-                      {expectedTotalQty>0&&expectedTotalQty<=maxOnlineQty&&offerFor(serviceKind==="compare"?serviceOffers:templateOffers,templateVariant,expectedTotalQty)&&(
+                    <div className="row flexwrap" style={{gap:8}}>
+                      {serviceKind==="compare"&&(expectedTotalQty===2||expectedTotalQty===3)&&offerFor(serviceOffers,templateVariant,expectedTotalQty)&&(
+                        <button
+                          type="button"
+                          className="button sm primary"
+                          onClick={()=>applyExpectedLinesUpdate(expectedLines,{recordUndo:false,forceSync:true})}
+                        >Switch to {expectedTotalQty}-Sample Comparison Package</button>
+                      )}
+                      {serviceKind!=="compare"&&expectedTotalQty>=minQty&&expectedTotalQty<=maxOnlineQty&&offerFor(templateOffers,templateVariant,expectedTotalQty)&&(
                         <button
                           type="button"
                           className="button sm primary"
@@ -2509,6 +2722,25 @@ export function NewOrder({customerId}:{customerId:string}) {
                             setStep(1);
                           }}
                         >Switch to Manual Batch Quote ({expectedTotalQty} units)</button>
+                      )}
+                      {serviceKind==="compare"&&expectedTotalQty>0&&expectedTotalQty!==clampedQty&&(
+                        <button
+                          type="button"
+                          className="button sm"
+                          onClick={()=>{
+                            const next=Array.from({length:clampedQty},(_,i)=>expectedLines[i]??{
+                              id:`EL-${Date.now().toString(36)}-${i+1}`,
+                              sku_code:`CMP-${String.fromCharCode(65+i)}`,
+                              product_name:itemName.trim()||expectedLines[0]?.product_name||"Comparison Sample",
+                              color_declared:baseColor.trim()||"Standard",
+                              size_label:baseSize.trim()||"M",
+                              quantity:1,
+                              supplier_alias:supplierRef.trim()||`Supplier ${String.fromCharCode(65+i)}`,
+                              source_kind:"manual" as const,
+                            }).map(l=>({...l,quantity:1}));
+                            applyExpectedLinesUpdate(next);
+                          }}
+                        >Reset to {clampedQty} Sample Lines</button>
                       )}
                     </div>
                   </div>
@@ -2536,14 +2768,34 @@ export function NewOrder({customerId}:{customerId:string}) {
                     <span className="file-picker-name">{attachmentName||"No file chosen"}</span>
                     <input type="file" accept="image/*" onChange={async e=>{
                       const file=e.target.files?.[0];
+                      e.currentTarget.value="";
                       if(!file) return;
                       try {
                         setBusyMessage("Uploading reference image…");
+                        const sha256=await sha256FileHex(file);
                         const uploadForm=new FormData();
                         uploadForm.set("photo",file);
                         const uploaded=await request("/me/media","POST",uploadForm);
                         setAttachmentId(uploaded.id);
                         setAttachmentName(file.name);
+                        setPurchaseEvidences(prev=>{
+                          if(prev.some(ev=>ev.sha256===sha256||ev.media_id===uploaded.id)) return prev;
+                          return [...prev,{
+                            id:`EV-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`,
+                            media_id:uploaded.id,
+                            file_name:file.name,
+                            mime_type:file.type||"image/png",
+                            size_bytes:file.size,
+                            sha256,
+                            supplier_alias:supplierRef.trim(),
+                            platform_source:"Reference Image / Size Chart",
+                            purchase_order_ref:"",
+                            uploaded_at:new Date().toISOString(),
+                            extraction_status:"manual_only",
+                            extraction_note:"Reference photo / size chart attached in Step 3B.",
+                            candidates:[],
+                          }];
+                        });
                         setServerQuote(undefined);
                       } catch(err) {
                         setWizardError(err instanceof Error?err.message:"Photo upload failed.");
@@ -2553,7 +2805,7 @@ export function NewOrder({customerId}:{customerId:string}) {
                     }}/>
                   </span>
                 </label>
-                {attachmentName&&<small className="ok">Attached: {attachmentName}</small>}
+                {attachmentName&&<small className="ok">Attached: {attachmentName} (listed in Step 3A)</small>}
               </div>
             </div>
           )}
@@ -2922,9 +3174,9 @@ export function NewOrder({customerId}:{customerId:string}) {
               </div>
             </div>
 
-            {filteredShots.length>0&&<div style={{marginTop:12,paddingTop:10,borderTop:"1px solid var(--line)"}}>
-              <strong className="small">Required Camera Angles ({filteredShots.length}): </strong>
-              <span className="small muted">{filteredShots.map((s:Row)=>s.name||s.code).join(" · ")}</span>
+            {(filteredShots.length>0||allOfferShots.length>0)&&<div style={{marginTop:12,paddingTop:10,borderTop:"1px solid var(--line)"}}>
+              <strong className="small">{filteredShots.length>0?`Required Camera Angles (${filteredShots.length})`:`Standard Studio Camera Angles (${allOfferShots.length})`}: </strong>
+              <span className="small muted">{(filteredShots.length>0?filteredShots:allOfferShots).map((s:Row)=>s.name||s.code).join(" · ")}</span>
             </div>}
           </div>
 
@@ -3088,6 +3340,25 @@ export function NewOrder({customerId}:{customerId:string}) {
             </div>
           </div>}
 
+          {totalEvidenceCount>0&&<div style={{marginTop:12}}>
+            <div className="label" style={{marginBottom:6}}>ATTACHED PURCHASE EVIDENCE ({totalEvidenceCount} FILE{totalEvidenceCount===1?"":"S"})</div>
+            <ul className="draft-lines">
+              {purchaseEvidences.map(ev=><li key={ev.id}>
+                <span>
+                  <strong>{ev.file_name}</strong>
+                  <small className="muted"> · {ev.platform_source||"File"}{ev.purchase_order_ref?` · PO ${ev.purchase_order_ref}`:""}</small>
+                </span>
+                {ev.media_id?<a className="button sm" href={`/api/v1/media/${ev.media_id}`} target="_blank" rel="noreferrer">View</a>:<span className="small muted">{(ev.size_bytes/1024).toFixed(1)} KB</span>}
+              </li>)}
+              {attachmentId&&!purchaseEvidences.some(ev=>ev.media_id===attachmentId)&&(
+                <li>
+                  <span><strong>{attachmentName||"Reference image"}</strong><small className="muted"> · Reference photo / size chart</small></span>
+                  <a className="button sm" href={`/api/v1/media/${attachmentId}`} target="_blank" rel="noreferrer">View</a>
+                </li>
+              )}
+            </ul>
+          </div>}
+
           {extraLines.length>0&&<ul className="draft-lines" aria-label="Inspection scopes">
             {allLines.map((line,idx)=>{
               const rangeCount=line.attributes.tolerances?.length??0;
@@ -3221,6 +3492,7 @@ export function NewOrder({customerId}:{customerId:string}) {
               disabled={
                 Boolean(busyMessage) ||
                 !serviceOffers.length ||
+                (step===0 && goldenSampleBlockedInStep1) ||
                 (step===1 && (manualQuoteMode||!validQuantity)) ||
                 (step===4 && (!allConsentsChecked || !hasValidQuote))
               }
@@ -3233,7 +3505,7 @@ export function NewOrder({customerId}:{customerId:string}) {
       </div>
 
       <aside className="wizard-side">
-        <section className="card">
+        <section className="card" data-testid="order-summary-card">
           <button className="wizard-summary-toggle button" type="button" aria-expanded={summaryOpen} aria-controls="wizard-summary"
             onClick={()=>setSummaryOpen(open=>!open)}>Order Summary <span aria-hidden="true">{summaryOpen?"−":"+"}</span></button>
           <div id="wizard-summary" className={summaryOpen?"wizard-summary-body open":"wizard-summary-body"}>
@@ -3256,12 +3528,16 @@ export function NewOrder({customerId}:{customerId:string}) {
             <div><div className="k">Parcels / Waybills</div><div className="v">{parcelMode==="later"?"Add after pay":declaredWaybills.length?`${declaredWaybills.length} waybill(s)`:"Pending"}</div></div>
             <div><div className="k">Purchase evidence</div><div className="v">{totalEvidenceCount} file(s)</div></div>
           </div>
-          {pendingCandidateCount>0&&<div className="notice warning" style={{marginTop:10,padding:"8px 10px",fontSize:12}}>
-            <strong>{pendingCandidateCount} unconfirmed row(s)</strong> pending review in 3A.
-          </div>}
-          {expectedLines.length>0&&expectedTotalQty!==clampedQty&&<div className="notice warning" style={{marginTop:10,padding:"8px 10px",fontSize:12}}>
-            Expected qty ({expectedTotalQty}) differs from commissioned qty ({clampedQty}).
-          </div>}
+          {(()=>{
+            const summaryAlerts=[
+              ...(hasPendingCandidates?[`${pendingCandidateCount} unconfirmed row(s) pending review in Step 3A.`]:[]),
+              ...(hasQuantityMismatch?[`Expected qty (${expectedTotalQty}) differs from commissioned qty (${clampedQty}).`]:[]),
+              ...(missingReferenceSample&&step>=1?[activeRefs.length===0?"No active Golden Sample in warehouse vault for this category.":"Select an active Golden Sample in Step 2."]:[]),
+            ];
+            return summaryAlerts.length>0?<div className="notice warning" data-testid="order-summary-alert" style={{marginTop:10,padding:"8px 10px",fontSize:12}}>
+              {summaryAlerts.join(" ")}
+            </div>:null;
+          })()}
           {extraLines.length>0&&<ul className="wizard-summary-lines" aria-label="Service line summaries" tabIndex={0}>
             {allLines.map((line,index)=>{
               const offer=offers.find(row=>row.offer_id===line.offer_id);
@@ -3279,13 +3555,25 @@ export function NewOrder({customerId}:{customerId:string}) {
             })}
           </ul>}
           <div className="sep"/>
-          <div className="display-quote">
+          <div className="display-quote" data-testid="order-summary-estimate">
             <div className="label">{hasValidQuote?"OFFICIAL QUOTE":step>=4?"QUOTE STATUS":"CATALOG ESTIMATE"}</div>
-            <div className="big">{manualQuoteMode?"Manual quote":step>=4&&!hasValidQuote?"Awaiting quote":displayCents!=null?usd(displayCents):"Unavailable"}</div>
+            <div className="big">
+              {hasValidQuote
+                ?usd(serverQuote!.amount_cents)
+                :manualQuoteMode
+                  ?"Manual quote"
+                  :step>=4
+                    ?"Awaiting quote"
+                    :isEstimateInvalid
+                      ?<span data-testid="estimate-invalid-state">{hasQuantityMismatch?"Outdated estimate":"Action required"}</span>
+                      :displayCents!=null?usd(displayCents):"Unavailable"}
+            </div>
             <div className="small muted">
               {hasValidQuote && serverQuote?.expires_at
                 ?`Official quote valid until ${stamp(serverQuote.expires_at)}.`
-                :step<4?"Get your quote in Step 5.":""}
+                :isEstimateInvalid && !manualQuoteMode && step<4
+                  ?estimateInvalidReason
+                  :step<4?"Get your quote in Step 5.":""}
             </div>
             <div className="small muted" style={{marginTop:4}}>
               Excludes outbound shipping, storage beyond the free storage window, and seller return freight.
@@ -4618,7 +4906,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         )}</div>:"—",
       ])}/>
     </Panel>}
-    <Panel title="Reference samples">
+    <Panel id="reference-samples" title="Reference samples">
       <Table headers={["Item","Revision","Status","Valid through",""]} rows={(data.references??[]).map((r:Row)=>[
         <Link className="code-btn" href={inventoryHref(itemPage,itemFilter,r.code)} scroll={false}>{r.code}</Link>,`v${r.revision??1}`,
         <Tag>{r.in_use?"Locked in comparison":r.state==="active"&&r.expired?"Expired":label(r.state)}</Tag>,

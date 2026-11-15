@@ -7863,4 +7863,94 @@ test("expected product lines batch (50 units / 6 SKUs), unconfirmed evidence gua
   assert.equal(parcelRow.declared_line_breakdown.length,6);
 });
 
+test("expected_lines quantity mismatch returns 422 VALIDATION_FAILED and subcategory reference_match & 3-sample compare offers work",async()=>{
+  const {c,terms}=await signCustomer();
+  const {offers}=await c.fetch("/catalog");
+  const inspOffer=offers.find((row:{sku_code:string})=>row.sku_code==="apparel-sub-tops-inspection-1");
+  assert(inspOffer,"Tops inspection offer present");
+  const expectedLinesMismatch=[
+    {id:"EL-1",sku_code:"TOP-BLK-M",product_name:"Cotton Tee",color_declared:"Black",size_label:"M",quantity:2,supplier_alias:"Supplier A"},
+    {id:"EL-2",sku_code:"TOP-WHT-L",product_name:"Cotton Tee",color_declared:"White",size_label:"L",quantity:2,supplier_alias:"Supplier A"},
+  ];
+  const createMismatch=await c.fetch("/orders",{
+    lines:[{
+      category_id:inspOffer.category_id,
+      offer_id:inspOffer.offer_id,
+      template_version_id:inspOffer.template_version_id,
+      quantity:3,
+      attributes:{garment_type:"tops",name:"Cotton Tee",expected_lines:expectedLinesMismatch},
+    }],
+  },"POST",422);
+  assert.equal(createMismatch.error.code,"VALIDATION_FAILED");
+
+  const validDraft=await c.fetch("/orders",{
+    lines:[{
+      category_id:inspOffer.category_id,
+      offer_id:inspOffer.offer_id,
+      template_version_id:inspOffer.template_version_id,
+      quantity:4,
+      attributes:{garment_type:"tops",name:"Cotton Tee",expected_lines:expectedLinesMismatch},
+    }],
+  },"POST",201);
+  const patchMismatch=await c.fetch(`/orders/${validDraft.id}`,{
+    revision:validDraft.revision,
+    lines:[{
+      category_id:inspOffer.category_id,
+      offer_id:inspOffer.offer_id,
+      template_version_id:inspOffer.template_version_id,
+      quantity:3,
+      attributes:{garment_type:"tops",name:"Cotton Tee",expected_lines:expectedLinesMismatch},
+    }],
+  },"PATCH",422);
+  assert.equal(patchMismatch.error.code,"VALIDATION_FAILED");
+
+  // Subcategory 3-sample compare offer ($79.00) and subcategory reference_match offers ($39.00)
+  for(const sku of [
+    "apparel-sub-tops-compare-3",
+    "apparel-sub-bottoms-compare-3",
+    "apparel-sub-sports_bra-compare-3",
+    "apparel-sub-tops-reference_match-1",
+    "apparel-sub-bottoms-reference_match-1",
+    "apparel-sub-sports-bra-reference_match-1",
+  ]) {
+    const found=offers.find((row:{sku_code:string})=>row.sku_code===sku);
+    assert(found,`Catalog should include published offer ${sku}`);
+  }
+  const cmp3=offers.find((row:{sku_code:string})=>row.sku_code==="apparel-sub-tops-compare-3")!;
+  assert.equal(cmp3.rules.package_cents,7900);
+  const cmpDraft=await c.fetch("/orders",{
+    lines:[{
+      category_id:cmp3.category_id,
+      offer_id:cmp3.offer_id,
+      template_version_id:cmp3.template_version_id,
+      quantity:3,
+      attributes:{
+        garment_type:"tops",
+        name:"3-Supplier Fleece Hoodie Comparison",
+        expected_lines:[
+          {id:"EL-C1",sku_code:"CMP-A",product_name:"Fleece Hoodie",color_declared:"Black",size_label:"L",quantity:1,supplier_alias:"Supplier A"},
+          {id:"EL-C2",sku_code:"CMP-B",product_name:"Fleece Hoodie",color_declared:"Black",size_label:"L",quantity:1,supplier_alias:"Supplier B"},
+          {id:"EL-C3",sku_code:"CMP-C",product_name:"Fleece Hoodie",color_declared:"Black",size_label:"L",quantity:1,supplier_alias:"Supplier C"},
+        ],
+      },
+      items:[
+        {sample_code:"CMP-A",garment_type:"tops",supplier_alias:"Supplier A"},
+        {sample_code:"CMP-B",garment_type:"tops",supplier_alias:"Supplier B"},
+        {sample_code:"CMP-C",garment_type:"tops",supplier_alias:"Supplier C"},
+      ],
+    }],
+  },"POST",201);
+  const cmpQuote=await c.fetch(`/orders/${cmpDraft.id}/quotes`,{revision:cmpDraft.revision},"POST",201);
+  assert.equal(cmpQuote.amount_cents,7900);
+  const refTops=offers.find((row:{sku_code:string})=>row.sku_code==="apparel-sub-tops-reference_match-1")!;
+  assert.equal(refTops.rules.package_cents,3900);
+  const cmpSub=await c.fetch(`/orders/${cmpDraft.id}/submit`,{
+    revision:cmpDraft.revision,
+    quote_id:cmpQuote.id,
+    terms_version_ids:terms.map(t=>t.id),
+    acknowledgements:{scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true},
+  });
+  assert.equal(cmpSub.order.state,"awaiting_payment");
+});
+
 test("all core operations have a validated success response",assertCoreCoverage);

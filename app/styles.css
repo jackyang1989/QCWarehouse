@@ -1122,7 +1122,7 @@ a.metric:hover { border-color: #88a7e0; text-decoration: none; transform: transl
   align-items: start;
 }
 .wizard-content { min-width: 0; }
-.wizard-side { align-self: start; position: sticky; top: 88px; min-width: 0; }
+.wizard-side { align-self: start; position: static; min-width: 0; }
 .wizard-summary-toggle.button { display: none; }
 .wizard-summary-lines { list-style: none; margin: 12px 0; padding: 0; max-height: 360px; overflow-y: auto; }
 .wizard-summary-lines li { padding: 8px 0; }
@@ -1965,6 +1965,15 @@ button.option-card.disabled, .option-card.disabled {
   .view-new-order .steps .step span:not(.n) { display: none; }
   .view-new-order .steps .step { min-height: 44px; }
   .wizard-controls .button { min-height: 44px; white-space: normal; text-align: center; }
+  .wizard-content .button,
+  .wizard-content button:not(.wizard-step):not(.option-card):not(.step):not(.evidence-open) {
+    max-width: 100%;
+    height: auto;
+    min-height: 38px;
+    padding-block: 8px;
+    white-space: normal;
+    text-align: center;
+  }
   .wizard-items .tbl, .wizard-items tbody { display: block; min-width: 0; }
   .wizard-items thead { position: absolute; clip-path: inset(50%); width: 1px; height: 1px; overflow: hidden; }
   .wizard-items .tbl tr { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); border-bottom: 1px solid var(--line); padding: 12px 0; }
@@ -1974,11 +1983,33 @@ button.option-card.disabled, .option-card.disabled {
   .wizard-items .tbl td:last-child { grid-column: 1 / -1; }
   .wizard-items .tbl input { min-width: 0 !important; width: 100%; min-height: 44px; }
 }
-.wizard-content { scroll-margin-top: 88px; }
+.wizard-content,
+.wizard-content .card,
+.wizard-content .banner,
+.workspace-main [id] { scroll-margin-top: 100px; }
+
+.wizard-items .tbl th,
+.wizard-items .tbl td {
+  padding: 8px 6px;
+}
+.wizard-items .tbl input.input {
+  padding: 6px 8px;
+  font-size: 12.5px;
+  min-height: 34px;
+}
 
 .workspace-customer .workspace-context { display: none; }
 .workspace-customer .workspace-top { gap: 12px; }
 .workspace-customer .header-right { min-width: 0; }
+@media (max-width: 1380px) {
+  .workspace-customer .workspace-top { gap: 8px; padding-inline: 18px; }
+  .workspace-customer .topnav { gap: 2px; }
+  .workspace-customer .topnav a { padding: 0 8px; font-size: 12px; }
+  .workspace-customer .header-right { gap: 6px; }
+  .workspace-customer .quick-switch a,
+  .workspace-customer .quick-switch button { padding: 0 8px; }
+  .workspace-customer .header-right .demo-pill { padding: 0 9px; }
+}
 @media (max-width: 1279px) {
   .workspace-admin .workspace-top { flex-wrap: wrap; padding-block: 10px; }
   .workspace-admin .workspace-top .topnav,

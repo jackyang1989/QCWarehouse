@@ -104,8 +104,9 @@ async function seed() {
           [offer.id,{minimum,maximum,...(service==="inspection"?{unit_cents:price}:{package_cents:price}),business_days:3,demo:true}]);
       }
     }
-    // Delegate apparel subcategory templates & offers to the migration-governed database function
+    // Delegate apparel subcategory & reference-match templates/offers to migration-governed database functions
     await db.query("select ensure_apparel_subcategory_catalog()");
+    await db.query("select ensure_apparel_reference_match_catalog()");
     await db.query("insert into shipping_rate_versions values($1,1,$2,now(),$3)",[uuid(),{first_weight_g:1000,first_cents:850,extra_step_g:500,extra_cents:200,handling_cents:300},admin]);
     await db.query("insert into app_config(key,value) values('storage.daily_cents','25'),('demo.seeded','true')");
   });

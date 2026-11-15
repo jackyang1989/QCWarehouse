@@ -57,9 +57,19 @@ export const priceSchema=z.object({
   package_cents:z.number().int().positive().optional(),business_days:z.number().int().positive(),demo:z.boolean().optional()
 }).refine(p=>p.maximum>=p.minimum && Number(!!p.unit_cents)+Number(!!p.package_cents)===1);
 export type LineInput={category_id:string; offer_id:string; template_version_id?:string; quantity:number; options?:object; attributes?:object; items?:object[]};
-async function validateLineSamples(db:DB,org:string,line:{category_id:string;options?:unknown;attributes?:unknown;items?:unknown[];draft_items?:unknown[]},service:string) {
+async function validateLineSamples(db:DB,org:string,line:{category_id:string;quantity?:number;options?:unknown;attributes?:unknown;items?:unknown[];draft_items?:unknown[]},service:string) {
   const items=(Array.isArray(line.items)?line.items:Array.isArray(line.draft_items)?line.draft_items:[]) as {category_id?:string;size_label?:string;size?:string;attachment_ids?:unknown}[];
-  const attrs=(line.attributes??{}) as {attachment_ids?:unknown;purchase_evidences?:unknown};
+  const attrs=(line.attributes??{}) as {attachment_ids?:unknown;purchase_evidences?:unknown;expected_lines?:unknown};
+  const expectedLines=Array.isArray(attrs.expected_lines)?(attrs.expected_lines as {quantity?:unknown}[]):[];
+  if(expectedLines.length>0 && typeof line.quantity==="number") {
+    const expectedSum=expectedLines.reduce((sum,entry)=>sum+Math.max(0,Math.floor(Number(entry?.quantity)||0)),0);
+    guard(
+      expectedSum===line.quantity,
+      "VALIDATION_FAILED",
+      `Expected product lines total (${expectedSum}) must equal commissioned quantity (${line.quantity}).`,
+      422
+    );
+  }
   const lineAttachments=Array.isArray(attrs.attachment_ids)?attrs.attachment_ids:[];
   const evidenceMediaIds=Array.isArray(attrs.purchase_evidences)
     ?(attrs.purchase_evidences as {media_id?:unknown}[]).map(e=>e?.media_id).filter(Boolean)
