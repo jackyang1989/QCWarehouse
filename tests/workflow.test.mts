@@ -7391,6 +7391,8 @@ test("a standalone 30-item inspection splits a documented defect, a reference sa
   assert((await c.fetch("/media/"+defect.evidence_ids[0])).image.length>0);
 
   const terms_version_id=terms.find((term:{kind:string})=>term.kind==="terms").id;
+  await c.fetch(path+"/dispositions",{action:"retain",item_id:physical[0].id,terms_version_id,days:0},"POST",422);
+  assert.equal((await pool.query("select count(*)::int n from disposition_requests where item_id=$1",[physical[0].id])).rows[0].n,0);
   const toSeller={recipient:"Fixture seller",address:"Fixture return address",phone:"00000000000"};
   const toForwarder={recipient:"Fixture forwarder",address:"Fixture forwarding address",phone:"00000000000",member_code:"TEST-BATCH"};
   const returned=await c.fetch(path+"/dispositions",{action:"return_to_seller",item_id:physical[0].id,terms_version_id,

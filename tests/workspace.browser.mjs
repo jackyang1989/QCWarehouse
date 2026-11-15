@@ -1365,6 +1365,218 @@ async function verifyScopeRenewal({page,call,errors},other) {
   } finally {await db.end();}
 }
 
+async function verifyInstructionCancelRecovery(other) {
+  const customer=await session(process.env.QCW_BROWSER_INVENTORY_EMAIL,false,true),{page,call,errors}=customer;
+  const rows=(await call("/me/inventory")).rows;
+  const item=rows.find(row=>row.order_no&&row.active_disposition?.action==="retain"&&row.active_disposition.state==="requested");assert(item);
+  const id=item.active_disposition.id,path="/api/v1/me/dispositions/"+id+"/cancel";let key;
+  await page.goto("/orders/"+item.order_no+"/dispositions");
+  const row=page.getByRole("row").filter({has:page.getByRole("button",{name:item.code,exact:true})});
+  const cancel=row.getByRole("button",{name:"Cancel",exact:true});
+  const match=url=>new URL(url).pathname===path;
+  const route=async routed=>{key=routed.request().headers()["idempotency-key"];const result=await routed.fetch();assert.equal(result.status(),200);await routed.abort("failed");};
+  await page.route(match,route);await cancel.click();
+  await cancel.waitFor({state:"hidden",timeout:10000});
+  assert.equal((await call("/orders/"+item.order_id)).items.find(row=>row.item_id===item.item_id).instruction,null);
+  await page.unroute(match,route);
+  const repeat=await call("/me/dispositions/"+id+"/cancel",{body:{},key});assert.equal(repeat.state,"cancelled");
+  await other.call("/me/dispositions/"+id+"/cancel",{body:{},key,status:404});
+  await captureWizard(page,"handling-cancellation-reconciled","Instructions by item");
+  const {offers}=await call("/catalog"),offer=offers.find(row=>row.sku_code==="apparel-inspection-1");
+  const draft=await call("/orders",{body:{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},status:201});
+  await page.goto("/orders/"+draft.public_no);
+  const cancelOrder=page.getByRole("button",{name:"Cancel inspection",exact:true});await cancelOrder.waitFor();
+  const orderMatch=url=>new URL(url).pathname==="/api/v1/orders/"+draft.id+"/cancel";let orderKey,orderBody;
+  let cancelledResponse;const cancellationLoss=new Promise(resolve=>cancelledResponse=resolve);
+  const cancelRoute=async routed=>{orderKey=routed.request().headers()["idempotency-key"];orderBody=routed.request().postDataJSON();const result=await routed.fetch();assert.equal(result.status(),200);await routed.abort("failed");cancelledResponse();};
+  await page.route(orderMatch,cancelRoute);page.once("dialog",dialog=>dialog.accept());await cancelOrder.click();
+  await cancellationLoss;
+  await cancelOrder.waitFor({state:"hidden",timeout:10000});await page.unroute(orderMatch,cancelRoute);
+  assert.equal((await call("/orders/"+draft.id)).state,"cancelled");
+  assert.equal((await call("/orders/"+draft.id+"/cancel",{body:orderBody,key:orderKey})).state,"cancelled");
+  await other.call("/orders/"+draft.id+"/cancel",{body:orderBody,key:orderKey,status:404});
+  await captureWizard(page,"order-cancellation-reconciled",new RegExp(draft.public_no));
+  const reference=(await call("/me/desk")).references.find(row=>row.state==="active"&&!row.in_use);assert(reference);
+  await page.goto("/items");
+  const referenceRow=page.getByRole("row").filter({has:page.getByRole("link",{name:reference.code,exact:true})});
+  const release=referenceRow.getByRole("button",{name:"Release reference",exact:true});await release.waitFor();
+  const referencePath="/me/reference-samples/"+reference.reference_id+"/release",referenceMatch=url=>new URL(url).pathname==="/api/v1"+referencePath;let referenceKey,referenceBody;
+  let releasedResponse;const releaseLoss=new Promise(resolve=>releasedResponse=resolve);
+  const releaseRoute=async routed=>{referenceKey=routed.request().headers()["idempotency-key"];referenceBody=routed.request().postDataJSON();const result=await routed.fetch();assert.equal(result.status(),200);await routed.abort("failed");releasedResponse();};
+  await page.route(referenceMatch,releaseRoute);await release.click();
+  await releaseLoss;
+  await release.waitFor({state:"hidden",timeout:10000});await page.unroute(referenceMatch,releaseRoute);
+  assert.equal((await call("/me/desk")).references.find(row=>row.reference_id===reference.reference_id).state,"released");
+  assert.equal((await call(referencePath,{body:referenceBody,key:referenceKey})).state,"released");
+  await other.call(referencePath,{body:referenceBody,key:referenceKey,status:404});
+  await captureWizard(page,"reference-release-reconciled","Warehouse items");
+  assert.deepEqual(errors,[]);assert(entries.every(row=>row.overflow===0));
+  console.log("PASS saved handling/order cancellation and reference release response loss, authoritative readback, same-key replay and other-customer isolation");
+}
+
+async function verifyHistoricalOrderLink({page,call,errors},other) {
+  const {offers}=await call("/catalog"),offer=offers.find(row=>row.sku_code==="apparel-inspection-1");
+  const create=()=>call("/orders",{body:{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},status:201});
+  const first=await create(),second=await create();
+  for(let index=0;index<205;index++)await create();
+  const desk=await call("/me/desk?include_items=0&include_activity=0");assert.equal(desk.orders.length,200);
+  assert(!desk.orders.some(order=>order.id===first.id||order.id===second.id));
+  await page.goto("/parcels");
+  await page.getByText("Register incoming parcel",{exact:true}).click();
+  assert.equal(await page.getByLabel("Associate an order (optional)").locator(`option[value="${first.id}"]`).count(),0);
+  await page.getByText("Find an older order to link",{exact:true}).click();
+  await page.getByLabel("Order number to find").fill(first.public_no.toLowerCase());
+  let fail=true;const match=url=>new URL(url).pathname==="/api/v1/me/orders";
+  const route=routed=>fail?routed.fulfill({status:503,contentType:"application/json",body:JSON.stringify({error:{code:"UNAVAILABLE",message:"Order search temporarily unavailable."}})}):routed.continue();
+  await page.route(match,route);await page.getByRole("button",{name:"Find order",exact:true}).click();
+  await page.getByRole("alert").filter({hasText:"Order search temporarily unavailable."}).waitFor();
+  await captureWizard(page,"historical-order-search-error","Parcels");
+  fail=false;await page.getByRole("button",{name:"Retry order search",exact:true}).click();
+  const choices=page.getByLabel("Associate an order (optional)");
+  await choices.locator(`option[value="${first.id}"]`).waitFor({state:"attached"});await choices.selectOption(first.id);
+  await captureWizard(page,"historical-order-found","Parcels");
+  const tracking="ZTO"+randomUUID().replaceAll("-","").slice(0,10).toUpperCase();
+  await page.getByLabel("Seller’s tracking number").fill(tracking);await page.getByLabel("Carrier (if known)").selectOption("zto");
+  const saved=page.waitForResponse(response=>new URL(response.url()).pathname==="/api/v1/me/parcels"&&response.request().method()==="POST");
+  await page.getByRole("button",{name:"Add inbound parcel",exact:true}).click();const response=await saved;assert.equal(response.status(),201);const parcel=await response.json();
+  assert((await call("/orders/"+first.id)).parcels.some(row=>row.id===parcel.id));
+  await page.getByLabel("Order number to find").fill(second.public_no);await page.getByRole("button",{name:"Find order",exact:true}).click();
+  const row=page.getByRole("row").filter({has:page.getByRole("button",{name:tracking,exact:true})});
+  await row.getByText("+ Link to order",{exact:true}).click();const linkedOrder=row.locator('select[name="order_id"]');
+  try {await linkedOrder.locator(`option[value="${second.id}"]`).waitFor({state:"attached",timeout:10000});}
+  catch(error){console.log("ORDER LOOKUP DIAGNOSTIC",await page.locator('select[name="order_id"]').evaluateAll(selects=>selects.map(select=>[...select.options].map(option=>({value:option.value,text:option.textContent})))));await page.screenshot({path:join(out,"order-lookup-diagnostic.png"),fullPage:true});throw error;}
+  await linkedOrder.selectOption(second.id);
+  const linked=page.waitForResponse(response=>new URL(response.url()).pathname===`/api/v1/me/parcels/${parcel.id}/link-order`);
+  await row.getByRole("button",{name:"Link",exact:true}).click();assert.equal((await linked).status(),200);
+  await row.getByRole("link",{name:second.public_no,exact:true}).waitFor();
+  assert((await call("/orders/"+second.id)).parcels.some(row=>row.id===parcel.id));
+  await captureWizard(page,"historical-order-parcel-linked","Parcels");
+  await page.goto("/parcels?order="+first.id);await page.getByLabel("Associate an order (optional)").locator(`option[value="${first.id}"]`).waitFor({state:"attached"});
+  await page.waitForFunction(id=>document.querySelector('select[name="order"]')?.value===id,first.id);
+  await page.evaluate(id=>history.pushState(null,"","/parcels?order="+id),second.id);
+  await page.waitForFunction(id=>document.querySelector('select[name="order"]')?.value===id,second.id);
+  await page.goBack();await page.waitForFunction(id=>document.querySelector('select[name="order"]')?.value===id,first.id);
+  await captureWizard(page,"historical-order-deep-link","Parcels");
+  assert.deepEqual((await other.call("/me/orders?q="+first.public_no)).rows,[]);await other.call("/orders/"+first.id,{status:404});
+  assert.deepEqual(errors,[]);assert(entries.every(entry=>entry.overflow===0));
+  console.log("PASS 207 actual orders, search failure recovery, old-order registration/linking, reactive deep links and customer isolation");
+}
+
+async function verifyInstructionRecovery(other) {
+  const customer=await session(process.env.QCW_BROWSER_INVENTORY_EMAIL,false,true),{page,call,errors}=customer;
+  const inventory=await call("/me/inventory?filter=handling");assert(inventory.rows.length>=2);
+  const chosen=inventory.rows.slice(0,2),requests=[];let drop=true,savedFirst;
+  await page.goto("/items?filter=handling");
+  for(const item of chosen)await page.getByRole("checkbox",{name:"Select "+item.code+" for handling",exact:true}).check();
+  const selectionTools=page.getByRole("region",{name:"Selected item actions"});
+  for(const width of widths) {
+    await page.setViewportSize({width,height:1000});
+    const bar=await selectionTools.boundingBox(),header=await page.locator(".workspace-top").boundingBox();
+    assert(bar&&header&&bar.y>=header.y+header.height&&bar.y+bar.height<=1000);
+    if(width>=768) {
+      const table=page.locator(".customer-inventory-table .table-wrap");
+      await table.evaluate(element=>element.scrollLeft=element.scrollWidth);
+      const bounds=await table.boundingBox(),code=await page.getByRole("button",{name:chosen[0].code,exact:true}).boundingBox();
+      assert(bounds&&code&&code.x>=bounds.x&&code.x+code.width<=bounds.x+bounds.width,"Selected item identity must remain visible after horizontal scrolling.");
+    }
+    await capture(page,"handling-selection-shortcut",width,"Warehouse items",true);
+  }
+  await page.setViewportSize({width:1440,height:1000});
+  await selectionTools.getByRole("link",{name:"Review instructions",exact:true}).click();
+  await page.waitForURL(url=>url.hash==="#item-instructions");
+  await page.waitForFunction(()=>{const y=document.getElementById("item-instructions")?.getBoundingClientRect().top;return y!==undefined&&y>=120&&y<innerHeight;});
+  await page.getByLabel("Requested action").selectOption("retain");
+  await page.getByRole("checkbox",{name:/I authorize this request/}).check();
+  const match=url=>/\/api\/v1\/me\/items\/[^/]+\/dispositions$/.test(new URL(url).pathname);
+  const route=async routed=>{
+    const request=routed.request();if(request.method()!=="POST")return routed.continue();
+    requests.push({path:new URL(request.url()).pathname,key:request.headers()["idempotency-key"],body:request.postDataJSON()});
+    if(drop){drop=false;const saved=await routed.fetch();assert.equal(saved.status(),201);savedFirst=(await saved.json()).id;await routed.abort("failed");}else await routed.continue();
+  };
+  await page.route(match,route);
+  const save=page.getByRole("button",{name:"Save handling instruction (2 items)",exact:true});
+  await page.getByLabel("Additional storage days").fill("0");
+  await page.locator("form").filter({has:save}).evaluate(form=>form.noValidate=true);
+  await save.click();await page.getByRole("alert").filter({hasText:"Choose between 1 and 365"}).waitFor();assert.equal(requests.length,0);
+  await captureWizard(page,"handling-invalid-storage-days","Warehouse items");
+  await page.getByLabel("Additional storage days").fill("30");
+  await save.click();await page.getByRole("alert").filter({hasText:/Connection/}).waitFor();
+  await captureWizard(page,"handling-response-unknown","Warehouse items");
+  const retry=page.waitForResponse(response=>match(response.url())&&response.request().method()==="POST");
+  await page.getByRole("button",{name:"Check previous instructions",exact:true}).click();const response=await retry;
+  assert.equal(requests[0].path,requests[1].path);assert.equal(requests[0].key,requests[1].key,"Retry must replay the same saved item instruction, not create a new request key.");
+  assert.equal(response.status(),201);assert.equal((await response.json()).id,savedFirst);
+  await page.getByText(/Instructions recorded for/).waitFor();
+  const url=new URL(process.env.QCW_BROWSER_DATABASE_URL);assert.equal(url.hostname,"127.0.0.1");assert.match(url.pathname,/^\/qcw_test-[a-z0-9-]+$/);
+  const {default:pg}=await import("pg"),db=new pg.Client({connectionString:url.href});await db.connect();
+  try {
+    const rows=(await db.query("select item_id,count(*)::int n from disposition_requests where item_id=any($1::uuid[]) group by item_id",[chosen.map(item=>item.item_id)])).rows;
+    assert.equal(rows.length,2);assert(rows.every(row=>row.n===1));
+  }finally{await db.end();}
+  for(const item of chosen){assert.equal((await call("/me/inventory?code="+item.code)).rows[0].active_disposition.action,"retain");await other.call("/me/inventory?code="+item.code,{status:404});}
+  await captureWizard(page,"handling-request-replayed","Warehouse items");
+  await page.unroute(match,route);
+  const partial=(await call("/me/inventory?filter=handling")).rows.slice(0,2);assert.equal(partial.length,2);
+  await page.goto("/items?filter=handling");
+  for(const item of partial)await page.getByRole("checkbox",{name:"Select "+item.code+" for handling",exact:true}).check();
+  await page.getByLabel("Requested action").selectOption("retain");await page.getByRole("checkbox",{name:/I authorize this request/}).check();
+  let interrupted=false;const partialKeys=[];
+  const partialRoute=async routed=>{
+    if(routed.request().method()!=="POST")return routed.continue();
+    if(routed.request().url().includes(partial[1].item_id)) {
+      partialKeys.push(routed.request().headers()["idempotency-key"]);
+      if(!interrupted){interrupted=true;const saved=await routed.fetch();assert.equal(saved.status(),201);return routed.fulfill({status:500,contentType:"application/json",body:JSON.stringify({error:{code:"SERVER_ERROR",message:"Connection status could not be confirmed."}})});}
+    }
+    return routed.continue();
+  };
+  await page.route(match,partialRoute);
+  await page.getByRole("button",{name:"Save handling instruction (2 items)",exact:true}).click();
+  await page.getByRole("alert").filter({hasText:/Connection/}).waitFor();
+  assert.equal((await call("/me/inventory?code="+partial[0].code)).rows[0].active_disposition.action,"retain");
+  assert.equal((await call("/me/inventory?code="+partial[1].code)).rows[0].active_disposition.action,"retain");
+  await page.getByRole("region",{name:"Selected item actions"}).getByText("1 selected",{exact:true}).waitFor();
+  await captureWizard(page,"handling-partial-success","Warehouse items");
+  const partialReplay=page.waitForResponse(response=>match(response.url())&&response.url().includes(partial[1].item_id)&&response.request().method()==="POST");
+  await page.getByRole("button",{name:"Check previous instructions",exact:true}).click();assert.equal((await partialReplay).status(),201);
+  await page.getByRole("button",{name:"Check previous instructions",exact:true}).waitFor({state:"hidden"});
+  await page.getByText(/Instructions recorded for/).first().waitFor();assert.equal(partialKeys.length,2);assert.equal(partialKeys[0],partialKeys[1]);
+  await captureWizard(page,"handling-partial-recovered","Warehouse items");await page.unroute(match,partialRoute);
+  const orderItem=(await call("/me/inventory?filter=handling")).rows.find(item=>item.order_no);assert(orderItem);
+  await page.goto("/orders/"+orderItem.order_no+"/storage");
+  const orderBefore=await call("/orders/"+orderItem.order_id);
+  const eligible=orderBefore.items.filter(item=>item.item_id&&!item.instruction&&!item.handling_hold&&item.identity_state!=="quarantined"&&["stored","received"].includes(item.custody_state));
+  assert(eligible.length>=3);const third=eligible[2];
+  await page.locator(".role-chip").filter({hasText:eligible[1].code}).getByRole("checkbox").check();
+  await page.getByLabel("Additional storage days").fill("7");await page.getByRole("checkbox",{name:/I authorize this request/}).check();
+  const orderMatch=url=>/\/api\/v1\/orders\/[^/]+\/dispositions$/.test(new URL(url).pathname);
+  const orderRequests=[];let orderDrop=true,savedOrder;
+  const orderRoute=async routed=>{
+    if(routed.request().method()!=="POST")return routed.continue();
+    orderRequests.push({key:routed.request().headers()["idempotency-key"],body:routed.request().postDataJSON()});
+    if(orderRequests.length===2&&orderDrop){orderDrop=false;const saved=await routed.fetch();assert.equal(saved.status(),201);savedOrder=(await saved.json()).id;return routed.fulfill({status:200,contentType:"application/json",body:"{"});}
+    return routed.continue();
+  };
+  await page.route(orderMatch,orderRoute);await page.getByRole("button",{name:"Request storage extension (2 items)",exact:true}).click();
+  await page.getByRole("alert").filter({hasText:/could not be read/}).waitFor();
+  await captureWizard(page,"order-instruction-unknown","Storage by item");
+  const orderReplay=page.waitForResponse(response=>orderMatch(response.url())&&response.request().method()==="POST");
+  await page.getByRole("button",{name:"Check previous instructions",exact:true}).click();
+  assert.equal((await (await orderReplay).json()).id,savedOrder);
+  await page.getByText(/Recorded instruction for 1 item/).waitFor();assert.equal(orderRequests.length,3);assert.equal(orderRequests[1].key,orderRequests[2].key);
+  assert.equal(orderRequests[1].body.item_id,orderRequests[2].body.item_id);
+  assert.equal((await call("/orders/"+orderItem.order_id)).items.find(item=>item.item_id===third.item_id).instruction,null);
+  assert.equal(orderRequests[1].body.days,7);
+  await captureWizard(page,"order-instruction-replayed","Storage by item");
+  const verifyDB=new pg.Client({connectionString:url.href});await verifyDB.connect();
+  try {
+    const rows=(await verifyDB.query("select item_id,count(*)::int n from disposition_requests where item_id=any($1::uuid[]) and state not in ('completed','cancelled') group by item_id",[[...partial.map(item=>item.item_id),orderRequests[0].body.item_id,orderRequests[1].body.item_id]])).rows;
+    assert.equal(rows.length,4);assert(rows.every(row=>row.n===1));
+  }finally{await verifyDB.end();}
+  await other.call("/orders/"+orderItem.order_id,{status:404});
+  assert.deepEqual(errors,[]);assert(entries.every(entry=>entry.overflow===0));
+  console.log("PASS handling request replay, partial success recovery, order storage replay, zero-day rejection, unique real instructions and customer isolation");
+}
+
 async function verifyItemInspectionStages(other) {
   const url=new URL(process.env.QCW_BROWSER_DATABASE_URL);assert.equal(url.hostname,"127.0.0.1");assert.match(url.pathname,/^\/qcw_test-[a-z0-9-]+$/);
   const {default:pg}=await import("pg"),db=new pg.Client({connectionString:url.href});await db.connect();
@@ -1971,6 +2183,9 @@ try {
   else if(process.env.QCW_BROWSER_SELLER_RETURN_ONLY==="1") await verifySellerReturn(customer,other);
   else if(process.env.QCW_BROWSER_SUPPORT_ONLY==="1") await verifySupportHistory(customer,other);
   else if(process.env.QCW_BROWSER_PAYMENT_MISMATCH_ONLY==="1") await verifyRejectedPaymentCase(other);
+  else if(process.env.QCW_BROWSER_INSTRUCTION_CANCEL_ONLY==="1") await verifyInstructionCancelRecovery(other);
+  else if(process.env.QCW_BROWSER_ORDER_LINK_ONLY==="1") await verifyHistoricalOrderLink(customer,other);
+  else if(process.env.QCW_BROWSER_INSTRUCTION_RECOVERY_ONLY==="1") await verifyInstructionRecovery(other);
   else if(process.env.QCW_BROWSER_ITEM_STAGE_ONLY==="1") await verifyItemInspectionStages(other);
   else if(process.env.QCW_BROWSER_QUOTE_POLICY_ONLY==="1") await verifyQuoteValidity(customer,other);
   else if(process.env.QCW_BROWSER_SCOPE_ONLY==="1") await verifyScopeRenewal(customer,other);
@@ -2283,7 +2498,7 @@ async function verifyWorkspaceViews(customer,other) {
     await itemsPage.getByRole("checkbox",{name:`Select ${first.code} for handling`,exact:true}).check();
     await itemsPage.getByRole("navigation",{name:"Inventory pages"}).getByRole("link",{name:"Next"}).click();
     await itemsPage.getByRole("checkbox",{name:`Select ${later.code} for handling`,exact:true}).check();
-    await itemsPage.getByText("2 selected",{exact:true}).waitFor();
+    await itemsPage.getByRole("region",{name:"Selected item actions"}).getByText("2 selected",{exact:true}).waitFor();
     await itemsPage.getByLabel("Requested action").selectOption("retain");
     await itemsPage.getByRole("checkbox",{name:/I authorize this request/}).check();
     await itemsPage.getByRole("button",{name:"Save handling instruction (2 items)"}).click();
@@ -2307,7 +2522,12 @@ async function verifyWorkspaceViews(customer,other) {
     await fixture.page.setViewportSize({width,height:1000});
     for(const [name,path,heading] of paths) {
       if(captured(name,width)) continue;
-      await fixture.page.goto(path,{waitUntil:"domcontentloaded"});
+      try {await fixture.page.goto(path,{waitUntil:"domcontentloaded"});}
+      catch(error) {
+        if(!(error instanceof Error)||!error.message.includes("net::ERR_ABORTED"))throw error;
+        console.log("Retrying interrupted browser navigation once",path,width);
+        await fixture.page.goto(path,{waitUntil:"domcontentloaded"});
+      }
       try {await capture(fixture.page,name,width,heading);}
       catch(error) {throw new Error(`Capture failed for ${name} at ${width} px`,{cause:error});}
       if(name==="order-parcels"&&["closed","cancelled"].includes(chosenOrder.state)) {

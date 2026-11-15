@@ -2003,3 +2003,22 @@ button.option-card.disabled, .option-card.disabled {
     margin-bottom: 4px;
   }
 }
+
+.customer-selection-tools {
+  position: sticky; top: 82px; z-index: 15; display: flex; align-items: center;
+  justify-content: space-between; gap: 10px; margin: 12px 0; padding: 10px 14px;
+  border: 1px solid var(--line); border-radius: 12px; background: #fff;
+  box-shadow: 0 4px 16px rgba(23, 45, 80, .08);
+}
+#item-instructions { scroll-margin-top: 164px; }
+@media (min-width: 768px) {
+  .customer-inventory-table :is(th,td):first-child {
+    position: sticky; left: 0; z-index: 1; min-width: 170px; max-width: 220px;
+    background: #fff; border-right: 1px solid var(--line);
+  }
+  .customer-inventory-table th:first-child { background: #f6f8fb; }
+  .customer-inventory-table td:first-child .code-btn {
+    max-width: 200px; height: auto; min-height: 35px; padding: 6px 8px;
+    white-space: normal; overflow-wrap: anywhere; text-align: left;
+  }
+}

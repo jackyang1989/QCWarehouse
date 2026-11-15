@@ -2699,9 +2699,9 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
       </details>
       {id&&<OrderAfterSalesAndRefundPanel orderId={id} orderState={o.state} onSaved={detail.reload}/>}
       {!["closed","cancelled","report_ready","action_pending"].includes(o.state)&&<div className="actions" style={{marginTop:10}}>
-        <Action run={async()=>{
+        <Action key={id} idempotent onSettled={detail.reload} run={async key=>{
           if(!window.confirm("Cancel this inspection? Warehouse items remain available for disposition."))return;
-          await request("/orders/"+id+"/cancel","POST",{revision:o.revision});detail.reload();
+          await request("/orders/"+id+"/cancel","POST",{revision:o.revision},key);
         }}>Cancel inspection</Action>
       </div>}
     </Panel>}
@@ -3080,14 +3080,24 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   const focusedQuoteAvailable=Boolean(data&&requestedQuote&&focusedQuote.data?.id===requestedQuote);
   const homeActions=useLoad(path==="/account"?"/actions":null);
   const [next,setNext]=useState<string|null>(null);
-  const [parcelOrder,setParcelOrder]=useState<string|null>(null);
+  const parcelOrder=search.get("order");
+  const [orderSearchInput,setOrderSearchInput]=useState("");
+  const [orderSearch,setOrderSearch]=useState<{query:string;page:number}|null>(null);
+  const parcelOrderLookup=useLoad(path==="/parcels"&&orderSearch?"/me/orders?"+new URLSearchParams({q:orderSearch.query,page:String(orderSearch.page)}):null);
+  const preferredParcelOrder=useLoad(path==="/parcels"&&parcelOrder?"/orders/"+encodeURIComponent(parcelOrder):null);
+  const [foundOrderOptions,setFoundOrderOptions]=useState<{owner:string;rows:Row[]}>({owner:"",rows:[]});
+  useEffect(()=>{
+    const owner=data?.profile.receiving_code;
+    if(path!=="/parcels"||!owner)return;
+    const incoming=[...(parcelOrderLookup.data?.rows??[]),...(preferredParcelOrder.data?[preferredParcelOrder.data]:[])];
+    setFoundOrderOptions(previous=>({owner,rows:[...new Map([...(previous.owner===owner?previous.rows:[]),...incoming].map(order=>[order.id,order])).values()]}));
+  },[path,data?.profile.receiving_code,parcelOrderLookup.data,preferredParcelOrder.data]);
   const [trackTarget,setTrackTarget]=useState<CustomerTrackingTarget|null>(null);
   const [itemTarget,setItemTarget]=useState<Row|null>(null);
   const [batchTarget,setBatchTarget]=useState<string|null>(null);
   useEffect(()=>{
     const params=new URLSearchParams(location.search);
     setNext(customerDestination(params.get("next")));
-    setParcelOrder(params.get("order"));
   },[path]);
   const [batchIds,setBatchIds]=useState<string[]>([]);
   useEffect(()=>{
@@ -3136,7 +3146,8 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   const isHome=path==="/account",isSecurity=path==="/account/security",isParcels=path==="/parcels",isOrders=path==="/orders",isHelp=path==="/support";
   const orders:Row[]=data.orders;
   const otherQuotes:Row[]=isBills?data.quotes.filter((quote:Row)=>quote.id!==requestedQuote):[];
-  const linkableOrders=orders.filter(order=>parcelLinkStates.includes(order.state));
+  const linkableOrders=[...new Map([...(foundOrderOptions.owner===data.profile.receiving_code?foundOrderOptions.rows:[]),...orders].map(order=>[order.id,order])).values()]
+    .filter(order=>parcelLinkStates.includes(order.state));
   const visibleOrders:Row[]=isHome?orders.slice(0,5):orderList.data?.rows??[];
   const page=Number(orderParams.get("page")??1);
   function ordersHref(target:number) {
@@ -3250,10 +3261,31 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     {isParcels&&<><div className="page-head"><p className="eyebrow">Warehouse deliveries</p><h1>Parcels</h1><p className="muted">Register the seller’s tracking number, link parcels to orders, and click any tracking number to inspect live events.</p></div>
     <details className="card" open={Boolean(parcelOrder)||undefined}>
       <summary>Register incoming parcel</summary>
+      {parcelOrder&&preferredParcelOrder.error&&<><ErrorBlock error={preferredParcelOrder.error}/><button type="button" onClick={preferredParcelOrder.reload}>Retry requested order</button></>}
+      {parcelOrder&&!preferredParcelOrder.data&&!preferredParcelOrder.error&&<p role="status">Loading the requested order…</p>}
+      {preferredParcelOrder.data&&!parcelLinkStates.includes(preferredParcelOrder.data.state)&&<p className="notice">The requested order is no longer accepting parcels.</p>}
       {carriers.error?<><ErrorBlock error={carriers.error}/><button type="button" onClick={carriers.reload}>Retry carriers</button></>:
         !carriers.data?<p role="status">Loading carriers…</p>:
         <InboundParcelForm address={addr} carriers={carriers.data.carriers} orders={linkableOrders} preferredOrder={parcelOrder}
           onSave={()=>{if(parcelTab!=="incoming"||parcelPage>1)selectParcelTab("incoming");parcelList.reload();reload();}}/>}
+    </details>
+    <details className="card">
+      <summary>Find an older order to link</summary>
+      <div className="form">
+        <label>Order number to find<input type="search" maxLength={68} value={orderSearchInput} onChange={event=>setOrderSearchInput(event.target.value)}
+          onKeyDown={event=>{if(event.key==="Enter"&&orderSearchInput.trim()){event.preventDefault();setOrderSearch({query:orderSearchInput.trim(),page:1});}}}/></label>
+        <button type="button" className="button" disabled={!orderSearchInput.trim()} onClick={()=>setOrderSearch({query:orderSearchInput.trim(),page:1})}>Find order</button>
+        {parcelOrderLookup.error&&<><ErrorBlock error={parcelOrderLookup.error}/><button type="button" onClick={parcelOrderLookup.reload}>Retry order search</button></>}
+        {orderSearch&&!parcelOrderLookup.data&&!parcelOrderLookup.error&&<p role="status">Loading matching orders…</p>}
+        {parcelOrderLookup.data&&!parcelOrderLookup.error&&<>
+          <p role="status">{parcelOrderLookup.data.rows.filter((order:Row)=>parcelLinkStates.includes(order.state)).length} matching orders on this page are available in the order choices below.</p>
+          {(orderSearch!.page>1||parcelOrderLookup.data.has_more)&&<nav className="actions" aria-label="Order match pages">
+            {orderSearch!.page>1&&<button type="button" onClick={()=>setOrderSearch(current=>current&&({...current,page:current.page-1}))}>Previous order matches</button>}
+            <span>Page {orderSearch!.page}</span>
+            {parcelOrderLookup.data.has_more&&<button type="button" onClick={()=>setOrderSearch(current=>current&&({...current,page:current.page+1}))}>Next order matches</button>}
+          </nav>}
+        </>}
+      </div>
     </details>
     <div className="actions workspace-filters" aria-label="Parcel filters">
       {parcelTabs.map(([key,title])=>
@@ -3321,6 +3353,9 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         ["Active reference samples",itemCounts?.reference??"—"],
       ].map(([name,value])=><div className="metric" key={name}><span>{name}</span><strong>{value}</strong></div>)}
     </div>
+    {handlingItems.length>0&&<div className="customer-selection-tools" role="region" aria-label="Selected item actions">
+      <strong>{handlingItems.length} selected</strong><a className="button primary" href="#item-instructions">Review instructions</a>
+    </div>}
     <Panel title="Your items">
       <label>Show items <select value={itemFilter} onChange={event=>router.push(inventoryHref(1,event.target.value),{scroll:false})}>
         <option value="all">All items</option><option value="inspection">Awaiting or in inspection</option>
@@ -3332,7 +3367,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
       {requestedItem&&!focusedItem.data&&!focusedItem.error&&<p role="status">Loading selected item…</p>}
       {inventory.error&&<><ErrorBlock error={inventory.error}/><button className="button sm" onClick={inventory.reload}>Retry inventory</button></>}
       {!inventory.data&&!inventory.error&&<p role="status">Loading items…</p>}
-      {!!visibleItems.length&&<Table headers={["Item","Inbound / Package","Order & inspection","Custody","Storage through","Reference / Dispatch","Next action"]} rows={visibleItems.map((w:Row)=>[
+      {!!visibleItems.length&&<div className="customer-inventory-table"><Table headers={["Item","Inbound / Package","Order & inspection","Custody","Storage through","Reference / Dispatch","Next action"]} rows={visibleItems.map((w:Row)=>[
         <div className="cell-stack">
           <div id={"item-"+w.code}><CodeButton code={w.code} onClick={()=>setItemTarget(w)}/></div>
           {w.declared_fields?.name&&<small>{w.declared_fields.name} {[w.declared_fields.color_declared,w.declared_fields.size_label].filter(Boolean).join(" · ")}</small>}
@@ -3363,7 +3398,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
             <input type="checkbox" aria-label={`Select ${w.code} for handling`} checked={handlingItems.some(row=>row.item_id===w.item_id)}
               onChange={e=>setHandlingItems(rows=>e.target.checked?[...rows,w]:rows.filter(row=>row.item_id!==w.item_id))}/> Select for handling
           </label>:"—",
-      ])}/>}
+      ])}/></div>}
       {inventory.data&&!visibleItems.length&&<Empty>{itemCounts?.total?"No items match this view.":"Items will appear after physical warehouse intake and ownership verification."}</Empty>}
       {inventory.data&&(itemPage>1||inventory.data.has_more)&&<nav className="actions" aria-label="Inventory pages">
         {itemPage>1&&<Link className="button sm" href={inventoryHref(itemPage-1)} scroll={false}>Previous</Link>}
@@ -3402,16 +3437,15 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         <Link className="code-btn" href={inventoryHref(itemPage,itemFilter,r.code)} scroll={false}>{r.code}</Link>,`v${r.revision??1}`,
         <Tag>{r.in_use?"Locked in comparison":r.state==="active"&&r.expired?"Expired":label(r.state)}</Tag>,
         stamp(r.expires_at),
-        r.state==="active"&&!r.in_use?<Action run={async()=>{
+        r.state==="active"&&!r.in_use?<Action key={r.reference_id} idempotent onSettled={refreshInventory} run={async key=>{
           const t=await request("/public/terms");
           const termsId=t.terms?.find((x:Row)=>x.kind==="terms")?.id;
           if(!termsId) throw new Error("Service terms are unavailable.");
-          await request("/me/reference-samples/"+r.reference_id+"/release","POST",{terms_version_id:termsId,reason:"Customer released reference sample"});
-          refreshInventory();
+          await request("/me/reference-samples/"+r.reference_id+"/release","POST",{terms_version_id:termsId,reason:"Customer released reference sample"},key);
         }}>Release reference</Action>:r.in_use?<small>In active comparison</small>:null,
       ])} empty="No reference samples reserved yet. Use the instruction form below to reserve a stored item as a reference sample."/>
     </Panel>
-    <Panel title="Request handling for items">
+    <Panel id="item-instructions" title="Request handling for items">
       {handlingNotice&&<div className="notice ok"><p role="status">{handlingNotice}</p>
         {itemFilter==="handling"&&<Link href={inventoryHref(1,"all")} scroll={false}>View items with saved instructions</Link>}
       </div>}
@@ -3843,7 +3877,7 @@ function InboundParcelForm({address,carriers,orderId,orders=[],preferredOrder,pe
       </label>}
       <label>Seller’s tracking number<input name="tracking" required value={trackingInput} onChange={e=>setTrackingInput(e.target.value)}/></label>
       <Select name="carrier" label="Carrier (if known)" required={false} choices={carriers.map(c=>({id:c.code,label:c.labels.en}))}/>
-      {!orderId&&<Select key={preferredOrder} name="order" label="Associate an order (optional)" required={false}
+      {!orderId&&<Select key={(preferredOrder??"")+":"+orders.some(o=>o.id===preferredOrder)} name="order" label="Associate an order (optional)" required={false}
         value={orders.some(o=>o.id===preferredOrder)?preferredOrder??undefined:undefined}
         choices={orders.map(o=>({id:o.id,label:o.public_no}))}/>}
       <small className="muted">Linked orders show suppliers and expected items when the tracking number matches the item declarations.</small>
@@ -3852,6 +3886,7 @@ function InboundParcelForm({address,carriers,orderId,orders=[],preferredOrder,pe
   </>;
 }
 
+const instructionRequestTimeoutMs=20_000;
 function ItemInstructionForm({items,orderId,storage=false,preselected=false,recentDestinations=[],onSave}:{
   items:Row[];orderId?:string;storage?:boolean;preselected?:boolean;recentDestinations?:Row[];onSave:(recorded:Row[])=>void;
 }) {
@@ -3864,23 +3899,49 @@ function ItemInstructionForm({items,orderId,storage=false,preselected=false,rece
   const [memberCode,setMemberCode]=useState("");
   const [savedNotice,setSavedNotice]=useState<string>();
   const [formKey,setFormKey]=useState(0);
+  type PlannedInstruction={path:string;body:Row;key:string;item:Row};
+  const instructionKeys=useRef(new Map<string,{fingerprint:string;key:string}>());
+  const [pendingPlan,setPendingPlan]=useState<PlannedInstruction[]|null>(null);
+  const [recoveryError,setRecoveryError]=useState("");
+  const [errorVersion,setErrorVersion]=useState(0);
+  async function submitInstructions(plan:PlannedInstruction[],recovering=false) {
+    const recorded:Row[]=[];
+    for(const [index,entry] of plan.entries()) {
+      try {await request(entry.path,"POST",entry.body,entry.key,AbortSignal.timeout(instructionRequestTimeoutMs));recorded.push(entry.item);}
+      catch(error) {
+        const failure=error instanceof DOMException&&["AbortError","TimeoutError"].includes(error.name)
+          ?new RequestError("The request timed out. Check the previous instructions before starting a new request.","NETWORK_ERROR"):error;
+        const uncertain=failure instanceof RequestError&&(failure.code==="NETWORK_ERROR"||failure.status===undefined||failure.status>=500);
+        if(uncertain)setPendingPlan(plan.slice(index));
+        else if(recovering){setPendingPlan(null);setRecoveryError(failure instanceof Error?failure.message:"Instruction could not be confirmed.");setErrorVersion(value=>value+1);}
+        if(recorded.length){setSavedNotice("Instructions recorded for "+recorded.map(item=>item.code).join(", ")+".");onSave(recorded);}
+        throw failure;
+      }
+    }
+    setPendingPlan(null);setRecoveryError("");
+    setSavedNotice(`Recorded instruction for ${recorded.length} ${recorded.length===1?"item":"items"} (${recorded.map(item=>item.code).join(", ")}).`);
+    instructionKeys.current.clear();setFormKey(value=>value+1);onSave(recorded);
+  }
   useEffect(()=>{
     setSelectedIds(prev=>{
       const valid=prev.filter(id=>items.some(row=>row.item_id===id));
-      if(valid.length>0) return valid;
-      return items[0]?.item_id?[items[0].item_id]:[];
+      return valid;
     });
   },[items.map(i=>i.item_id).join(",")]);
   const currentAction=storage?"retain":action;
   const needsDestination=!["retain","reserve_reference"].includes(currentAction);
   const termsId=terms.data?.terms.find((t:Row)=>t.kind==="terms")?.id;
-  if(!items.length)return <Empty>No items are available for a new instruction.</Empty>;
+  if(!items.length&&!pendingPlan)return <>
+    {recoveryError&&<ErrorBlock error={recoveryError}/>}{savedNotice&&<p className="notice" role="status">{savedNotice}</p>}
+    <Empty>No items are available for a new instruction.</Empty>
+  </>;
   if(terms.error)return <><ErrorBlock error={terms.error}/><button type="button" onClick={terms.reload}>Retry service terms</button></>;
   if(!terms.data)return <p role="status">Loading service terms…</p>;
   if(!termsId)return <Empty>Current service terms are unavailable. Handling instructions cannot be submitted yet.</Empty>;
   const chosen=preselected?items:items.filter(row=>selectedIds.includes(row.item_id));
   return <>
-    <Form key={formKey} label={(storage?"Request storage extension":"Save handling instruction")+(chosen.length>1?` (${chosen.length} items)`:"")} run={async f=>{
+    <Form key={formKey} idempotent disabled={Boolean(pendingPlan)} clearErrorKey={errorVersion} label={(storage?"Request storage extension":"Save handling instruction")+(chosen.length>1?` (${chosen.length} items)`:"")} run={async f=>{
+      setSavedNotice(undefined);setRecoveryError("");
       if(!chosen.length||!checked(f,"agree"))throw new Error("Select at least one item and confirm the instruction.");
       const destination=needsDestination?{
         recipient:recipient.trim()||text(f,"recipient"),
@@ -3890,32 +3951,25 @@ function ItemInstructionForm({items,orderId,storage=false,preselected=false,rece
       }:undefined;
       const deadline=text(f,"deadline");
       const sellerName=text(f,"seller_name"),sellerId=text(f,"seller_id");
-      const retainDays=currentAction==="retain"?Number(text(f,"days")||30):undefined;
-      const recorded:Row[]=[];
-      try {
-        for(const item of chosen) {
-          await request(orderId?"/orders/"+orderId+"/dispositions":"/me/items/"+item.item_id+"/dispositions","POST",{
-          ...(orderId?{item_id:item.item_id}:{}),action:currentAction,terms_version_id:termsId,...(destination?{destination}:{}),
-          ...(retainDays?{days:retainDays}:{}),
+      const retainDays=currentAction==="retain"?Number(text(f,"days")):undefined;
+      if(retainDays!==undefined&&(!Number.isInteger(retainDays)||retainDays<1||retainDays>365))
+        throw new Error("Choose between 1 and 365 additional storage days.");
+      const plan=chosen.map(item=>{
+        const path=orderId?"/orders/"+orderId+"/dispositions":"/me/items/"+item.item_id+"/dispositions";
+        const body={...(orderId?{item_id:item.item_id}:{}),action:currentAction,terms_version_id:termsId,...(destination?{destination}:{}),
+          ...(retainDays!==undefined?{days:retainDays}:{}),
           ...(currentAction==="return_to_seller"?{return_info:{requested_from_seller:true,customer_pays_shipping:true,
             ...(sellerName?{seller_name:sellerName}:{}),...(sellerId?{seller_id:sellerId}:{}),
-            ...(deadline?{deadline:new Date(deadline).toISOString()}:{})}}:{}),
-          });
-          recorded.push(item);
-        }
-      } catch(error) {
-        if(recorded.length) {
-          setSavedNotice("Instructions recorded for "+recorded.map(item=>item.code).join(", ")+".");
-          onSave(recorded);
-        }
-        throw error;
-      }
-      setSavedNotice(`Recorded instruction for ${chosen.length} ${chosen.length===1?"item":"items"} (${chosen.map(c=>c.code).join(", ")}).`);
-      setFormKey(k=>k+1);
-      onSave(recorded);
+            ...(deadline?{deadline:new Date(deadline).toISOString()}:{})}}:{})};
+        const identity=path+":"+item.item_id,fingerprint=JSON.stringify(body);
+        if(instructionKeys.current.get(identity)?.fingerprint!==fingerprint)instructionKeys.current.set(identity,{fingerprint,key:crypto.randomUUID()});
+        return {path,body,key:instructionKeys.current.get(identity)!.key,item};
+      });
+      await submitInstructions(plan);
     }}>
       {preselected?<p><strong>{items.length} selected</strong> · <span className="code">{items.map(item=>item.code).join(", ")}</span></p>:items.length===1?(
-        <div><small className="muted">Selected item</small><div><strong className="code">{items[0].code}</strong></div></div>
+        <label className="check"><input type="checkbox" checked={selectedIds.includes(items[0].item_id)}
+          onChange={event=>setSelectedIds(event.target.checked?[items[0].item_id]:[])}/><span>Select <strong className="code">{items[0].code}</strong></span></label>
       ):(
         <div>
           <div className="row">
@@ -3937,11 +3991,11 @@ function ItemInstructionForm({items,orderId,storage=false,preselected=false,rece
           </div>
         </div>
       )}
-      {!storage&&<label>Requested action<select value={action} onChange={e=>setAction(e.target.value)}>
+      {!storage&&<label>Requested action<select name="action" value={action} onChange={e=>setAction(e.target.value)}>
         <option value="return_to_seller">Return to seller</option><option value="to_forwarder">Send to freight forwarder</option>
         <option value="to_domestic_address">Send to a domestic address</option><option value="retain">Extend storage</option>
         <option value="reserve_reference">Reserve as reference sample (90 days)</option></select></label>}
-      {currentAction==="retain"&&<Field name="days" label="Additional storage days" type="number" value={30}/>}
+      {currentAction==="retain"&&<Field name="days" label="Additional storage days" type="number" min={1} max={365} step={1} value={30}/>}
       {needsDestination&&<>
         {recentDestinations.length>0&&<label>Quick-fill from saved / recent addresses (optional)
           <select defaultValue="" onChange={e=>{
@@ -3976,6 +4030,11 @@ function ItemInstructionForm({items,orderId,storage=false,preselected=false,rece
       <label className="check"><input name="agree" required type="checkbox"/>{currentAction==="return_to_seller"?
         "I have arranged the return with my seller and will pay the return shipping fee.":"I authorize this request subject to the current terms and quote."}</label>
     </Form>
+    {pendingPlan&&<div className="notice">
+      <p role="status">Previous instructions for <span className="code">{pendingPlan.map(entry=>entry.item.code).join(", ")}</span> may already be saved. Check these requests before starting new instructions.</p>
+      <Action primary run={()=>submitInstructions(pendingPlan,true)}>Check previous instructions</Action>
+    </div>}
+    {recoveryError&&<ErrorBlock error={recoveryError}/>}
     {savedNotice&&<p className="notice" role="status">{savedNotice}</p>}
   </>;
 }
@@ -4007,8 +4066,8 @@ function OrderHandling({
         {item.instruction?<><Tag>{label(item.instruction.action)}</Tag>{!storage&&!item.handling_hold&&item.instruction.awaiting_batch&&
           <label className="small"><input type="checkbox" checked={selection.includes(item.instruction.id)} onChange={e=>
             setSelected(current=>e.target.checked?[...current,item.instruction.id]:current.filter(id=>id!==item.instruction.id))}/> Select for shipping</label>}
-          {item.instruction.state==="requested"&&<Action run={async()=>{
-            await request("/me/dispositions/"+item.instruction.id+"/cancel","POST",{});onSave();
+          {item.instruction.state==="requested"&&<Action key={item.instruction.id} idempotent onSettled={onSave} run={async key=>{
+            await request("/me/dispositions/"+item.instruction.id+"/cancel","POST",{},key);
           }}>Cancel</Action>}</>:!item.handling_hold?"—":null}</div>,
       ])} empty="No warehouse items are linked to this inspection."/>
       {!storage&&selection.length>0&&<Action primary run={async()=>{

@@ -339,19 +339,24 @@ export function useLoad(path:string|null) {
   const current=result?.path===path?result:undefined;
   return {data:current?.data,error:current?.error??"",reload};
 }
-export function Action({children,run,primary=false,disabled=false,sm=false}:{children:ReactNode;run:()=>Promise<unknown>;primary?:boolean;disabled?:boolean;sm?:boolean}) {
+export function Action({children,run,primary=false,disabled=false,sm=false,idempotent=false,onSettled}:{children:ReactNode;run:(key?:string)=>Promise<unknown>;primary?:boolean;disabled?:boolean;sm?:boolean;idempotent?:boolean;onSettled?:()=>void}) {
   const [busy,set]=useState(false),[error,err]=useState("");
+  const inFlight=useRef(false),attempt=useRef<string|undefined>(undefined);
   const cls=["button",primary?"primary":"",sm?"sm":""].filter(Boolean).join(" ");
   return <span className="action-wrap" suppressHydrationWarning><button className={cls} type="button" suppressHydrationWarning disabled={busy||disabled} onClick={async()=>{
-    set(true);err("");try {await run();}catch(e){err(e instanceof Error?e.message:"Failed");}finally{set(false);}
+    if(inFlight.current||disabled)return;
+    inFlight.current=true;set(true);err("");
+    if(idempotent)attempt.current??=crypto.randomUUID();
+    try {await run(attempt.current);}catch(e){err(e instanceof Error?e.message:"Failed");}finally{inFlight.current=false;set(false);onSettled?.();}
   }}>{busy?"…":children}</button>{error&&<span className="notice error" role="alert">{error}</span>}</span>;
 }
-export function Form({children,run,label,inline=false,idempotent=false}:{children:ReactNode;run:(f:FormData,key?:string)=>Promise<unknown>;label:string;inline?:boolean;idempotent?:boolean}) {
+export function Form({children,run,label,inline=false,idempotent=false,disabled=false,clearErrorKey=0}:{children:ReactNode;run:(f:FormData,key?:string)=>Promise<unknown>;label:string;inline?:boolean;idempotent?:boolean;disabled?:boolean;clearErrorKey?:number}) {
   const [busy,set]=useState(false),[error,err]=useState("");
+  useEffect(()=>err(""),[clearErrorKey]);
   const inFlight=useRef(false),attempt=useRef<{fingerprint:string;key:string}|null>(null);
   async function submit(e:FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if(inFlight.current)return;
+    if(inFlight.current||disabled)return;
     const fields=new FormData(e.currentTarget);
     inFlight.current=true;
     set(true);err("");
@@ -369,8 +374,8 @@ export function Form({children,run,label,inline=false,idempotent=false}:{childre
       ?"Connection lost. Your request may already be saved. Retry to check the same request.":e instanceof Error?e.message:"Failed");}
     finally{inFlight.current=false;set(false);}
   }
-  return <form className={"form"+(inline?" inline-form":"")} onSubmit={submit}><fieldset disabled={busy} style={{display:"contents"}}>
-    {children}<button type="submit" className="button primary" disabled={busy}>{busy?"…":label}</button></fieldset>
+  return <form className={"form"+(inline?" inline-form":"")} onSubmit={submit}><fieldset disabled={busy||disabled} style={{display:"contents"}}>
+    {children}<button type="submit" className="button primary" disabled={busy||disabled}>{busy?"…":label}</button></fieldset>
     {error&&<div className="notice error" role="alert">{error}</div>}</form>;
 }
 export function Field({label,name,type="text",value,required=true,min,max,step}:{label:string;name:string;type?:string;value?:string|number;required?:boolean;min?:number;max?:number;step?:number|string}) {
