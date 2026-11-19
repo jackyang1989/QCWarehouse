@@ -411,10 +411,18 @@ export function WorkspaceNavigation({
             title={toggleLabel}
             onClick={onToggleCollapse}
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <rect x="3" y="4" width="18" height="16" rx="2"/>
-              <path d="M9 4v16"/>
-              {collapsed ? <path d="m14 10 2.5 2-2.5 2"/> : <path d="m16 10-2.5 2 2.5 2"/>}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.85" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              {collapsed ? (
+                <>
+                  <path d="M13 17l5-5-5-5"/>
+                  <path d="M6 17l5-5-5-5"/>
+                </>
+              ) : (
+                <>
+                  <path d="M11 17l-5-5 5-5"/>
+                  <path d="M18 17l-5-5 5-5"/>
+                </>
+              )}
             </svg>
           </button>
         )}
