@@ -27,28 +27,37 @@ export async function switchDemoPortal(targetHref:string, demoEmail:string) {
   location.assign(targetHref);
 }
 
-export function QuickSwitch({active,actor}:{active:"public"|"customer"|"warehouse"|"admin";actor?:Actor|null}) {
+export function QuickSwitch({active,actor,demo=false}:{active:"public"|"customer"|"warehouse"|"admin";actor?:Actor|null;demo?:boolean}) {
   const canCustomer = actor?.kind==="customer";
   const canWarehouse = actor?.kind==="staff" && actor.roles.some(r=>["receiver","warehouse_admin","inspector","reviewer","super_admin"].includes(r));
   const canAdmin = actor?.kind==="staff" && actor.roles.some(r=>["super_admin","finance","support","template_admin"].includes(r));
 
-  return <div className="quick-switch" role="navigation" aria-label="Portal switcher">
-    <Link href="/" className={active==="public"?"on":""}>Website</Link>
-    <Link
-      href="/orders"
-      className={active==="customer"?"on":""}
-      onClick={canCustomer?undefined:(e=>{e.preventDefault();void switchDemoPortal("/orders","customer@qcw.test");})}
-    >Customer</Link>
-    <Link
-      href="/wh"
-      className={active==="warehouse"?"on":""}
-      onClick={canWarehouse?undefined:(e=>{e.preventDefault();void switchDemoPortal("/wh","admin@qcw.test");})}
-    >Warehouse</Link>
-    <Link
-      href="/admin"
-      className={active==="admin"?"on":""}
-      onClick={canAdmin?undefined:(e=>{e.preventDefault();void switchDemoPortal("/admin","admin@qcw.test");})}
-    >Admin</Link>
+  return <div className="quick-switch" role="navigation" aria-label="工作区切换">
+    <Link href="/" className={active==="public"?"on":""}>官网</Link>
+    {(canCustomer || demo) && (
+      <Link
+        href="/orders"
+        className={active==="customer"?"on":""}
+        title={canCustomer?"客户工作台":"切换至演示客户账号"}
+        onClick={canCustomer?undefined:(e=>{e.preventDefault();void switchDemoPortal("/orders","customer@qcw.test");})}
+      >客户中心</Link>
+    )}
+    {(canWarehouse || demo) && (
+      <Link
+        href="/wh"
+        className={active==="warehouse"?"on":""}
+        title={canWarehouse?"仓库作业台":"切换至演示仓库账号"}
+        onClick={canWarehouse?undefined:(e=>{e.preventDefault();void switchDemoPortal("/wh","admin@qcw.test");})}
+      >仓库台</Link>
+    )}
+    {(canAdmin || demo) && (
+      <Link
+        href="/admin"
+        className={active==="admin"?"on":""}
+        title={canAdmin?"运营管理后台":"切换至演示管理账号"}
+        onClick={canAdmin?undefined:(e=>{e.preventDefault();void switchDemoPortal("/admin","admin@qcw.test");})}
+      >管理后台</Link>
+    )}
   </div>;
 }
 
@@ -243,6 +252,18 @@ export function SiteFooter() {
   </footer>;
 }
 
+export function InternalWorkspaceFooter({area,demo=false,timeZone="Asia/Shanghai"}:{area:"admin"|"warehouse";demo?:boolean;timeZone?:string}) {
+  return <footer className="site-footer internal-footer">
+    <div>
+      <strong>QCWarehouse {area==="admin"?"运营管理后台":"仓库作业工作台"}</strong>
+      <span> · 时区 {timeZone} · 全操作实时写入不可变审计台账</span>
+    </div>
+    <div className="muted small">
+      {demo ? "当前为本地演示隔离环境 (QCW_DEMO=1)" : "受控生产/预发布环境"}
+    </div>
+  </footer>;
+}
+
 const iconPaths:Record<string,string>={
   add:"M4 4h16v16H4z M8 12h8 M12 8v8",
   overview:"M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z",
@@ -341,7 +362,7 @@ export function WorkspaceNavigation({area,title,links,path,demo=false,mobileOpen
   const normPath = path==="/billing"?"/account/billing":path==="/notifications"?"/account/notifications":path;
   const current=links.find(([href])=>href===normPath)?.[0]
     ?? links.filter(([href])=>href!=="/wh"&&href!=="/admin"&&normPath.startsWith(href+"/")).sort(([left],[right])=>right.length-left.length)[0]?.[0]
-    ?? (normPath.startsWith("/wh/task/")?"/wh/execute":normPath.startsWith("/shipments/")?"/parcels":normPath.startsWith("/support/cases/")?"/support":normPath.startsWith("/admin/disposals/")?"/admin/dispositions":undefined);
+    ?? (normPath.startsWith("/wh/task/")?"/wh/execute":normPath.startsWith("/shipments/")?"/parcels":normPath.startsWith("/support/cases/")?"/support":normPath.startsWith("/admin/disposals/")?"/admin/dispositions":normPath.startsWith("/admin/inspections/")?"/admin/inspections":undefined);
   const grouped = navigationSections[area].map(([name,paths])=>[name,paths.flatMap(href=>links.filter(([url])=>url===href))] as const);
   const hasAdminCatalog = links.some(([url])=>url==="/admin/catalog");
   const otherLinks = area==="warehouse"
@@ -350,11 +371,8 @@ export function WorkspaceNavigation({area,title,links,path,demo=false,mobileOpen
   const isStaff = area==="warehouse" || area==="admin";
   return <aside className={`workspace-sidebar ${mobileOpen?"mobile-open":""}`} id="workspace-sidebar-nav">
     <div className="workspace-sidebar-title">
-      <div className="row" style={{justifyContent:"space-between",alignItems:"flex-start"}}>
-        <div>
-          {isStaff&&<p className="eyebrow">OPERATIONS / INTERNAL</p>}
-          <strong>{area==="customer"?"My Workspace":area==="warehouse"?"仓库作业中心":"运营管理中心"}</strong>
-        </div>
+      <div className="row" style={{justifyContent:"space-between",alignItems:"center"}}>
+        <strong>{area==="customer"?"My Workspace":area==="warehouse"?"仓库作业中心":"运营管理后台"}</strong>
         {onCloseMobile && (
           <button
             type="button"
@@ -366,7 +384,6 @@ export function WorkspaceNavigation({area,title,links,path,demo=false,mobileOpen
           </button>
         )}
       </div>
-      {isStaff&&<p>统一实物、检查、证据和订单履约信息</p>}
     </div>
     <nav className="workspace-nav" aria-label={title}>
       {[...grouped,[area==="customer"?"More":"平台配置",otherLinks] as const].filter(([,group])=>group.length>0).map(([name,group])=><div className="workspace-nav-group" key={name}>
@@ -376,9 +393,9 @@ export function WorkspaceNavigation({area,title,links,path,demo=false,mobileOpen
         </Link>)}
       </div>)}
     </nav>
-    {isStaff&&<div className="sidebar-note">
-      <b>{demo?"演示环境提醒":"作业与审计留痕"}</b>
-      {demo?"所有操作均为本机模拟。实际资金、物流、客户资产和报告发布需要服务端授权。":"所有收货、库位、质检证据与资金操作均实时记录服务端审计台账。"}
+    {isStaff&&demo&&<div className="sidebar-note">
+      <b>演示模式说明</b>
+      本机模拟数据与正式外部资金/物流/发信通道隔离。
     </div>}
   </aside>;
 }

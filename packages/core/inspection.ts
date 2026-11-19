@@ -354,7 +354,7 @@ async function evaluateCompleteness(
 }
 
 export async function checkTaskCompleteness(db:DB,actor:Actor,id:string) {
-  role(actor,"inspector","reviewer","warehouse_admin");
+  role(actor,"inspector","reviewer","warehouse_admin","super_admin","support");
   const t=await one(db,`select t.id,t.revision,t.group_id,t.template_version_id,v.content,
     l.attributes line_attributes,e.declared_fields
     from inspection_tasks t join template_versions v on v.id=t.template_version_id
@@ -367,7 +367,7 @@ export async function checkTaskCompleteness(db:DB,actor:Actor,id:string) {
 }
 
 export async function findInspectionTaskByScan(db:DB,actor:Actor,input:{code:string;order_id?:string|null}) {
-  role(actor,"inspector","reviewer","warehouse_admin");
+  role(actor,"inspector","reviewer","warehouse_admin","super_admin");
   const normalized=input.code.trim().toUpperCase();
   const row=(await db.query<{
     task_id:string;state:string;revision:number;order_id:string;public_no:string;item_code:string|null;
@@ -396,7 +396,7 @@ export async function findInspectionTaskByScan(db:DB,actor:Actor,input:{code:str
 }
 
 export async function taskDetail(db:DB,actor:Actor,id:string) {
-  role(actor,"inspector","reviewer","warehouse_admin");
+  role(actor,"inspector","reviewer","warehouse_admin","super_admin","support");
   const t=await one(db,`select t.id,t.state,t.revision,t.assignee_id,t.group_id,t.template_version_id,v.content,
     o.public_no,o.id order_id,o.revision order_revision,o.state order_state,o.sla_due_at,o.samples_ready_at,
     l.attributes line_attributes,e.declared_fields,e.position expected_position,
@@ -1030,7 +1030,7 @@ export async function reportDesk(db:DB,actor:Actor,order:string|null) {
   return {rows};
 }
 export async function staffReport(db:DB,actor:Actor,id:string) {
-  role(actor,...staffAccess.reportEditing);
+  role(actor,...staffAccess.reportEditing,"support","inspector");
   const version=await one(db,`select v.id,v.report_id,v.version,v.state,v.revision,v.snapshot,v.amend_reason,v.created_by,v.published_at,
     r.published_version,o.public_no,
     (select ae.after->>'reason' from audit_events ae where ae.entity_id=v.id and ae.entity_type='report_versions'

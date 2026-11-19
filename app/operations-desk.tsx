@@ -22,6 +22,11 @@ const jobNames:Record<string,string>={
   "order.cancelled":"取消检查通知","dispatch.quoted":"发运报价通知","quote.offered":"人工报价通知",
   "shipment.handed_over":"交接后通知","shipment.return_received":"退回实收通知","payment.confirmed":"付款确认通知",
 };
+const jobSafetyNotes:Record<string,string>={
+  "report.render":"幂等安全：基于已锁定的报告版本快照重新渲染 PDF 并校验 SHA-256，不会修改检查数据。",
+  "refund.approved":"幂等安全：使用退款单固定幂等键调用渠道原路退款，已成功退款不会重复扣款。",
+  "payment.checkout_expire":"幂等安全：仅关闭未入账的过期结账会话，已确认付款不受影响。",
+};
 export function OperationsDesk() {
   const {data,error,reload}=useLoad("/staff/admin/jobs");
   const [emailState,setEmailState]=useState("");
@@ -30,18 +35,19 @@ export function OperationsDesk() {
   const [scheduled,setScheduled]=useState<string>();
   const [retriedEmail,setRetriedEmail]=useState<string>();
   return <>
-    <div className="page-head"><p className="eyebrow">OPERATIONS / BACKGROUND JOBS</p><h1>后台作业与邮件通道恢复</h1>
-      <p className="muted">核对失败原因、邮件通道告警与退信抑制状态，完成修复后重新安排作业或受控补发通知。</p></div>
+    <div className="page-head"><h1>后台作业与邮件通道恢复</h1>
+      <p className="muted">核对失败原因、重试幂等安全性、邮件通道告警与退信抑制状态，完成修复后重新安排作业或受控补发通知。</p></div>
     {error&&<ErrorBlock error={error}/>}
     {email.error&&<ErrorBlock error={email.error}/>}
     {email.data?.channel_alert?.message&&<div className="notice" role="alert"><strong>邮件通道独立告警：</strong>{email.data.channel_alert.message}</div>}
     {!data&&!error&&<p role="status">正在读取失败队列…</p>}
-    {data&&!error&&<Panel title="失败待处理" badge={<button type="button" className="button sm" onClick={reload}>刷新作业状态</button>}>
+    {data&&!error&&<Panel title="失败待处理作业队列" subtitle="所有受控重试均携带原乐观锁尝试次数 (attempts) 校验，避免并发重复重排。" badge={<button type="button" className="button sm" onClick={reload}>刷新作业状态</button>}>
       {!data.rows.length&&<Empty>当前没有可重排的失败作业。</Empty>}
       {data.rows.map((job:Row)=><details className="card" key={job.id+"-"+job.attempts}>
         <summary><span className="code">#{job.id}</span> · {jobNames[job.type]??job.type} · <Tag>
           {job.attempts>=data.max_attempts?"自动重试已耗尽":"等待自动重试"}
         </Tag></summary>
+        <p className="small muted" style={{margin:"8px 0"}}>{jobSafetyNotes[job.type]??"幂等通知作业：若目标邮箱处于硬退信/投诉抑制状态将自动拦截外发。"}</p>
         <Table headers={["已尝试","最近错误码","下一自动重试","关联订单"]} rows={[[
           job.attempts,job.last_error??"—",job.attempts>=data.max_attempts?"等待人工恢复":stamp(job.next_attempt_at),
           job.order_number?<Link href={"/admin/orders/"+job.order_number}>{job.order_number}</Link>:"—",

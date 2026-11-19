@@ -35,6 +35,7 @@ import {
   TICKET_CATEGORY_ZH,
   TICKET_STATE_ZH,
   USER_STATUS_ZH,
+  WarehouseItemLifecycleTags,
 } from "./admin-labels";
 
 export function AdminCustomersDirectory() {
@@ -52,7 +53,6 @@ export function AdminCustomersDirectory() {
     <>
       <div className="page-head row">
         <div>
-          <p className="eyebrow">OPERATIONS / CUSTOMER DIRECTORY</p>
           <h1>客户档案与业务全景中心</h1>
           <p className="muted">按专属收件码、邮箱、昵称或关联订单号查询客户；点击进入完整客户工作台查看全部订单、在库样品、确认样、财务账单与客服记录。</p>
         </div>
@@ -163,8 +163,7 @@ export function AdminCustomerDetail({ id, actor }: { id: string; actor: Row }) {
       <div className="page-head row">
         <div>
           <Link href="/admin/customers">← 返回客户档案目录</Link>
-          <p className="eyebrow" style={{ marginTop: 8 }}>OPERATIONS / CUSTOMER 360 WORKBENCH</p>
-          <h1>
+          <h1 style={{ marginTop: 6 }}>
             客户详情工作台 · <span className="code">{p?.receiving_code ?? `#${id.slice(0, 8)}`}</span>
           </h1>
           {p && (
@@ -313,12 +312,12 @@ export function AdminCustomerDetail({ id, actor }: { id: string; actor: Row }) {
               </Panel>
               <Panel title={`在库及历史实物 (${(data.items ?? []).length})`}>
                 <Table
-                  headers={["实物编码", "来源包裹", "绑定订单", "保管状态", "库位", "活跃处置"]}
+                  headers={["实物编码", "来源包裹", "绑定订单", "保管与核身状态", "库位", "活跃处置"]}
                   rows={(data.items ?? []).map((it: Row) => [
                     <Link key="c" className="code" href={`/wh/samples/${it.code}`}>{it.code}</Link>,
                     it.package_code,
                     it.order_no ? <Link key="o" className="code" href={`/admin/orders/${it.order_no}`}>{it.order_no}</Link> : "未委托件",
-                    <Tag key="s">{it.custody_state}</Tag>,
+                    <WarehouseItemLifecycleTags key="s" item={it} compact />,
                     it.location_code ?? "—",
                     it.active_disposition ? (DISPOSITION_ACTION_ZH[it.active_disposition.split(":")[0]] ?? it.active_disposition) : "—",
                   ])}

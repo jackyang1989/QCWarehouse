@@ -28,8 +28,10 @@ import {
 } from "./ui";
 import {
   AdminTabs,
+  AUDIT_ACTION_ZH,
   BizTag,
   CopyId,
+  describeOrderNextResponsibility,
   DISPOSITION_ACTION_ZH,
   EmptyState,
   Money,
@@ -39,6 +41,7 @@ import {
   REFUND_STATE_ZH,
   REPORT_STATE_ZH,
   SERVICE_CODE_ZH,
+  SlaCountdownBadge,
   StatusBanner,
   SYNC_STATE_ZH,
   TASK_STATE_ZH,
@@ -46,6 +49,7 @@ import {
   TICKET_STATE_ZH,
   TRANSPORT_STATE_ZH,
   USER_STATUS_ZH,
+  WarehouseItemLifecycleTags,
 } from "./admin-labels";
 
 export function AdminOrdersWorkbench({
@@ -96,8 +100,21 @@ export function AdminOrdersWorkbench({
   useEffect(() => {
     if (typeof window !== "undefined" && window.location.hash.startsWith("#case-")) {
       setSectionTab("claims");
+      return;
     }
-  }, []);
+    setSectionTab(initTab);
+    setSearchText(initQuery);
+    setStateFilter(initState);
+    setTestFilter(initTest);
+    setApplied(prev => ({
+      ...prev,
+      query: initQuery,
+      state: initState,
+      exception: initTab === "exceptions" ? "1" : "all",
+      test: initTest,
+      cursor: null,
+    }));
+  }, [initTab, initQuery, initState, initTest]);
 
   const [drawer, setDrawer] = useState<StaffObjectTarget | null>(null);
   const [bindingPkg, setBindingPkg] = useState<Row | null>(null);
@@ -145,9 +162,8 @@ export function AdminOrdersWorkbench({
     <>
       <div className="page-head row">
         <div>
-          <p className="eyebrow">OPERATIONS / ORDER MANAGEMENT</p>
           <h1>订单中心与包裹认领核验</h1>
-          <p className="muted">按业务阶段、客户码、SKU 数量、到货核身进度、付款与 SLA 全面追踪每笔订单；异常订单与未认领包裹分视图处理。</p>
+          <p className="muted">按业务阶段、客户码、6 类数量口径（委托/预报/实收/核身/已检/差异）、下一步责任方、付款与 SLA 全面追踪每笔订单。</p>
         </div>
         <div className="head-actions">
           <Link className="button sm" href="/admin/customers">客户档案目录</Link>
@@ -164,7 +180,13 @@ export function AdminOrdersWorkbench({
         }}
         tabs={[
           { id: "orders", label: "全部订单工作队列", count: ordersRes.data && sectionTab === "orders" ? rows.length : undefined },
-          { id: "exceptions", label: "阻塞 / 异常 / SLA 超时", count: deskData?.overviewMetrics ? Number(deskData.overviewMetrics.sla_overdue ?? 0) : undefined },
+          {
+            id: "exceptions",
+            label: "阻塞 / 异常 / SLA 超时",
+            count: deskData?.overviewMetrics
+              ? Number(applied.test === "production" ? (deskData.overviewMetrics.exception_orders ?? deskData.overviewMetrics.sla_overdue ?? 0) : (deskData.overviewMetrics.exception_orders_all ?? deskData.overviewMetrics.sla_overdue_all ?? 0))
+              : undefined,
+          },
           { id: "claims", label: "未认领包裹与客户申诉核验", count: pendingClaimsCount || undefined },
         ]}
       />
@@ -229,15 +251,20 @@ export function AdminOrdersWorkbench({
               ) : (
                 <>
                   <Table
-                    headers={["订单编号", "客户", "服务与品类", "SKU / 委托件数", "实收 / 核身 / 已检", "付款状态", "当前阶段", "异常与提醒", "SLA 截止", "最近更新", "详情"]}
+                    headers={["订单编号", "客户", "服务与品类", "委托 / 预报包裹", "实收 / 核身 / 已检 / 差异", "付款状态", "当前阶段与责任方", "异常与 SLA 时限", "最近更新", "详情"]}
                     rows={rows.map(o => {
                       const expected = Number(o.expected_units ?? 0);
                       const arrived = Number(o.arrived_units ?? 0);
                       const identified = Number(o.identified_units ?? 0);
-                      const slaOverdue = Boolean(o.sla_due_at && Date.parse(o.sla_due_at) <= Date.now() && ["queued", "inspecting", "qa_review"].includes(o.state));
+                      const inspected = Number(o.qa_approved_tasks ?? 0);
+                      const diff = arrived - expected;
+                      const slaActive = ["queued", "inspecting", "qa_review"].includes(o.state);
+                      const resp = describeOrderNextResponsibility(o);
+                      const backQuery = params.toString();
+                      const detailHref = `/admin/orders/${o.public_no}${backQuery ? `?from_orders=${encodeURIComponent(backQuery)}` : ""}`;
                       return [
                         <div key="no" className="cell-stack">
-                          <Link href={`/admin/orders/${o.public_no}`}><strong className="code nowrap">{o.public_no}</strong></Link>
+                          <Link href={detailHref}><strong className="code nowrap">{o.public_no}</strong></Link>
                           <small>{o.is_test ? <Tag tone="gray">测试单</Tag> : "正式订单"}</small>
                         </div>,
                         <div key="cust" className="cell-stack">
@@ -251,29 +278,42 @@ export function AdminOrdersWorkbench({
                           <small>{o.category_label ?? "通用/服装"}</small>
                         </div>,
                         <div key="sku" className="cell-stack nowrap">
-                          <strong>{o.sku_count ?? 1} 组 / {expected} 件</strong>
-                          <small>{o.parcel_count ?? 0} 个预报包裹</small>
+                          <strong>委托 {expected} 件 ({o.sku_count ?? 1} 组 SKU)</strong>
+                          <small>预报包裹 {o.parcel_count ?? 0} 个（到仓 {o.arrived_parcel_count ?? 0}）</small>
                         </div>,
                         <div key="prog" className="cell-stack nowrap">
-                          <span>到 {arrived} / 核身 {identified} / 预期 {expected}</span>
+                          <span>实收 <strong>{arrived}</strong> · 核身 <strong>{identified}</strong> · 已检 <strong>{inspected}</strong></span>
                           <small>
-                            {o.total_tasks > 0 ? `质检通过 ${o.qa_approved_tasks}/${o.total_tasks}` : o.report_version ? `已发报告 v${o.report_version}` : "待开检任务"}
+                            {arrived === 0
+                              ? "包裹未到仓"
+                              : diff === 0 && identified === expected
+                                ? "账实核身一致"
+                                : diff < 0
+                                  ? `少到 ${Math.abs(diff)} 件`
+                                  : diff > 0
+                                    ? `多收 +${diff} 件`
+                                    : `待核身 ${Math.max(0, arrived - identified)} 件`}
+                            {o.report_version ? ` · 已发报告 v${o.report_version}` : ""}
                           </small>
                         </div>,
                         <div key="pay" className="cell-stack">
                           <BizTag dict={PAYMENT_STATE_ZH} value={o.payment_state ?? (o.paid_at ? "paid" : o.state === "draft" ? "open" : "paid")} />
                           {o.price_cents != null && <small><Money cents={o.price_cents} align="left" /></small>}
                         </div>,
-                        <BizTag key="st" dict={ORDER_STATE_ZH} value={o.state} />,
-                        <div key="exc" className="cell-stack">
-                          {o.open_block_count > 0 && <Tag tone="red">阻塞 {o.open_block_count} 项</Tag>}
-                          {o.open_ticket_count > 0 && <Tag tone="yellow">工单 {o.open_ticket_count}</Tag>}
-                          {slaOverdue && <Tag tone="red">SLA 已逾期</Tag>}
-                          {!o.open_block_count && !o.open_ticket_count && !slaOverdue && <span className="muted">正常</span>}
+                        <div key="st" className="cell-stack">
+                          <BizTag dict={ORDER_STATE_ZH} value={o.state} />
+                          <small className="muted" title={resp.action}>责任：{resp.owner}</small>
                         </div>,
-                        <span key="sla" className="nowrap">{o.sla_due_at ? stamp(o.sla_due_at, true) : "—"}</span>,
+                        <div key="exc" className="cell-stack">
+                          <div className="actions">
+                            {o.open_block_count > 0 && <Tag tone="red">阻塞 {o.open_block_count} 项</Tag>}
+                            {o.open_ticket_count > 0 && <Tag tone="yellow">工单 {o.open_ticket_count}</Tag>}
+                            <SlaCountdownBadge dueAt={o.sla_due_at} active={slaActive} />
+                          </div>
+                          {o.sla_due_at && <small className="nowrap">截止 {stamp(o.sla_due_at, true)}</small>}
+                        </div>,
                         <span key="up" className="nowrap">{stamp(o.updated_at ?? o.created_at, true)}</span>,
-                        <Link key="go" className="button sm nowrap" href={`/admin/orders/${o.public_no}`}>进入工作台 →</Link>,
+                        <Link key="go" className="button sm nowrap" href={detailHref}>进入工作台 →</Link>,
                       ];
                     })}
                   />
@@ -487,6 +527,9 @@ export function OrderRefundDesk({ number, onDone }: { number: string; onDone?: (
 }
 
 export function AdminOrderDetailWorkbench({ number }: { number: string }) {
+  const searchParams = useSearchParams();
+  const fromOrders = searchParams.get("from_orders") ?? "";
+  const backHref = fromOrders ? `/admin/orders?${fromOrders}` : "/admin/orders";
   const { data, error, reload } = useLoad(`/staff/orders/by-number/${number}`);
   const [tab, setTab] = useState("overview");
   const [drawer, setDrawer] = useState<StaffObjectTarget | null>(null);
@@ -504,14 +547,22 @@ export function AdminOrderDetailWorkbench({ number }: { number: string }) {
   const payments: Row[] = data?.payments ?? [];
   const refunds: Row[] = data?.refunds ?? [];
   const openBlocks = (data?.blocks ?? []).filter((b: Row) => !b.resolved_at);
+  const nextResp = order
+    ? describeOrderNextResponsibility({
+      state: order.state,
+      open_block_count: openBlocks.length,
+      arrived_units: skuSummary?.logged_units_total ?? 0,
+      identified_units: skuSummary?.identified_units_total ?? 0,
+      expected_units: skuSummary?.expected_units_total ?? 0,
+    })
+    : null;
 
   return (
     <>
       <div className="page-head row">
         <div>
-          <Link href="/admin/orders">← 返回全部订单队列</Link>
-          <p className="eyebrow" style={{ marginTop: 8 }}>OPERATIONS / ORDER WORKBENCH</p>
-          <h1>
+          <Link href={backHref}>← 返回订单队列</Link>
+          <h1 style={{ marginTop: 6 }}>
             订单详情工作台 · <span className="code">{order?.public_no ?? number}</span>
           </h1>
           {order && (
@@ -519,6 +570,7 @@ export function AdminOrderDetailWorkbench({ number }: { number: string }) {
               <BizTag dict={ORDER_STATE_ZH} value={order.state} />
               {data.is_test && <Tag tone="gray">测试订单</Tag>}
               {openBlocks.length > 0 && <Tag tone="red">当前阻塞 {openBlocks.length} 项</Tag>}
+              {nextResp && <Tag tone={nextResp.tone}>下一步责任方：{nextResp.owner}（{nextResp.action}）</Tag>}
               {cust?.id && (
                 <Link className="button sm" href={`/admin/customers/${cust.id}`}>
                   客户 {cust.receiving_code} ({cust.display_name ?? cust.email})
@@ -539,16 +591,22 @@ export function AdminOrderDetailWorkbench({ number }: { number: string }) {
         <>
           {actionNotice && <StatusBanner tone="success" title="受控状态更新成功">{actionNotice}</StatusBanner>}
 
-          <div className="metric-strip" aria-label="订单执行关键指标">
+          <div className="metric-strip" aria-label="订单 6 维数量与执行关键指标">
             <div className="metric">
-              <span>委托 SKU / 件数</span>
-              <strong>{skuSummary?.expected_lines_count ?? 0} 组 / {skuSummary?.expected_units_total ?? 0} 件</strong>
-              <small>{data.lines.map((l: Row) => l.title?.["zh-CN"] ?? l.title?.en).join(" + ")}</small>
+              <span>① 委托 / ② 预报包裹</span>
+              <strong>{skuSummary?.expected_units_total ?? 0} 件 ({skuSummary?.expected_lines_count ?? 0} 组 SKU)</strong>
+              <small>已预报包裹 {data.parcels.length} 个（已到仓 {data.parcels.filter((p: Row) => Boolean(p.code)).length} 个）</small>
             </div>
             <div className="metric">
-              <span>仓库收货与核身进度</span>
-              <strong>实收 {skuSummary?.logged_units_total ?? 0} · 核身 {skuSummary?.identified_units_total ?? 0}</strong>
-              <small>已检 {skuSummary?.inspected_units_total ?? 0} 件{skuSummary?.short_units_total > 0 ? ` · 少货 ${skuSummary.short_units_total} 件` : ""}</small>
+              <span>③ 实收 / ④ 核身 / ⑤ 已检 / ⑥ 差异</span>
+              <strong>实收 {skuSummary?.logged_units_total ?? 0} · 核身 {skuSummary?.identified_units_total ?? 0} · 已检 {skuSummary?.inspected_units_total ?? 0}</strong>
+              <small>
+                {skuSummary?.short_units_total > 0
+                  ? `缺件差异 ${skuSummary.short_units_total} 件`
+                  : (skuSummary?.unidentified_units_total ?? 0) > 0
+                    ? `待 SKU 核身 ${skuSummary.unidentified_units_total} 件`
+                    : "实收与核身口径无差异"}
+              </small>
             </div>
             <div className="metric">
               <span>订单金额 / 实付</span>
@@ -742,7 +800,7 @@ export function AdminOrderDetailWorkbench({ number }: { number: string }) {
 
               <Panel title={`在单实物条码明细 (${data.items.length})`}>
                 <Table
-                  headers={["实物编号", "序号", "SKU / 颜色 / 尺码", "来源包裹", "核身状态", "保管状态", "检验阶段", "当前库位"]}
+                  headers={["实物编号", "序号", "SKU / 颜色 / 尺码", "来源包裹", "保管与核身状态", "检验阶段", "当前库位"]}
                   rows={data.items.map((item: Row) => {
                     const df = (item.declared_fields ?? {}) as Row;
                     return [
@@ -753,9 +811,10 @@ export function AdminOrderDetailWorkbench({ number }: { number: string }) {
                       `#${item.position}`,
                       `${df.sku_code ?? df.sample_code ?? "—"} · ${df.color_declared ?? df.color ?? "—"} / ${df.size_label ?? "—"}`,
                       <CodeButton key="pk" code={item.package_code} onClick={() => setDrawer({ kind: "package", ref: item.package_code })} />,
-                      <Tag key="id">{item.identity_state}</Tag>,
-                      <Tag key="cu">{item.custody_state}</Tag>,
-                      <Tag key="in" tone={item.inspection_stage === "inspected" ? "green" : "blue"}>{item.inspection_stage ?? "待检"}</Tag>,
+                      <WarehouseItemLifecycleTags key="st" item={{ ...item, order_no: order.public_no }} compact />,
+                      <Tag key="in" tone={item.inspection_stage === "inspected" ? "green" : "blue"}>
+                        {item.inspection_stage === "inspected" ? "已完成检验" : item.inspection_stage === "in_inspection" ? "检验进行中" : "待检验"}
+                      </Tag>,
                       item.location ?? "—",
                     ];
                   })}
@@ -769,9 +828,9 @@ export function AdminOrderDetailWorkbench({ number }: { number: string }) {
             <div className="ops-columns">
               <Panel title={`质检任务列表 (${tasks.length})`}>
                 <Table
-                  headers={["任务入口", "关联实物", "检查模板", "检查员", "状态", "检查项 / 证据"]}
+                  headers={["任务监督入口", "关联实物", "检查模板", "检查员", "状态", "检查项 / 证据"]}
                   rows={tasks.map(t => [
-                    <Link key="id" className="code" href={`/wh/task/${t.id}`}>任务 #{t.id.slice(0, 8)}</Link>,
+                    <Link key="id" className="code nowrap" href={`/admin/inspections/tasks/${t.id}`}><strong>TSK-{t.id.slice(0, 8).toUpperCase()}</strong></Link>,
                     t.item_code ? <CodeButton key="it" code={t.item_code} onClick={() => setDrawer({ kind: "item", ref: t.item_code })} /> : (t.is_group_task ? <Tag tone="blue">同框对比/留样组</Tag> : "—"),
                     `${t.template_key} v${t.template_version}`,
                     t.assignee_name ?? "未领取",
@@ -903,10 +962,10 @@ export function AdminOrderDetailWorkbench({ number }: { number: string }) {
 
               <Panel title="订单状态与审计时间线">
                 <Table
-                  headers={["时间", "动作", "操作人角色", "操作员"]}
+                  headers={["时间", "业务动作", "操作人角色", "操作员"]}
                   rows={(data.activity ?? []).map((a: Row) => [
                     stamp(a.at, true),
-                    a.action,
+                    AUDIT_ACTION_ZH[a.action] ?? a.action,
                     a.actor_type === "customer" ? "客户" : a.actor_type === "staff" ? "员工" : "系统",
                     a.display_name ?? "—",
                   ])}

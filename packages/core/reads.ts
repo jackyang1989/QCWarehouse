@@ -693,11 +693,28 @@ export async function adminDesk(db:DB,actor:Actor) {
   const templates=hasStaffAccess(actor.roles,staffAccess.templates);
   const overviewMetrics=ops?(await db.query(`select
     count(*) filter (where coalesce(is_test,false)=false and state='awaiting_samples')::int awaiting_samples,
+    count(*) filter (where state='awaiting_samples')::int awaiting_samples_all,
     count(*) filter (where coalesce(is_test,false)=false and state in ('queued','inspecting'))::int queued_or_inspecting,
+    count(*) filter (where state in ('queued','inspecting'))::int queued_or_inspecting_all,
     count(*) filter (where coalesce(is_test,false)=false and state in ('queued','inspecting','qa_review') and sla_due_at is not null and sla_due_at<=now())::int sla_overdue,
+    count(*) filter (where state in ('queued','inspecting','qa_review') and sla_due_at is not null and sla_due_at<=now())::int sla_overdue_all,
+    count(*) filter (where coalesce(is_test,false)=false and (
+      state='on_hold' or
+      (sla_due_at is not null and sla_due_at<=now() and state in ('queued','inspecting','qa_review')) or
+      exists(select 1 from order_blocks ob where ob.order_id=orders.id and ob.resolved_at is null) or
+      exists(select 1 from tickets k where k.order_id=orders.id and k.state in ('open','waiting_customer','waiting_internal'))
+    ))::int exception_orders,
+    count(*) filter (where (
+      state='on_hold' or
+      (sla_due_at is not null and sla_due_at<=now() and state in ('queued','inspecting','qa_review')) or
+      exists(select 1 from order_blocks ob where ob.order_id=orders.id and ob.resolved_at is null) or
+      exists(select 1 from tickets k where k.order_id=orders.id and k.state in ('open','waiting_customer','waiting_internal'))
+    ))::int exception_orders_all,
     count(*) filter (where coalesce(is_test,false)=false and state='qa_review')::int qa_review,
+    count(*) filter (where state='qa_review')::int qa_review_all,
     count(*) filter (where coalesce(is_test,false)=false)::int production_orders,
     count(*) filter (where coalesce(is_test,false)=true)::int test_orders,
+    count(*)::int total_orders,
     (select count(*)::int from dispatch_batches where state in ('confirmed','quoted','paid')) dispatch_pending,
     (select count(*)::int from tickets where state in ('open','waiting_customer','waiting_internal')) open_tickets,
     (select count(*)::int from payment_disputes where state<>'resolved_by_staff') open_disputes,
@@ -809,10 +826,17 @@ export async function adminDesk(db:DB,actor:Actor) {
       return {holidays:[...holidays].sort(),extra_workdays:[...extraWorkdays].sort()};
     })():{holidays:[],extra_workdays:[]},
     termsVersions:actor.roles.includes("super_admin")?(await db.query(
-      `select id,kind,version,effective_at,content_md,content_hash,
-              case when effective_at is not null and effective_at<=now() then 'published' else 'draft' end state
-       from terms_versions
-       order by kind,effective_at desc nulls first,version desc`
+      `select tv.id,tv.kind,tv.version,tv.effective_at,tv.content_md,tv.content_hash,
+              case when tv.effective_at is not null and tv.effective_at<=now() then 'published' else 'draft' end state,
+              (tv.content_md ilike '%Development fixture%' or tv.version ilike 'demo-%') is_demo_fixture,
+              (select count(*)::int from account_consents ac where ac.terms_version_id=tv.id) consent_count,
+              (tv.effective_at is not null and tv.effective_at<=now() and tv.id=(
+                select tv2.id from terms_versions tv2
+                where tv2.kind=tv.kind and tv2.effective_at is not null and tv2.effective_at<=now()
+                order by tv2.effective_at desc,tv2.version desc limit 1
+              )) is_current_active
+       from terms_versions tv
+       order by tv.kind,tv.effective_at desc nulls first,tv.version desc`
     )).rows:[],
     staffUsers:actor.roles.includes("super_admin")?(await db.query(
       `select u.id,u.display_name,u.status,u.auth_version,u.created_at,u.updated_at,
@@ -849,9 +873,17 @@ export async function adminDesk(db:DB,actor:Actor) {
     })):[],
     templates:templates?(await db.query(`select t.id,t.template_key,t.category_id,t.service_type_id,t.version,t.state,t.content,
       t.content_hash,t.author_id,t.reviewer_id,t.published_at,
+      au.display_name author_name,ru.display_name reviewer_name,
+      cat.labels->>'zh-CN' category_label,st.labels->>'zh-CN' service_label,
+      (select count(distinct l.order_id)::int from order_lines l where l.template_version_id=t.id) order_count,
       array(select c.code from template_capabilities tc join capabilities c on c.id=tc.capability_id
         where tc.template_version_id=t.id order by c.code) capability_codes
-      from template_versions t order by t.published_at desc nulls first,t.template_key,t.version desc limit 100`)).rows:[],
+      from template_versions t
+      left join users au on au.id=t.author_id
+      left join users ru on ru.id=t.reviewer_id
+      left join categories cat on cat.id=t.category_id
+      left join service_types st on st.id=t.service_type_id
+      order by t.published_at desc nulls first,t.template_key,t.version desc limit 100`)).rows:[],
     categories:templates?(await db.query("select id,slug,labels,status,revision,admission_snapshot from categories order by slug")).rows:[],
     services:templates?(await db.query("select id,code,labels from service_types order by code")).rows:[],
     capabilities:templates?(await db.query("select id,code,method from capabilities where approved_by is not null and revoked_at is null order by code")).rows:[],

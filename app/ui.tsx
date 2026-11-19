@@ -417,7 +417,13 @@ export function Tag({children,tone}:{children:ReactNode;tone?:"green"|"yellow"|"
     /quarantine|cancelled|cancel|hold|restricted|expired|error|failed|dispute|隔离|已取消|冻结|异常|驳回/.test(raw)?"red":undefined);
   return <span className={`tag${auto?" "+auto:""}`}>{children}</span>;
 }
-export function ErrorBlock({error}:{error:string}) {return <div className="notice error" role="alert">{error}</div>;}
+export function ErrorBlock({error}:{error:string}) {
+  const zh=useIsStaffLocale();
+  const display = zh && error === "This action requires staff permission."
+    ? "当前员工账号未分配执行该操作的岗位角色权限（按职责分离与最小权限控制拦截）。"
+    : error;
+  return <div className="notice error" role="alert">{display}</div>;
+}
 export function Tabs({links,path}:{links:[string,string][];path:string}) {return <nav className="tabs">{links.map(([to,label])=><Link aria-current={to===path?"page":undefined} href={to} key={to}>{label}</Link>)}</nav>;}
 export function Table({headers,rows,empty}:{headers:string[];rows:ReactNode[][];empty?:string}) {
   if(!rows.length)return empty?<Empty>{empty}</Empty>:null;
@@ -776,14 +782,25 @@ export function StaffObjectDrawer({
         <div className="panel" style={{margin:0}}>
           <h3>包裹内拆出实物 ({(d.items??[]).length})</h3>
           <Table
-            headers={["实物编码","订单","核身","保管状态","库位"]}
-            rows={(d.items??[]).map((it:Row)=>[
-              <CodeButton key={it.id} code={it.code} onClick={()=>switchTo({kind:"item",ref:it.code})}/>,
-              it.order_no?<Link className="code-btn" href={`/admin/orders/${it.order_no}`} onClick={onClose}>{it.order_no}</Link>:"—",
-              <Tag key="id">{it.identity_state}</Tag>,
-              <Tag key="cs">{it.custody_state}</Tag>,
-              it.location??"—",
-            ])}
+            headers={["实物编码","订单","保管与核身状态","库位"]}
+            rows={(d.items??[]).map((it:Row)=>{
+              const custody = it.custody_state === "disposed" ? "已特殊处置" : it.custody_state === "outbound" ? "已出库交接" : it.custody_state === "stored" ? "在库保管" : "已实收暂存";
+              const identity = it.custody_state === "disposed" && it.identity_state === "pending"
+                ? "逾期免核身"
+                : it.custody_state === "outbound" && it.identity_state === "pending"
+                  ? "未绑单退回"
+                  : it.identity_state === "identified"
+                    ? "已核身"
+                    : it.identity_state === "quarantined"
+                      ? "隔离管控"
+                      : "待 SKU 核身";
+              return [
+                <CodeButton key={it.id} code={it.code} onClick={()=>switchTo({kind:"item",ref:it.code})}/>,
+                it.order_no?<Link className="code-btn" href={`/admin/orders/${it.order_no}`} onClick={onClose}>{it.order_no}</Link>:"未绑单",
+                <div key="st" className="actions"><Tag>{custody}</Tag><Tag tone="outline">{identity}</Tag></div>,
+                it.location??"—",
+              ];
+            })}
             empty="该包裹尚未拆包生成逐件条码。"
           />
         </div>
@@ -791,11 +808,21 @@ export function StaffObjectDrawer({
     })()}
     {d?.kind==="item"&&(()=>{
       const it=d.item;
+      const custodyLabel = it.custody_state === "disposed" ? "已特殊处置归档" : it.custody_state === "outbound" ? "已出库交接" : it.custody_state === "stored" ? "在库保管中" : "已实收暂存";
+      const identityLabel = it.custody_state === "disposed" && it.identity_state === "pending"
+        ? "逾期/无主直接处置（免 SKU 核身）"
+        : it.custody_state === "outbound" && it.identity_state === "pending"
+          ? "未绑单原样退回/出库（免 SKU 核身）"
+          : it.identity_state === "identified"
+            ? "已完成 SKU 核身"
+            : it.identity_state === "quarantined"
+              ? "违禁/异常隔离"
+              : "待 SKU 核身";
       return <>
         <div className="panel" style={{margin:0}}>
           <div className="row">
             <div><strong className="code">{it.code}</strong> <span className="muted">({it.receiving_code??"未绑定客户"})</span></div>
-            <div className="actions"><Tag>{it.identity_state}</Tag><Tag>{it.custody_state}</Tag></div>
+            <div className="actions"><Tag>{custodyLabel}</Tag><Tag tone="outline">{identityLabel}</Tag></div>
           </div>
           <div className="grid cols2" style={{marginTop:10}}>
             <div><small className="muted">来源包裹 / 入仓运单</small><div className="actions">

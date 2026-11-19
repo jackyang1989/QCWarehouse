@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { useEffect, useState } from "react";
 import {
   Action,
   Empty,
@@ -20,6 +21,7 @@ import {
 } from "./ui";
 import {
   AdminTabs,
+  AUDIT_ACTION_ZH,
   BizTag,
   CopyId,
   EmptyState,
@@ -45,7 +47,12 @@ function FinanceSubNav({ active }: { active: "payments" | "refunds" | "finance" 
 }
 
 export function AdminPaymentsWorkbench({ demo = false }: { demo?: boolean }) {
-  const [tab, setTab] = useState("all");
+  const searchParams = useSearchParams();
+  const initTab = searchParams.get("tab") ?? "all";
+  const [tab, setTab] = useState(initTab);
+  useEffect(() => {
+    setTab(searchParams.get("tab") ?? "all");
+  }, [searchParams]);
   const [q, setQ] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [purpose, setPurpose] = useState("all");
@@ -66,7 +73,6 @@ export function AdminPaymentsWorkbench({ demo = false }: { demo?: boolean }) {
     <>
       <div className="page-head row">
         <div>
-          <p className="eyebrow">FINANCE / PAYMENTS & RECONCILIATION</p>
           <h1>支付与渠道对账工作台</h1>
           <p className="muted">按业务状态查看每笔收费单与支付交易对应的客户、订单、用途、退款进度与账实对账结论；点击单号进入 6 区块完整交易详情。</p>
         </div>
@@ -294,8 +300,7 @@ export function AdminPaymentDetail({ id, demo = false }: { id: string; demo?: bo
       <div className="page-head row">
         <div>
           <Link href="/admin/payments">← 返回支付流水与对账工作台</Link>
-          <p className="eyebrow" style={{ marginTop: 8 }}>FINANCE / PAYMENT DETAIL WORKBENCH</p>
-          <h1>
+          <h1 style={{ marginTop: 6 }}>
             支付交易详情 · <span className="code">{p?.display_ref ?? `#${id.slice(0, 8)}`}</span>
           </h1>
           {p && (
@@ -541,7 +546,6 @@ export function AdminRefundsWorkbench() {
     <>
       <div className="page-head row">
         <div>
-          <p className="eyebrow">FINANCE / REFUND GOVERNANCE</p>
           <h1>退款审批与执行工作台</h1>
           <p className="muted">每笔退款申请必须进入完整详情工作台核对客户、原始订单、报告交付状态、剩余可退余额及职责分离要求后，方可由独立复核人批准或驳回。</p>
         </div>
@@ -688,8 +692,7 @@ export function AdminRefundDetail({ id, demo = false }: { id: string; demo?: boo
       <div className="page-head row">
         <div>
           <Link href="/admin/refunds">← 返回退款审批列表</Link>
-          <p className="eyebrow" style={{ marginTop: 8 }}>FINANCE / REFUND DECISION WORKBENCH</p>
-          <h1>
+          <h1 style={{ marginTop: 6 }}>
             退款审批决策台 · <span className="code">{rf?.display_ref ?? `#${id.slice(0, 8)}`}</span>
           </h1>
           {rf && (
@@ -798,11 +801,11 @@ export function AdminRefundDetail({ id, demo = false }: { id: string; demo?: boo
 
               <Panel title="3. 退款审批与执行审计记录">
                 <Table
-                  headers={["时间", "操作人", "动作", "审批理由 / 详情"]}
+                  headers={["时间", "操作人", "业务动作", "审批理由 / 详情"]}
                   rows={(data.audit_events ?? []).map((a: Row) => [
                     stamp(a.at, true),
                     a.actor_name ?? (a.actor_type === "system" ? "后台系统作业" : "员工"),
-                    a.action,
+                    AUDIT_ACTION_ZH[a.action] ?? a.action,
                     a.after?.reason ?? a.after?.provider_ref ?? "—",
                   ])}
                   empty="暂无该退款单后续审批或执行审计日志。"
@@ -935,7 +938,6 @@ export function AdminFinanceAnalytics({ demo = false }: { demo?: boolean }) {
     <>
       <div className="page-head row">
         <div>
-          <p className="eyebrow">FINANCE / REVENUE & COST ANALYTICS</p>
           <h1>业务财务对账与订单贡献毛利</h1>
           <p className="muted">严格区分平台服务收入、代收代付运费（Pass-through）、已退款支出及估算检查工时成本（显式标记估算口径）。</p>
         </div>

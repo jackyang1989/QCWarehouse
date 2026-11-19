@@ -220,7 +220,7 @@ small, .small { font-size: 12px; color: var(--muted); }
 .workspace-sidebar, .sidebar {
   background: var(--nav);
   color: #d0deec;
-  padding: 32px 16px 40px;
+  padding: 20px 14px 28px;
   min-height: calc(100svh - 70px);
   box-shadow: inset -1px 0 0 #29415d;
   position: relative;
@@ -237,19 +237,19 @@ small, .small { font-size: 12px; color: var(--muted); }
   border: 1px solid rgba(126, 167, 236, 0.08);
   border-radius: 50%;
 }
-.workspace-sidebar-title { padding: 0 13px; margin-bottom: 24px; }
-.workspace-sidebar-title .eyebrow { color: #8da7c5; letter-spacing: 1.65px; font-size: 10px; margin: 0 0 8px; }
-.workspace-sidebar-title strong { display: block; margin-bottom: 8px; color: var(--white); font-size: 20px; line-height: 1.18; font-weight: 780; letter-spacing: -0.4px; }
-.workspace-sidebar-title p:last-child { color: #9caec4; font-size: 11px; line-height: 1.6; margin: 0; }
-.workspace-nav { display: grid; gap: 20px; margin-top: 18px; }
-.workspace-nav-group { display: grid; gap: 3px; }
-.workspace-nav-group > p { padding: 0 13px 6px; margin: 0; color: #7f93ad; font-size: 10px; font-weight: 850; letter-spacing: 1.1px; text-transform: uppercase; }
+.workspace-sidebar-title { padding: 0 13px; margin-bottom: 12px; }
+.workspace-sidebar-title .eyebrow { color: #8da7c5; letter-spacing: 1.65px; font-size: 10px; margin: 0 0 6px; }
+.workspace-sidebar-title strong { display: block; margin-bottom: 0; color: var(--white); font-size: 17px; line-height: 1.25; font-weight: 780; letter-spacing: -0.3px; }
+.workspace-sidebar-title p:last-child { color: #9caec4; font-size: 11px; line-height: 1.5; margin: 4px 0 0; }
+.workspace-nav { display: grid; gap: 14px; margin-top: 10px; }
+.workspace-nav-group { display: grid; gap: 2px; }
+.workspace-nav-group > p { padding: 0 13px 4px; margin: 0; color: #7f93ad; font-size: 10px; font-weight: 850; letter-spacing: 1.1px; text-transform: uppercase; }
 .workspace-nav a {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 40px;
-  padding: 9px 13px;
+  min-height: 36px;
+  padding: 7px 12px;
   color: #b8c9dc;
   font-size: 12.5px;
   font-weight: 620;
@@ -2461,6 +2461,11 @@ button.admin-tab.active .admin-tab-count {
 @media (max-width: 1180px) {
   .admin-split-detail { grid-template-columns: 1fr; }
 }
+.site-footer.internal-footer {
+  padding: 12px 0 4px;
+  font-size: 12px;
+  color: #6b7f95;
+}
 @media (max-width: 767px) {
   .workspace-admin .metric-strip,
   .workspace-warehouse .metric-strip {
@@ -2474,6 +2479,31 @@ button.admin-tab.active .admin-tab-count {
   .workspace-admin .header-right .quick-switch,
   .workspace-warehouse .header-right .quick-switch {
     display: none;
+  }
+  .workspace-admin .head-actions,
+  .workspace-warehouse .head-actions {
+    flex-wrap: wrap;
+    max-width: 100%;
+    min-width: 0;
+  }
+  .workspace-admin .head-actions .quick-switch,
+  .workspace-warehouse .head-actions .quick-switch {
+    display: flex;
+    flex-wrap: wrap;
+    height: auto;
+    max-width: 100%;
+  }
+  .workspace-admin .inline-form,
+  .workspace-warehouse .inline-form,
+  .workspace-admin .inline-form label,
+  .workspace-warehouse .inline-form label,
+  .workspace-admin select,
+  .workspace-admin input {
+    max-width: 100%;
+    min-width: 0;
+  }
+  .workspace-admin .bars {
+    gap: 4px;
   }
   .workspace-admin .topnav {
     display: none;

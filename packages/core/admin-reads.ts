@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { DB } from "../db";
 import { guard, one, role, type Actor } from "./common";
+import { taskDetail } from "./inspection";
 import { computeOrderRefundStage } from "./operations";
 import { hasStaffAccess, staffAccess } from "./staff-access";
 import { incidentAwaitingCustomer } from "./storage";
@@ -1113,6 +1114,67 @@ export async function adminInspectionsOverview(db: DB, actor: Actor, opts?: { q?
     tasks,
     qa_reviews: qaReviews.filter(r => ["draft", "submitted", "qa_approved"].includes(r.state)),
     reports: qaReviews.filter(r => ["published", "superseded"].includes(r.state)),
+  };
+}
+
+export async function adminInspectionTaskDetail(db: DB, actor: Actor, id: string) {
+  role(actor, "inspector", "reviewer", "warehouse_admin", "support", "super_admin");
+  const base = await taskDetail(db, actor, id);
+  const meta = await one(
+    db,
+    `select t.id, t.assignee_id, u.display_name assignee_name,
+            o.id order_id, o.public_no order_no,
+            tv.template_key, tv.version template_version, tv.state template_state, tv.published_at template_published_at,
+            array(select c.code from template_capabilities tc join capabilities c on c.id = tc.capability_id
+              where tc.template_version_id = tv.id order by c.code) capability_codes,
+            st.code service_code, st.labels->>'zh-CN' service_label,
+            cat.slug category_slug, cat.labels->>'zh-CN' category_label,
+            so.sku_code offer_sku_code, so.title->>'zh-CN' offer_title,
+            crp.user_id customer_user_id, crp.receiving_code, cu.display_name customer_name, ce.original_email customer_email,
+            w.code item_code, w.identity_state, w.condition_state, w.custody_state, sl.code location_code, p.code package_code
+     from inspection_tasks t
+     join order_lines l on l.id = t.order_line_id
+     join orders o on o.id = l.order_id
+     join service_offers so on so.id = l.offer_id
+     join service_types st on st.id = so.service_type_id
+     join categories cat on cat.id = l.category_id
+     join template_versions tv on tv.id = t.template_version_id
+     left join users u on u.id = t.assignee_id
+     left join customer_receiving_profiles crp on crp.org_id = o.org_id
+     left join users cu on cu.id = crp.user_id
+     left join user_emails ce on ce.user_id = cu.id and ce.is_primary
+     left join order_line_item_links a on a.id = t.assignment_id
+     left join warehouse_items w on w.id = a.item_id
+     left join packages p on p.id = w.package_id
+     left join storage_locations sl on sl.id = w.location_id
+     where t.id = $1`,
+    [id]
+  );
+
+  const reports = (await db.query(
+    `select r.id report_id, r.public_no report_no, r.published_version,
+            v.id version_id, v.version, v.state, v.amend_reason, v.created_at, v.reviewed_at, v.published_at,
+            cu.display_name created_by_name, ru.display_name reviewed_by_name
+     from reports r
+     join report_versions v on v.report_id = r.id
+     left join users cu on cu.id = v.created_by
+     left join users ru on ru.id = v.reviewed_by
+     where r.order_id = $1
+     order by v.version desc`,
+    [meta.order_id]
+  )).rows;
+
+  return {
+    ...base,
+    meta: {
+      ...meta,
+      customer_email: maskEmailForStaff(actor, meta.customer_email, meta.customer_email),
+    },
+    reports,
+    permissions: {
+      can_execute_in_warehouse: actor.roles.includes("inspector"),
+      can_qa_review: actor.roles.some(r => ["reviewer", "warehouse_admin", "super_admin"].includes(r)),
+    },
   };
 }
 

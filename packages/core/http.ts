@@ -16,7 +16,7 @@ import { advise, assign, bindUnmatchedPackageOwner, checkIn, customerIntakeClaim
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
 import { acceptQuote, amendDispatchBatch, calculateShippingPreview, cancelDisposition, checkStorageReminders, closeCompletedOrder, confirmBatch, handover, instruct, packShipment, planBatch, publishShippingRate, quoteBatch, readDispatchBatch, receiveReturn, releaseReferenceSample, storageQuote } from "./dispatch";
 import { chargeReceipt, checkout, demoPay, orderPayment, orderRefundPayments, refundApprove, refundReject, refundRequest, resolvePaymentDispute, stripeEvent, verifyStripe } from "./payments";
-import { adminCustomerDetail, adminCustomerFilters, adminCustomersList, adminDisposalDetail, adminDispositionsOverview, adminIncidentDetail, adminInspectionsOverview, adminPaymentDetail, adminPaymentListFilters, adminPaymentsList, adminRefundDetail, adminRefundListFilters, adminRefundsList, adminStorageLocationDetail } from "./admin-reads";
+import { adminCustomerDetail, adminCustomerFilters, adminCustomersList, adminDisposalDetail, adminDispositionsOverview, adminIncidentDetail, adminInspectionTaskDetail, adminInspectionsOverview, adminPaymentDetail, adminPaymentListFilters, adminPaymentsList, adminRefundDetail, adminRefundListFilters, adminRefundsList, adminStorageLocationDetail } from "./admin-reads";
 import { approveTrackingTranslation, correctCustomerParcelTracking, correctStaffTracking, providerCallback, refreshTracking, submitTrackingTranslation, tracking, trackingAdmin, trackingMonitor, updateTrackingAlert, verificationState, verifyTracking } from "./logistics";
 import { adminDesk, bills, customerActions, customerDesk, customerInventory, customerNotifications, customerParcelTab, dispatchQueueStates, items, listCustomerOrders, listCustomerParcels, markNotificationRead, orderLedger, orderLedgerCsv, readOrderByPublicNumber, readStaffObjectSummary, reconcileFinance, referenceSamples, searchStaffOrders, staffOrderDetail, staffOrderFilters, warehouseDesk, warehouseDispatchBatch, warehouseDispatchQueue, warehouseItem, warehousePackage } from "./reads";
 import { staffAccess } from "./staff-access";
@@ -508,6 +508,8 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const state=url.searchParams.get("state")?.trim()||"";
     return json(await transaction(db=>adminInspectionsOverview(db,actorRequired(actor),{q,state})));
   }
+  const adminInspectionTaskRoute=path.match(/^\/staff\/admin\/inspections\/tasks\/([a-f0-9-]{36})$/i);
+  if(method==="GET"&&adminInspectionTaskRoute) return json(await transaction(db=>adminInspectionTaskDetail(db,actorRequired(actor),idSchema.parse(adminInspectionTaskRoute[1]))));
   if(method==="GET" && path==="/staff/admin/dispositions-overview") {
     return json(await transaction(db=>adminDispositionsOverview(db,actorRequired(actor))));
   }

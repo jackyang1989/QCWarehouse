@@ -431,8 +431,10 @@ export async function trackingAdmin(db:DB,actor:Actor) {
     t.tracking_norm,t.revision,t.transport_state,t.sync_state,t.package_id,t.shipment_id,
     t.last_success_at,t.latest_event_at,
     crp.receiving_code,crp.user_id customer_user_id,
-    p.code package_code,p.state package_state,p.received_at package_received_at,
-    sh.batch_id,
+    p.code package_code,p.state package_state,p.received_at package_received_at,p.weight_g package_weight_g,p.received_quantity package_received_quantity,
+    (select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null) logged_item_count,
+    (select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null and wi.identity_state='identified') identified_item_count,
+    sh.batch_id,sh.weight_g shipment_weight_g,sh.shipped_at,sh.state shipment_state,
     coalesce((select array_agg(distinct o.public_no order by o.public_no)
       from advice_orders ao join orders o on o.id=ao.order_id where ao.advice_id=t.advice_id),
       (select array_agg(distinct o.public_no order by o.public_no)

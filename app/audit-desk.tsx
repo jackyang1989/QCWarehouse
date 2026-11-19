@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
+import { useState } from "react";
 import { Empty, ErrorBlock, Field, Panel, stamp, Table, Tag, type Row, useLoad } from "./ui";
-import { AUDIT_ACTION_ZH, CopyId, ROLE_ZH } from "./admin-labels";
+import { AUDIT_ACTION_ZH, CopyId, ROLE_ZH, StatusBanner } from "./admin-labels";
 
 const actorLabels:Record<string,string>={customer:"客户",staff:"员工",system:"系统"};
 const ENTITY_ZH:Record<string,string>={
@@ -20,10 +21,29 @@ const VALUE_KEY_ZH:Record<string,string>={
   reason:"操作依据/原因",status:"状态",state:"阶段状态",decision:"核验决定",
   roles:"角色集合",amount_cents:"金额(分)",provider_ref:"渠道凭据号",
   receiving_code:"客户收件码",revision:"版本号",enabled:"启用",
+  service_refund_cents:"退服务费(分)",compensation_cents:"货值赔偿(分)",
+  payout_reference:"打款水单号",method:"处置方式",
 };
 const fields=[
   ["actor_id","操作人 ID"],["action","动作编码"],["entity_type","对象类型"],["entity_id","对象 ID"],
 ] as const;
+
+const HIGH_RISK_ACTIONS = new Set([
+  "approve_refund", "reject_refund", "request_refund", "refund_executed",
+  "resolve_payment_dispute", "approve_incident_resolution", "resolve_incident_compensation",
+  "approve_disposal_case", "execute_disposal_case", "update_user_roles", "update_user_status",
+  "publish_terms_version", "publish_template", "publish_sku_price", "publish_shipping_rate",
+  "set_default_address", "record_launch_signoff",
+]);
+
+function classifyAuditRisk(action: string): { label: string; tone: "red" | "yellow" | "blue" | "gray" } {
+  if (action === "rejected_forbidden") return { label: "安全拦截 (403)", tone: "red" };
+  if (HIGH_RISK_ACTIONS.has(action)) return { label: "高风险资金/权限", tone: "yellow" };
+  if (["publish_report", "approve_report", "return_report", "hold_order", "resume_order", "bind_unmatched_owner"].includes(action)) {
+    return { label: "核心履约审批", tone: "blue" };
+  }
+  return { label: "常规业务", tone: "gray" };
+}
 
 function entityHref(entityType?:string,entityId?:string|null,orderPublicNo?:string|null,entityLabel?:string|null):string|null {
   if(!entityType||!entityId) return null;
@@ -36,34 +56,70 @@ function entityHref(entityType?:string,entityId?:string|null,orderPublicNo?:stri
   if(entityType==="users"&&entityLabel&&entityLabel.startsWith("QCW-")) return `/admin/customers/${entityId}`;
   if(entityType==="packages"&&entityLabel&&entityLabel.startsWith("P-")) return `/wh/packages/${encodeURIComponent(entityLabel)}`;
   if(entityType==="warehouse_items"&&entityLabel&&entityLabel.startsWith("S-")) return `/wh/samples/${encodeURIComponent(entityLabel)}`;
+  if(entityType==="inspection_tasks") return `/admin/inspections/tasks/${entityId}`;
   return null;
 }
 
-function AuditValues({values}:{values:Record<string,string|number|boolean>}) {
-  const entries=Object.entries(values);
-  return entries.length?<dl className="location-facts">
-    {entries.map(([key,value])=><div key={key}><dt>{VALUE_KEY_ZH[key]??key}</dt><dd>{String(value)}</dd></div>)}
-  </dl>:<Empty>无记录字段。</Empty>;
+function AuditDiffTable({before,after}:{before?:Record<string,unknown>;after?:Record<string,unknown>}) {
+  const b = before ?? {};
+  const a = after ?? {};
+  const keys = [...new Set([...Object.keys(b), ...Object.keys(a)])];
+  if (keys.length === 0) return <Empty>本次操作无附加字段快照。</Empty>;
+  return (
+    <Table
+      headers={["业务字段", "变更前 (Before)", "变更后 (After)"]}
+      rows={keys.map(k => [
+        <strong key="k">{VALUE_KEY_ZH[k] ?? k}</strong>,
+        b[k] !== undefined && b[k] !== null ? <span key="b" className="code">{String(b[k])}</span> : <span key="b" className="muted">—</span>,
+        a[k] !== undefined && a[k] !== null ? <strong key="a" className="code">{String(a[k])}</strong> : <span key="a" className="muted">—</span>,
+      ])}
+    />
+  );
 }
+
 export function AuditDesk() {
   const search=useSearchParams(),params=new URLSearchParams();
   for(const name of [...fields.map(([key])=>key),"actor_type","from","to","before_id"]) {
     const value=search.get(name)?.trim();
     if(value)params.set(name,value);
   }
+  const explicitActionFilter = params.get("action") ?? "";
+  const [collapse403, setCollapse403] = useState(explicitActionFilter !== "rejected_forbidden");
   const query=params.toString();
   const {data,error,reload}=useLoad("/staff/audit"+(query?"?"+query:""));
   const next=new URLSearchParams(params),first=new URLSearchParams(params);
   if(data?.next_before_id)next.set("before_id",data.next_before_id);
   first.delete("before_id");
+
+  const allRows: Row[] = data?.rows ?? [];
+  const forbiddenRows = allRows.filter(r => r.action === "rejected_forbidden");
+  const visibleRows = (collapse403 && explicitActionFilter !== "rejected_forbidden")
+    ? allRows.filter(r => r.action !== "rejected_forbidden")
+    : allRows;
+
   return <>
     <div className="page-head row">
       <div>
-        <p className="eyebrow">OPERATIONS / AUDIT TRAIL</p>
         <h1>系统操作与风控审计日志</h1>
-        <p className="muted">不可变记录全部关键操作人、业务对象、所属客户及变更前后快照；支持从业务单号或操作人直接穿透溯源。</p>
+        <p className="muted">不可变记录全部关键操作人、风险等级、业务对象、所属客户及字段级 Before/After 快照；支持聚合折叠高频 403 越权拦截噪音。</p>
       </div>
       <div className="head-actions">
+        <div className="quick-switch" role="group" aria-label="403 拦截折叠开关">
+          <button
+            type="button"
+            className={collapse403 ? "on" : ""}
+            onClick={() => setCollapse403(true)}
+          >
+            业务视图 (折叠 403)
+          </button>
+          <button
+            type="button"
+            className={!collapse403 ? "on" : ""}
+            onClick={() => setCollapse403(false)}
+          >
+            全量安全 ({forbiddenRows.length} 条 403)
+          </button>
+        </div>
         <button type="button" className="button sm" onClick={reload}>刷新日志</button>
       </div>
     </div>
@@ -81,16 +137,28 @@ export function AuditDesk() {
         </div>
       </form>
     </Panel>
-    <Panel title="历史操作与变更溯源" subtitle="业务操作人、中文动作定义、目标业务实体及 Before/After 对照统一展示。">
+    {collapse403 && forbiddenRows.length > 0 && explicitActionFilter !== "rejected_forbidden" && (
+      <StatusBanner tone="info" title={`已自动聚合折叠本页 ${forbiddenRows.length} 条权限守卫拦截事件 (rejected_forbidden)`}>
+        这些记录来自自动化权限回归验证或越权拦截守卫（403），底层不可变审计表已 100% 保留。{" "}
+        <button type="button" className="button sm" style={{ marginLeft: 8 }} onClick={() => setCollapse403(false)}>
+          展开查看全部 {forbiddenRows.length} 条 403 拦截明细
+        </button>
+      </StatusBanner>
+    )}
+    <Panel title={`历史操作与变更溯源（当前展示 ${visibleRows.length} 条）`} subtitle="包含风险等级、业务操作人、中文动作定义、目标业务实体及字段级 Before → After 对照。">
       {error&&<ErrorBlock error={error}/>}
       {!data&&!error&&<p role="status">正在查询不可变审计记录…</p>}
-      {data&&!error&&<Table headers={["操作时间","业务动作","操作人 / 岗位","客户 / 订单","目标业务对象","变更对照详情"]} rows={data.rows.map((event:Row)=>{
+      {data&&!error&&<Table headers={["操作时间","风险与业务动作","操作人 / 岗位","客户 / 订单","目标业务对象","字段级变更对照"]} rows={visibleRows.map((event:Row)=>{
         const actionLabel=AUDIT_ACTION_ZH[event.action]??event.action;
         const href=entityHref(event.entity_type,event.entity_id,event.order_public_no,event.entity_label);
+        const risk=classifyAuditRisk(event.action);
         return [
           <span key="t" className="nowrap">{stamp(event.at)}</span>,
           <div key="act" className="cell-stack">
-            <strong>{actionLabel}</strong>
+            <div className="actions">
+              <Tag tone={risk.tone}>{risk.label}</Tag>
+              <strong>{actionLabel}</strong>
+            </div>
             <CopyId value={event.action}/>
           </div>,
           <div key="actor" className="cell-stack">
@@ -116,13 +184,12 @@ export function AuditDesk() {
           </div>,
           <details key="diff">
             <summary>查看变更前后 (#{event.id})</summary>
-            <div className="ops-columns" style={{marginTop:8}}>
-              <div><strong className="small muted">变更前 (Before)</strong><AuditValues values={event.before}/></div>
-              <div><strong className="small muted">变更后 (After)</strong><AuditValues values={event.after}/></div>
+            <div style={{marginTop:8}}>
+              <AuditDiffTable before={event.before} after={event.after}/>
             </div>
           </details>,
         ];
-      })} empty="没有符合条件的审计记录。"/>}
+      })} empty="当前过滤条件下无业务审计记录（可切换至全量安全视图查看 403 拦截记录）。"/>}
       <div className="actions" style={{marginTop:12}}><button type="button" className="button sm" onClick={reload}>刷新</button>
         {params.has("before_id")&&<Link className="button sm" href={"/admin/audit"+(first.size?"?"+first:"")}>返回首批</Link>}
         {!error&&data?.next_before_id&&<Link className="button sm" href={"/admin/audit?"+next}>下一批 →</Link>}

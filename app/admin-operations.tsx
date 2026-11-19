@@ -35,15 +35,18 @@ import {
   DISPOSAL_STATE_ZH,
   DISPOSITION_ACTION_ZH,
   EmptyState,
+  formatAuditSnapshotSummary,
   INCIDENT_KIND_ZH,
   INCIDENT_STATE_ZH,
   Money,
   ORDER_STATE_ZH,
   REPORT_STATE_ZH,
   SERVICE_CODE_ZH,
+  SlaCountdownBadge,
   StatusBanner,
   STOCKTAKE_STATE_ZH,
   TASK_STATE_ZH,
+  WarehouseItemLifecycleTags,
 } from "./admin-labels";
 import { hasStaffAccess, staffAccess } from "../packages/core/staff-access";
 
@@ -60,6 +63,9 @@ export function AdminOverviewDashboard({
 }) {
   const [jumpNo, setJumpNo] = useState("");
   const m = deskData?.overviewMetrics;
+  const defaultScope: "production" | "all" =
+    m && Number(m.production_orders ?? 0) === 0 && Number(m.test_orders ?? 0) > 0 ? "all" : "production";
+  const [scope, setScope] = useState<"production" | "all">(defaultScope);
   const trend: Row[] = deskData?.dailyTrend ?? [];
   const maxTrend = Math.max(1, ...trend.map(t => Number(t.total ?? 0)));
   const isFinance = hasStaffAccess(actor.roles ?? [], staffAccess.finance);
@@ -67,6 +73,13 @@ export function AdminOverviewDashboard({
   const isTracking = hasStaffAccess(actor.roles ?? [], staffAccess.tracking);
   const isSuper = (actor.roles ?? []).includes("super_admin");
   const isTemplates = hasStaffAccess(actor.roles ?? [], staffAccess.templates);
+
+  const awaitingSamplesCount = scope === "all" ? Number(m?.awaiting_samples_all ?? m?.awaiting_samples ?? 0) : Number(m?.awaiting_samples ?? 0);
+  const queuedOrInspectingCount = scope === "all" ? Number(m?.queued_or_inspecting_all ?? m?.queued_or_inspecting ?? 0) : Number(m?.queued_or_inspecting ?? 0);
+  const qaReviewCount = scope === "all" ? Number(m?.qa_review_all ?? m?.qa_review ?? 0) : Number(m?.qa_review ?? 0);
+  const exceptionOrdersCount = scope === "all" ? Number(m?.exception_orders_all ?? m?.sla_overdue_all ?? 0) : Number(m?.exception_orders ?? m?.sla_overdue ?? 0);
+  const slaOverdueCount = scope === "all" ? Number(m?.sla_overdue_all ?? m?.sla_overdue ?? 0) : Number(m?.sla_overdue ?? 0);
+  const scopeLabel = scope === "all" ? "含测试单全量口径" : "正式业务单口径";
 
   const todoCards: {
     show: boolean;
@@ -80,7 +93,7 @@ export function AdminOverviewDashboard({
       show: isFinance,
       label: "待独立审批退款",
       count: Number(m?.pending_refunds ?? 0),
-      hint: "须复核订单执行阶段与可退余额",
+      hint: "全库待审申请 · 须复核执行阶段与余额",
       href: "/admin/refunds",
       urgency: Number(m?.pending_refunds ?? 0) > 0 ? "urgent" : undefined,
     },
@@ -88,7 +101,7 @@ export function AdminOverviewDashboard({
       show: isOrders,
       label: "待人工核定非标报价",
       count: Number(m?.pending_manual_quotes ?? 0),
-      hint: "超规/复杂件数客户等待人工报价",
+      hint: "全库待报价 · 复杂件数等待人工核价",
       href: "/admin/dispositions",
       urgency: Number(m?.pending_manual_quotes ?? 0) > 0 ? "urgent" : undefined,
     },
@@ -96,7 +109,7 @@ export function AdminOverviewDashboard({
       show: isOrders || hasStaffAccess(actor.roles ?? [], staffAccess.inspection),
       label: "待 QA 复核报告版本",
       count: Number(m?.pending_report_reviews ?? 0),
-      hint: "检查已提交，待独立复核并生成 PDF",
+      hint: "全库已提交报告 · 待独立复核生成 PDF",
       href: "/admin/inspections",
       urgency: Number(m?.pending_report_reviews ?? 0) > 0 ? "urgent" : undefined,
     },
@@ -104,7 +117,7 @@ export function AdminOverviewDashboard({
       show: isTracking,
       label: "承运商已签收未实收",
       count: Number(m?.delivered_unreceived ?? 0),
-      hint: "物流显示签收但仓库尚未登记收货",
+      hint: "入仓运单显示签收但仓库未扫码实收",
       href: "/admin/logistics",
       urgency: Number(m?.delivered_unreceived ?? 0) > 0 ? "danger" : undefined,
     },
@@ -112,7 +125,7 @@ export function AdminOverviewDashboard({
       show: isOrders,
       label: "未认领/无主待核验包裹",
       count: Number(m?.unmatched_packages ?? 0),
-      hint: "缺少专属码或客户认领申诉待核",
+      hint: "全仓无主件 · 缺少专属码待绑定客户",
       href: "/admin/orders?tab=claims",
       urgency: Number(m?.unmatched_packages ?? 0) > 0 ? "urgent" : undefined,
     },
@@ -120,24 +133,24 @@ export function AdminOverviewDashboard({
       show: isOrders,
       label: "待跟进客服工单",
       count: Number(m?.open_tickets ?? 0),
-      hint: "包含收货差异、质检异议与退货咨询",
+      hint: "全库未结案工单 · 收货差异/异议/咨询",
       href: "/admin/tickets",
     },
     {
       show: isFinance,
       label: "支付争议 / 拒付冻结",
       count: Number(m?.open_disputes ?? 0),
-      hint: "关联订单已冻结，需举证或人工解冻",
-      href: "/admin/payments",
+      hint: "全库未决争议 · 关联订单已冻结待核销",
+      href: "/admin/payments?tab=reconciliation_issues",
       urgency: Number(m?.open_disputes ?? 0) > 0 ? "danger" : undefined,
     },
     {
       show: isOrders,
-      label: "SLA 已逾期在检订单",
-      count: Number(m?.sla_overdue ?? 0),
-      hint: "已过承诺质检截止期限的活跃单",
-      href: "/admin/orders?exception=1",
-      urgency: Number(m?.sla_overdue ?? 0) > 0 ? "danger" : undefined,
+      label: `阻塞 / 异常 / SLA 超期订单`,
+      count: exceptionOrdersCount,
+      hint: `${scopeLabel}（其中 SLA 超期 ${slaOverdueCount} 单）`,
+      href: `/admin/orders?tab=exceptions&test=${scope}`,
+      urgency: exceptionOrdersCount > 0 ? "danger" : undefined,
     },
     {
       show: isOrders || isFinance,
@@ -161,11 +174,26 @@ export function AdminOverviewDashboard({
     <>
       <div className="page-head row">
         <div>
-          <p className="eyebrow">OPERATIONS / CONTROL TOWER</p>
           <h1>运营管理指挥台</h1>
-          <p className="muted">集中呈现今日待审批、待核验、异常告警与在途质检负荷，点击任意待办卡片直达对应工作台。</p>
+          <p className="muted">集中呈现待审批、待核验、异常告警与在途质检负荷；每张卡片统计口径与点击进入的目标队列严格一致。</p>
         </div>
         <div className="head-actions">
+          <div className="quick-switch" role="group" aria-label="订单统计口径切换">
+            <button
+              type="button"
+              className={scope === "production" ? "on" : ""}
+              onClick={() => setScope("production")}
+            >
+              仅正式单 ({m?.production_orders ?? 0})
+            </button>
+            <button
+              type="button"
+              className={scope === "all" ? "on" : ""}
+              onClick={() => setScope("all")}
+            >
+              含测试单全量 ({Number(m?.production_orders ?? 0) + Number(m?.test_orders ?? 0)})
+            </button>
+          </div>
           <Tag tone={deskData?.effectiveLaunchMode === "production" ? "green" : "yellow"}>
             {deskData?.effectiveLaunchMode === "production" ? "正式生产运行模式" : "预发布隔离模式 (staging_only)"}
           </Tag>
@@ -174,6 +202,45 @@ export function AdminOverviewDashboard({
       </div>
 
       {error && <ErrorBlock error={error} />}
+
+      {m && (
+        <>
+          <Panel title="优先待办与异常处理队列" subtitle={`当前订单类指标口径：${scopeLabel}（正式单 ${m.production_orders} 笔 · 隔离测试单 ${m.test_orders} 笔）。点击卡片直达对应筛选队列。`}>
+            <div className="todo-grid">
+              {todoCards.filter(c => c.show).map(card => (
+                <Link key={card.label} href={card.href} className={`todo-card${card.urgency ? ` ${card.urgency}` : ""}`}>
+                  <span className="small muted">{card.label}</span>
+                  <strong>{card.count}</strong>
+                  <small className="muted">{card.hint} →</small>
+                </Link>
+              ))}
+            </div>
+          </Panel>
+
+          <div className="metric-strip" aria-label="订单阶段负荷指标">
+            <Link className="metric" href={`/admin/orders?state=awaiting_samples&test=${scope}`} style={{ textDecoration: "none", color: "inherit" }}>
+              <span>待样件到仓（{scope === "all" ? "全量" : "正式单"}）</span>
+              <strong>{awaitingSamplesCount}</strong>
+              <small>点击查看待到仓订单队列 →</small>
+            </Link>
+            <Link className="metric" href={`/admin/orders?state=inspecting&test=${scope}`} style={{ textDecoration: "none", color: "inherit" }}>
+              <span>排队及质检中（{scope === "all" ? "全量" : "正式单"}）</span>
+              <strong>{queuedOrInspectingCount}</strong>
+              <small>其中 QA 复核中 {qaReviewCount} 单 →</small>
+            </Link>
+            <Link className="metric" href="/admin/dispositions" style={{ textDecoration: "none", color: "inherit" }}>
+              <span>待处理发运批次（全库）</span>
+              <strong>{m.dispatch_pending}</strong>
+              <small>含待称重、待付款与待打包交接 →</small>
+            </Link>
+            <Link className="metric" href={`/admin/orders?tab=exceptions&test=${scope}`} style={{ textDecoration: "none", color: "inherit" }}>
+              <span>阻塞 / 异常 / SLA 超期（{scope === "all" ? "全量" : "正式单"}）</span>
+              <strong>{exceptionOrdersCount}</strong>
+              <small>SLA 逾期 {slaOverdueCount} 单 · 拒付 {m.open_disputes} · 签收未入库 {m.delivered_unreceived} →</small>
+            </Link>
+          </div>
+        </>
+      )}
 
       <form
         className="admin-toolbar"
@@ -184,7 +251,7 @@ export function AdminOverviewDashboard({
         }}
       >
         <label>
-          快捷直达订单工作台
+          快捷直达订单详情工作台
           <input
             value={jumpNo}
             onChange={e => setJumpNo(e.target.value)}
@@ -199,45 +266,6 @@ export function AdminOverviewDashboard({
           {isTemplates && <Link className="button sm" href="/admin/templates">检查模板配置</Link>}
         </div>
       </form>
-
-      {m && (
-        <>
-          <div className="metric-strip" aria-label="生产订单核心指标">
-            <div className="metric">
-              <span>待样件到仓（正式单）</span>
-              <strong>{m.awaiting_samples}</strong>
-              <small>总正式订单 {m.production_orders}（隔离测试单 {m.test_orders}）</small>
-            </div>
-            <div className="metric">
-              <span>排队及质检中</span>
-              <strong>{m.queued_or_inspecting}</strong>
-              <small>其中 QA 复核中 {m.qa_review} 单</small>
-            </div>
-            <div className="metric">
-              <span>待处理发运批次</span>
-              <strong>{m.dispatch_pending}</strong>
-              <small>含待称重、待付款与待打包交接</small>
-            </div>
-            <div className="metric">
-              <span>待办风险项总计</span>
-              <strong>{Number(m.sla_overdue ?? 0) + Number(m.open_disputes ?? 0) + Number(m.delivered_unreceived ?? 0)}</strong>
-              <small>SLA 逾期 / 拒付争议 / 签收未实收</small>
-            </div>
-          </div>
-
-          <Panel title="运营待办队列直达" subtitle="按当前账号权限显示负责的待审批与异常处理入口。">
-            <div className="todo-grid">
-              {todoCards.filter(c => c.show).map(card => (
-                <Link key={card.label} href={card.href} className={`todo-card${card.urgency ? ` ${card.urgency}` : ""}`}>
-                  <span className="small muted">{card.label}</span>
-                  <strong>{card.count}</strong>
-                  <small className="muted">{card.hint} →</small>
-                </Link>
-              ))}
-            </div>
-          </Panel>
-        </>
-      )}
 
       {trend.length > 0 && (
         <Panel title="近 9 日正式订单建单趋势（UTC · 已排除测试单）">
@@ -254,7 +282,7 @@ export function AdminOverviewDashboard({
               );
             })}
           </div>
-          <div className="row between" style={{ marginTop: 6 }}>
+          <div className="row between flexwrap" style={{ marginTop: 6, gap: 4 }}>
             {trend.map(day => <small key={day.day} className="code">{day.day}</small>)}
           </div>
         </Panel>
@@ -263,7 +291,7 @@ export function AdminOverviewDashboard({
   );
 }
 
-export function AdminInspectionsWorkbench() {
+export function AdminInspectionsWorkbench({ actor }: { actor?: Row }) {
   const [tab, setTab] = useState<"tasks" | "qa" | "reports">("tasks");
   const [q, setQ] = useState("");
   const [searchInput, setSearchInput] = useState("");
@@ -277,18 +305,19 @@ export function AdminInspectionsWorkbench() {
   const tasks: Row[] = data?.tasks ?? [];
   const qaReviews: Row[] = data?.qa_reviews ?? [];
   const reports: Row[] = data?.reports ?? [];
+  const isInspector = Boolean(actor?.roles?.includes("inspector"));
+  const canReviewReport = Boolean(actor?.roles?.some((r: string) => ["reviewer", "warehouse_admin", "super_admin"].includes(r)));
 
   return (
     <>
       <div className="page-head row">
         <div>
-          <p className="eyebrow">OPERATIONS / QC & QA SUPERVISION</p>
           <h1>质检任务、QA 复核与报告运营监督</h1>
           <p className="muted">全局监控所有检查任务推进、独立 QA 复核队列与客户可见正式报告发布状态（严格保留检查员与独立复核员职责分离）。</p>
         </div>
         <div className="head-actions">
-          <Link className="button sm" href="/wh/inspection">仓库检查队列</Link>
-          <Link className="button sm" href="/wh/review">QA 复核与修订工作台</Link>
+          {isInspector && <Link className="button sm" href="/wh/inspection">仓库检查队列</Link>}
+          {canReviewReport && <Link className="button sm" href="/wh/review">QA 复核与修订工作台</Link>}
           <button type="button" className="button sm" onClick={reload}>刷新数据</button>
         </div>
       </div>
@@ -341,11 +370,11 @@ export function AdminInspectionsWorkbench() {
       </form>
 
       {tab === "tasks" && (
-        <Panel title={`质检任务明细 (${tasks.length})`}>
+        <Panel title={`质检任务明细 (${tasks.length})`} subtitle="点击「监督详情」打开管理后台只读监督工作台，核验模板版本、逐项实测数据与证据照；现场录入仅限检查员在仓库工作台执行。">
           <Table
-            headers={["任务", "所属订单", "客户码", "实物 / 对比组", "服务与品类", "锁定模板", "执行检查员", "任务状态", "结果 / 照片", "SLA 截止", "执行入口"]}
+            headers={["任务编号", "所属订单", "客户码", "实物 / 对比组", "服务与品类", "锁定模板", "执行检查员", "任务状态", "已录结果 / 照片", "SLA 时限", "监督与执行"]}
             rows={tasks.map(t => [
-              <Link key="id" className="code nowrap" href={`/wh/task/${t.id}`}>#{t.id.slice(0, 8)}</Link>,
+              <Link key="id" className="code nowrap" href={`/admin/inspections/tasks/${t.id}`}><strong>TSK-{t.id.slice(0, 8).toUpperCase()}</strong></Link>,
               <Link key="o" className="code nowrap" href={`/admin/orders/${t.order_no}`}>{t.order_no}</Link>,
               <span key="c" className="code nowrap">{t.receiving_code ?? "—"}</span>,
               <div key="it" className="cell-stack">
@@ -354,11 +383,17 @@ export function AdminInspectionsWorkbench() {
               </div>,
               `${t.service_label ?? t.service_code} · ${t.category_label ?? ""}`,
               <span key="tp" className="code nowrap">{t.template_key} v{t.template_version}</span>,
-              t.assignee_name ?? "待领取",
+              t.assignee_name ?? <Tag tone="yellow">待检查员领取</Tag>,
               <BizTag key="st" dict={TASK_STATE_ZH} value={t.state} />,
               `${t.result_count} 项 / ${t.evidence_count} 图`,
-              stamp(t.sla_due_at, true),
-              <Link key="go" className="button sm nowrap" href={`/wh/task/${t.id}`}>任务工作台</Link>,
+              <div key="sla" className="cell-stack">
+                <span className="nowrap">{stamp(t.sla_due_at, true)}</span>
+                <SlaCountdownBadge dueAt={t.sla_due_at} active={!["SUBMITTED", "QA_APPROVED", "VOID"].includes(t.state)} />
+              </div>,
+              <div key="go" className="actions">
+                <Link className="button sm primary nowrap" href={`/admin/inspections/tasks/${t.id}`}>监督详情 →</Link>
+                {isInspector && <Link className="button sm nowrap" href={`/wh/task/${t.id}`}>现场录入</Link>}
+              </div>,
             ])}
             empty="当前筛选条件下暂无质检任务。"
           />
@@ -378,7 +413,9 @@ export function AdminInspectionsWorkbench() {
               `${r.created_by_name ?? "—"} / ${r.reviewed_by_name ?? "待独立复核"}`,
               r.amend_reason ?? "首次提交",
               stamp(r.created_at, true),
-              <Link key="go" className="button sm primary nowrap" href={`/wh/review/${r.id}`}>QA 校对与审批 →</Link>,
+              <Link key="go" className="button sm primary nowrap" href={`/wh/review/${r.id}`}>
+                {canReviewReport ? "QA 校对与审批 →" : "只读查看报告 →"}
+              </Link>,
             ])}
             empty="当前没有待独立 QA 复核或待生成 PDF 的报告。"
           />
@@ -403,6 +440,241 @@ export function AdminInspectionsWorkbench() {
           />
         </Panel>
       )}
+    </>
+  );
+}
+
+const RESULT_STATUS_ZH: Record<string, { label: string; tone: "green" | "yellow" | "red" | "gray" }> = {
+  RECORDED: { label: "正常已记录", tone: "green" },
+  OBSERVED_ISSUE: { label: "发现异常/瑕疵", tone: "red" },
+  NOT_OBSERVED: { label: "未观察到异常", tone: "green" },
+  NOT_TESTED: { label: "未测试", tone: "yellow" },
+  NOT_APPLICABLE: { label: "不适用 (N/A)", tone: "gray" },
+  BLOCKED: { label: "受阻待解除", tone: "red" },
+};
+
+export function AdminInspectionTaskDetail({ id, actor }: { id: string; actor: Row }) {
+  const { data, error, reload } = useLoad(`/staff/admin/inspections/tasks/${id}`);
+  const [drawer, setDrawer] = useState<StaffObjectTarget | null>(null);
+  const meta = data?.meta ?? {};
+  const checks: Row[] = data?.content?.checks ?? [];
+  const tplShots: Row[] = data?.content?.shots ?? [];
+  const results: Row[] = data?.results ?? [];
+  const shots: Row[] = data?.shots ?? [];
+  const componentsList: Row[] = data?.components ?? [{ id: "main", code: meta.item_code ?? "Item" }];
+  const completeness = data?.completeness;
+  const reports: Row[] = data?.reports ?? [];
+  const canExecute = Boolean(data?.permissions?.can_execute_in_warehouse || actor?.roles?.includes("inspector"));
+
+  return (
+    <>
+      <div className="page-head row">
+        <div>
+          <Link href="/admin/inspections">← 返回质检与报告监督台</Link>
+          <h1 style={{ marginTop: 6 }}>
+            质检任务监督工作台 · <span className="code">TSK-{id.slice(0, 8).toUpperCase()}</span>
+          </h1>
+          {data && (
+            <div className="actions" style={{ marginTop: 6 }}>
+              <BizTag dict={TASK_STATE_ZH} value={data.state} />
+              <Tag tone="blue">{meta.service_label ?? meta.service_code} · {meta.category_label ?? meta.category_slug}</Tag>
+              <span className="code">模板：{meta.template_key} v{meta.template_version}</span>
+              {data.public_no && <Link className="button sm" href={`/admin/orders/${data.public_no}`}>所属订单 {data.public_no}</Link>}
+              {meta.customer_user_id && <Link className="button sm" href={`/admin/customers/${meta.customer_user_id}`}>客户 {meta.receiving_code}</Link>}
+            </div>
+          )}
+        </div>
+        <div className="head-actions">
+          {canExecute ? (
+            <Link className="button sm primary" href={`/wh/task/${id}`}>进入仓库现场执行工作台 →</Link>
+          ) : (
+            <Tag tone="outline">只读监督模式（现场录入仅限检查员 inspector）</Tag>
+          )}
+          <button type="button" className="button sm" onClick={reload}>刷新任务数据</button>
+        </div>
+      </div>
+
+      {error && <ErrorBlock error={error} />}
+      {!data && !error && <p role="status">正在加载质检任务监督详情、实测结果与证据照…</p>}
+
+      {data && (
+        <>
+          {data.review_feedback && (
+            <StatusBanner tone="warning" title="QA 复核退回补正意见">
+              {data.review_feedback}
+            </StatusBanner>
+          )}
+
+          <div className="metric-strip" aria-label="任务执行关键指标">
+            <div className="metric">
+              <span>执行检查员</span>
+              <strong>{meta.assignee_name ?? "待领取"}</strong>
+              <small>状态：{TASK_STATE_ZH[data.state]?.label ?? data.state}</small>
+            </div>
+            <div className="metric">
+              <span>检查项完成度</span>
+              <strong>{results.filter(r => r.is_final).length} / {checks.length * componentsList.length}</strong>
+              <small>{completeness?.ok ? "所有必测项与必拍图已齐备" : `尚缺 ${completeness?.missing?.length ?? 0} 项待补`}</small>
+            </div>
+            <div className="metric">
+              <span>已上传机位与证据照</span>
+              <strong>{shots.length + results.reduce((n, r) => n + (r.evidence_ids?.length ?? 0), 0)} 张</strong>
+              <small>机位照 {shots.length} 张 · 检查项证据 {results.reduce((n, r) => n + (r.evidence_ids?.length ?? 0), 0)} 张</small>
+            </div>
+            <div className="metric">
+              <span>订单 SLA 截止</span>
+              <strong style={{ fontSize: 17 }}>{data.sla_due_at ? stamp(data.sla_due_at, true) : "—"}</strong>
+              <small><SlaCountdownBadge dueAt={data.sla_due_at} active={!["SUBMITTED", "QA_APPROVED", "VOID"].includes(data.state)} /></small>
+            </div>
+          </div>
+
+          <div className="admin-split-detail">
+            <div className="admin-detail-main">
+              <Panel title="1. 任务关联业务档案与锁定模板规范">
+                <dl className="admin-kv-grid">
+                  <div className="admin-kv-item"><dt>任务完整 UUID</dt><dd><CopyId value={data.id} /></dd></div>
+                  <div className="admin-kv-item"><dt>所属订单 / 阶段</dt><dd><Link className="code" href={`/admin/orders/${data.public_no}`}>{data.public_no}</Link> · <BizTag dict={ORDER_STATE_ZH} value={data.order_state} /></dd></div>
+                  <div className="admin-kv-item"><dt>所属客户</dt><dd>{meta.customer_user_id ? <Link className="code" href={`/admin/customers/${meta.customer_user_id}`}>{meta.receiving_code} ({meta.customer_email ?? meta.customer_name ?? "—"})</Link> : (meta.receiving_code ?? "—")}</dd></div>
+                  <div className="admin-kv-item"><dt>服务套餐</dt><dd>{meta.offer_title ?? meta.service_label} (<span className="code">{meta.offer_sku_code}</span>)</dd></div>
+                  <div className="admin-kv-item">
+                    <dt>检验对象（实物 / 组件）</dt>
+                    <dd className="actions">
+                      {meta.item_code ? <CodeButton code={meta.item_code} onClick={() => setDrawer({ kind: "item", ref: meta.item_code })} /> : componentsList.map(c => <Tag key={c.id} tone="blue">{c.code}</Tag>)}
+                    </dd>
+                  </div>
+                  <div className="admin-kv-item">
+                    <dt>实物当前库位与状态</dt>
+                    <dd>{meta.location_code ?? "—"} · {meta.item_code ? <WarehouseItemLifecycleTags item={meta} compact /> : "对比/确认样任务"}</dd>
+                  </div>
+                  <div className="admin-kv-item"><dt>锁定检验模板版本</dt><dd><span className="code">{meta.template_key} v{meta.template_version}</span></dd></div>
+                  <div className="admin-kv-item"><dt>绑定获批检验能力</dt><dd>{(meta.capability_codes ?? []).join("、") || "标准检验"}</dd></div>
+                  {data.content?.measure_conditions && (
+                    <div className="admin-kv-item" style={{ gridColumn: "1 / -1" }}>
+                      <dt>锁定测量环境与工器具条件</dt>
+                      <dd>{data.content.measure_conditions}</dd>
+                    </div>
+                  )}
+                </dl>
+              </Panel>
+
+              <Panel title={`2. 逐项检验标准与实测记录 (${checks.length} 项标准 × ${componentsList.length} 个对象)`} subtitle="展示该任务锁定的全部检查项、测量方法、多次复测尝试及现场证据照片。">
+                <Table
+                  headers={["对象/部位", "检查项名称", "方法与单位", "要求", "当前结论", "实测值 / 多次复测", "客观说明", "证据照片"]}
+                  rows={componentsList.flatMap(comp =>
+                    checks.map(chk => {
+                      const attempts = results.filter(r => r.component === comp.id && r.item_key === chk.key);
+                      const finalRes = attempts.find(r => r.is_final) ?? attempts.at(-1);
+                      const allEvidenceIds = [...new Set(attempts.flatMap(a => a.evidence_ids ?? []))];
+                      return [
+                        <span key="c" className="code nowrap">{comp.code}</span>,
+                        <div key="nm" className="cell-stack">
+                          <strong>{chk.zh ?? chk.label}</strong>
+                          <small className="muted">{chk.label} (<span className="code">{chk.key}</span>)</small>
+                        </div>,
+                        <div key="m" className="cell-stack">
+                          <span>{chk.method}</span>
+                          {chk.unit && <small className="code">单位: {chk.unit}</small>}
+                        </div>,
+                        <div key="req" className="actions">
+                          {chk.required ? <Tag tone="blue">必检</Tag> : <Tag tone="gray">选检</Tag>}
+                          {chk.evidence && <Tag tone="yellow">必拍图</Tag>}
+                        </div>,
+                        finalRes ? <BizTag key="st" dict={RESULT_STATUS_ZH} value={finalRes.status} /> : <Tag key="st" tone="gray">尚未录入</Tag>,
+                        finalRes ? (
+                          <div key="val" className="cell-stack">
+                            <strong>
+                              {finalRes.typed_value !== null && finalRes.typed_value !== undefined
+                                ? `${String(finalRes.typed_value)}${finalRes.unit ? ` ${finalRes.unit}` : ""}`
+                                : "—"}
+                            </strong>
+                            {attempts.length > 1 && (
+                              <small className="muted">
+                                {attempts.map(a => `#${a.attempt}: ${a.typed_value ?? a.status}`).join(" | ")}
+                              </small>
+                            )}
+                          </div>
+                        ) : "—",
+                        finalRes?.reason || (finalRes?.details?.note as string) || <span className="muted">—</span>,
+                        allEvidenceIds.length > 0 ? <MediaButton key="ev" ids={allEvidenceIds} label={`照片 (${allEvidenceIds.length})`} /> : <span className="muted">—</span>,
+                      ];
+                    })
+                  )}
+                  empty="该模板未配置检查项。"
+                />
+              </Panel>
+
+              <Panel title={`3. 必拍标准机位与对比组照片 (${shots.length} 张已上传)`}>
+                <Table
+                  headers={["适用对象", "机位编码", "机位要求", "上传状态", "拍摄时间", "查看原图"]}
+                  rows={componentsList.flatMap(comp =>
+                    tplShots.map(sh => {
+                      const uploaded = shots.filter(s => s.shot_code === sh.code && (s.component ?? "main") === comp.id);
+                      return [
+                        <span key="c" className="code">{comp.code}</span>,
+                        <span key="cd" className="code">{sh.code}</span>,
+                        `${sh.zh ?? sh.name} (${sh.name})`,
+                        uploaded.length > 0 ? <Tag key="st" tone="green">已上传 ({uploaded.length})</Tag> : <Tag key="st" tone="yellow">待拍摄上传</Tag>,
+                        uploaded[0]?.created_at ? stamp(uploaded[0].created_at, true) : "—",
+                        uploaded.length > 0 ? <MediaButton key="m" ids={uploaded.map(u => u.id)} label="查看机位照片" /> : "—",
+                      ];
+                    })
+                  )}
+                  empty="该模板无独立机位要求。"
+                />
+              </Panel>
+            </div>
+
+            <div className="admin-detail-side">
+              <Panel title="提交前完整性校验结果">
+                {completeness?.ok ? (
+                  <StatusBanner tone="success" title="完整性核验通过">
+                    所有必检项、测量复测规则、异常取证照及标准机位照均已齐备。
+                  </StatusBanner>
+                ) : (
+                  <>
+                    <StatusBanner tone="warning" title={`尚有 ${completeness?.missing?.length ?? 0} 项未满足提交条件`}>
+                      检查员需在仓库执行台补齐以下项目后方可提交至 QA 复核：
+                    </StatusBanner>
+                    <ul style={{ paddingLeft: 18, margin: "8px 0 0", fontSize: 13 }}>
+                      {(completeness?.missing ?? []).map((m: Row, idx: number) => (
+                        <li key={idx} style={{ marginBottom: 4 }}>
+                          <strong>{m.sample_id} · {m.label}</strong>：{m.hint}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </Panel>
+
+              <Panel title={`同订单关联报告版本 (${reports.length})`}>
+                <Table
+                  headers={["版本", "状态", "复核人", "操作"]}
+                  rows={reports.map(r => [
+                    `v${r.version}`,
+                    <BizTag key="st" dict={REPORT_STATE_ZH} value={r.state} />,
+                    r.reviewed_by_name ?? "待复核",
+                    <Link key="go" className="button sm nowrap" href={`/wh/review/${r.version_id}`}>打开报告 →</Link>,
+                  ])}
+                  empty="订单内全部质检任务提交后生成报告版本。"
+                />
+              </Panel>
+
+              <Panel title={`同订单全部质检任务 (${(data.sibling_tasks ?? []).length})`}>
+                <Table
+                  headers={["任务", "实物", "状态"]}
+                  rows={(data.sibling_tasks ?? []).map((st: Row) => [
+                    st.id === id ? <strong key="id" className="code">当前任务</strong> : <Link key="id" className="code" href={`/admin/inspections/tasks/${st.id}`}>TSK-{st.id.slice(0, 8).toUpperCase()}</Link>,
+                    <span key="it" className="code">{st.item_code ?? (st.position ? `#${st.position}` : "对比组")}</span>,
+                    <BizTag key="s" dict={TASK_STATE_ZH} value={st.state} />,
+                  ])}
+                />
+              </Panel>
+            </div>
+          </div>
+        </>
+      )}
+
+      <StaffObjectDrawer target={drawer} onClose={() => setDrawer(null)} />
     </>
   );
 }
@@ -445,7 +717,6 @@ export function AdminDispositionsWorkbench({
     <>
       <div className="page-head row">
         <div>
-          <p className="eyebrow">OPERATIONS / DISPOSITIONS & MANUAL QUOTES</p>
           <h1>处置发运、人工询价与特殊处置台</h1>
           <p className="muted">按业务职责严格拆分三类工作流：正常检后发运/留存批次监控、非标质检人工报价核定，以及逾期/违禁件双人审批特殊处置。</p>
         </div>
@@ -735,8 +1006,7 @@ export function AdminDisposalDetail({ id }: { id: string }) {
       <div className="page-head row">
         <div>
           <Link href="/admin/dispositions">← 返回处置与报价工作台</Link>
-          <p className="eyebrow" style={{ marginTop: 8 }}>OPERATIONS / SPECIAL DISPOSAL APPROVAL</p>
-          <h1>特殊处置单详情 · <span className="code">{dc?.display_ref ?? `#${id.slice(0, 8)}`}</span></h1>
+          <h1 style={{ marginTop: 6 }}>特殊处置单详情 · <span className="code">{dc?.display_ref ?? `#${id.slice(0, 8)}`}</span></h1>
           {dc && (
             <div className="actions" style={{ marginTop: 6 }}>
               <BizTag dict={DISPOSAL_STATE_ZH} value={dc.state} />
@@ -774,13 +1044,13 @@ export function AdminDisposalDetail({ id }: { id: string }) {
 
               <Panel title={`涉及在库/隔离实物清单 (${(data.items ?? []).length})`}>
                 <Table
-                  headers={["实物编号", "关联订单", "来源包裹 / 运单", "当前库位", "核身状态", "保管到期"]}
+                  headers={["实物编号", "关联订单", "来源包裹 / 运单", "当前库位", "保管与核身状态", "保管到期"]}
                   rows={(data.items ?? []).map((it: Row) => [
                     <CodeButton key="c" code={it.code} onClick={() => setDrawer({ kind: "item", ref: it.code })} />,
                     it.order_no ? <Link key="o" className="code" href={`/admin/orders/${it.order_no}`}>{it.order_no}</Link> : "未绑单",
                     `${it.package_code}${it.tracking_norm ? ` · ${it.tracking_norm}` : ""}`,
-                    it.location_code ?? "—",
-                    <Tag key="id" tone={it.identity_state === "quarantined" ? "red" : undefined}>{it.identity_state}</Tag>,
+                    it.location_code ?? "已出库/已处置",
+                    <WarehouseItemLifecycleTags key="id" item={it} compact />,
                     stamp(it.storage_until, true),
                   ])}
                 />
@@ -898,7 +1168,6 @@ export function AdminIncidentsWorkbench() {
     <>
       <div className="page-head row">
         <div>
-          <p className="eyebrow">OPERATIONS / INCIDENTS & STOCKTAKES</p>
           <h1>库存事故赔付调查与盘点差异复核</h1>
           <p className="muted">集中追踪库内破损、缺失及质检差错事故的调查、双人赔偿审批与打款结案，同时处理盘点提交的库位/数量差异独立复核。</p>
         </div>
@@ -1068,8 +1337,7 @@ export function AdminIncidentDetail({ id, actor }: { id: string; actor: Row }) {
       <div className="page-head row">
         <div>
           <Link href="/admin/incidents">← 返回库存事故列表</Link>
-          <p className="eyebrow" style={{ marginTop: 8 }}>OPERATIONS / INCIDENT INVESTIGATION WORKBENCH</p>
-          <h1>事故调查与赔偿工作台 · <span className="code">{inc?.ticket_no ?? `#${id.slice(0, 8)}`}</span></h1>
+          <h1 style={{ marginTop: 6 }}>事故调查与赔偿工作台 · <span className="code">{inc?.ticket_no ?? `#${id.slice(0, 8)}`}</span></h1>
           {inc && (
             <div className="actions" style={{ marginTop: 6 }}>
               <BizTag dict={INCIDENT_STATE_ZH} value={inc.state} />
@@ -1098,7 +1366,7 @@ export function AdminIncidentDetail({ id, actor }: { id: string; actor: Row }) {
                   <div className="admin-kv-item"><dt>关联订单</dt><dd>{item?.order_no ? <Link className="code" href={`/admin/orders/${item.order_no}`}>{item.order_no}</Link> : "未委托件"}</dd></div>
                   <div className="admin-kv-item"><dt>涉事唯一实物编号</dt><dd><CodeButton code={item?.code} onClick={() => setDrawer({ kind: "item", ref: item.code })} /></dd></div>
                   <div className="admin-kv-item"><dt>来源包裹 / 入库运单</dt><dd>{item?.package_code}{item?.inbound_tracking_norm ? ` · ${item.inbound_tracking_norm}` : ""}</dd></div>
-                  <div className="admin-kv-item"><dt>当前库位 / 保管状态</dt><dd>{item?.location_code ?? "—"} · {item?.custody_state}</dd></div>
+                  <div className="admin-kv-item"><dt>当前库位 / 保管状态</dt><dd className="actions"><span>{item?.location_code ?? "—"}</span>{item && <WarehouseItemLifecycleTags item={item} compact />}</dd></div>
                   <div className="admin-kv-item"><dt>立项发起人员</dt><dd>{inc.created_by_name ?? "—"} ({stamp(inc.created_at, true)})</dd></div>
                   <div className="admin-kv-item" style={{ gridColumn: "1 / -1" }}><dt>对客英文事故说明</dt><dd>{res.summary_en || inc.ticket_subject}</dd></div>
                 </dl>
@@ -1145,12 +1413,12 @@ export function AdminIncidentDetail({ id, actor }: { id: string; actor: Row }) {
 
               <Panel title="3. 事故处置与赔付审计轨迹">
                 <Table
-                  headers={["时间", "操作人", "动作", "关键记录"]}
+                  headers={["时间", "操作人", "业务动作", "结构化变更记录"]}
                   rows={(data.audit_events ?? []).map((a: Row) => [
                     stamp(a.at, true),
                     a.actor_name ?? "系统",
                     AUDIT_ACTION_ZH[a.action] ?? a.action,
-                    JSON.stringify(a.after ?? {}),
+                    formatAuditSnapshotSummary(a.after),
                   ])}
                   empty="暂无审计轨迹。"
                 />
@@ -1229,10 +1497,18 @@ export function AdminIncidentDetail({ id, actor }: { id: string; actor: Row }) {
                     const file = f.get("proof_photo");
                     const proofIds: string[] = [];
                     if (file instanceof File && file.size > 0) proofIds.push(await upload(file, "attachment"));
+                    const payoutRef = text(f, "payout_reference").trim();
+                    const compCents = Number(res.compensation_cents ?? 0);
+                    if (compCents > 0 && payoutRef.length < 4) {
+                      throw new Error("货值赔偿金额大于 $0 时，必须填写至少 4 位的银行/渠道真实打款水单号。");
+                    }
+                    if (compCents > 0 && proofIds.length === 0 && !checked(f, "verified_without_upload")) {
+                      throw new Error("请上传银行打款水单截图，或勾选已核验外部渠道凭证。");
+                    }
                     await request(`/staff/incidents/${inc.id}/resolve`, "POST", {
-                      payout_reference: text(f, "payout_reference"),
+                      payout_reference: payoutRef,
                       payout_method: text(f, "payout_method") || "bank_transfer",
-                      paid_amount_cents: Number(res.compensation_cents ?? 0),
+                      paid_amount_cents: compCents,
                       currency: "USD",
                       ...(proofIds.length ? { proof_media_ids: proofIds } : {}),
                       ...(text(f, "note") ? { note: text(f, "note") } : {}),
@@ -1240,14 +1516,15 @@ export function AdminIncidentDetail({ id, actor }: { id: string; actor: Row }) {
                     setNotice("打款凭证已归档，事故单与阻塞已正式结案。");
                     reload();
                   }}>
-                    <Field label="外部打款流水号 / 水单编号" name="payout_reference" />
+                    <Field label="外部打款流水号 / 水单编号（必填）" name="payout_reference" />
                     <Select label="打款渠道" name="payout_method" value="bank_transfer" choices={[
                       { id: "bank_transfer", label: "银行转账 (Bank Transfer)" },
                       { id: "wire", label: "跨境电汇 (Wire)" },
                       { id: "paypal", label: "PayPal 企业打款" },
                       { id: "other", label: "其他约定渠道" },
                     ]} />
-                    <Field label="银行水单截图（建议上传）" name="proof_photo" type="file" required={false} />
+                    <Field label="银行水单截图（赔偿 > $0 强烈建议上传）" name="proof_photo" type="file" required={false} />
+                    <label className="check"><input type="checkbox" name="verified_without_upload" /> 已在财务系统核对打款流水号与收款回执一致</label>
                     <Field label="财务核销备注" name="note" value="已按客户同意方案金额完成货值打款" required={false} />
                   </Form>
                 )}

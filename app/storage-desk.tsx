@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Action, checked, CodeButton, Empty, ErrorBlock, Field, Form, MediaButton, ModalDrawer, Panel, Photo, request, Select, StaffObjectDrawer, type StaffObjectTarget, stamp, Table, Tag, text, upload, useLoad, usd, type Row } from "./ui";
+import { StatusBanner, WarehouseItemLifecycleTags } from "./admin-labels";
 
 const zones:Record<string,string>={
   receiving:"收货区",queue:"待检区",inspecting:"检查区",post_inspection:"检后存放区",
@@ -21,25 +22,118 @@ export function StorageLocations({warehouseLinks}:{warehouseLinks:[string,string
   const locDetail=useLoad(detailLocId?`/staff/admin/storage/locations/${detailLocId}`:null);
   const locations:Row[]=data?.rows??[];
   const active=locations.filter(location=>location.active).length;
+  const unconfiguredCapLocs=locations.filter(l=>l.active && (l.capacity===null || l.capacity===undefined));
+  const congestedLocs=locations.filter(l=>l.active && ((l.capacity && l.occupied>=l.capacity) || (l.zone==="receiving" && l.occupied>=20)));
   const visible=locations.filter(location=>location.code.toUpperCase().includes(query.trim().toUpperCase())&&
     (!status||location.active===(status==="active")));
   return <>
-    <div className="page-head row"><div><p className="eyebrow">Operations / Storage</p><h1>库位管理</h1>
-      <p className="muted">维护仓库的物理位置、启用状态和每格容量。仓库工作台使用同一份库位档案。</p></div>
+    <div className="page-head row"><div><h1>库位管理与容量负载监控</h1>
+      <p className="muted">维护仓库物理分区、启用状态、容量上限与积压告警；点击任意库位可在下方全宽展开在位实物清单与移库流转记录。</p></div>
       <div className="head-actions">{warehouseLinks.filter(([href])=>href==="/wh/intake"||href==="/wh/storage").map(([href,name])=>
-        <Link className="button" href={href} key={href}>{name}</Link>)}</div></div>
+        <Link className="button sm" href={href} key={href}>{name}</Link>)}
+        <button type="button" className="button sm" onClick={reload}>刷新库位</button>
+      </div></div>
     {error&&<><ErrorBlock error={error}/><button type="button" onClick={reload}>重试</button></>}
     {!data&&!error&&<p role="status">正在读取库位…</p>}
     {data&&<>
+      {(congestedLocs.length>0 || unconfiguredCapLocs.length>0)&&<StatusBanner tone="warning" title="库位容量与收货暂存区积压巡检提示">
+        {congestedLocs.length>0&&<span>检测到 <strong>{congestedLocs.map(l=>`${l.code}(${l.occupied}件)`).join("、")}</strong> 处于满载或收货暂存高积压状态，请及时安排拆包核身并移入待检货架；</span>}
+        {unconfiguredCapLocs.length>0&&<span>当前有 <strong>{unconfiguredCapLocs.length} 个功能区库位（{unconfiguredCapLocs.map(l=>l.code).join("、")}）</strong>未设固定容量上限（开放式暂存区）。</span>}
+      </StatusBanner>}
       <div className="metric-strip" aria-label="库位概览">
-        <div className="metric"><span>库位档案</span><strong>{locations.length}</strong><small>包含启用及停用记录</small></div>
-        <div className="metric"><span>已启用</span><strong>{active}</strong><small>可供收货和移库选择</small></div>
-        <div className="metric"><span>占用件数</span><strong>{locations.reduce((sum,row)=>sum+row.occupied,0)}</strong><small>当前库位内登记实物</small></div>
-        <div className="metric"><span>隔离及确认样库位</span><strong>{locations.filter(row=>row.zone==="quarantine"||row.zone==="reference").length}</strong><small>按用途分区存放</small></div>
+        <div className="metric"><span>库位档案总数</span><strong>{locations.length}</strong><small>已启用 {active} 个 · 停用 {locations.length-active} 个</small></div>
+        <div className="metric"><span>全仓在位实物总数</span><strong>{locations.reduce((sum,row)=>sum+row.occupied,0)}</strong><small>当前绑定库位的在库件数</small></div>
+        <div className="metric"><span>满载 / 暂存积压预警</span><strong>{congestedLocs.length}</strong><small>{congestedLocs.map(l=>l.code).join(", ")||"无积压库位"}</small></div>
+        <div className="metric"><span>开放式无上限暂存区</span><strong>{unconfiguredCapLocs.length}</strong><small>{unconfiguredCapLocs.map(l=>l.code).join(", ")||"已全部设限"}</small></div>
       </div>
+
+      {detailLocId&&<Panel
+        id="location-detail-workbench"
+        title={locDetail.data?.location?`库位全宽明细工作台 · ${locDetail.data.location.code}（${zones[locDetail.data.location.zone]??locDetail.data.location.zone}）`:"正在加载库位详情…"}
+        subtitle={locDetail.data?.location?`当前占用 ${locDetail.data.items?.length??0} 件 · 容量上限：${locDetail.data.location.capacity?`${locDetail.data.location.capacity} 件`:"开放式功能暂存区（无硬上限）"}`:""}
+        badge={<button type="button" className="button sm" onClick={()=>setDetailLocId("")}>收起库位明细 ✕</button>}
+      >
+        {locDetail.error&&<ErrorBlock error={locDetail.error}/>}
+        {!locDetail.data&&!locDetail.error&&<p role="status">正在读取当前在位实物及历史移库事件…</p>}
+        {locDetail.data&&<div className="ops-columns">
+          <div>
+            <h3 style={{marginTop:0}}>当前存放实物 ({(locDetail.data.items??[]).length})</h3>
+            <Table
+              headers={["实物编码","专属客户","关联订单","来源包裹","保管与核身状态","保管到期"]}
+              rows={(locDetail.data.items??[]).slice(0,50).map((it:Row)=>[
+                <Link key="c" className="code nowrap" href={`/wh/samples/${encodeURIComponent(it.code)}`}>{it.code}</Link>,
+                <span key="rc" className="code">{it.receiving_code??"未认领"}</span>,
+                it.order_no?<Link key="o" className="code nowrap" href={`/admin/orders/${it.order_no}`}>{it.order_no}</Link>:"未绑单",
+                it.package_code?<Link key="p" className="code nowrap" href={`/wh/packages/${it.package_code}`}>{it.package_code}</Link>:"—",
+                <WarehouseItemLifecycleTags key="st" item={it} compact/>,
+                stamp(it.storage_until,true),
+              ])}
+              empty="该库位当前为空置状态。"
+            />
+            {(locDetail.data.items?.length??0)>50&&<p className="muted small" style={{marginTop:8}}>当前库位共存放 {locDetail.data.items.length} 件实物，上方展示最新入库的 50 件。</p>}
+          </div>
+          <div>
+            <h3 style={{marginTop:0}}>近期移库流转记录 ({(locDetail.data.moves??[]).length})</h3>
+            <Table
+              headers={["时间","动作","实物码","原库位 → 目标库位","操作人"]}
+              rows={(locDetail.data.moves??[]).map((mv:Row)=>[
+                stamp(mv.created_at,true),
+                mv.action,
+                <Link key="i" className="code" href={`/wh/samples/${encodeURIComponent(mv.item_code)}`}>{mv.item_code}</Link>,
+                `${mv.from_location??"收货入口"} → ${mv.to_location??"—"}`,
+                mv.operator_name??"—",
+              ])}
+              empty="暂无历史移库记录。"
+            />
+          </div>
+        </div>}
+      </Panel>}
+
+      <Panel title="库位档案目录" subtitle="点击库位编码或「展开库位明细」可在上方全宽工作区查看该库位的全部实物与移库审计。">
+        <div className="form inline-form">
+          <label>按库位码筛选<input type="search" value={query} onChange={e=>setQuery(e.target.value)} placeholder="如 A-04 / R-01"/></label>
+          <label>启用状态<select value={status} onChange={e=>setStatus(e.target.value)}><option value="">全部</option><option value="active">启用</option><option value="inactive">停用</option></select></label>
+        </div>
+        {printedLoc&&<div className="notice" role="status" style={{marginBottom:10}}>
+          <p>已生成库位标签 <strong className="code">{printedLoc.code}</strong> · <a href={"/api/v1/staff/labels/"+printedLoc.print_id+"/file"} target="_blank" rel="noreferrer">打开库位标签 PDF</a> · <a href={"/api/v1/staff/labels/"+printedLoc.print_id+"/preview.png"} target="_blank" rel="noreferrer">查看条码 PNG</a></p>
+          <img src={"/api/v1/staff/labels/"+printedLoc.print_id+"/preview.png"} alt={`库位条码 ${printedLoc.code}`} style={{maxWidth:320,border:"1px solid #cbd5e1",borderRadius:6,marginTop:6}}/>
+        </div>}
+        <Table headers={["库位编码","分区用途","占用件数","容量上限与负载状态","启用状态","备注","操作"]} rows={visible.map(location=>{
+          const isFull = Boolean(location.capacity && location.occupied >= location.capacity);
+          const isStagingCongested = location.zone === "receiving" && location.occupied >= 20;
+          const isSelected = detailLocId === location.id;
+          return [
+            <button key="code" type="button" className="code-btn" onClick={()=>setDetailLocId(isSelected?"":location.id)}><strong>{location.code}</strong></button>,
+            zones[location.zone]??location.zone,
+            <strong key="occ">{location.occupied} 件</strong>,
+            <div key="cap" className="actions">
+              <span>{location.capacity?`${location.occupied} / ${location.capacity} 件`:"开放式暂存区"}</span>
+              {isFull&&<Tag tone="red">已满载</Tag>}
+              {isStagingCongested&&<Tag tone="yellow">暂存积压待移库</Tag>}
+              {!location.capacity&&!isStagingCongested&&<Tag tone="outline">无硬上限</Tag>}
+            </div>,
+            <Tag key="act" tone={location.active?"green":"gray"}>{location.active?"已启用":"已停用"}</Tag>,
+            location.notes||"—",
+            <div key="op" className="actions">
+              <button type="button" className={`button sm nowrap${isSelected?"":" primary"}`} onClick={()=>setDetailLocId(isSelected?"":location.id)}>
+                {isSelected?"收起明细":`展开库位明细 (${location.occupied})`}
+              </button>
+              <Action sm run={async()=>{
+                const res=await request("/staff/labels/print","POST",{location_ids:[location.id],label_size:"shelf_100x60"});
+                setPrintedLoc({print_id:res.print_id,code:location.code});
+              }}>打印货架签</Action>
+              <Action sm disabled={location.active&&location.occupied>0} run={async()=>{
+                if(location.active&&!window.confirm("停用库位 "+location.code+"？"))return;
+                await request(api+"/"+location.id+"/state","POST",{active:!location.active});reload();
+              }}>{location.active?(location.occupied?"占用中":"停用"):"启用"}</Action>
+            </div>,
+          ];
+        })} empty="没有符合条件的库位。"/>
+      </Panel>
+
       <div className="ops-columns">
-        <Panel title="批量生成库位">
-          <p className="muted">按仓区、货架、层号和格位范围生成。已有编码将跳过。</p>
+        <Panel title="批量生成标准货架库位">
+          <p className="muted">按仓区、货架、层号和格位范围生成。已有编码将自动跳过。</p>
           <Form label="生成并添加库位" run={async f=>{
             const created=await request(api,"POST",{prefix:text(f,"prefix").toUpperCase(),zone:text(f,"zone"),rack:Number(text(f,"rack")),
               level:Number(text(f,"level")),start:Number(text(f,"start")),end:Number(text(f,"end")),capacity:Number(text(f,"capacity")),notes:text(f,"notes")});
@@ -58,76 +152,12 @@ export function StorageLocations({warehouseLinks}:{warehouseLinks:[string,string
           </Form>
           {result&&<p className="notice" role="status">新增 {result.added.length} 个库位，跳过 {result.skipped.length} 个已有编码。</p>}
         </Panel>
-        <Panel title="编码与操作规则">
+        <Panel title="编码与库位管控规则">
           <div className="location-example"><strong className="code">A-04-02-03</strong><small>A 区 · 04 架 · 02 层 · 03 格</small></div>
           <ul className="location-rules"><li>已存在的编号保留原档案。</li><li>已占用的库位须先清空，才能停用。</li><li>收货、移位与退回入库均检查启用状态、分区用途与容量。</li><li>每个库位均可打印 100×60mm 标准 QR + Code-128 货架标签并支持扫码盘点。</li></ul>
         </Panel>
       </div>
-      <Panel title="库位档案">
-        <div className="form inline-form">
-          <label>按库位码筛选<input type="search" value={query} onChange={e=>setQuery(e.target.value)}/></label>
-          <label>启用状态<select value={status} onChange={e=>setStatus(e.target.value)}><option value="">全部</option><option value="active">启用</option><option value="inactive">停用</option></select></label>
-        </div>
-        {printedLoc&&<div className="notice" role="status" style={{marginBottom:10}}>
-          <p>已生成库位标签 <strong className="code">{printedLoc.code}</strong> · <a href={"/api/v1/staff/labels/"+printedLoc.print_id+"/file"} target="_blank" rel="noreferrer">打开库位标签 PDF</a> · <a href={"/api/v1/staff/labels/"+printedLoc.print_id+"/preview.png"} target="_blank" rel="noreferrer">查看条码 PNG</a></p>
-          <img src={"/api/v1/staff/labels/"+printedLoc.print_id+"/preview.png"} alt={`库位条码 ${printedLoc.code}`} style={{maxWidth:320,border:"1px solid #cbd5e1",borderRadius:6,marginTop:6}}/>
-        </div>}
-        <Table headers={["库位编码","用途","占用件数","容量上限","状态","备注","操作"]} rows={visible.map(location=>[
-          <button key="code" type="button" className="code" onClick={()=>setDetailLocId(location.id)}>{location.code}</button>,
-          zones[location.zone]??location.zone,location.occupied,
-          location.capacity??"未设定",<Tag tone={location.active?"green":"gray"}>{location.active?"已启用":"已停用"}</Tag>,location.notes||"—",
-          <div key="op" className="actions">
-            <button type="button" className="button sm primary nowrap" onClick={()=>setDetailLocId(location.id)}>库位明细 ({location.occupied})</button>
-            <Action sm run={async()=>{
-              const res=await request("/staff/labels/print","POST",{location_ids:[location.id],label_size:"shelf_100x60"});
-              setPrintedLoc({print_id:res.print_id,code:location.code});
-            }}>打印货架签</Action>
-            <Action sm disabled={location.active&&location.occupied>0} run={async()=>{
-              if(location.active&&!window.confirm("停用库位 "+location.code+"？"))return;
-              await request(api+"/"+location.id+"/state","POST",{active:!location.active});reload();
-            }}>{location.active?(location.occupied?"占用中":"停用"):"启用"}</Action>
-          </div>,
-        ])} empty="没有符合条件的库位。"/>
-      </Panel>
     </>}
-    <ModalDrawer
-      open={Boolean(detailLocId)}
-      onClose={()=>setDetailLocId("")}
-      title={locDetail.data?.location?`库位实物与移库详情 · ${locDetail.data.location.code}`:"正在加载库位详情…"}
-      subtitle={locDetail.data?.location?`${zones[locDetail.data.location.zone]??locDetail.data.location.zone} · 容量上限 ${locDetail.data.location.capacity??"未限"} 件`:""}
-    >
-      {locDetail.error&&<ErrorBlock error={locDetail.error}/>}
-      {!locDetail.data&&!locDetail.error&&<p role="status">正在读取当前在位实物及历史移库事件…</p>}
-      {locDetail.data&&<>
-        <Panel title={`当前存放实物 (${(locDetail.data.items??[]).length})`}>
-          <Table
-            headers={["实物码","专属客户","关联订单","来源包裹","识别/保管状态","保管到期"]}
-            rows={(locDetail.data.items??[]).map((it:Row)=>[
-              <Link key="c" className="code nowrap" href={`/wh/samples/${encodeURIComponent(it.code)}`}>{it.code}</Link>,
-              <span key="rc" className="code">{it.receiving_code??"未认领"}</span>,
-              it.order_no?<Link key="o" className="code nowrap" href={`/admin/orders/${it.order_no}`}>{it.order_no}</Link>:"—",
-              it.package_code?<Link key="p" className="code nowrap" href={`/wh/packages/${it.package_code}`}>{it.package_code}</Link>:"—",
-              `${it.identity_state} / ${it.custody_state}`,
-              stamp(it.storage_until,true),
-            ])}
-            empty="该库位当前为空置状态。"
-          />
-        </Panel>
-        <Panel title={`近期移库记录 (${(locDetail.data.moves??[]).length})`}>
-          <Table
-            headers={["时间","动作","实物码","原库位 → 目标库位","操作人"]}
-            rows={(locDetail.data.moves??[]).map((mv:Row)=>[
-              stamp(mv.created_at),
-              mv.action,
-              <span key="i" className="code">{mv.item_code}</span>,
-              `${mv.from_location??"入口"} → ${mv.to_location??"—"}`,
-              mv.operator_name??"—",
-            ])}
-            empty="暂无历史移库记录。"
-          />
-        </Panel>
-      </>}
-    </ModalDrawer>
   </>;
 }
 

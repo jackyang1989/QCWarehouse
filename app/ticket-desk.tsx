@@ -9,6 +9,7 @@ import {
   INCIDENT_KIND_ZH,
   INCIDENT_STATE_ZH,
   ORDER_STATE_ZH,
+  SlaCountdownBadge,
   TICKET_CATEGORY_ZH,
   TICKET_STATE_ZH,
 } from "./admin-labels";
@@ -183,7 +184,6 @@ export function StaffTicketQueue() {
   return <>
     <div className="page-head row">
       <div>
-        <p className="eyebrow">OPERATIONS / SUPPORT QUEUE</p>
         <h1>客户工单处理台</h1>
         <p className="muted">按分类、紧急度、指派状态与处理时限追踪全部售后、包裹认领、质量异议与账号恢复工单，直达关联客户与订单上下文。</p>
       </div>
@@ -235,8 +235,11 @@ export function StaffTicketQueue() {
         </div>:"—",
         entry.assignee??<Tag tone="yellow">未领取</Tag>,
         <div key="op" className="cell-stack">
-          <small>{entry.next_action_at?stamp(entry.next_action_at):stamp(entry.created_at,true)}</small>
-          <Link className="button sm nowrap" href={`/admin/tickets/${entry.id}`}>进入处理 →</Link>
+          <div className="actions">
+            <SlaCountdownBadge dueAt={entry.next_action_at} active={isOpen(entry.state)}/>
+            <Link className="button sm nowrap" href={`/admin/tickets/${entry.id}`}>进入处理 →</Link>
+          </div>
+          <small>{entry.next_action_at?`截止 ${stamp(entry.next_action_at)}`:`创建 ${stamp(entry.created_at,true)}`}</small>
         </div>,
       ])} empty="没有符合条件的工单记录。"/>}
     </Panel>
@@ -257,12 +260,12 @@ export function StaffTicket({id,actor}:{id:string;actor:Row}) {
     <div className="page-head row">
       <div>
         <Link href="/admin/tickets">← 返回工单处理台</Link>
-        <p className="eyebrow report-eyebrow" style={{marginTop:8}}>OPERATIONS / CASE WORKBENCH</p>
-        <h1>{data?.subject??"工单详情工作台"}</h1>
+        <h1 style={{marginTop:6}}>{data?.subject??"工单详情工作台"}</h1>
         {data&&<div className="actions" style={{marginTop:6}}>
           <CopyId value={data.public_no} short={false}/>
           <Tag tone="blue">{TICKET_CATEGORY_ZH[data.category]??data.category}</Tag>
           <BizTag dict={TICKET_STATE_ZH} value={data.state}/>
+          <SlaCountdownBadge dueAt={data.next_action_at} active={isOpen(data.state)}/>
         </div>}
       </div>
       <div className="head-actions">

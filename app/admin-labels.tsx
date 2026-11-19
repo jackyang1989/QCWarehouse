@@ -266,6 +266,14 @@ export const AUDIT_ACTION_ZH: Record<string, string> = {
   ticket_state_change: "调整工单指派人",
   ticket_message: "发送工单公开回复",
   ticket_internal_note: "记录工单内部备注",
+  print_label: "生成并打印内部条码标签",
+  verify_label_readback: "扫码回读校验内部条码标签",
+  register: "客户完成账号注册",
+  advise_parcel: "客户登记卖家运单预报",
+  audit_projection_fixture: "安全审计投影校验记录",
+  submit_tracking_translation: "提交物流轨迹英文译稿",
+  approve_tracking_translation: "独立复核批准物流英文轨迹",
+  correct_tracking: "受控更正运单号或承运商",
 };
 
 export const ROLE_ZH: Record<string, string> = {
@@ -278,6 +286,227 @@ export const ROLE_ZH: Record<string, string> = {
   inspector: "现场质检员",
   reviewer: "独立 QA 复核员",
 };
+
+export const CUSTODY_STATE_ZH: Record<string, { label: string; tone: "green" | "yellow" | "blue" | "red" | "gray" }> = {
+  in_transit: { label: "在途未到仓", tone: "gray" },
+  received: { label: "已实收暂存", tone: "yellow" },
+  stored: { label: "在库保管中", tone: "green" },
+  at_warehouse: { label: "在库保管中", tone: "green" },
+  outbound: { label: "已出库交接", tone: "blue" },
+  shipped: { label: "已发运离库", tone: "blue" },
+  disposed: { label: "已特殊处置归档", tone: "gray" },
+};
+
+export const IDENTITY_STATE_ZH: Record<string, { label: string; tone: "green" | "yellow" | "blue" | "red" | "gray" }> = {
+  identified: { label: "已完成 SKU 核身", tone: "green" },
+  verified: { label: "已核验归属", tone: "green" },
+  pending: { label: "待 SKU 核身", tone: "yellow" },
+  quarantined: { label: "违禁/异常隔离", tone: "red" },
+  unmatched: { label: "无主未认领", tone: "yellow" },
+};
+
+export const PACKAGE_STATE_ZH: Record<string, { label: string; tone: "green" | "yellow" | "blue" | "red" | "gray" }> = {
+  checked_in: { label: "已扫码实收·待拆包", tone: "yellow" },
+  unpacked: { label: "已拆包建档", tone: "blue" },
+  stored: { label: "已上架保管", tone: "green" },
+  unmatched: { label: "无主待认领归属", tone: "red" },
+  quarantined: { label: "违禁/破损隔离", tone: "red" },
+};
+
+export const CONDITION_STATE_ZH: Record<string, { label: string; tone: "green" | "yellow" | "red" | "gray" }> = {
+  good: { label: "外观完好", tone: "green" },
+  unchecked: { label: "待拆包初检", tone: "gray" },
+  damaged: { label: "收货有破损", tone: "red" },
+  contaminated: { label: "污损/受潮", tone: "red" },
+};
+
+export function describeWarehouseItemLifecycle(item: {
+  custody_state?: string | null;
+  identity_state?: string | null;
+  order_no?: string | null;
+  order_number?: string | null;
+}) {
+  const custody = item.custody_state ?? "received";
+  const identity = item.identity_state ?? "pending";
+  const hasOrder = Boolean(item.order_no || item.order_number);
+
+  if (custody === "disposed") {
+    return {
+      custodyLabel: "已特殊处置归档",
+      custodyTone: "gray" as const,
+      identityLabel: identity === "identified" ? "历史已绑单后处置" : "逾期/无主直接处置（免 SKU 核身）",
+      identityTone: "gray" as const,
+      note: "该实物已通过双人复核完成特殊处置销毁/变卖，生命周期已终结，无需再执行订单 SKU 核身。",
+    };
+  }
+  if (custody === "outbound" || custody === "shipped") {
+    return {
+      custodyLabel: "已出库交接",
+      custodyTone: "blue" as const,
+      identityLabel: identity === "identified" ? "检后正常发运出库" : "未绑单原样退回/出库（免 SKU 核身）",
+      identityTone: identity === "identified" ? ("green" as const) : ("blue" as const),
+      note: identity === "identified"
+        ? "已完成质检并按客户指令发运离库。"
+        : "该实物未关联正式质检单，已按原样退回或未委托件出库处理，故未经过订单行 SKU 核身。",
+    };
+  }
+  if (identity === "quarantined") {
+    return {
+      custodyLabel: CUSTODY_STATE_ZH[custody]?.label ?? custody,
+      custodyTone: "red" as const,
+      identityLabel: "违禁/异常隔离管控",
+      identityTone: "red" as const,
+      note: "已移入隔离区锁定，禁止进入常规质检或普通发运，需走异常处置流程。",
+    };
+  }
+  return {
+    custodyLabel: CUSTODY_STATE_ZH[custody]?.label ?? custody,
+    custodyTone: CUSTODY_STATE_ZH[custody]?.tone ?? ("gray" as const),
+    identityLabel: identity === "identified"
+      ? "已完成 SKU 核身"
+      : hasOrder
+        ? "已绑单·待现场核对 SKU"
+        : "在库待绑定订单并核身",
+    identityTone: identity === "identified" ? ("green" as const) : ("yellow" as const),
+    note: identity === "identified" ? "实物已绑定订单预期行并通过 SKU/颜色/尺码核对。" : "需仓库人员在样品建档台核对吊牌/SKU 后完成核身。",
+  };
+}
+
+export function WarehouseItemLifecycleTags({
+  item,
+  compact = false,
+}: {
+  item: { custody_state?: string | null; identity_state?: string | null; order_no?: string | null; order_number?: string | null };
+  compact?: boolean;
+}) {
+  const info = describeWarehouseItemLifecycle(item);
+  return (
+    <div className={compact ? "actions" : "cell-stack"} title={info.note}>
+      <span className={`tag ${info.custodyTone}`}>{info.custodyLabel}</span>
+      <span className={`tag ${info.identityTone}`}>{info.identityLabel}</span>
+    </div>
+  );
+}
+
+export function describeOrderNextResponsibility(order: {
+  state?: string | null;
+  open_block_count?: number;
+  arrived_units?: number;
+  identified_units?: number;
+  expected_units?: number;
+}) {
+  if (Number(order.open_block_count ?? 0) > 0 || order.state === "on_hold") {
+    return { owner: "客服 / 运营专员", action: "跟进异常工单或收货差异，解除订单阻塞", tone: "red" as const };
+  }
+  switch (order.state) {
+    case "draft":
+      return { owner: "客户", action: "确认商品明细并提交订单报价", tone: "gray" as const };
+    case "awaiting_payment":
+      return { owner: "客户 / 财务", action: "等待客户完成付款或人工报价确认", tone: "yellow" as const };
+    case "awaiting_samples": {
+      const arrived = Number(order.arrived_units ?? 0);
+      const identified = Number(order.identified_units ?? 0);
+      const expected = Number(order.expected_units ?? 0);
+      if (arrived === 0) return { owner: "卖家 / 仓库收货", action: "等待快递包裹到仓并扫码实收", tone: "yellow" as const };
+      if (identified < arrived || identified < expected) {
+        return { owner: "仓库收货员 (receiver)", action: `已到 ${arrived} 件，待拆包完成剩余 ${Math.max(0, expected - identified)} 件 SKU 核身`, tone: "blue" as const };
+      }
+      return { owner: "仓库收货员", action: "确认全部样件核身就绪转入待检", tone: "blue" as const };
+    }
+    case "samples_ready":
+    case "queued":
+      return { owner: "现场质检员 (inspector)", action: "从检查队列领取任务并开始实测拍照", tone: "blue" as const };
+    case "inspecting":
+      return { owner: "现场质检员 (inspector)", action: "完成全部必检项、测量复测与机位拍照后提交", tone: "blue" as const };
+    case "qa_review":
+      return { owner: "独立 QA 复核员 (reviewer)", action: "校对英文表述与证据照片，批准生成正式报告 PDF", tone: "yellow" as const };
+    case "report_ready":
+    case "action_pending":
+      return { owner: "客户 / 仓库出库", action: "客户下达检后发运/退回/留样指令，仓库称重打包交接", tone: "green" as const };
+    case "closed":
+      return { owner: "已归档完结", action: "全流程履约与账务已闭环", tone: "green" as const };
+    case "cancelled":
+      return { owner: "已取消", action: "订单已终止", tone: "gray" as const };
+    default:
+      return { owner: "运营专员", action: "核查订单当前状态", tone: "gray" as const };
+  }
+}
+
+export function SlaCountdownBadge({
+  dueAt,
+  active = true,
+}: {
+  dueAt?: string | null;
+  active?: boolean;
+}) {
+  if (!dueAt) return <span className="muted">—</span>;
+  const ms = Date.parse(dueAt) - Date.now();
+  if (!Number.isFinite(ms)) return <span className="muted">—</span>;
+  if (!active) return <span className="muted">已完结</span>;
+  const hours = Math.round(Math.abs(ms) / 3600_000);
+  if (ms <= 0) {
+    return (
+      <span className="tag red nowrap" title={`截止时间：${dueAt}`}>
+        已超时 {hours >= 24 ? `${Math.floor(hours / 24)}天${hours % 24}h` : `${Math.max(1, hours)}h`}
+      </span>
+    );
+  }
+  if (hours <= 12) {
+    return (
+      <span className="tag yellow nowrap" title={`截止时间：${dueAt}`}>
+        剩 {Math.max(1, hours)}h 到期
+      </span>
+    );
+  }
+  return (
+    <span className="tag blue nowrap" title={`截止时间：${dueAt}`}>
+      剩 {hours >= 24 ? `${Math.floor(hours / 24)}天${hours % 24}h` : `${hours}h`}
+    </span>
+  );
+}
+
+const AUDIT_FIELD_LABELS: Record<string, string> = {
+  reason: "原因说明",
+  status: "状态",
+  state: "阶段",
+  decision: "审批结论",
+  amount_cents: "金额",
+  service_refund_cents: "退服务费",
+  compensation_cents: "货值赔偿",
+  paid_amount_cents: "实付赔偿",
+  payout_reference: "打款水单号",
+  payout_method: "打款渠道",
+  provider_ref: "渠道凭据",
+  receiving_code: "客户收件码",
+  revision: "版本",
+  enabled: "开关状态",
+  roles: "岗位角色",
+  method: "执行方式",
+  witness_note: "见证记录",
+  legal_basis_version: "条款版本",
+  list_hash: "清单哈希",
+};
+
+export function formatAuditSnapshotSummary(values?: Record<string, unknown> | null): string {
+  if (!values || typeof values !== "object") return "已记录状态变更";
+  const parts: string[] = [];
+  for (const [k, v] of Object.entries(values)) {
+    if (v === null || v === undefined || v === "") continue;
+    const label = AUDIT_FIELD_LABELS[k] ?? k;
+    if (k.endsWith("_cents") && typeof v === "number") {
+      parts.push(`${label}: $${(v / 100).toFixed(2)}`);
+    } else if (Array.isArray(v)) {
+      parts.push(`${label}: ${v.join(", ")}`);
+    } else if (typeof v === "boolean") {
+      parts.push(`${label}: ${v ? "是" : "否"}`);
+    } else if (typeof v === "object") {
+      continue;
+    } else {
+      parts.push(`${label}: ${String(v)}`);
+    }
+  }
+  return parts.length > 0 ? parts.join(" · ") : "已完成业务动作并留痕";
+}
 
 export function dictLabel(dict: Record<string, { label: string; tone?: string }>, key?: string | null, fallback = "—") {
   if (!key) return fallback;

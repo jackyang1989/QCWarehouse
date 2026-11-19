@@ -1091,9 +1091,8 @@ export function LogisticsDesk({actor}:{actor?:Row}) {
   return <>
     <div className="page-head row">
       <div>
-        <p className="eyebrow">TRACKING / OPERATIONS</p>
         <h1>物流监控与轨迹翻译台</h1>
-        <p className="muted">统一监控入仓包裹、退回商家与寄出集运仓运单；所有记录关联专属收件码、质检单与仓内包裹，支持中文原始轨迹审核译文与运单纠错。</p>
+        <p className="muted">统一监控入仓包裹、退回商家与寄出集运仓运单；严格区分「承运商物流签收」与「仓库扫码实收/称重/SKU 核身」，支持全宽双语轨迹翻译与独立复核。</p>
       </div>
       <div className="head-actions">
         <button type="button" className="button sm" onClick={()=>{reload();monitor.reload();}}>刷新监控</button>
@@ -1193,90 +1192,88 @@ export function LogisticsDesk({actor}:{actor?:Row}) {
       </Panel>
     </>}
 
-    {(tab==="all"||tab==="inbound"||tab==="outbound")&&<>
-      <div className="admin-toolbar">
-        <label>
-          检索运单 / 客户码 / 订单号 / 包裹码
-          <input type="search" value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="输入单号、QCW-... 或 QW-..."/>
-        </label>
-        <label>
-          承运商状态筛选
-          <select value={transportFilter} onChange={e=>setTransportFilter(e.target.value)}>
-            <option value="">全部运输状态</option>
-            {Object.entries(TRANSPORT_STATE_ZH).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
-          </select>
-        </label>
-        <div className="actions">
-          <button type="button" className="button sm" onClick={()=>{setSearchQ("");setTransportFilter("");}}>清空筛选</button>
-        </div>
-      </div>
-
+    {selectedTrack&&(
       <Panel
-        title={tab==="inbound"?"入仓运单监控":tab==="outbound"?"出库发运监控":"全部入仓与出库运单"}
-        subtitle={`共匹配 ${filteredRows.length} 条记录；点击右侧「轨迹与复核」可审核英文译文或更正运单号。`}
+        id="waybill-detail-workbench"
+        title={`运单全宽详情与双语轨迹复核台 · ${selectedTrack.tracking_norm}`}
+        subtitle={`${selectedTrack.carrier_name_zh??selectedTrack.carrier_code??""} · ${DIRECTION_ZH[selectedTrack.direction]?.label??selectedTrack.direction}`}
+        badge={<button type="button" className="button sm" onClick={()=>setSelectedId("")}>收起运单工作台 ✕</button>}
       >
-        {filteredRows.length===0?(
-          <EmptyState
-            kind={q||transportFilter?"filtered":"empty"}
-            title="没有符合筛选条件的运单记录"
-            description="请检查单号/客户码关键词，或清空筛选查看全量运输监控记录。"
-            actionLabel="重置筛选"
-            onAction={()=>{setSearchQ("");setTransportFilter("");}}
-          />
-        ):(
-          <Table
-            headers={["运单号 / 方向","承运商","客户码与关联订单","运输状态","同步状态","轨迹数","最近同步","工作区"]}
-            rows={filteredRows.map((r:Row)=>[
-              <div key="tr" className="cell-stack">
-                <CodeButton code={r.tracking_norm} onClick={()=>setDrawer({kind:"tracking",ref:r.tracking_norm})}/>
-                <BizTag dict={DIRECTION_ZH} value={r.direction}/>
-              </div>,
-              <div key="ca" className="cell-stack">
-                <strong>{r.carrier_name_zh??r.carrier_code??"—"}</strong>
-                <small className="code">{r.carrier_code??"—"}</small>
-              </div>,
-              renderTrackCustomerAndOrders(r),
-              <BizTag key="ts" dict={TRANSPORT_STATE_ZH} value={r.transport_state}/>,
-              <BizTag key="ss" dict={SYNC_STATE_ZH} value={r.sync_state}/>,
-              <span key="cnt" className="nowrap">{r.events?.length??0} 条</span>,
-              stamp(r.last_success_at),
-              <button
-                key="btn"
-                type="button"
-                className={"button sm nowrap"+(selectedId===r.id?" primary":"")}
-                onClick={()=>setSelectedId(prev=>prev===r.id?"":r.id)}
-              >{selectedId===r.id?"关闭工作区":"轨迹与复核"}</button>,
-            ])}
-          />
-        )}
-      </Panel>
-    </>}
-
-    <ModalDrawer
-      open={Boolean(selectedTrack)}
-      onClose={()=>setSelectedId("")}
-      title={selectedTrack?`运单详情与双语审核 · ${selectedTrack.tracking_norm}`:""}
-      subtitle={selectedTrack?`${selectedTrack.carrier_name_zh??selectedTrack.carrier_code??""} · ${DIRECTION_ZH[selectedTrack.direction]?.label??selectedTrack.direction}`:""}
-    >
-      {selectedTrack&&<>
-        <div className="admin-kv-grid" style={{marginBottom:14}}>
-          <div className="kv-card"><span className="k">运单编号</span><CopyId value={selectedTrack.tracking_norm} short={false}/></div>
-          <div className="kv-card"><span className="k">承运商状态</span><BizTag dict={TRANSPORT_STATE_ZH} value={selectedTrack.transport_state}/></div>
-          <div className="kv-card"><span className="k">同步状态</span><BizTag dict={SYNC_STATE_ZH} value={selectedTrack.sync_state}/></div>
-          <div className="kv-card"><span className="k">关联客户 / 订单</span>{renderTrackCustomerAndOrders(selectedTrack)}</div>
+        <div className="metric-strip" style={{marginBottom:14}} aria-label="运单四阶段状态对照">
+          <div className="metric">
+            <span>① 承运商运输与签收</span>
+            <strong>{TRANSPORT_STATE_ZH[selectedTrack.transport_state]?.label??selectedTrack.transport_state}</strong>
+            <small>同步状态：{SYNC_STATE_ZH[selectedTrack.sync_state]?.label??selectedTrack.sync_state}</small>
+          </div>
+          <div className="metric">
+            <span>② 仓库物理扫码实收</span>
+            <strong>{selectedTrack.direction==="inbound"?(selectedTrack.package_code?`已实收 (${selectedTrack.package_code})`:selectedTrack.transport_state==="delivered"?"签收未实收 (需催查)":"待到仓实收"):"出库发运件"}</strong>
+            <small>{selectedTrack.package_received_at?`实收时间 ${stamp(selectedTrack.package_received_at,true)}`:"以仓库现场扫码为准"}</small>
+          </div>
+          <div className="metric">
+            <span>③ 包裹实测称重</span>
+            <strong>{selectedTrack.package_weight_g?`${selectedTrack.package_weight_g} g`:selectedTrack.shipment_weight_g?`${selectedTrack.shipment_weight_g} g`:"待称重"}</strong>
+            <small>仓库电子秤实测克重</small>
+          </div>
+          <div className="metric">
+            <span>④ 拆包建档与 SKU 核身</span>
+            <strong>{selectedTrack.direction==="inbound"?`拆包 ${selectedTrack.logged_item_count??0} 件 / 核身 ${selectedTrack.identified_item_count??0} 件`:"已核身出库"}</strong>
+            <small>关联：{selectedTrack.receiving_code??"未归属"} {(selectedTrack.order_numbers??[]).join(", ")}</small>
+          </div>
         </div>
-        {selectedTrack.events?.length
-          ?<ol className="timeline">{selectedTrack.events.map((e:Row)=><li key={e.id}><small className="muted">{stamp(e.occurred_at)}</small><div>{e.text}</div></li>)}</ol>
-          :<Empty>暂无承运商中文轨迹（本地演示未接外部回调或尚无路由回传时保留真实空状态）。</Empty>}
-        {(selectedTrack.zh_events?.length??0)>0&&<div style={{marginTop:14}}>
-          <h3 style={{marginBottom:8}}>客户英文轨迹翻译与独立双人复核</h3>
-          <Table headers={["发生时间","中文原文","当前英文译文","状态","人工翻译 / 独立复核"]} rows={selectedTrack.zh_events.map((ev:Row)=>[
-            stamp(ev.occurred_at??ev.source_time),
+
+        <div className="ops-columns">
+          <div>
+            <h3 style={{marginTop:0}}>承运商中文原始轨迹快照</h3>
+            {selectedTrack.events?.length
+              ?<ol className="timeline">{selectedTrack.events.map((e:Row,idx:number)=><li key={e.id??idx}><small className="muted">{stamp(e.occurred_at??e.time)}</small><div>{e.text??e.context??e.description}</div></li>)}</ol>
+              :<Empty>暂无承运商中文轨迹（本地演示未接外部回调或尚无路由回传时保留真实空状态）。</Empty>}
+          </div>
+          <div>
+            <h3 style={{marginTop:0}}>受控运单号与承运商纠偏</h3>
+            {canCorrectWaybill&&carrierChoices.length>0?(
+              <div className="card" style={{margin:0}}>
+                <p className="small muted">原运单记录将归档为历史快照并保留关联；已交接出库运单修正必须上传面单照片凭证。</p>
+                <Form key={`corr-${selectedTrack.id}-${selectedTrack.revision}`} label="确认修正运单" run={async f=>{
+                  const file=f.get("photo");
+                  const evidenceIds:string[]=[];
+                  if(file instanceof File && file.size>0) {
+                    evidenceIds.push(await upload(file,"label_photo"));
+                  } else if(selectedTrack.shipment_id) {
+                    throw new Error("已出库运单修正必须上传面单照片凭证。");
+                  }
+                  await request(`/staff/tracking/${selectedTrack.id}/correct`,"POST",{
+                    revision:selectedTrack.revision??1,
+                    carrier_code:text(f,"carrier_code"),
+                    tracking_no:text(f,"tracking_no"),
+                    reason:text(f,"reason"),
+                    ...(evidenceIds.length?{evidence_ids:evidenceIds}:{}),
+                  });
+                  setSelectedId("");
+                  reload();
+                  monitor.reload();
+                }}>
+                  <div className="fields">
+                    <Select name="carrier_code" label="更正后承运商" value={selectedTrack.carrier_code??carrierChoices[0]?.id} choices={carrierChoices}/>
+                    <Field name="tracking_no" label="更正后运单号" value={selectedTrack.tracking_norm}/>
+                  </div>
+                  <Field name="reason" label="更正原因（审计必填）"/>
+                  <label>面单照片凭证{selectedTrack.shipment_id?"（出库运单必填）":"（可选）"}<FileInput name="photo" accept="image/*" required={Boolean(selectedTrack.shipment_id)}/></label>
+                </Form>
+              </div>
+            ):<Empty>仅仓库主管与超级管理员可执行运单号纠偏。</Empty>}
+          </div>
+        </div>
+
+        {(selectedTrack.zh_events?.length??0)>0&&<div style={{marginTop:16}}>
+          <h3 style={{marginBottom:8}}>对客英文轨迹翻译与独立双人复核（禁止起草人自审）</h3>
+          <Table headers={["发生时间","中文原始节点","当前对客英文译文","复核状态","人工翻译 / 独立复核操作"]} rows={selectedTrack.zh_events.map((ev:Row)=>[
+            <span key="tm" className="nowrap">{stamp(ev.occurred_at??ev.source_time)}</span>,
             ev.text_zh??"—",
-            ev.text_en??<span className="muted">尚未录入</span>,
-            <Tag tone={ev.reviewed_at?"green":ev.translation_id?"yellow":"gray"}>{ev.reviewed_at?"已独立复核":ev.translation_id?"草稿待复核":"待翻译"}</Tag>,
-            canTranslate?<div className="stack" style={{gap:6}}>
-              <Form inline key={`tr-${ev.id}-${ev.translation_id??"new"}`} label="提交译稿" run={async f=>{
+            ev.text_en??<span className="muted">尚未录入英文译稿</span>,
+            <Tag key="st" tone={ev.reviewed_at?"green":ev.translation_id?"yellow":"gray"}>{ev.reviewed_at?"已独立复核发布":ev.translation_id?"译稿待第二人复核":"待翻译"}</Tag>,
+            canTranslate?<div key="act" className="stack" style={{gap:6}}>
+              <Form inline key={`tr-${ev.id}-${ev.translation_id??"new"}`} label="保存译稿" run={async f=>{
                 await request(`/staff/tracking/${selectedTrack.id}/translations`,"POST",{
                   tracking_event_id:ev.id,
                   source_hash:ev.source_hash,
@@ -1297,36 +1294,87 @@ export function LogisticsDesk({actor}:{actor?:Row}) {
             </div>:"—",
           ])}/>
         </div>}
-        {canCorrectWaybill&&carrierChoices.length>0&&<details className="card" style={{marginTop:14}}>
-          <summary>修正运单号或承运商（需 15 分钟内员工验证登录会话）</summary>
-          <p className="small muted">原运单记录将归档为历史快照并保留关联；已交接出库运单修正必须上传面单照片凭证。</p>
-          <Form key={`corr-${selectedTrack.id}-${selectedTrack.revision}`} label="确认修正运单" run={async f=>{
-            const file=f.get("photo");
-            const evidenceIds:string[]=[];
-            if(file instanceof File && file.size>0) {
-              evidenceIds.push(await upload(file,"label_photo"));
-            } else if(selectedTrack.shipment_id) {
-              throw new Error("已出库运单修正必须上传面单照片凭证。");
-            }
-            await request(`/staff/tracking/${selectedTrack.id}/correct`,"POST",{
-              revision:selectedTrack.revision??1,
-              carrier_code:text(f,"carrier_code"),
-              tracking_no:text(f,"tracking_no"),
-              reason:text(f,"reason"),
-              ...(evidenceIds.length?{evidence_ids:evidenceIds}:{}),
-            });
-            setSelectedId("");
-            reload();
-            monitor.reload();
-          }}>
-            <Select name="carrier_code" label="更正后承运商" value={selectedTrack.carrier_code??carrierChoices[0]?.id} choices={carrierChoices}/>
-            <Field name="tracking_no" label="更正后运单号" value={selectedTrack.tracking_norm}/>
-            <Field name="reason" label="更正原因（审计必填）"/>
-            <label>面单照片凭证{selectedTrack.shipment_id?"（出库运单必填）":"（可选）"}<FileInput name="photo" accept="image/*" required={Boolean(selectedTrack.shipment_id)}/></label>
-          </Form>
-        </details>}
-      </>}
-    </ModalDrawer>
+      </Panel>
+    )}
+
+    {(tab==="all"||tab==="inbound"||tab==="outbound")&&<>
+      <div className="admin-toolbar">
+        <label>
+          检索运单 / 客户码 / 订单号 / 包裹码
+          <input type="search" value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="输入单号、QCW-... 或 QW-..."/>
+        </label>
+        <label>
+          承运商状态筛选
+          <select value={transportFilter} onChange={e=>setTransportFilter(e.target.value)}>
+            <option value="">全部运输状态</option>
+            {Object.entries(TRANSPORT_STATE_ZH).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
+          </select>
+        </label>
+        <div className="actions">
+          <button type="button" className="button sm" onClick={()=>{setSearchQ("");setTransportFilter("");}}>清空筛选</button>
+        </div>
+      </div>
+
+      <Panel
+        title={tab==="inbound"?"入仓运单监控":tab==="outbound"?"出库发运监控":"全部入仓与出库运单"}
+        subtitle={`共匹配 ${filteredRows.length} 条记录；点击右侧「展开轨迹与复核」可在上方全宽工作区核对四阶段入库状态、审核英文译文或更正运单。`}
+      >
+        {filteredRows.length===0?(
+          <EmptyState
+            kind={q||transportFilter?"filtered":"empty"}
+            title="没有符合筛选条件的运单记录"
+            description="请检查单号/客户码关键词，或清空筛选查看全量运输监控记录。"
+            actionLabel="重置筛选"
+            onAction={()=>{setSearchQ("");setTransportFilter("");}}
+          />
+        ):(
+          <Table
+            headers={["运单号 / 方向","承运商","客户码与关联订单","承运商运输状态","仓库实收 / 称重 / 核身状态","同步状态","轨迹数","最近同步","全宽工作区"]}
+            rows={filteredRows.map((r:Row)=>[
+              <div key="tr" className="cell-stack">
+                <CodeButton code={r.tracking_norm} onClick={()=>setSelectedId(prev=>prev===r.id?"":r.id)}/>
+                <BizTag dict={DIRECTION_ZH} value={r.direction}/>
+              </div>,
+              <div key="ca" className="cell-stack">
+                <strong>{r.carrier_name_zh??r.carrier_code??"—"}</strong>
+                <small className="code">{r.carrier_code??"—"}</small>
+              </div>,
+              renderTrackCustomerAndOrders(r),
+              <BizTag key="ts" dict={TRANSPORT_STATE_ZH} value={r.transport_state}/>,
+              r.direction==="inbound"?(
+                r.package_code?(
+                  <div key="wh" className="cell-stack">
+                    <div className="actions">
+                      <Tag tone="green">已实收 {r.package_code}</Tag>
+                      {r.package_weight_g&&<small className="code">{r.package_weight_g}g</small>}
+                    </div>
+                    <small>拆包 {r.logged_item_count??r.package_received_quantity??0} 件 · 已核身 {r.identified_item_count??0} 件</small>
+                  </div>
+                ):r.transport_state==="delivered"?(
+                  <Tag key="wh" tone="red">承运商已签收·待仓库扫码实收</Tag>
+                ):(
+                  <span key="wh" className="muted">在途待到仓</span>
+                )
+              ):(
+                <div key="wh" className="cell-stack">
+                  <Tag tone="blue">{r.shipment_state==="handed_over"?"已交接承运商":"已打包待交接"}</Tag>
+                  <small>{r.shipment_weight_g?`称重 ${r.shipment_weight_g}g`:"出库批次发运"}</small>
+                </div>
+              ),
+              <BizTag key="ss" dict={SYNC_STATE_ZH} value={r.sync_state}/>,
+              <span key="cnt" className="nowrap">{(r.zh_events?.length||r.events?.length)||0} 条</span>,
+              stamp(r.last_success_at),
+              <button
+                key="btn"
+                type="button"
+                className={"button sm nowrap"+(selectedId===r.id?"":" primary")}
+                onClick={()=>setSelectedId(prev=>prev===r.id?"":r.id)}
+              >{selectedId===r.id?"收起工作区":"展开轨迹与复核"}</button>,
+            ])}
+          />
+        )}
+      </Panel>
+    </>}
     <StaffObjectDrawer target={drawer} onClose={()=>setDrawer(null)}/>
   </>;
 }
@@ -1336,7 +1384,6 @@ export function LogisticsConfiguration() {
   return <>
     <div className="page-head row">
       <div>
-        <p className="eyebrow">TRACKING / CONFIGURATION</p>
         <h1>物流供应商接入与承运商字典</h1>
         <p className="muted">检查服务端快递100（Express100）密钥接入状态、回调安全开关与首发承运商校验规则。</p>
       </div>
@@ -1391,12 +1438,21 @@ const TEMPLATE_STATE_ZH: Record<string, { label: string; tone: "green" | "yellow
   ARCHIVED: { label: "已归档", tone: "gray" },
 };
 
+const LEGAL_KIND_ZH: Record<string, string> = {
+  terms: "客户服务条款 (Terms of Service)",
+  privacy: "隐私与数据保护政策 (Privacy Policy)",
+  restricted_items: "禁限寄与高风险品说明 (Restricted Items)",
+  report_notice: "质检报告使用与责任限制 (Report Notice)",
+};
+
 export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:boolean}) {
   const {data,error,reload}=useLoad("/staff/admin/desk"),terms=useLoad("/public/terms");
   const [configTab,setConfigTab]=useState<"addresses"|"quote_policy"|"calendar">("addresses");
   const [catalogTab,setCatalogTab]=useState<"categories"|"offers">("categories");
   const [previewLegal,setPreviewLegal]=useState<Row|null>(null);
   const [previewTemplate,setPreviewTemplate]=useState<Row|null>(null);
+  const [compareTemplateId,setCompareTemplateId]=useState<string>("");
+  const [admittingCategory,setAdmittingCategory]=useState<Row|null>(null);
   const [drawer,setDrawer]=useState<StaffObjectTarget|null>(null);
 
   if(error)return <ErrorBlock error={error}/>;
@@ -1424,20 +1480,22 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
   const heading:Record<string,[string,string]>={
     catalog:["品类与可售套餐目录","分类准入、服务类型与可售报价 SKU 版本价格分离管控；生产目录只发布完成 SOP 与能力审批的品类。"],
     templates:["品类检验能力与检查模板","所有检验能力与模板版本须经作者提交 + 独立审核人双人发布；已绑定历史订单保留原模板版本快照。"],
-    "shipping-rates":["国内运费阶梯费率与试算","配置首重、续重步长及每批操作费版本，所有已确认发运报价沿用签发时费率版本。"],
+    "shipping-rates":["国内运费阶梯费率与试算","严格分离「运费费率版本发布管理」与「独立多包裹运费试算器」，所有已确认发运报价沿用签发时费率版本。"],
     config:["业务参数、收货公仓与工作日历","配置多版本公仓地址、报价有效期及 SLA 节假日/调休规则，禁止在前端写死业务参数。"],
-    legal:["合规条款、隐私政策与声明版本","支持先保存草稿并全文预览内容哈希，再独立发布生效；客户注册与下单历史同意版本全量可追溯。"],
+    legal:["合规条款、隐私政策与声明版本","支持先保存草稿并全宽审阅 Markdown 正文与 SHA-256 哈希，自动拦截/告警开发夹具文本，客户历史签约版本全量可追溯。"],
     users:["员工账号角色与 RBAC 权限管控","按职责分离 (SoD) 配置岗位权限；客户 360 档案已独立迁往「客户档案」工作台。"],
     settings:[superAdmin?"系统参数与模板准入":"检查能力与模板准入","集中维护当前业务参数、类目准入与品类检查模板版本。"],
   };
   const currentHeading=heading[page]??["平台配置","维护受控业务规则与版本记录。"];
   const defaultAddr=(data.addresses??[]).find((a:Row)=>a.is_default&&a.active);
   const looksLikeDemoAddr=Boolean(defaultAddr && /演示|test|demo/i.test(`${defaultAddr.address_zh??""} ${defaultAddr.address_en??""}`));
+  const activeDemoTerms=(data.termsVersions??[]).filter((t:Row)=>t.is_current_active && (t.is_demo_fixture || /Development fixture/i.test(t.content_md??"")));
+  const sameKeyTemplates=previewTemplate?(data.templates??[]).filter((t:Row)=>t.template_key===previewTemplate.template_key && t.id!==previewTemplate.id):[];
+  const compareTarget=sameKeyTemplates.find((t:Row)=>t.id===compareTemplateId)??sameKeyTemplates[0]??null;
 
   return <>
     <div className="page-head row">
       <div>
-        <p className="eyebrow">PLATFORM CONFIGURATION</p>
         <h1>{currentHeading[0]}</h1>
         <p className="muted">{currentHeading[1]}</p>
       </div>
@@ -1466,7 +1524,7 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
         </StatusBanner>}
         <Panel title="仓库收货地址版本列表" subtitle="切换唯一默认公仓地址不会影响发往历史仓址的在途包裹正常入库。">
           <Table
-            headers={["中文收货地址","英文参考地址","收件人 / 电话","关联预报数","启用状态","版本操作"]}
+            headers={["中文收货地址","英文参考地址","收件人 / 电话","关联预报运单数","启用状态","版本操作"]}
             rows={(data.addresses??[]).map((a:Row)=>[
               <div key="zh" className="cell-stack">
                 <span>{a.address_zh}</span>
@@ -1481,6 +1539,7 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
               <Tag key="st" tone={a.is_default?"green":a.active?"blue":"gray"}>{a.is_default?"唯一默认公仓":a.active?"候选启用":"已停用(历史保留)"}</Tag>,
               <div key="op" className="actions">
                 {!a.is_default&&<Action sm primary run={async()=>{
+                  if(!window.confirm(`确认将「${a.address_zh}」切换为唯一默认公共收货仓址？新注册与新建单客户将看到此地址，历史在途预报包裹仍保留原地址快照。`)) return;
                   await request("/staff/admin/warehouse-addresses/"+a.id,"POST",{is_default:true});
                   reload();
                 }}>设为唯一默认</Action>}
@@ -1514,23 +1573,71 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
     </>}
 
     {page==="legal"&&superAdmin&&<>
-      <Panel title="合规文档与条款发布版本列表" subtitle="可点击「全文预览」审阅完整 Markdown 条款与内容 SHA 摘要后再正式发布生效。">
+      {activeDemoTerms.length>0&&(
+        <StatusBanner tone="warning" title={`合规阻断提醒：检测到 ${activeDemoTerms.length} 类当前生效协议仍为开发夹具文本 (demo fixture)`}>
+          当前生效的 <strong>{activeDemoTerms.map((t:Row)=>`${t.kind} (${t.version})`).join("、")}</strong> 包含 <code>Development fixture. Use test parcels and simulated payments only.</code> 占位文案。正式对外开放生产接单前，必须在下方起草并发布经法务审核的正式英文协议版本！
+        </StatusBanner>
+      )}
+
+      {previewLegal&&(
+        <Panel
+          id="legal-preview-workbench"
+          title={`条款全文审阅与发布工作区 · ${LEGAL_KIND_ZH[previewLegal.kind]??previewLegal.kind} (${previewLegal.version})`}
+          subtitle={`SHA-256 内容哈希：${previewLegal.content_hash??"—"} · 已关联客户同意记录：${previewLegal.consent_count??0} 份`}
+          badge={<button type="button" className="button sm" onClick={()=>setPreviewLegal(null)}>收起全文审阅 ✕</button>}
+        >
+          <div className="actions" style={{marginBottom:12}}>
+            <BizTag dict={LEGAL_STATE_ZH} value={previewLegal.state}/>
+            {previewLegal.is_current_active&&<Tag tone="blue">当前对外生效版本</Tag>}
+            {(previewLegal.is_demo_fixture||/Development fixture/i.test(previewLegal.content_md??""))&&(
+              <Tag tone="red">警告：包含开发夹具占位文本（禁用于正式生产）</Tag>
+            )}
+            <CopyId value={previewLegal.content_hash??"—"} short={false}/>
+            {previewLegal.state==="draft"&&<Action sm primary run={async()=>{
+              await request("/staff/admin/terms/"+previewLegal.id+"/publish","POST",{});
+              setPreviewLegal(null);
+              reload();
+            }}>确认正文无误并正式发布生效</Action>}
+          </div>
+          <pre className="card-soft" style={{whiteSpace:"pre-wrap",fontFamily:"var(--font-mono)",fontSize:13,lineHeight:1.65,maxHeight:"56vh",overflow:"auto",padding:16}}>
+            {previewLegal.content_md??"（该记录仅返回元数据，未附带 Markdown 正文）"}
+          </pre>
+        </Panel>
+      )}
+
+      <Panel title="合规文档与条款发布版本列表" subtitle="点击「展开全文审阅」在上方全宽区域核对完整 Markdown 条款与内容 SHA-256 摘要；自动标记开发夹具文本。">
         <Table
-          headers={["文档类型","版本号","发布状态","生效时间","内容摘要","全文预览 / 发布"]}
-          rows={(data.termsVersions??[]).map((t:Row)=>[
-            <span key="k" className="code">{t.kind}</span>,
-            <strong key="v" className="code">{t.version}</strong>,
-            <BizTag key="st" dict={LEGAL_STATE_ZH} value={t.state}/>,
-            t.effective_at?stamp(t.effective_at):"草稿待发布",
-            <CopyId key="h" value={t.content_hash??"—"}/>,
-            <div key="op" className="actions">
-              <button type="button" className="button sm" onClick={()=>setPreviewLegal(t)}>全文预览</button>
-              {t.state==="draft"&&<Action sm primary run={async()=>{
-                await request("/staff/admin/terms/"+t.id+"/publish","POST",{});
-                reload();
-              }}>正式发布生效</Action>}
-            </div>,
-          ])}
+          headers={["文档类型","版本号","发布与合规状态","生效时间","客户签约同意数","SHA-256 内容摘要","审阅与发布"]}
+          rows={(data.termsVersions??[]).map((t:Row)=>{
+            const isFixture = Boolean(t.is_demo_fixture || /Development fixture/i.test(t.content_md ?? ""));
+            const isSelected = previewLegal?.id === t.id;
+            return [
+              <div key="k" className="cell-stack">
+                <strong>{LEGAL_KIND_ZH[t.kind]??t.kind}</strong>
+                <small className="code">{t.kind}</small>
+              </div>,
+              <strong key="v" className="code">{t.version}</strong>,
+              <div key="st" className="cell-stack">
+                <div className="actions">
+                  <BizTag dict={LEGAL_STATE_ZH} value={t.state}/>
+                  {t.is_current_active&&<Tag tone="blue">当前生效</Tag>}
+                </div>
+                {isFixture&&<Tag tone="red">开发夹具文本 (Demo Fixture)</Tag>}
+              </div>,
+              t.effective_at?stamp(t.effective_at):"草稿待发布",
+              <span key="cc" className="nowrap"><strong>{t.consent_count??0}</strong> 户/次</span>,
+              <CopyId key="h" value={t.content_hash??"—"}/>,
+              <div key="op" className="actions">
+                <button type="button" className={`button sm${isSelected?"":" primary"}`} onClick={()=>setPreviewLegal(isSelected?null:t)}>
+                  {isSelected?"收起审阅":"展开全文审阅"}
+                </button>
+                {t.state==="draft"&&<Action sm primary run={async()=>{
+                  await request("/staff/admin/terms/"+t.id+"/publish","POST",{});
+                  reload();
+                }}>正式发布生效</Action>}
+              </div>,
+            ];
+          })}
           empty="暂无合规条款版本。"
         />
       </Panel>
@@ -1578,34 +1685,74 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
           ...(superAdmin?[{id:"offers",label:"可售套餐 SKU 与版本定价",count:(data.offers??[]).length}]:[]),
         ]}
       />
-      {catalogTab==="categories"&&<Panel title="品类准入管控" subtitle="仅已完成 SOP 与质检设备验证的品类可设为正式可售（服装 Apparel 为首发运营品类）。">
-        <Table
-          headers={["类目编码","中文名称","英文名称","准入状态","SOP 与试运行材料","操作"]}
-          rows={(data.categories??[]).map((c:Row)=>[
-            <span key="sl" className="code">{c.slug}</span>,
-            c.labels["zh-CN"],
-            c.labels.en,
-            <BizTag key="st" dict={CATEGORY_STATUS_ZH} value={c.status}/>,
-            c.admission_snapshot?`SOP: ${c.admission_snapshot.sop_ref??(c.admission_snapshot.demo?"演示夹具":"待补充")}`:"未提交准入",
-            superAdmin&&c.status!=="ACTIVE"?<Form key="act" inline label="核准激活" run={async f=>{
-              await request("/staff/admin/categories/"+c.id+"/status","POST",{
+      {catalogTab==="categories"&&<>
+        {admittingCategory&&superAdmin&&(
+          <Panel
+            id="category-admission-workbench"
+            title={`品类准入审核与激活工作台 · ${admittingCategory.labels["zh-CN"]} (${admittingCategory.slug})`}
+            subtitle="激活类目上线前，须登记已通过验证的仓库作业 SOP 编号、影子模板试运行证据，并确认质检台设备与人员培训到位。"
+            badge={<button type="button" className="button sm" onClick={()=>setAdmittingCategory(null)}>取消审核 ✕</button>}
+          >
+            <Form label={`核准激活「${admittingCategory.labels["zh-CN"]}」为正式可售品类`} run={async f=>{
+              await request("/staff/admin/categories/"+admittingCategory.id+"/status","POST",{
                 status:"ACTIVE",
-                admission_snapshot:{sop_ref:text(f,"sop_ref"),pilot_evidence:text(f,"pilot_evidence"),training_completed:true,equipment_verified:true},
-              });reload();
-            }}><Field name="sop_ref" label="SOP 编号"/><Field name="pilot_evidence" label="试运行记录"/></Form>:
-            superAdmin&&c.status==="ACTIVE"?<Action key="pa" sm run={async()=>{
-              await request("/staff/admin/categories/"+c.id+"/status","POST",{status:"PAUSED"});reload();
-            }}>暂停可售</Action>:null,
-          ])}
-          empty="暂无类目记录。"
-        />
-        {canAuthorTemplate&&<>
-          <hr className="divider"/>
-          <Form inline label="新建规划类目（初始草稿状态，不直接开放售卖）" run={async f=>{
-            await request("/staff/admin/categories","POST",{slug:text(f,"slug"),labels:{en:text(f,"en"),"zh-CN":text(f,"zh")}});reload();
-          }}><Field name="slug" label="类目编码"/><Field name="zh" label="中文名称"/><Field name="en" label="英文名称"/></Form>
-        </>}
-      </Panel>}
+                admission_snapshot:{
+                  sop_ref:text(f,"sop_ref"),
+                  pilot_evidence:text(f,"pilot_evidence"),
+                  training_completed:true,
+                  equipment_verified:true,
+                },
+              });
+              setAdmittingCategory(null);
+              reload();
+            }}>
+              <div className="fields">
+                <Field name="sop_ref" label="仓库标准作业 SOP 编号（必填，如 SOP-BAGS-2026-V1）" value={admittingCategory.admission_snapshot?.sop_ref??`SOP-${String(admittingCategory.slug).toUpperCase()}-2026-V1`}/>
+                <Field name="pilot_evidence" label="影子模板与实样试运行验证记录（必填）" value={admittingCategory.admission_snapshot?.pilot_evidence??"已完成影子模板全流程检验、拍照机位与报告渲染验证"}/>
+              </div>
+            </Form>
+          </Panel>
+        )}
+
+        <Panel title="品类准入管控" subtitle="仅已完成 SOP 与质检设备验证的品类可设为正式可售（服装 Apparel 为首发运营品类）；暂停类目不会影响已建在途订单。">
+          <Table
+            headers={["类目编码","中文名称","英文名称","准入状态","SOP 与试运行准入材料","关联已发布模板数","准入操作"]}
+            rows={(data.categories??[]).map((c:Row)=>{
+              const publishedTplCount = (data.templates??[]).filter((t:Row)=>t.category_id===c.id && t.state==="PUBLISHED").length;
+              return [
+                <span key="sl" className="code"><strong>{c.slug}</strong></span>,
+                c.labels["zh-CN"],
+                c.labels.en,
+                <BizTag key="st" dict={CATEGORY_STATUS_ZH} value={c.status}/>,
+                c.admission_snapshot
+                  ? <div key="adm" className="cell-stack">
+                      <span>SOP: <code className="code">{c.admission_snapshot.sop_ref??(c.admission_snapshot.demo?"演示夹具":"已登记")}</code></span>
+                      {c.admission_snapshot.pilot_evidence&&<small className="muted">{c.admission_snapshot.pilot_evidence}</small>}
+                    </div>
+                  : <span key="adm" className="muted">尚未登记准入材料</span>,
+                <span key="tc" className="nowrap">{publishedTplCount} 个已发布模板</span>,
+                superAdmin&&c.status!=="ACTIVE"?(
+                  <button key="act" type="button" className="button sm primary nowrap" onClick={()=>setAdmittingCategory(c)}>
+                    填写准入并激活 →
+                  </button>
+                ):superAdmin&&c.status==="ACTIVE"?(
+                  <Action key="pa" sm run={async()=>{
+                    if(!window.confirm(`确认暂停「${c.labels["zh-CN"]}」对外新建订单？已创建的在途订单仍正常履约。`)) return;
+                    await request("/staff/admin/categories/"+c.id+"/status","POST",{status:"PAUSED"});reload();
+                  }}>暂停可售</Action>
+                ):null,
+              ];
+            })}
+            empty="暂无类目记录。"
+          />
+          {canAuthorTemplate&&<>
+            <hr className="divider"/>
+            <Form inline label="新建规划类目（初始草稿状态，不直接开放售卖）" run={async f=>{
+              await request("/staff/admin/categories","POST",{slug:text(f,"slug"),labels:{en:text(f,"en"),"zh-CN":text(f,"zh")}});reload();
+            }}><Field name="slug" label="类目编码"/><Field name="zh" label="中文名称"/><Field name="en" label="英文名称"/></Form>
+          </>}
+        </Panel>
+      </>}
 
       {catalogTab==="offers"&&superAdmin&&<Panel title="可售套餐 SKU 与版本价格" subtitle="调价将签发新价格版本；客户已创建/已确认订单永久保留下单当时的价格快照。">
         <Table
@@ -1692,6 +1839,96 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
     </>}
 
     {(page==="templates"||page==="settings")&&<>
+      {previewTemplate&&(
+        <Panel
+          id="template-detail-workbench"
+          title={`检查模板全宽审阅与版本对比工作台 · ${previewTemplate.template_key} v${previewTemplate.version}`}
+          subtitle={`适用类目：${previewTemplate.category_label??"—"} · 服务类型：${previewTemplate.service_label??"—"} · 绑定检验能力：${(previewTemplate.capability_codes??[]).join("、")||"无"} · 已关联订单：${previewTemplate.order_count??0} 单`}
+          badge={<button type="button" className="button sm" onClick={()=>setPreviewTemplate(null)}>收起模板审阅 ✕</button>}
+        >
+          <div className="row between flexwrap" style={{marginBottom:12,gap:10}}>
+            <div className="actions">
+              <BizTag dict={TEMPLATE_STATE_ZH} value={previewTemplate.state}/>
+              <span className="small muted">作者：{previewTemplate.author_name??"系统预置"} · 审核人：{previewTemplate.reviewer_name??(previewTemplate.state==="PUBLISHED"?"已审核":"待独立复核")}</span>
+              <CopyId value={previewTemplate.id}/>
+              {previewTemplate.state==="IN_REVIEW"&&canReviewTemplate&&previewTemplate.author_id!==actor.id&&<Action sm primary run={async()=>{
+                await request("/staff/admin/templates/"+previewTemplate.id+"/publish","POST",{});
+                setPreviewTemplate(null);
+                reload();
+              }}>确认全部字段无误并独立发布</Action>}
+            </div>
+            {sameKeyTemplates.length>0&&(
+              <label className="row" style={{gap:6,fontSize:12.5}}>
+                <span>对比同模板其他版本：</span>
+                <select value={compareTarget?.id??""} onChange={e=>setCompareTemplateId(e.target.value)}>
+                  {sameKeyTemplates.map((st:Row)=><option key={st.id} value={st.id}>v{st.version} ({TEMPLATE_STATE_ZH[st.state]?.label??st.state})</option>)}
+                </select>
+              </label>
+            )}
+          </div>
+
+          {previewTemplate.content?.measure_conditions&&(
+            <div className="notice" style={{marginBottom:14}}>
+              <strong>锁定测量环境与工器具条件：</strong> {previewTemplate.content.measure_conditions}
+            </div>
+          )}
+
+          {compareTarget&&(
+            <div className="card-soft" style={{marginBottom:14}}>
+              <strong>版本差异摘要（当前 v{previewTemplate.version} vs 对照 v{compareTarget.version}）：</strong>
+              <p className="small muted" style={{margin:"4px 0 0"}}>
+                检查项数量：v{previewTemplate.version} 共 {(previewTemplate.content?.checks??[]).length} 项 vs v{compareTarget.version} 共 {(compareTarget.content?.checks??[]).length} 项；
+                必拍机位：v{previewTemplate.version} 共 {(previewTemplate.content?.shots??[]).length} 个 vs v{compareTarget.version} 共 {(compareTarget.content?.shots??[]).length} 个。
+              </p>
+            </div>
+          )}
+
+          <div className="ops-columns">
+            <div style={{gridColumn:"1 / -1"}}>
+              <h3 style={{marginTop:0}}>受控检查字段明细 ({(previewTemplate.content?.checks??[]).length} 项)</h3>
+              <Table
+                headers={["字段键 (Key)","中文检查项名称","英文报告标签 (Report Label)","值类型 / 单位","标准测量与检验方法","必检属性","强制拍照","版本变更"]}
+                rows={(previewTemplate.content?.checks??[]).map((c:Row)=>{
+                  const prevCheck=(compareTarget?.content?.checks??[]).find((x:Row)=>x.key===c.key);
+                  const diffStatus=!compareTarget
+                    ?"基准版本"
+                    :!prevCheck
+                      ?"新增字段"
+                      :(prevCheck.method!==c.method||prevCheck.type!==c.type||prevCheck.required!==c.required||prevCheck.evidence!==c.evidence)
+                        ?"规则已调整"
+                        :"与对照版一致";
+                  return [
+                    <span key="k" className="code nowrap">{c.key}</span>,
+                    <strong key="zh">{c.zh??c.label??"—"}</strong>,
+                    c.label??"—",
+                    <span key="t" className="nowrap">{c.type}{c.unit?` (${c.unit})`:""}</span>,
+                    c.method??"—",
+                    c.required?<Tag key="r" tone="blue">必检</Tag>:<Tag key="r" tone="gray">选检</Tag>,
+                    c.evidence?<Tag key="e" tone="yellow">必拍证据图</Tag>:"按需拍照",
+                    <Tag key="d" tone={diffStatus==="新增字段"?"green":diffStatus==="规则已调整"?"yellow":"gray"}>{diffStatus}</Tag>,
+                  ];
+                })}
+                empty="未配置检查项。"
+              />
+            </div>
+          </div>
+
+          <div style={{marginTop:14}}>
+            <h3>必拍标准证据机位 ({(previewTemplate.content?.shots??[]).length} 个)</h3>
+            <Table
+              headers={["机位编码","中文拍摄说明","英文报告标签","适用组件"]}
+              rows={(previewTemplate.content?.shots??[]).map((s:Row)=>[
+                <span key="k" className="code">{s.code}</span>,
+                s.zh??"—",
+                s.name??"—",
+                s.component??"整件默认 (main)",
+              ])}
+              empty="未配置必拍机位。"
+            />
+          </div>
+        </Panel>
+      )}
+
       <Panel title="检验能力准入与独立审批" subtitle="检查模板必须绑定已获独立批准的检验能力；能力创建人与审批人不得为同一人。">
         <Table headers={["能力编码","标准检验方法与工器具","审批状态","操作"]} rows={(data.allCapabilities??data.capabilities).map((cap:Row)=>[
           <span key="c" className="code">{cap.code}</span>,
@@ -1709,20 +1946,28 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
           }}><Field name="code" label="能力编码"/><Field name="method" label="标准方法与工具说明"/></Form>
         </>}
       </Panel>
-      <Panel title="模板版本仓库与独立审核发布" subtitle="审核发布前请点击「审阅完整字段」核对每项实测指标、测量环境说明和必拍机位。">
-        <Table headers={["模板键","版本","发布状态","关联能力","检查项与机位概览","操作"]} rows={(data.templates??[]).map((t:Row)=>[
-          <strong key="k" className="code">{t.template_key}</strong>,
-          <span key="v" className="code nowrap">v{t.version}</span>,
-          <BizTag key="st" dict={TEMPLATE_STATE_ZH} value={t.state}/>,
-          (t.capability_codes??[]).join(", ")||"—",
-          t.content?.checks?`${t.content.checks.length} 项检查 / ${(t.content.shots??[]).length} 个机位`:"—",
-          <div key="op" className="actions">
-            <button type="button" className="button sm" onClick={()=>setPreviewTemplate(t)}>审阅完整字段</button>
-            {t.state==="IN_REVIEW"&&canReviewTemplate&&t.author_id!==actor.id&&
-              <Action sm primary run={async()=>{await request("/staff/admin/templates/"+t.id+"/publish","POST",{});reload();}}>独立审核发布</Action>}
-            {t.state==="IN_REVIEW"&&t.author_id===actor.id&&<small className="muted">须非作者独立复核</small>}
-          </div>,
-        ])} empty="暂无模板版本。"/>
+      <Panel title="模板版本仓库与独立审核发布" subtitle="点击「全宽审阅与对比」在上方展开完整检查项、测量条件及版本差异对比；已绑定订单锁定下单时的模板版本。">
+        <Table headers={["模板键","版本","适用类目 / 服务","发布状态","关联能力","检查项 / 机位","作者 / 审核人","关联订单","操作"]} rows={(data.templates??[]).map((t:Row)=>{
+          const isSelected = previewTemplate?.id === t.id;
+          return [
+            <strong key="k" className="code">{t.template_key}</strong>,
+            <span key="v" className="code nowrap">v{t.version}</span>,
+            <span key="cs">{t.category_label??"—"} · {t.service_label??"—"}</span>,
+            <BizTag key="st" dict={TEMPLATE_STATE_ZH} value={t.state}/>,
+            (t.capability_codes??[]).join(", ")||"—",
+            t.content?.checks?`${t.content.checks.length} 项 / ${(t.content.shots??[]).length} 机位`:"—",
+            <span key="au" className="small">{t.author_name??"系统"} / {t.reviewer_name??(t.state==="PUBLISHED"?"已审":"待审")}</span>,
+            <span key="oc" className="nowrap"><strong>{t.order_count??0}</strong> 单</span>,
+            <div key="op" className="actions">
+              <button type="button" className={`button sm nowrap${isSelected?"":" primary"}`} onClick={()=>setPreviewTemplate(isSelected?null:t)}>
+                {isSelected?"收起审阅":"全宽审阅与对比"}
+              </button>
+              {t.state==="IN_REVIEW"&&canReviewTemplate&&t.author_id!==actor.id&&
+                <Action sm primary run={async()=>{await request("/staff/admin/templates/"+t.id+"/publish","POST",{});reload();}}>独立审核发布</Action>}
+              {t.state==="IN_REVIEW"&&t.author_id===actor.id&&<small className="muted">须非作者独立复核</small>}
+            </div>,
+          ];
+        })} empty="暂无模板版本。"/>
         {!!data.categories.length&&canAuthorTemplate&&<TemplateAuthorForm
           categories={data.categories}
           services={data.services}
@@ -1733,79 +1978,6 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
     </>}
 
     {page==="shipping-rates"&&superAdmin&&<ShippingRateConfigPanel rates={data.shippingRates??[]} onSave={reload}/>}
-
-    <ModalDrawer
-      open={Boolean(previewLegal)}
-      onClose={()=>setPreviewLegal(null)}
-      title={previewLegal?`条款正文预览 · ${previewLegal.kind} v${previewLegal.version}`:""}
-      subtitle={previewLegal?`SHA-256 摘要：${previewLegal.content_hash??"—"}`:""}
-    >
-      {previewLegal&&<>
-        <div className="actions" style={{marginBottom:12}}>
-          <BizTag dict={LEGAL_STATE_ZH} value={previewLegal.state}/>
-          <CopyId value={previewLegal.content_hash??"—"}/>
-          {previewLegal.state==="draft"&&<Action sm primary run={async()=>{
-            await request("/staff/admin/terms/"+previewLegal.id+"/publish","POST",{});
-            setPreviewLegal(null);
-            reload();
-          }}>确认无误并正式发布</Action>}
-        </div>
-        <pre className="card-soft" style={{whiteSpace:"pre-wrap",fontFamily:"var(--font-mono)",fontSize:12.5,lineHeight:1.6,maxHeight:"62vh",overflow:"auto"}}>
-          {previewLegal.content_md??"（该记录仅返回元数据，未附带 Markdown 正文）"}
-        </pre>
-      </>}
-    </ModalDrawer>
-
-    <ModalDrawer
-      open={Boolean(previewTemplate)}
-      onClose={()=>setPreviewTemplate(null)}
-      title={previewTemplate?`检查模板版本审阅 · ${previewTemplate.template_key} v${previewTemplate.version}`:""}
-      subtitle={previewTemplate?`关联能力：${(previewTemplate.capability_codes??[]).join("、")||"无"}`:""}
-    >
-      {previewTemplate&&<>
-        <div className="actions" style={{marginBottom:12}}>
-          <BizTag dict={TEMPLATE_STATE_ZH} value={previewTemplate.state}/>
-          <CopyId value={previewTemplate.id}/>
-          {previewTemplate.state==="IN_REVIEW"&&canReviewTemplate&&previewTemplate.author_id!==actor.id&&<Action sm primary run={async()=>{
-            await request("/staff/admin/templates/"+previewTemplate.id+"/publish","POST",{});
-            setPreviewTemplate(null);
-            reload();
-          }}>确认字段无误并独立发布</Action>}
-        </div>
-        {previewTemplate.content?.measure_conditions&&(
-          <div className="card-soft" style={{marginBottom:12}}>
-            <strong>测量环境与工具条件</strong>
-            <p style={{margin:"6px 0 0"}}>{previewTemplate.content.measure_conditions}</p>
-          </div>
-        )}
-        <Panel title={`受控检查字段 (${(previewTemplate.content?.checks??[]).length})`}>
-          <Table
-            headers={["键名","中文名称","英文标签","类型 / 单位","方法","必检","强制拍照"]}
-            rows={(previewTemplate.content?.checks??[]).map((c:Row)=>[
-              <span key="k" className="code">{c.key}</span>,
-              c.zh??"—",
-              c.label??"—",
-              <span key="t" className="nowrap">{c.type}{c.unit?` (${c.unit})`:""}</span>,
-              c.method??"—",
-              c.required?<Tag tone="blue">必检</Tag>:"选检",
-              c.evidence?<Tag tone="yellow">必拍图</Tag>:"否",
-            ])}
-            empty="未配置检查项。"
-          />
-        </Panel>
-        <Panel title={`必拍证据机位 (${(previewTemplate.content?.shots??[]).length})`}>
-          <Table
-            headers={["机位编码","中文说明","英文标签"]}
-            rows={(previewTemplate.content?.shots??[]).map((s:Row)=>[
-              <span key="k" className="code">{s.code}</span>,
-              s.zh??"—",
-              s.name??"—",
-            ])}
-            empty="未配置必拍机位。"
-          />
-        </Panel>
-      </>}
-    </ModalDrawer>
 
     <StaffObjectDrawer target={drawer} onClose={()=>setDrawer(null)}/>
   </>;
@@ -1925,6 +2097,18 @@ function StaffAndCustomerUsersDesk({
           }}>{u.status==="disabled"?"恢复账号":"停用账号"}</Action>}
         </div>,
       ])} empty="暂无员工账号。"/>
+    </Panel>
+    <Panel title="各岗位业务模块访问与隐私隔离边界矩阵" subtitle="所有权限以服务端角色校验为准；非超管角色访问客户邮箱自动脱敏，非财务角色隐藏实付与赔付金额。">
+      <Table headers={["岗位名称","可进入工作台","核心可执行业务能力","禁止越权与脱敏边界"]} rows={[
+        ["收货与库管员 (receiver)","仓库台 + 物流监控","扫码实收包裹、拆包生成实物条码、绑定订单预期行、SKU 核身、库位移转、盘点录入","不可进入财务/退款/模板发布；客户完整邮箱不可见"],
+        ["现场质检员 (inspector)","仓库检查执行台","领取待检任务、录入多次实测数据与异常取证照、上传必拍机位照、提交检查任务","严禁批准本人或他人报告 (QA 复核)；不可修改订单状态或财务数据"],
+        ["独立 QA 复核员 (reviewer)","仓库报告复核台","校对报告英文表述与瑕疵标注、独立批准或退回非本人报告、独立审批检验能力与模板","严禁批准本人提交的报告或本人编写的模板；不可执行退款或收货"],
+        ["仓库主管 (warehouse_admin)","仓库全模块 + 物流","出库批次称重与运费报价、打包与承运商交接、盘点差异独立复核、运单号纠偏","不可执行退款终审或修改系统级条款与员工角色"],
+        ["客服与运营专员 (support)","管理后台 (订单/客户/工单/物流)","订单全链路追踪、人工报价核定、无主包裹认领核验、工单回复与转派、质检只读监督","客户邮箱脱敏显示 (如 c***@...)；财务实付/赔付金额隐藏；不可现场录入质检数据"],
+        ["财务专员 (finance)","管理后台 (财务/支付/退款/客户)","支付流水与渠道对账、争议冻结解冻、事故赔付方案审批与打款水单核销、导出账本 CSV","客户邮箱脱敏显示；不可操作仓库收货、质检录入或修改系统配置"],
+        ["模板管理员 (template_admin)","管理后台 (仓址及模板)","新建规划类目、提交新增检验能力、编写品类检查模板版本提交审核","严禁自行批准本人提交的检验能力或模板版本 (须独立 reviewer/super_admin 审核)"],
+        ["超级管理员 (super_admin)","管理后台 + 仓库台全模块","全局配置、法务条款发布、可售套餐定价、员工角色授权、非本人退款/处置/事故终审","同样受双人职责分离 (SoD) 约束：本人发起的退款、事故方案、处置单或模板不可自审"],
+      ]}/>
     </Panel>
     <Panel title="平台核心职责分离 (SoD) 守卫矩阵">
       <Table headers={["敏感业务操作","授权角色","强制服务端守卫"]} rows={[
@@ -2103,19 +2287,30 @@ function TemplateAuthorForm({
 
 function ShippingRateConfigPanel({rates,onSave}:{rates:Row[];onSave:()=>void}) {
   const [preview,setPreview]=useState<Row>();
-  return <Panel title="国内运价版本与运费试算" subtitle="支持多包裹按克计重及单批次操作费试算；历史已签发发运报价锁定对应费率版本。">
-    <Table headers={["版本","首重 (g)","首重费","续重步长 (g)","续重单价","操作费","发布时间"]} rows={rates.map((r:Row)=>[
-      <strong key="v" className="code">v{r.version}</strong>,
-      <span key="fw" className="nowrap">{r.rules?.first_weight_g??1000} g</span>,
-      <Money key="fc" cents={r.rules?.first_cents??0}/>,
-      <span key="es" className="nowrap">{r.rules?.extra_step_g??500} g</span>,
-      <Money key="ec" cents={r.rules?.extra_cents??0}/>,
-      <Money key="hc" cents={r.rules?.handling_cents??0}/>,
-      stamp(r.effective_at??r.published_at),
-    ])} empty="暂无运价版本。"/>
-    <hr className="divider"/>
-    <div className="ops-columns">
-      <Form label="发布新运价版本" run={async f=>{
+  const latestRate=rates[0];
+  return <>
+    <Panel title="01 / 国内运费费率版本管理" subtitle="所有已签发的出库运费报价永久锁定签发时的费率版本；发布新版本仅对后续新称重报价生效。">
+      {latestRate&&(
+        <div className="metric-strip" style={{marginBottom:14}} aria-label="当前生效运费版本摘要">
+          <div className="metric"><span>当前生效版本</span><strong>v{latestRate.version}</strong><small>生效于 {stamp(latestRate.effective_at??latestRate.published_at,true)}</small></div>
+          <div className="metric"><span>首重标准 ({latestRate.rules?.first_weight_g??1000} g)</span><strong><Money cents={latestRate.rules?.first_cents??0} align="left"/></strong><small>单个包裹基础首重费</small></div>
+          <div className="metric"><span>续重阶梯 (每 {latestRate.rules?.extra_step_g??500} g)</span><strong><Money cents={latestRate.rules?.extra_cents??0} align="left"/></strong><small>超出首重后向上取整计费</small></div>
+          <div className="metric"><span>每批次打包操作费</span><strong><Money cents={latestRate.rules?.handling_cents??0} align="left"/></strong><small>按出库批次固定收取一次</small></div>
+        </div>
+      )}
+      <Table headers={["费率版本","状态","首重上限 (g)","首重费 (USD)","续重步长 (g)","续重单价 (USD)","每批操作费 (USD)","发布生效时间"]} rows={rates.map((r:Row,idx:number)=>[
+        <strong key="v" className="code">v{r.version}</strong>,
+        idx===0?<Tag key="st" tone="green">当前生效版本</Tag>:<Tag key="st" tone="gray">历史锁定版本</Tag>,
+        <span key="fw" className="nowrap">{r.rules?.first_weight_g??1000} g</span>,
+        <Money key="fc" cents={r.rules?.first_cents??0}/>,
+        <span key="es" className="nowrap">{r.rules?.extra_step_g??500} g</span>,
+        <Money key="ec" cents={r.rules?.extra_cents??0}/>,
+        <Money key="hc" cents={r.rules?.handling_cents??0}/>,
+        stamp(r.effective_at??r.published_at),
+      ])} empty="暂无运价版本。"/>
+      <hr className="divider"/>
+      <h3 style={{marginTop:0}}>发布新国内运费阶梯版本</h3>
+      <Form label="正式发布新运价版本" run={async f=>{
         await request("/staff/admin/shipping-rates","POST",{
           first_weight_g:Number(text(f,"first_weight_g")),
           first_cents:Math.round(Number(text(f,"first_usd"))*100),
@@ -2125,43 +2320,47 @@ function ShippingRateConfigPanel({rates,onSave}:{rates:Row[];onSave:()=>void}) {
         });
         onSave();
       }}>
-        <Field name="first_weight_g" label="首重克重 (g)" type="number" min={1} value={1000}/>
-        <Field name="first_usd" label="首重费用 (USD)" type="number" min={0} step=".01" value={8}/>
-        <Field name="step_g" label="续重步长 (g)" type="number" min={1} value={500}/>
-        <Field name="step_usd" label="续重单价 (USD)" type="number" min={0} step=".01" value={2}/>
-        <Field name="handling_usd" label="每批操作费 (USD)" type="number" min={0} step=".01" value={1}/>
+        <div className="inline-form">
+          <Field name="first_weight_g" label="首重克重 (g)" type="number" min={1} value={1000}/>
+          <Field name="first_usd" label="首重费用 (USD)" type="number" min={0} step=".01" value={8}/>
+          <Field name="step_g" label="续重步长 (g)" type="number" min={1} value={500}/>
+          <Field name="step_usd" label="续重单价 (USD)" type="number" min={0} step=".01" value={2}/>
+          <Field name="handling_usd" label="每批操作费 (USD)" type="number" min={0} step=".01" value={1}/>
+        </div>
       </Form>
-      <div>
-        <Form label="试算运费（支持多包裹逗号分隔）" run={async f=>{
-          const weights=text(f,"weights").split(",").map(s=>Number(s.trim())).filter(n=>n>0);
-          const res=await request("/staff/admin/shipping-rates/calculate","POST",{
-            ...(text(f,"rate_version_id")?{rate_version_id:text(f,"rate_version_id")}:{}),
-            parcels:weights.map(weight_g=>({weight_g})),
-          });
-          setPreview(res);
-        }}>
-          <Select name="rate_version_id" label="运价版本（默认最新）" required={false}
-            choices={rates.map(r=>({id:r.id,label:`v${r.version}`}))}/>
-          <Field name="weights" label="包裹重量列表（克，逗号分隔，如 800, 1350）" value="1200"/>
-        </Form>
-        {preview&&<div className="card-soft" style={{marginTop:12}} role="status">
-          <div className="row between" style={{marginBottom:8}}>
-            <strong>试算分解 · 运价版本 v{preview.version}</strong>
-            <span className="actions"><strong>合计</strong><Money cents={preview.total_cents}/></span>
-          </div>
-          <Table
-            headers={["费用构成","计费克重","金额"]}
-            rows={[
-              ...(preview.parcels??[]).map((p:Row,idx:number)=>[
-                `包裹 #${idx+1}`,`${p.weight_g} g`,<Money key={`p-${idx}`} cents={p.amount_cents}/>,
-              ]),
-              ["批次打包操作费","固定按批",<Money key="h" cents={preview.handling_cents??0}/>],
-            ]}
-          />
-        </div>}
-      </div>
-    </div>
-  </Panel>;
+    </Panel>
+
+    <Panel title="02 / 独立多包裹运费试算器" subtitle="仅用于运营或客服试算单票/多包裹合批出库运费，不会修改或发布任何线上费率版本。">
+      <Form inline label="执行运费试算" run={async f=>{
+        const weights=text(f,"weights").split(",").map(s=>Number(s.trim())).filter(n=>n>0);
+        if(!weights.length) throw new Error("请输入至少一个大于 0 的包裹克重。");
+        const res=await request("/staff/admin/shipping-rates/calculate","POST",{
+          ...(text(f,"rate_version_id")?{rate_version_id:text(f,"rate_version_id")}:{}),
+          parcels:weights.map(weight_g=>({weight_g})),
+        });
+        setPreview(res);
+      }}>
+        <Select name="rate_version_id" label="选用试算费率版本（默认最新生效版本）" required={false}
+          choices={rates.map(r=>({id:r.id,label:`v${r.version}（首重 $${((r.rules?.first_cents??0)/100).toFixed(2)} / ${r.rules?.first_weight_g??1000}g）`}))}/>
+        <Field name="weights" label="包裹重量列表（单位：克，多包裹用逗号分隔，如 800, 1350）" value="1200"/>
+      </Form>
+      {preview&&<div className="card-soft" style={{marginTop:14}} role="status">
+        <div className="row between" style={{marginBottom:8}}>
+          <strong>试算结果明细 · 适用费率版本 v{preview.version}</strong>
+          <span className="actions"><strong>应收运费总计：</strong><Money cents={preview.total_cents}/></span>
+        </div>
+        <Table
+          headers={["计费项","实测克重","费用金额 (USD)"]}
+          rows={[
+            ...(preview.parcels??[]).map((p:Row,idx:number)=>[
+              `出库包裹 #${idx+1}`,`${p.weight_g} g`,<Money key={`p-${idx}`} cents={p.amount_cents}/>,
+            ]),
+            ["批次打包与面单操作费","按批次固定计收",<Money key="h" cents={preview.handling_cents??0}/>],
+          ]}
+        />
+      </div>}
+    </Panel>
+  </>;
 }
 
 export function WarehouseScan() {

@@ -386,4 +386,66 @@ test("admin workbench: payment refund state sync (partially_refunded -> refunded
   assert.equal(dispDetail.case.id, dispCreated.id);
   assert.equal(dispDetail.items.length, 1);
   assert.equal(dispDetail.items[0].code, incItem.code);
+
+  // 6. Verify Round 2 inspection task supervision endpoint across roles (super_admin, support, reviewer, inspector)
+  // Create a 1-unit order, check in parcel, intake 1 item, assign & identify to generate a real inspection task
+  const draftTaskOrd = await c.fetch("/orders", { lines: [{ category_id: offer.category_id, offer_id: offer.offer_id, quantity: 1 }] }, "POST", 201);
+  const qTaskOrd = await c.fetch(`/orders/${draftTaskOrd.id}/quotes`, { revision: draftTaskOrd.revision }, "POST", 201);
+  const subTaskOrd = await c.fetch(
+    `/orders/${draftTaskOrd.id}/submit`,
+    { revision: draftTaskOrd.revision, quote_id: qTaskOrd.id, terms_version_ids: terms.map((t: { id: string }) => t.id), acknowledgements: ack },
+    "POST",
+    200
+  );
+  const payTaskOrd = await c.fetch(`/charges/${subTaskOrd.charge.charge_item_id}/checkout`, { quote_revision: qTaskOrd.revision });
+  await c.fetch(`/checkout/demo/${payTaskOrd.attempt_id}`, {});
+  const qLoc = locs.rows.find((l: { zone: string }) => l.zone === "queue") ?? postLoc;
+  const taskItemCode = "S-TSK" + randomUUID().slice(0, 6).toUpperCase();
+  const pkgCurrRev = (await pool.query<{ revision: number }>("select revision from packages where id=$1", [pkgId])).rows[0].revision;
+  const taskItemIntake = await receiver.fetch(
+    `/staff/packages/${pkgId}/items`,
+    { revision: pkgCurrRev, items: [{ code: taskItemCode, location_id: qLoc.id }] },
+    "POST",
+    201
+  );
+  const taskItemId = taskItemIntake.item_ids[0] as string;
+  const itemLookup = await receiver.fetch(`/staff/items/by-code?code=${encodeURIComponent(taskItemCode)}`);
+  const pos = itemLookup.positions.find((p: { public_no: string }) => p.public_no === draftTaskOrd.public_no);
+  assert(pos, "Expected available position for task order");
+  await receiver.fetch(
+    `/staff/items/${taskItemId}/assign`,
+    {
+      revision: itemLookup.item.revision,
+      order_line_id: pos.order_line_id,
+      expected_item_id: pos.id,
+      evidence_ids: [await receiver.photo("label_photo")],
+    },
+    "POST",
+    200
+  );
+
+  const inspAfterReady = await admin.fetch("/staff/admin/inspections");
+  assert(inspAfterReady.tasks.length > 0, "Expected at least one inspection task after item identification");
+  const sampleTaskId = inspAfterReady.tasks[0].id as string;
+  const adminTaskSup = await admin.fetch(`/staff/admin/inspections/tasks/${sampleTaskId}`);
+  assert.equal(adminTaskSup.id, sampleTaskId);
+  assert(adminTaskSup.meta && adminTaskSup.meta.template_key);
+  assert(Array.isArray(adminTaskSup.content?.checks) && adminTaskSup.content.checks.length > 0);
+  assert(adminTaskSup.completeness && typeof adminTaskSup.completeness.ok === "boolean");
+
+  const supportTaskSup = await support.fetch(`/staff/admin/inspections/tasks/${sampleTaskId}`);
+  assert.equal(supportTaskSup.id, sampleTaskId);
+  assert.equal(supportTaskSup.permissions.can_execute_in_warehouse, false);
+  // Support must NOT be able to execute warehouse task write operations (start / recordResults)
+  await support.fetch(`/staff/inspection-tasks/${sampleTaskId}/start`, { revision: supportTaskSup.revision }, "POST", 403);
+  // Finance must NOT access inspection task supervision
+  await finance.fetch(`/staff/admin/inspections/tasks/${sampleTaskId}`, undefined, "GET", 403);
+
+  // Verify Round 2 desk enrichments: overviewMetrics dual scope, termsVersions demo-fixture detection & consent_count, templates order_count
+  assert.equal(typeof deskAfterBind.overviewMetrics.awaiting_samples_all, "number");
+  assert.equal(typeof deskAfterBind.overviewMetrics.exception_orders_all, "number");
+  assert(Array.isArray(deskAfterBind.termsVersions) && deskAfterBind.termsVersions.length > 0);
+  assert(deskAfterBind.termsVersions.some((t: { is_demo_fixture?: boolean }) => t.is_demo_fixture === true));
+  assert(deskAfterBind.termsVersions.some((t: { consent_count?: number }) => Number(t.consent_count ?? 0) >= 1));
+  assert(Array.isArray(deskAfterBind.templates) && deskAfterBind.templates.some((t: { order_count?: number }) => typeof t.order_count === "number"));
 });
