@@ -191,6 +191,21 @@ export async function customerActions(db:DB,actor:Actor,page?:number) {
     union all select t.advice_id,'parcel',t.sync_state,t.tracking_norm,null from tracking_records t
       where t.org_id=$1 and t.direction='inbound' and t.advice_id is not null and t.closed_at is null
       and t.sync_state in ('needs_verification','needs_carrier')
+    union all select ao.advice_id,'parcel_discrepancy',
+      case when p.condition_note ~ '^\\[outer:(crushed|torn|wet)\\]' and coalesce(logged.cnt,p.received_quantity)=declared.cnt then 'condition_discrepancy' else 'quantity_discrepancy' end,
+      o.public_no,null
+      from advice_orders ao
+      join orders o on o.id=ao.order_id and o.org_id=ao.org_id
+      join tracking_records t on t.advice_id=ao.advice_id and t.org_id=ao.org_id and t.closed_at is null and t.direction='inbound'
+      join packages p on p.id=t.package_id and p.org_id=ao.org_id
+      cross join lateral (select coalesce((select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null),p.received_quantity) cnt) logged
+      cross join lateral (select count(*)::int cnt from order_lines l join expected_items e on e.order_line_id=l.id and e.in_scope
+        where l.order_id=o.id and l.org_id=o.org_id
+          and (${declaredItemTracking}=t.tracking_norm or (${declaredItemTracking}='' and (select count(*) from advice_orders ao2 where ao2.order_id=o.id and ao2.org_id=o.org_id)=1))
+      ) declared
+      where o.org_id=$1 and o.state in ('awaiting_samples','samples_ready','queued','on_hold')
+        and ((declared.cnt>0 and logged.cnt<>declared.cnt) or p.condition_note ~ '^\\[outer:(crushed|torn|wet)\\]')
+        and not exists(select 1 from tickets k where k.order_id=o.id and k.org_id=o.org_id and k.category in ('receipt_mismatch','damage_or_loss'))
     union all select k.id,'support',case when incident.decision_required then 'incident_decision' else k.state end,
       k.public_no,case when not incident.decision_required then k.next_action_at end
       from tickets k cross join lateral (select exists(select 1 from incident_cases ic
@@ -290,10 +305,11 @@ const customerAdviceSource=`
     left join packages p on p.advice_id=a.id and p.org_id=a.org_id
     left join lateral(select count(*)::int item_count,
       array_agg(distinct nullif(e.declared_fields->>'supplier_alias','')) filter (where nullif(e.declared_fields->>'supplier_alias','') is not null) suppliers
-      from advice_orders ao join order_lines l on l.order_id=ao.order_id and l.org_id=ao.org_id
+      from advice_orders ao join orders o on o.id=ao.order_id and o.org_id=ao.org_id
+      join order_lines l on l.order_id=o.id and l.org_id=o.org_id
       join expected_items e on e.order_line_id=l.id and e.in_scope
       where ao.advice_id=a.id and ao.org_id=a.org_id
-        and ${declaredItemTracking}=t.tracking_norm
+        and (${declaredItemTracking}=t.tracking_norm or (${declaredItemTracking}='' and (select count(*) from advice_orders ao2 where ao2.order_id=o.id and ao2.org_id=o.org_id)=1))
         and not exists(select 1 from advice_orders other join tracking_records tr on tr.advice_id=other.advice_id
           and tr.closed_at is null and tr.tracking_norm=t.tracking_norm
           where other.order_id=ao.order_id and other.org_id=ao.org_id and other.advice_id<>a.id)

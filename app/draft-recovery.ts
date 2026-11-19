@@ -19,11 +19,17 @@ export type ExpectedProductLine = {
   carton_no?:string;
   inspection_note?:string;
   evidence_ids?:string[];
+  source_file_name?:string;
+  edited_by_user?:boolean;
   source_kind?:"manual"|"paste"|"evidence_extract"|"matrix";
 };
 
 export type ExtractedCandidateLine = ExpectedProductLine & {
   evidence_id:string;
+  status?:"unconfirmed"|"confirmed"|"discarded";
+  source_evidence_id?:string;
+  source_file_name?:string;
+  edited_by_user?:boolean;
   confidence:"structured"|"needs_review";
   needs_confirmation:boolean;
   missing_fields:string[];
@@ -63,6 +69,7 @@ export type PlannedParcelEntry = {
   supplier_alias:string;
   carton_count:number;
   contains_all_items:boolean;
+  contents_unknown?:boolean;
   allocations:ParcelLineAllocation[];
   note?:string;
 };
@@ -237,7 +244,7 @@ export function expandExpectedLinesToDraftItems(params:{
       const seq:Array<{tracking_no:string;carrier_code:string;carton_no?:string}>=[];
       for(const parcel of plannedParcels) {
         const tn=normalizeTrackingCode(parcel.tracking_no);
-        if(!tn) continue;
+        if(!tn||parcel.contents_unknown) continue;
         if(parcel.contains_all_items) {
           for(let k=0;k<line.quantity;k++) seq.push({tracking_no:tn,carrier_code:parcel.carrier_code,carton_no:parcel.note});
           break;
@@ -382,6 +389,7 @@ export function parseStructuredPurchaseText(
   rawText:string,
   options:{
     evidenceId:string;
+    sourceFileName?:string;
     defaultProductName?:string;
     defaultSupplier?:string;
     defaultPoRef?:string;
@@ -521,6 +529,10 @@ export function parseStructuredPurchaseText(
     const row:ExtractedCandidateLine={
       id:`EXT-${Date.now().toString(36)}-${i}`,
       evidence_id:options.evidenceId,
+      source_evidence_id:options.evidenceId,
+      ...(options.sourceFileName?{source_file_name:options.sourceFileName}:{}),
+      status:"unconfirmed",
+      edited_by_user:false,
       sku_code:sku,
       product_name:productName,
       color_declared:color,

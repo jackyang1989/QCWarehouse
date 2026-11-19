@@ -94,7 +94,8 @@ export async function tracking(db:DB,actor:Actor,id:string,kind:"advice"|"shipme
   const org=organization(actor);
   const filter=kind==="advice"?"t.advice_id":"t.shipment_id";
   const t=await one(db,`select t.*,coalesce(p.state,s.state) warehouse_state,c.labels,
-      p.received_at warehouse_received_at,p.received_quantity logged_item_count,
+      p.received_at warehouse_received_at,
+      coalesce((select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null),p.received_quantity) logged_item_count,
       substring(p.condition_note from '^\\[outer:(intact|crushed|torn|wet)\\]') outer_condition
     from tracking_records t left join packages p on p.id=t.package_id and p.org_id=t.org_id
     left join shipments s on s.id=t.shipment_id left join carriers c on c.code=t.carrier_code where ${filter}=$1 and t.org_id=$2 and t.closed_at is null order by t.generation desc limit 1`,[id,org]);

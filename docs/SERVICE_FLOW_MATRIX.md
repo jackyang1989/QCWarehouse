@@ -38,13 +38,17 @@ Category Scope: `apparel` (sole `ACTIVE` online booking category; `footwear`, `b
   - **`1+` active sealed vault sample (`active`)**: Badge turns green (`1 active vault sample ready`), Step 2 auto-selects when `1` non-busy active sample exists (or `#step2-reference-select` lists seal/location/expiry).
 - **Step 3–6**: Shows `[data-testid="golden-sample-step3-context"]` reminder (`Declare only the 1 incoming candidate unit`), user adds 1 confirmed line (`Qty = 1`), `$39.00` official quote in Step 5, Demo Pay in Step 6. *(Note: multi-unit candidate restock pricing under `reference_match` offers stays fixed to `minimum: 1, maximum: 1` per current catalog pricing rule without modifying server SKUs).*
 
-## 3. Verified Live Orders in Isolated E2E Database (`qcw_test_user_journey_e2e`)
+## 3. Verified Live Orders & Pre-Launch Capabilities (`qcw_test_user_journey_e2e`)
+
+Additional workflow capabilities verified in `p1_prelaunch_e2e.mjs` (see also [Commercial Pricing & SLA Decision Matrix](COMMERCIAL_SLA_PRICING_DECISION.md)):
+- **Mixed-SKU / `Contents unknown` Multi-Parcels**: Step 3C supports per-parcel & batch `Contents unknown — warehouse will reconcile on receipt`, suppressing premature per-item waybill stamping (`resolvedTracking` only used for `single`), registering all 3 waybills in 1 click on `/orders/:no/parcels`, and cleanly tracking partial multi-box arrival (`20 arrived / 2 in transit`) with zero false shortage alerts.
+- **Dual Intake Reconciliation & Discrepancy Resolution**: `orderDetail` (`../packages/core/orders.ts`) separates `unidentified` physical units (before `/staff/items/:id/assign`) from confirmed SKU-level `missing` units (after SKU assignment), surfaces `parcel_discrepancy` in `customerActions` (`../packages/core/reads.ts`), and provides 1-click resolution (`Proceed with Received Items`, `Wait for Remaining Delivery`, `Contact Seller / Open Discrepancy Case`) via `POST /me/cases` without altering historical quotes or paid charges.
 
 | Scenario | Service / Template | Server Offer SKU | Verified Total / Outcome | Order / Seal Reference |
 |---|---|---|---|---|
-| `S1` | Product Inspection (`tops`, 3u, 1 SKU) | `apparel-sub-tops-inspection-1` | `$105.00` (`PASS`) | `QW-85DCCB501DFF` |
-| `S2` | Product Inspection (`basic`, 50u, 6 SKUs, 1 Box + `48/50` discrepancy) | `apparel-inspection-1` | `$1,450.00` (`PASS`, `48/50` on `/parcels`) | `QW-99E01DD69B28` |
-| `S3` | Product Inspection (`basic`, 50u, 3 Parcels, 2 Suppliers) | `apparel-inspection-1` | `$1,450.00` (`PASS`) | `QW-6E7DAF4E7614` |
-| `S5` | Sample Comparison (`basic`, 2 samples, size mismatch ack) | `apparel-compare-2` | `$59.00` (`PASS`) | `QW-38B1D175B491` |
-| `S6` | Sample Comparison (`basic`, 2->3 toggle preserves edit, 3 samples) | `apparel-compare-3` | `$79.00` (`PASS`) | `QW-9983EC2169EB` |
-| `S9` | Golden Sample Matching (`tops`, active `GS-*` vault seal, cross-tenant 422 verified) | `apparel-sub-tops-reference_match-1` | `$39.00` (`PASS`) | `QW-5714FC2C66A8` / `GS-20261115-863240` |
+| `S1` / `A` | Product Inspection (`tops`, 3u, 1 SKU) | `apparel-sub-tops-inspection-1` | `$105.00` (`PASS`) | `QW-71B7424DCDD7` |
+| `S2` / `B` | Product Inspection (`basic`, 50u, 6 SKUs, 1 Box + `48/50` dual reconciliation + proceed resolution) | `apparel-inspection-1` | `$1,450.00` (`PASS`, `4` clicks / `530ms`, `TEE-WHT-L` `2 missing`) | `QW-E48639038165` |
+| `S3` / `C` | Product Inspection (`basic`, 50u, 3 Parcels `Contents unknown` / 2 Suppliers, partial receipt) | `apparel-inspection-1` | `$1,450.00` (`PASS`, `20 arrived / 2 in transit`) | `QW-D8F28AC791CC` |
+| `S5` / `E` | Sample Comparison (`basic`, 2 samples, cross-size rule in Steps 3/4/5) | `apparel-compare-2` | `$59.00` (`PASS`) | `QW-3503029BEBAB` |
+| `S6` / `E` | Sample Comparison (`basic`, 3 samples) | `apparel-compare-3` | `$79.00` (`PASS`) | `QW-C37CBC057F0D` |
+| `S9` / `F` | Golden Sample Matching (`tops`, active `GS-*` vault seal, 1u checkout + 10u `422` catalog cap guard) | `apparel-sub-tops-reference_match-1` | `$39.00` (`PASS` / `10u -> 422 OPEN`) | `QW-3C94307DC68F` / `GS-20261119-031885` |

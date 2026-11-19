@@ -24,7 +24,7 @@ export const orderInboundRegistration=`left join lateral (
     join tracking_records t on t.package_id=w.package_id and t.org_id=w.org_id
       and t.direction='inbound' and t.closed_at is null
     where o.state='awaiting_samples' and l.order_id=o.id and l.org_id=o.org_id
-  ), pending as (
+  ), item_pending as (
     select declared.tracking_no,count(*)::int item_count
     from order_lines l join expected_items e on e.order_line_id=l.id and e.in_scope
     cross join lateral (values (${declaredItemTracking})) declared(tracking_no)
@@ -33,6 +33,20 @@ export const orderInboundRegistration=`left join lateral (
       and not exists(select 1 from order_line_item_links a where a.expected_item_id=e.id and a.org_id=l.org_id and a.unlinked_at is null)
       and not exists(select 1 from registered r where r.tracking_norm=declared.tracking_no)
     group by declared.tracking_no
+  ), parcel_pending as (
+    select pp_track.tracking_no,0::int item_count
+    from order_lines l,
+    jsonb_array_elements(coalesce(l.attributes->'planned_parcels','[]'::jsonb)) pp
+    cross join lateral (values (upper(regexp_replace(coalesce(pp->>'tracking_no',''),'[[:space:]]+','','g')))) pp_track(tracking_no)
+    where o.state='awaiting_samples' and l.order_id=o.id and l.org_id=o.org_id
+      and pp_track.tracking_no ~ '^[A-Z0-9-]{5,64}$'
+      and not exists(select 1 from registered r where r.tracking_norm=pp_track.tracking_no)
+      and not exists(select 1 from item_pending ip where ip.tracking_no=pp_track.tracking_no)
+    group by pp_track.tracking_no
+  ), pending as (
+    select * from item_pending
+    union all
+    select * from parcel_pending
   )
   select o.state='awaiting_samples' and (count(*)>0 or not exists(select 1 from registered)) parcel_registration_due,
     coalesce(jsonb_agg(to_jsonb(pending) order by tracking_no),'[]'::jsonb) unregistered_waybills

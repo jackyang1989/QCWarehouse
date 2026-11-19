@@ -24,7 +24,7 @@ import { customerFulfillmentQuote, customerShipment, orderFulfillmentRecord } fr
 import { renewScopeSupplement } from "./operations";
 import { canReadCasePhoto, caseDetail, createPublicInquiry, customerCaseHistory, customerCaseQuery, customerTicketMessage, inquiryCategories, publicInquiry, replyToCase, staffTicketEvent, staffTicketQueue, writeStaffTicket } from "./tickets";
 import { approveDisposalCase, approveIncidentResolution, approveStocktake, createDisposalCase, createIncident, createLocations, createStocktake, customerReadIncident, customerRespondIncident, executeDisposalCase, listIncidents, listOverdueAndRestrictedQueue, listStocktakes, locationBatchSchema, locationMaster, proposeIncidentResolution, resolveIncidentCompensation, scanStocktakeItem, setLocationActive, storageMovementDesk, submitStocktake } from "./storage";
-import { acceptScope, approveCapability, cancelOrder, computeOrderRefundStage, configureLegalEntity, convertOrderToTwo, createCapability, createCategory, createTermsVersion, evaluateLaunchReadiness, exportCustomerPrivacyData, extendOrderArrival, holdOrder, moveItem, newTemplate, orderCaseCategory, publishSkuPrice, publishTemplate, publishTermsVersion, recordLaunchSignoff, recordRecoveryDrill, recordRehearsalRun, reportIssue, requestCustomerPrivacyAction, requestOrderAfterSales, respondOrderMismatch, resumeOrder, revokeCapability, scopeProposal, scopeReview, setAddress, setDisposalExecutionSwitch, setOfferEnabled, staffSchemas, systemHealthAndBackupCheck, updateBusinessCalendar, updateCategoryStatus, updateWarehouseAddress, upsertOffer } from "./operations";
+import { acceptScope, approveCapability, cancelOrder, computeOrderRefundStage, configureLegalEntity, convertOrderToTwo, createCapability, createCategory, createTermsVersion, discrepancyResolutionKind, evaluateLaunchReadiness, exportCustomerPrivacyData, extendOrderArrival, holdOrder, moveItem, newTemplate, orderCaseCategory, publishSkuPrice, publishTemplate, publishTermsVersion, recordLaunchSignoff, recordRecoveryDrill, recordRehearsalRun, reportIssue, requestCustomerPrivacyAction, requestOrderAfterSales, respondOrderMismatch, resumeOrder, revokeCapability, scopeProposal, scopeReview, setAddress, setDisposalExecutionSwitch, setOfferEnabled, staffSchemas, systemHealthAndBackupCheck, updateBusinessCalendar, updateCategoryStatus, updateWarehouseAddress, upsertOffer } from "./operations";
 import { createReportShare, listPublishedReports, listReportShares, readSharedPhoto, readSharedReport, reportSharingEnabled, revokeReportShare, shareInput, shareTokenPattern } from "./report-shares";
 import { auditFilters, readAudit } from "./audit-read";
 import { completeMediaUpload, createMediaReadUrl, createMediaUploadUrl, putMediaStaging, readMediaBinary, uploadUrlInputSchema } from "./media";
@@ -843,18 +843,20 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   if(method==="POST" && path==="/me/cases") {
     const schema=z.object({subject:z.string().trim().min(2,"Enter a subject of at least 2 characters.").max(150,"Use 150 characters or fewer for the subject."),
       message:z.string().trim().min(2,"Enter a message of at least 2 characters.").max(2000,"Use 2,000 characters or fewer for the message."),
-      order_id:idSchema.optional(),category:orderCaseCategory.optional(),parcel_id:idSchema.optional()});
+      order_id:idSchema.optional(),category:orderCaseCategory.optional(),parcel_id:idSchema.optional(),
+      discrepancy_resolution:discrepancyResolutionKind.optional()});
     if(req.headers.get("content-type")?.startsWith("multipart/form-data")) {
       csrf(req);
       const customer=actorRequired(actor);organization(customer);
       const key=idSchema.parse(req.headers.get("idempotency-key"));
       const {form,bytes}=await supportPhotoForm(req);
       const v=schema.parse({subject:form.get("subject"),message:form.get("message"),
-        order_id:form.get("order_id")||undefined,category:form.get("category")||undefined,parcel_id:form.get("parcel_id")||undefined});
+        order_id:form.get("order_id")||undefined,category:form.get("category")||undefined,parcel_id:form.get("parcel_id")||undefined,
+        discrepancy_resolution:form.get("discrepancy_resolution")||undefined});
       return json(await transaction(db=>idempotent(db,customer.id+":"+path,key,{...v,photo:hash(bytes)},
-        ()=>reportIssue(db,customer,v.subject,v.message,v.order_id,v.category,v.parcel_id,bytes))));
+        ()=>reportIssue(db,customer,v.subject,v.message,v.order_id,v.category,v.parcel_id,bytes,v.discrepancy_resolution))));
     }
-    return extraWrite(req,path,actor,schema,(db,a,v)=>reportIssue(db,a,v.subject,v.message,v.order_id,v.category,v.parcel_id));
+    return extraWrite(req,path,actor,schema,(db,a,v)=>reportIssue(db,a,v.subject,v.message,v.order_id,v.category,v.parcel_id,undefined,v.discrepancy_resolution));
   }
   if(method==="POST" && path==="/staff/admin/warehouse-addresses")
     return extraWrite(req,path,actor,staffSchemas.address,setAddress);

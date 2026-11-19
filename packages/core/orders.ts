@@ -455,9 +455,36 @@ export type ExpectedLineBreakdown={
   arrived_qty:number;
   identified_qty:number;
   mismatch_qty:number;
+  damaged_qty:number;
+  missing_qty:number;
+  unidentified_pending_qty:number;
+  extra_qty:number;
   inspected_qty:number;
   outstanding_qty:number;
+  linked_item_codes:string[];
   evidence_ids:string[];
+};
+
+export type ParcelReconciliationRow={
+  advice_id:string;
+  tracking_norm:string;
+  carrier_code:string|null;
+  carrier_name:string|null;
+  package_code:string|null;
+  warehouse_state:string|null;
+  received_at:Date|string|null;
+  outer_condition:string|null;
+  condition_note:string|null;
+  supplier_alias:string;
+  contents_unknown:boolean;
+  declared_qty:number;
+  logged_item_count:number;
+  identified_item_count:number;
+  unidentified_item_count:number;
+  damaged_item_count:number;
+  short_qty:number;
+  extra_qty:number;
+  item_codes:string[];
 };
 
 export function summarizeExpectedLines(
@@ -470,9 +497,27 @@ export function summarizeExpectedLines(
     declared_fields?:Record<string,unknown>|null;
     item_id?:string|null;
     linked_item_id?:string|null;
+    code?:string|null;
     identity_state?:string|null;
+    condition_state?:string|null;
     inspection_stage?:string|null;
-  }[]
+  }[],
+  parcelRows:{
+    id:string;
+    tracking_norm:string;
+    carrier_code?:string|null;
+    carrier_name?:string|null;
+    package_code?:string|null;
+    warehouse_state?:string|null;
+    received_at?:Date|string|null;
+    outer_condition?:string|null;
+    condition_note?:string|null;
+    received_quantity?:number|null;
+    logged_item_count?:number|null;
+    identified_item_count?:number|null;
+    damaged_item_count?:number|null;
+    item_codes?:string[]|null;
+  }[]=[]
 ) {
   const breakdown:ExpectedLineBreakdown[]=[];
   const purchaseEvidences:Record<string,unknown>[]=[];
@@ -538,7 +583,10 @@ export function summarizeExpectedLines(
         const arrivedQty=boundedMatched.filter(r=>Boolean(r.item_id||r.linked_item_id)).length;
         const identifiedQty=boundedMatched.filter(r=>r.identity_state==="identified").length;
         const mismatchQty=boundedMatched.filter(r=>r.identity_state==="mismatch").length;
+        const damagedQty=boundedMatched.filter(r=>Boolean(r.item_id||r.linked_item_id)&&r.condition_state&&!["good","unchecked"].includes(r.condition_state)).length;
         const inspectedQty=boundedMatched.filter(r=>r.inspection_stage==="inspected").length;
+        const extraQty=Math.max(0,arrivedQty-declaredQty);
+        const linkedItemCodes=boundedMatched.map(r=>String(r.code??"").trim()).filter(Boolean);
         const evidenceIds=Array.isArray(el.evidence_ids)?el.evidence_ids.map(x=>String(x)):[];
         breakdown.push({
           order_line_id:line.id,
@@ -556,8 +604,13 @@ export function summarizeExpectedLines(
           arrived_qty:arrivedQty,
           identified_qty:identifiedQty,
           mismatch_qty:mismatchQty,
+          damaged_qty:damagedQty,
+          missing_qty:0,
+          unidentified_pending_qty:0,
+          extra_qty:extraQty,
           inspected_qty:inspectedQty,
           outstanding_qty:Math.max(0,declaredQty-identifiedQty),
+          linked_item_codes:linkedItemCodes,
           evidence_ids:evidenceIds,
         });
       }
@@ -570,17 +623,21 @@ export function summarizeExpectedLines(
       ?lineRows.map(r=>({
         rowId:String(r.expected_item_id??r.id),
         df:(r.declared_fields??{}) as Record<string,unknown>,
+        code:String(r.code??"").trim(),
         arrived:Boolean(r.item_id||r.linked_item_id),
         identified:r.identity_state==="identified",
         mismatch:r.identity_state==="mismatch",
+        damaged:Boolean(r.item_id||r.linked_item_id)&&Boolean(r.condition_state)&&!["good","unchecked"].includes(String(r.condition_state)),
         inspected:r.inspection_stage==="inspected",
       }))
       :draftFallback.map((df,idx)=>({
         rowId:`draft-${idx}`,
         df,
+        code:"",
         arrived:false,
         identified:false,
         mismatch:false,
+        damaged:false,
         inspected:false,
       }));
     for(const entry of sourceRows) {
@@ -613,8 +670,13 @@ export function summarizeExpectedLines(
             arrived_qty:0,
             identified_qty:0,
             mismatch_qty:0,
+            damaged_qty:0,
+            missing_qty:0,
+            unidentified_pending_qty:0,
+            extra_qty:0,
             inspected_qty:0,
             outstanding_qty:0,
+            linked_item_codes:[],
             evidence_ids:[],
           },
           ids:new Set(),
@@ -625,7 +687,9 @@ export function summarizeExpectedLines(
       if(entry.arrived) bucket.item.arrived_qty+=1;
       if(entry.identified) bucket.item.identified_qty+=1;
       if(entry.mismatch) bucket.item.mismatch_qty+=1;
+      if(entry.damaged) bucket.item.damaged_qty+=1;
       if(entry.inspected) bucket.item.inspected_qty+=1;
+      if(entry.code) bucket.item.linked_item_codes.push(entry.code);
       bucket.item.outstanding_qty=Math.max(0,bucket.item.expected_qty-bucket.item.identified_qty);
     }
     for(const b of groupMap.values()) breakdown.push(b.item);
@@ -635,12 +699,99 @@ export function summarizeExpectedLines(
   const arrivedUnitsTotal=breakdown.reduce((s,r)=>s+r.arrived_qty,0);
   const identifiedUnitsTotal=breakdown.reduce((s,r)=>s+r.identified_qty,0);
   const inspectedUnitsTotal=breakdown.reduce((s,r)=>s+r.inspected_qty,0);
+  const mismatchUnitsTotal=breakdown.reduce((s,r)=>s+r.mismatch_qty,0);
+  const checkedInParcels=parcelRows.filter(p=>Boolean(p.warehouse_state));
+  const parcelLoggedTotal=checkedInParcels.reduce((s,p)=>s+(Number(p.logged_item_count??p.received_quantity??0)||0),0);
+  const loggedUnitsTotal=Math.max(parcelLoggedTotal,arrivedUnitsTotal);
+  const unidentifiedUnitsTotal=Math.max(0,parcelLoggedTotal-arrivedUnitsTotal);
+  const parcelDamagedTotal=checkedInParcels.reduce((s,p)=>s+(Number(p.damaged_item_count??0)||0),0);
+  const damagedUnitsTotal=Math.max(parcelDamagedTotal,breakdown.reduce((s,r)=>s+r.damaged_qty,0));
+  const anyContentsUnknown=plannedParcels.some(pp=>Boolean(pp.contents_unknown));
+  const allExpectedParcelsCheckedIn=checkedInParcels.length>0
+    && checkedInParcels.length===parcelRows.length
+    && (plannedParcels.length===0 || checkedInParcels.length>=plannedParcels.length);
+
+  const parcelReconciliation:ParcelReconciliationRow[]=parcelRows.map(p=>{
+    const tn=normTrack(p.tracking_norm);
+    const matchingPlanned=plannedParcels.find(pp=>normTrack(pp.tracking_no)===tn);
+    const matchingLines=breakdown.filter(b=>b.tracking_no===tn);
+    const trackingDeclaredQty=matchingLines.reduce((s,b)=>s+b.expected_qty,0);
+    const singleBoxFallback=parcelRows.length===1 && plannedParcels.length<=1 && !anyContentsUnknown && breakdown.every(b=>!b.tracking_no);
+    const declaredQty=trackingDeclaredQty>0?trackingDeclaredQty:singleBoxFallback?expectedUnitsTotal:0;
+    const contentsUnknown=Boolean(matchingPlanned?.contents_unknown)||(trackingDeclaredQty===0 && parcelRows.length>1);
+    const loggedCount=Number(p.logged_item_count??p.received_quantity??0)||0;
+    const identifiedCount=Number(p.identified_item_count??0)||0;
+    const unidentifiedCount=Math.max(0,loggedCount-identifiedCount);
+    const damagedCount=Number(p.damaged_item_count??0)||0;
+    const checkedIn=Boolean(p.warehouse_state);
+    const shortQty=checkedIn && declaredQty>0?Math.max(0,declaredQty-loggedCount):0;
+    const extraQty=checkedIn && declaredQty>0?Math.max(0,loggedCount-declaredQty):0;
+    return {
+      advice_id:p.id,
+      tracking_norm:p.tracking_norm,
+      carrier_code:p.carrier_code??null,
+      carrier_name:p.carrier_name??null,
+      package_code:p.package_code??null,
+      warehouse_state:p.warehouse_state??null,
+      received_at:p.received_at??null,
+      outer_condition:p.outer_condition??null,
+      condition_note:p.condition_note??null,
+      supplier_alias:String(matchingPlanned?.supplier_alias??"").trim()||matchingLines.map(m=>m.supplier_alias).filter(Boolean).join(", ")||"—",
+      contents_unknown:contentsUnknown,
+      declared_qty:declaredQty,
+      logged_item_count:loggedCount,
+      identified_item_count:identifiedCount,
+      unidentified_item_count:unidentifiedCount,
+      damaged_item_count:damagedCount,
+      short_qty:shortQty,
+      extra_qty:extraQty,
+      item_codes:Array.isArray(p.item_codes)?p.item_codes:[],
+    };
+  });
+
+  // Only mark per-SKU confirmed Missing when warehouse check-in happened and all physically logged items on the checked-in parcel(s) are SKU-identified (never fabricate SKU attribution while unidentified physical items exist)
+  const canAttributeSkuMissing=checkedInParcels.length>0 && unidentifiedUnitsTotal===0 && (allExpectedParcelsCheckedIn || parcelReconciliation.some(pr=>pr.short_qty>0));
+  for(const row of breakdown) {
+    const lineCheckedIn=checkedInParcels.some(p=>normTrack(p.tracking_norm)===row.tracking_no) || (parcelRows.length===1 && checkedInParcels.length===1 && !row.tracking_no);
+    if(unidentifiedUnitsTotal>0 && lineCheckedIn) {
+      row.unidentified_pending_qty=Math.max(0,row.expected_qty-row.arrived_qty);
+      row.missing_qty=0;
+    } else if((canAttributeSkuMissing || (lineCheckedIn && unidentifiedUnitsTotal===0)) && row.arrived_qty<row.expected_qty) {
+      row.missing_qty=Math.max(0,row.expected_qty-row.arrived_qty);
+      row.unidentified_pending_qty=0;
+    }
+  }
+
+  const shortUnitsTotal=(allExpectedParcelsCheckedIn || parcelReconciliation.some(pr=>pr.short_qty>0))
+    ?Math.max(0,expectedUnitsTotal-loggedUnitsTotal)
+    :parcelReconciliation.reduce((s,pr)=>s+pr.short_qty,0);
+  const extraUnitsTotal=allExpectedParcelsCheckedIn
+    ?Math.max(0,loggedUnitsTotal-expectedUnitsTotal)
+    :parcelReconciliation.reduce((s,pr)=>s+pr.extra_qty,0);
+  const hasIntakeDiscrepancy=checkedInParcels.length>0 && (
+    parcelReconciliation.some(pr=>pr.short_qty>0 || pr.extra_qty>0 || ["crushed","torn","wet"].includes(String(pr.outer_condition??"")))
+    || (allExpectedParcelsCheckedIn && loggedUnitsTotal!==expectedUnitsTotal)
+    || damagedUnitsTotal>0
+    || mismatchUnitsTotal>0
+  );
+
   return {
     lines_breakdown:breakdown,
     expected_lines_count:breakdown.length,
     expected_units_total:expectedUnitsTotal,
     arrived_units_total:arrivedUnitsTotal,
+    logged_units_total:loggedUnitsTotal,
     identified_units_total:identifiedUnitsTotal,
+    unidentified_units_total:unidentifiedUnitsTotal,
+    short_units_total:shortUnitsTotal,
+    extra_units_total:extraUnitsTotal,
+    damaged_units_total:damagedUnitsTotal,
+    mismatch_units_total:mismatchUnitsTotal,
+    checked_in_parcels_count:checkedInParcels.length,
+    all_expected_parcels_checked_in:allExpectedParcelsCheckedIn,
+    any_contents_unknown:anyContentsUnknown,
+    has_intake_discrepancy:hasIntakeDiscrepancy,
+    parcel_reconciliation:parcelReconciliation,
     inspected_units_total:inspectedUnitsTotal,
     outstanding_units_total:Math.max(0,expectedUnitsTotal-identifiedUnitsTotal),
     suppliers:[...supplierSet],
@@ -682,14 +833,23 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
       and q.expires_at>now() and q.accepted_at is null
     where r.order_id=$1 and r.revision=$2`,[id,order.revision])).rows[0]:null;
   const parcels=(await db.query(`select ao.advice_id id,t.tracking_norm,t.carrier_code,c.labels->>'en' carrier_name,
-    t.transport_state,t.sync_state,p.code package_code,p.state warehouse_state,p.received_quantity,
-    (select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null) logged_item_count
+    t.transport_state,t.sync_state,p.id package_id,p.code package_code,p.state warehouse_state,p.received_quantity,
+    p.received_at,p.condition_note,
+    substring(p.condition_note from '^\\[outer:(intact|crushed|torn|wet)\\]') outer_condition,
+    (select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null) logged_item_count,
+    (select count(*)::int from warehouse_items wi join order_line_item_links olil on olil.item_id=wi.id and olil.unlinked_at is null
+      join order_lines ol on ol.id=olil.order_line_id where wi.package_id=p.id and wi.parent_item_id is null and ol.order_id=$1) identified_item_count,
+    (select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null and wi.condition_state not in ('good','unchecked')) damaged_item_count,
+    (select coalesce(array_agg(wi.code order by wi.code),array[]::text[]) from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null) item_codes
     from advice_orders ao join tracking_records t on t.advice_id=ao.advice_id and t.org_id=ao.org_id and t.closed_at is null
     left join packages p on p.id=t.package_id and p.org_id=ao.org_id
     left join carriers c on c.code=t.carrier_code
     where ao.order_id=$1 and ao.org_id=$2 order by t.tracking_norm`,[id,order.org_id])).rows;
   const cases=(await db.query(`select id,public_no,subject,state from tickets
     where order_id=$1 and org_id=$2 order by created_at desc limit 50`,[id,order.org_id])).rows;
+  const discrepancyResolutionRecord=(await db.query(`select id,public_no,state,details->>'discrepancy_resolution' discrepancy_resolution,created_at
+    from tickets where order_id=$1 and org_id=$2 and category in ('receipt_mismatch','damage_or_loss') and details ? 'discrepancy_resolution'
+    order by created_at desc limit 1`,[id,order.org_id])).rows[0]??null;
   const consents=(await db.query(`select c.id,c.created_at,c.acknowledgements,
     jsonb_agg(jsonb_build_object('kind',t.kind,'version',t.version) order by t.kind) policies
     from consents c join terms_versions t on t.id=any(c.terms_version_ids)
@@ -697,7 +857,7 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
   const shipments=await orderShipments(db,id,order.org_id);
   const quotes=(await orderQuotes(db,id,order.org_id)).map(({id,revision,purpose,action,state,amount_cents,expires_at,batch_id,item_codes})=>
     ({id,revision,purpose,action,state,amount_cents,expires_at,batch_id:batch_id??null,item_codes:item_codes??null}));
-  const expected_lines_summary=summarizeExpectedLines(lines,rows);
+  const expected_lines_summary={...summarizeExpectedLines(lines,rows,parcels),discrepancy_resolution_record:discrepancyResolutionRecord};
   return {...orderDTO(order as Parameters<typeof orderDTO>[0]),price_cents:order.price_cents,
     customer_notes:order.customer_notes??null,held_at:order.held_at??null,held_from_state:order.held_from_state??null,hold_reason:order.hold_reason??null,
     created_at:order.created_at,report_published_at:order.report_published_at??null,closed_at:order.closed_at??null,paid_at:order.paid_at??null,samples_ready_at:order.samples_ready_at??null,sla_due_at:order.sla_due_at??null,

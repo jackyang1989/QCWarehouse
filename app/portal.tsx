@@ -54,12 +54,10 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
   else if(route.view==="legal") content=<PublicLegal path={path}/>;
   else if(!a) content=null;
   else if(isStaff && a.kind!=="staff") content=<section className="panel narrow"><h1>需要员工权限</h1>
-    <p>{demo?"请使用已分配权限的员工账号登录，或在本地演示环境下直接切换角色。":"请使用已分配权限的员工账号登录。"}</p>
+    <p>当前登录的是客户账号，无权访问{route.area==="warehouse"?"仓库":"管理后台"}工作台，请使用已分配权限的员工账号登录。</p>
     <div className="actions">
-      {demo&&<button type="button" className="button primary" onClick={()=>void switchDemoPortal(target,"admin@qcw.test")}>
-        一键切换为{route.area==="warehouse"?"仓库":"管理后台"}演示账号
-      </button>}
-      <Link className={demo?"button":"button primary"} href={withDestination("/staff/login",target)}>前往员工登录</Link>
+      <Link className="button primary" href={withDestination("/staff/login",target)}>前往员工登录</Link>
+      <Link className="button" href="/orders">返回客户工作台</Link>
     </div></section>;
   else if(isStaff&&!canOpenStaffPage(path,route,a.roles)) content=<section className="panel"><h1>当前账号无权访问</h1>
     <p>{demo?"请联系管理员确认当前岗位的权限，或切换至对应岗位演示账号。":"请联系管理员确认当前岗位的权限。"}</p>
@@ -154,8 +152,8 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
         {topLinks.map(([href,label])=><Link key={href} href={href} aria-current={normPath===href?"page":undefined}>{label}</Link>)}
       </nav>
       <div className="header-right">
-        {demo&&<QuickSwitch active={route.area as "customer"|"warehouse"|"admin"} actor={a}/>}
-        {demo&&<Tag tone="outline">{isStaff?"内部演示":"Customer preview"}</Tag>}
+        {demo&&isStaff&&<QuickSwitch active={route.area as "customer"|"warehouse"|"admin"} actor={a}/>}
+        {demo&&isStaff&&<Tag tone="outline">内部演示</Tag>}
         {signOut}
       </div>
     </header>
