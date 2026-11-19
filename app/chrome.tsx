@@ -308,7 +308,8 @@ const navIcons:Record<string,string>={
   "/wh":"overview","/wh/scan":"scan","/wh/intake":"intake","/wh/packages":"packages","/wh/samples":"items",
   "/wh/storage":"storage","/wh/inspection":"inspection","/wh/execute":"execute","/wh/sync":"sync",
   "/wh/review":"review","/wh/dispatch":"dispatch","/wh/logistics":"logistics","/wh/stocktakes":"stocktakes",
-  "/admin":"overview","/admin/orders":"orders","/admin/tickets":"support","/admin/dispositions":"compare",
+  "/admin":"overview","/admin/orders":"orders","/admin/customers":"users","/admin/tickets":"support",
+  "/admin/inspections":"inspection","/admin/dispositions":"compare",
   "/admin/refunds":"refunds","/admin/payments":"payments","/admin/finance":"analytics","/admin/logistics":"logistics",
   "/admin/incidents":"incidents","/admin/catalog":"catalog","/admin/templates":"templates",
   "/admin/settings":"warehouse_address","/admin/storage/locations":"locations",
@@ -331,7 +332,7 @@ const navigationSections = {
     ["运营作业",["/wh","/wh/scan","/wh/intake","/wh/packages","/wh/samples","/wh/storage","/wh/inspection","/wh/execute","/wh/sync","/wh/review","/wh/dispatch","/wh/logistics","/wh/stocktakes"]],
   ],
   admin: [
-    ["运营管理",["/admin","/admin/orders","/admin/tickets","/admin/dispositions","/admin/refunds","/admin/payments","/admin/finance","/admin/logistics","/admin/incidents"]],
+    ["运营管理",["/admin","/admin/orders","/admin/customers","/admin/tickets","/admin/inspections","/admin/dispositions","/admin/refunds","/admin/payments","/admin/finance","/admin/logistics","/admin/incidents"]],
     ["平台配置",["/admin/catalog","/admin/templates","/admin/storage/locations","/admin/shipping-rates","/admin/config","/admin/legal","/admin/users","/admin/audit","/admin/operations","/admin/integrations/logistics"]],
   ],
 } satisfies Record<string,[string,string[]][]>;
@@ -340,7 +341,7 @@ export function WorkspaceNavigation({area,title,links,path,demo=false,mobileOpen
   const normPath = path==="/billing"?"/account/billing":path==="/notifications"?"/account/notifications":path;
   const current=links.find(([href])=>href===normPath)?.[0]
     ?? links.filter(([href])=>href!=="/wh"&&href!=="/admin"&&normPath.startsWith(href+"/")).sort(([left],[right])=>right.length-left.length)[0]?.[0]
-    ?? (normPath.startsWith("/wh/task/")?"/wh/execute":normPath.startsWith("/shipments/")?"/parcels":normPath.startsWith("/support/cases/")?"/support":undefined);
+    ?? (normPath.startsWith("/wh/task/")?"/wh/execute":normPath.startsWith("/shipments/")?"/parcels":normPath.startsWith("/support/cases/")?"/support":normPath.startsWith("/admin/disposals/")?"/admin/dispositions":undefined);
   const grouped = navigationSections[area].map(([name,paths])=>[name,paths.flatMap(href=>links.filter(([url])=>url===href))] as const);
   const hasAdminCatalog = links.some(([url])=>url==="/admin/catalog");
   const otherLinks = area==="warehouse"

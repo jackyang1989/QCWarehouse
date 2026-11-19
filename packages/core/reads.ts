@@ -3,7 +3,7 @@ import { z } from "zod";
 import { guard, hash, one, organization, role, type Actor } from "./common";
 import { receiving } from "./auth";
 import { customerEmailDeliveryStatus } from "./email";
-import { eligibleManualQuoteOrderSql, expiredManualInspectionPaymentSql, orderAcceptsSampleAssignmentSql, orderDTO, referenceCategorySql } from "./orders";
+import { eligibleManualQuoteOrderSql, expiredManualInspectionPaymentSql, orderAcceptsSampleAssignmentSql, orderDTO, referenceCategorySql, summarizeExpectedLines } from "./orders";
 import { declaredItemTracking, orderInboundRegistration, orderShipments } from "./fulfillment-reads";
 import { getIntakeContext, pendingIntakeClaimSql, waybill } from "./intake";
 import { scopeSupplementForOrder, scopeSupplementState } from "./scope-payment";
@@ -701,7 +701,16 @@ export async function adminDesk(db:DB,actor:Actor) {
     (select count(*)::int from dispatch_batches where state in ('confirmed','quoted','paid')) dispatch_pending,
     (select count(*)::int from tickets where state in ('open','waiting_customer','waiting_internal')) open_tickets,
     (select count(*)::int from payment_disputes where state<>'resolved_by_staff') open_disputes,
-    (select count(*)::int from packages where state='unmatched' or org_id is null) unmatched_packages
+    (select count(*)::int from packages where state='unmatched' or org_id is null) unmatched_packages,
+    (select count(*)::int from refunds where state='requested') pending_refunds,
+    (select count(*)::int from manual_quote_requests where state='requested') pending_manual_quotes,
+    (select count(*)::int from tracking_records where closed_at is null and direction='inbound' and transport_state='delivered' and package_id is null) delivered_unreceived,
+    (select count(*)::int from disposal_cases where state='pending_approval') pending_disposals,
+    (select count(*)::int from incident_cases where state in ('open','proposed','customer_rejected','awaiting_payout')) open_incidents,
+    (select count(*)::int from stocktakes where state='submitted') submitted_stocktakes,
+    (select count(*)::int from report_versions where state='submitted') pending_report_reviews,
+    (select count(*)::int from outbox_events where processed_at is null and attempts>0) failed_jobs,
+    (select count(*)::int from customer_receiving_profiles) active_customers
     from orders`)).rows[0]:null;
   const dailyTrend=ops?(await db.query<{day:string;total:number;completed:number}>(`
     select to_char(d.ts,'MM-DD') as day,
@@ -734,6 +743,14 @@ export async function adminDesk(db:DB,actor:Actor) {
         and m.kind='intake_outer' and m.status='ready') outer_photo_ids
       from tickets k where category='identity_unclear' and details ? 'proof_id'
       order by (${pendingIntakeClaimSql}) desc,created_at desc limit 100`)).rows:[],
+    unmatchedPackages:ops?(await db.query(`select p.id,p.code,p.revision,p.condition_note,p.received_at,p.received_quantity,
+      (select t.tracking_norm from tracking_records t where t.package_id=p.id and t.direction='inbound' and t.closed_at is null limit 1) tracking_norm,
+      (select t.carrier_code from tracking_records t where t.package_id=p.id and t.direction='inbound' and t.closed_at is null limit 1) carrier_code,
+      sl.code location_code,
+      array(select m.id from media_assets m where m.package_id=p.id and m.kind in ('intake_outer','label_photo') and m.status='ready' order by m.captured_at) outer_photo_ids
+      from packages p left join storage_locations sl on sl.id=p.location_id
+      where p.state='unmatched' and p.org_id is null
+      order by p.received_at desc nulls last,p.id desc limit 100`)).rows:[],
     manualQuotes:ops?(await db.query(`select r.id,r.order_id,r.revision,r.state,r.assignee_id,r.reason,o.public_no,
       (select jsonb_agg(jsonb_build_object('id',l.id,'quantity',l.quantity,'title',s.title->>'zh-CN') order by l.id)
        from order_lines l join service_offers s on s.id=l.offer_id where l.order_id=r.order_id) lines
@@ -863,6 +880,7 @@ export const staffOrderFilters=z.object({
   query:z.string().trim().max(254).default(""),
   state:z.enum(["draft","awaiting_payment","awaiting_samples","samples_ready","queued","inspecting","qa_review",
     "report_ready","action_pending","closed","on_hold","cancelled"]).optional(),
+  exception:z.enum(["all","1"]).default("all"),
   from:z.iso.date().optional(),to:z.iso.date().optional(),
   test:z.enum(["all","production","test"]).default("all"),
   limit:z.coerce.number().int().min(1).max(100).default(50),
@@ -872,9 +890,10 @@ const staffOrderCursor=z.object({at:z.string().regex(/^\d{4}-\d\d-\d\dT\d\d:\d\d
   id:z.uuid(),filter:z.string().length(64)});
 export async function searchStaffOrders(db:DB,actor:Actor,filters:z.infer<typeof staffOrderFilters>) {
   role(actor,...staffAccess.orders);
-  const {query,state,from,to,test,limit,cursor}=filters;
-  const key=query?query.includes("@")?z.email().parse(query.toLowerCase()):waybill(query):"";
-  const filter=hash(JSON.stringify({key,state,from,to,test,limit}));
+  const {query,state,exception,from,to,test,limit,cursor}=filters;
+  const trimmed=query.trim();
+  const key=trimmed?trimmed.includes("@")?z.email().parse(trimmed.toLowerCase()):waybill(trimmed):"";
+  const filter=hash(JSON.stringify({key,state,exception,from,to,test,limit}));
   let after:z.infer<typeof staffOrderCursor>|undefined;
   if(cursor) {
     let decoded:unknown;
@@ -883,9 +902,37 @@ export async function searchStaffOrders(db:DB,actor:Actor,filters:z.infer<typeof
     after=staffOrderCursor.parse(decoded);
     guard(after.filter===filter,"INVALID_CURSOR","Restart pagination after changing search filters.",422);
   }
-  const {rows}=await db.query(`select o.id,o.public_no,o.state,o.created_at,o.is_test,
-    to_char(o.created_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') cursor_time from orders o
-    where ($1='' or o.public_no=$1 or exists(
+  const {rows}=await db.query(`select o.id,o.public_no,o.state,o.revision,o.created_at,o.updated_at,o.paid_at,o.sla_due_at,
+    o.report_published_at,o.hold_reason,o.price_cents,o.is_test,
+    crp.user_id customer_user_id,crp.receiving_code,u.display_name customer_name,
+    (select so.title->>'zh-CN' from order_lines l join service_offers so on so.id=l.offer_id where l.order_id=o.id order by l.id limit 1) service_title,
+    (select st.code from order_lines l join service_offers so on so.id=l.offer_id join service_types st on st.id=so.service_type_id where l.order_id=o.id order by l.id limit 1) service_code,
+    (select cat.labels->>'zh-CN' from order_lines l join categories cat on cat.id=l.category_id where l.order_id=o.id order by l.id limit 1) category_label,
+    (select coalesce(sum(case when jsonb_typeof(l.attributes->'expected_lines')='array' and jsonb_array_length(l.attributes->'expected_lines')>0
+      then jsonb_array_length(l.attributes->'expected_lines') else 1 end),0)::int from order_lines l where l.order_id=o.id) sku_count,
+    (select coalesce(sum(l.quantity),0)::int from order_lines l where l.order_id=o.id) expected_units,
+    (select count(*)::int from order_lines l join expected_items e on e.order_line_id=l.id and e.in_scope
+      join order_line_item_links a on a.expected_item_id=e.id and a.unlinked_at is null where l.order_id=o.id) identified_units,
+    (select count(*)::int from advice_orders ao where ao.order_id=o.id and ao.org_id=o.org_id) parcel_count,
+    (select count(*)::int from advice_orders ao join tracking_records tr on tr.advice_id=ao.advice_id and tr.closed_at is null and tr.direction='inbound'
+      join packages pkg on pkg.id=tr.package_id where ao.order_id=o.id and ao.org_id=o.org_id) arrived_parcel_count,
+    coalesce((select sum(coalesce((select count(*)::int from warehouse_items wi where wi.package_id=pkg.id and wi.parent_item_id is null),pkg.received_quantity,0))::int
+      from advice_orders ao join tracking_records tr on tr.advice_id=ao.advice_id and tr.closed_at is null and tr.direction='inbound'
+      join packages pkg on pkg.id=tr.package_id where ao.order_id=o.id and ao.org_id=o.org_id),0) arrived_units,
+    (select count(*)::int from inspection_tasks it join order_lines l on l.id=it.order_line_id
+      where l.order_id=o.id and it.state='QA_APPROVED') qa_approved_tasks,
+    (select count(*)::int from inspection_tasks it join order_lines l on l.id=it.order_line_id
+      where l.order_id=o.id and it.state<>'VOID') total_tasks,
+    (select count(*)::int from order_blocks ob where ob.order_id=o.id and ob.resolved_at is null) open_block_count,
+    (select count(*)::int from tickets k where k.order_id=o.id and k.state in ('open','waiting_customer','waiting_internal')) open_ticket_count,
+    (select rp.published_version from reports rp where rp.order_id=o.id limit 1) report_version,
+    nullif(inspection_payment.state,'not_due') payment_state,
+    to_char(o.created_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') cursor_time
+    from orders o
+    left join customer_receiving_profiles crp on crp.org_id=o.org_id
+    left join users u on u.id=crp.user_id
+    ${inspectionPaymentForOrder}
+    where ($1='' or o.public_no=$1 or upper(coalesce(crp.receiving_code,''))=$1 or exists(
       select 1 from tracking_records t where t.tracking_norm=$1 and t.direction='inbound'
       and t.closed_at is null and ${inboundBelongsToOrder}
     ) or exists(
@@ -895,49 +942,132 @@ export async function searchStaffOrders(db:DB,actor:Actor,filters:z.infer<typeof
     ) or exists(select 1 from memberships m join user_emails e on e.user_id=m.user_id
       where m.org_id=o.org_id and e.normalized_email=$1 and e.verified_at is not null))
     and ($2::text is null or o.state=$2)
-    and ($3::date is null or o.created_at>=($3::date)::timestamp at time zone 'UTC')
-    and ($4::date is null or o.created_at<($4::date+1)::timestamp at time zone 'UTC')
-    and ($5='all' or o.is_test=($5='test'))
-    and ($6::timestamptz is null or (o.created_at,o.id)<($6::timestamptz,$7::uuid))
-    order by o.created_at desc,o.id desc limit $8`,[key,state??null,from??null,to??null,test,after?.at??null,after?.id??null,limit+1]);
+    and ($3='all' or (
+      o.state='on_hold' or
+      (o.sla_due_at is not null and o.sla_due_at<=now() and o.state in ('queued','inspecting','qa_review')) or
+      exists(select 1 from order_blocks ob where ob.order_id=o.id and ob.resolved_at is null) or
+      exists(select 1 from tickets k where k.order_id=o.id and k.state in ('open','waiting_customer','waiting_internal'))
+    ))
+    and ($4::date is null or o.created_at>=($4::date)::timestamp at time zone 'UTC')
+    and ($5::date is null or o.created_at<($5::date+1)::timestamp at time zone 'UTC')
+    and ($6='all' or o.is_test=($6='test'))
+    and ($7::timestamptz is null or (o.created_at,o.id)<($7::timestamptz,$8::uuid))
+    order by o.created_at desc,o.id desc limit $9`,[key,state??null,exception,from??null,to??null,test,after?.at??null,after?.id??null,limit+1]);
   const page=rows.slice(0,limit),last=page.at(-1);
   return {rows:page.map(({cursor_time,...row})=>row),
     next_cursor:rows.length>limit&&last?Buffer.from(JSON.stringify({at:last.cursor_time,id:last.id,filter})).toString("base64url"):null};
 }
 export async function staffOrderDetail(db:DB,actor:Actor,publicNo:string) {
   role(actor,...staffAccess.orders);
-  const order=await one<Parameters<typeof orderDTO>[0]&{org_id:string;created_at:Date;paid_at:Date|null;samples_ready_at:Date|null;
-    sla_due_at:Date|null;report_published_at:Date|null;closed_at:Date|null}>(db,`select id,org_id,public_no,state,revision,created_at,paid_at,samples_ready_at,sla_due_at,
-    report_published_at,closed_at from orders where public_no=$1`,[publicNo]);
+  const order=await one<Parameters<typeof orderDTO>[0]&{org_id:string;created_at:Date;updated_at:Date|null;paid_at:Date|null;samples_ready_at:Date|null;
+    sla_due_at:Date|null;report_published_at:Date|null;closed_at:Date|null;held_at:Date|null;held_from_state:string|null;hold_reason:string|null;
+    price_cents:number|null;currency:string|null;customer_notes:string|null;is_test:boolean}>(
+    db,
+    `select id,org_id,public_no,state,revision,created_at,updated_at,paid_at,samples_ready_at,sla_due_at,
+            report_published_at,closed_at,held_at,held_from_state,hold_reason,price_cents,currency,customer_notes,coalesce(is_test,false) is_test
+     from orders where public_no=$1`,
+    [publicNo]
+  );
   const {id,org_id}=order;
-  const {rows:lines}=await db.query(`select l.quantity,s.title,l.id,
+  const {rows:lines}=await db.query(`select l.id,l.offer_id,l.category_id,l.template_version_id,l.quantity,l.options,l.attributes,l.draft_items,
+    s.title,s.sku_code,st.code service_code,cat.labels category_labels,
     (select count(*)::int from expected_items e where e.order_line_id=l.id and e.in_scope) current_positions
-    from order_lines l join service_offers s on s.id=l.offer_id where l.order_id=$1 order by l.id`,[id]);
-  const {rows:items}=await db.query(`select w.code,w.custody_state,w.identity_state,loc.code location,e.position,pkg.code package_code
-    from order_lines l join order_line_item_links a on a.order_line_id=l.id and a.org_id=$2 and a.unlinked_at is null
-    join expected_items e on e.id=a.expected_item_id
-    join warehouse_items w on w.id=a.item_id and w.org_id=a.org_id
+    from order_lines l join service_offers s on s.id=l.offer_id join service_types st on st.id=s.service_type_id
+    join categories cat on cat.id=l.category_id where l.order_id=$1 order by l.id`,[id]);
+  const {rows:expectedRows}=await db.query(`select e.id,e.position,e.declared_fields,e.in_scope,l.id as order_line_id,l.quantity,so.title,st.code service,
+    w.id item_id,w.code,w.identity_state,w.condition_state,w.custody_state,w.storage_until,pkg.code package_code,loc.code location,
+    ${itemInspectionStageSql} inspection_stage,
+    ${itemHandlingHoldSql} handling_hold,
+    (select d.action||':'||d.state from disposition_requests d where d.item_id=w.id and d.org_id=w.org_id and d.state not in ('completed','cancelled') order by d.revision desc limit 1) active_disposition,
+    (select r.state from reference_samples r where r.item_id=w.id and r.org_id=w.org_id order by r.revision desc limit 1) reference_sample_state
+    from order_lines l join service_offers so on so.id=l.offer_id join service_types st on st.id=so.service_type_id
+    left join expected_items e on e.order_line_id=l.id and e.in_scope
+    left join order_line_item_links a on a.expected_item_id=e.id and a.unlinked_at is null
+    left join warehouse_items w on w.id=a.item_id and w.org_id=l.org_id
     left join packages pkg on pkg.id=w.package_id
     left join storage_locations loc on loc.id=w.location_id
-    where l.order_id=$1 order by l.id,e.position`,[id,org_id]);
-  const {rows:parcels}=await db.query(`select t.tracking_norm,t.carrier_code,t.transport_state,t.sync_state,p.code,p.state custody,p.received_at
+    where l.order_id=$1 order by l.id,e.position`,[id]);
+  const items=expectedRows.filter(r=>Boolean(r.code));
+  const {rows:parcels}=await db.query(`select t.tracking_norm,t.carrier_code,c.labels->>'zh-CN' carrier_name,
+    t.transport_state,t.sync_state,t.advice_id as id,p.id package_id,p.code,p.state custody,p.state warehouse_state,
+    p.received_at,p.weight_g,p.received_quantity,p.condition_note,
+    substring(p.condition_note from '^\\[outer:(intact|crushed|torn|wet)\\]') outer_condition,
+    (select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null) logged_item_count,
+    (select count(*)::int from warehouse_items wi join order_line_item_links olil on olil.item_id=wi.id and olil.unlinked_at is null
+      join order_lines ol on ol.id=olil.order_line_id where wi.package_id=p.id and wi.parent_item_id is null and ol.order_id=$1) identified_item_count,
+    (select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null and wi.condition_state not in ('good','unchecked')) damaged_item_count,
+    coalesce((select array_agg(wi.code order by wi.code) from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null),array[]::text[]) item_codes,
+    coalesce(array(select m.id from media_assets m where m.package_id=p.id and m.kind in ('intake_outer','intake_open') and m.status='ready' order by m.captured_at),array[]::uuid[]) media_ids
     from orders o join tracking_records t on t.org_id=o.org_id and t.direction='inbound' and t.closed_at is null
     left join packages p on p.id=t.package_id and p.org_id=o.org_id
+    left join carriers c on c.code=t.carrier_code
     where o.id=$1 and ${inboundBelongsToOrder} order by t.tracking_norm`,[id]);
-  const {rows:tickets}=await db.query(`select id,public_no,subject,state from tickets where order_id=$1 and org_id=$2
-    order by created_at desc,id limit 100`,[id,org_id]);
+  const expected_lines_summary=summarizeExpectedLines(lines,expectedRows,parcels);
+  const {rows:tasks}=await db.query(`select t.id,t.state,t.revision,t.assignee_id,u.display_name assignee_name,
+    tv.template_key,tv.version template_version,w.code item_code,t.group_id is not null is_group_task,
+    (select count(*)::int from inspection_results ir where ir.task_id=t.id) result_count,
+    (select count(*)::int from task_evidence te where te.task_id=t.id) evidence_count
+    from inspection_tasks t join order_lines l on l.id=t.order_line_id
+    join template_versions tv on tv.id=t.template_version_id
+    left join users u on u.id=t.assignee_id
+    left join order_line_item_links a on a.id=t.assignment_id
+    left join warehouse_items w on w.id=a.item_id
+    where l.order_id=$1 and t.state<>'VOID' order by l.id,w.code nulls last,t.id`,[id]);
+  const {rows:reports}=await db.query(`select r.id report_id,r.public_no report_no,r.published_version,
+    v.id version_id,v.version,v.state,v.amend_reason,v.created_at,v.reviewed_at,v.published_at,
+    cu.display_name created_by_name,ru.display_name reviewed_by_name
+    from reports r join report_versions v on v.report_id=r.id
+    left join users cu on cu.id=v.created_by left join users ru on ru.id=v.reviewed_by
+    where r.order_id=$1 order by v.version desc`,[id]);
+  const {rows:quotes}=await db.query(`select id,revision,amount_cents,currency,expires_at,accepted_at
+    from inspection_quotes where order_id=$1 order by revision desc`,[id]);
+  const {rows:charges}=await db.query(`select c.id,c.purpose,c.amount_cents,c.currency,c.voided_at,c.applied_payment_id,
+    c.scope_revision_id,c.free_authorization,iq.revision quote_revision,iq.expires_at
+    from charge_items c left join inspection_quotes iq on iq.id=c.inspection_quote_id
+    where c.org_id=$2 and (iq.order_id=$1 or exists(select 1 from charge_allocations ca where ca.charge_id=c.id and ca.order_id=$1))
+    order by c.voided_at nulls first,c.id desc`,[id,org_id]);
+  const {rows:payments}=await db.query(`select distinct on (p.id) p.id,p.charge_item_id,c.purpose,p.amount_cents,p.currency,
+    p.state,p.provider,p.provider_ref,p.created_at,p.updated_at,
+    coalesce((select sum(r.amount_cents)::int from refunds r where r.payment_id=p.id and r.state='succeeded'),0) refunded_cents
+    from charge_items c join payments p on p.charge_item_id=c.id
+    left join inspection_quotes iq on iq.id=c.inspection_quote_id
+    where c.org_id=$2 and (iq.order_id=$1 or exists(select 1 from charge_allocations ca where ca.charge_id=c.id and ca.order_id=$1))
+    order by p.id,p.created_at desc`,[id,org_id]);
+  const {rows:refunds}=await db.query(`select r.id,r.payment_id,r.amount_cents,r.reason,r.state,r.source,r.provider_ref,r.created_at,
+    ru.display_name requested_by_name,au.display_name approved_by_name
+    from refunds r join payments p on p.id=r.payment_id join charge_items c on c.id=p.charge_item_id
+    left join inspection_quotes iq on iq.id=c.inspection_quote_id
+    left join users ru on ru.id=r.requested_by left join users au on au.id=r.approved_by
+    where c.org_id=$2 and (iq.order_id=$1 or exists(select 1 from charge_allocations ca where ca.charge_id=c.id and ca.order_id=$1))
+    order by r.created_at desc`,[id,org_id]);
+  const {rows:dispositions}=await db.query(`select d.id,d.action,d.state,d.destination,d.return_info,w.code item_code,
+    bi.batch_id,db.state batch_state
+    from order_lines l join order_line_item_links a on a.order_line_id=l.id and a.org_id=$2 and a.unlinked_at is null
+    join warehouse_items w on w.id=a.item_id
+    join disposition_requests d on d.item_id=w.id and d.org_id=$2
+    left join dispatch_batch_items bi on bi.disposition_id=d.id and bi.released_at is null
+    left join dispatch_batches db on db.id=bi.batch_id
+    where l.order_id=$1 order by w.code,d.revision desc`,[id,org_id]);
+  const {rows:tickets}=await db.query(`select k.id,k.public_no,k.category,k.subject,k.state,k.created_at,k.next_action_at,u.display_name assignee_name
+    from tickets k left join users u on u.id=k.assignee_id where k.order_id=$1 and k.org_id=$2
+    order by k.created_at desc,k.id limit 100`,[id,org_id]);
   const {rows:blocks}=await db.query(`select reason,opened_at,resolved_at from order_blocks
     where order_id=$1 order by opened_at desc,id`,[id]);
   const {rows:activity}=await db.query(`select a.id,a.at,a.actor_type,a.action,u.display_name
     from audit_events a left join users u on u.id=a.actor_id where a.entity_type='orders' and a.entity_id=$1
     order by a.at desc,a.id desc limit 100`,[id]);
-  const customer=(await db.query(`select u.id,u.status,p.receiving_code,e.normalized_email::text as email
+  const customer=(await db.query(`select u.id,u.display_name,u.status,p.org_id,p.receiving_code,e.normalized_email::text as email
     from customer_receiving_profiles p join users u on u.id=p.user_id left join user_emails e on e.user_id=u.id and e.is_primary
     where p.org_id=$1 limit 1`,[org_id])).rows[0]??null;
   const shipments=(await orderShipments(db,id,org_id)).map(({id:shipment_id,batch_id,carrier_code,state,tracking_norm,shipped_at,action})=>({id:shipment_id,batch_id,carrier_code,state,tracking_norm,shipped_at,action}));
-  return {order:orderDTO(order),created_at:order.created_at,paid_at:order.paid_at,
+  return {order:orderDTO(order),is_test:order.is_test,price_cents:order.price_cents,currency:order.currency??"USD",
+    customer_notes:order.customer_notes??null,held_at:order.held_at,held_from_state:order.held_from_state,hold_reason:order.hold_reason,
+    created_at:order.created_at,updated_at:order.updated_at,paid_at:order.paid_at,
     samples_ready_at:order.samples_ready_at,sla_due_at:order.sla_due_at,report_published_at:order.report_published_at,closed_at:order.closed_at,
-    customer,lines,items,parcels,tickets,blocks,activity,shipments};
+    customer,lines,items,expected_lines_summary,parcels,tasks,reports,quotes,charges,
+    payments:payments.map(p=>({...p,display_ref:`PAY-${String(p.id).replace(/-/g,"").slice(0,8).toUpperCase()}`})),
+    refunds:refunds.map(r=>({...r,display_ref:`RFD-${String(r.id).replace(/-/g,"").slice(0,8).toUpperCase()}`})),
+    dispositions,tickets,blocks,activity,shipments};
 }
 
 export async function reconcileFinance(db:DB,actor:Actor,includeTest=true) {
@@ -946,6 +1076,7 @@ export async function reconcileFinance(db:DB,actor:Actor,includeTest=true) {
     charge_item_id:string;purpose:string;amount_cents:number;currency:string;
     state:string;paid_cents:number;refunded_cents:number;batch_id:string|null;
     inspection_order_id:string|null;inspection_order_no:string|null;is_test:boolean;
+    receiving_code:string|null;applied_payment_id:string|null;
     allocations:{order_id:string;public_no:string;amount_cents:number}[];
   }>(
     `select c.id charge_item_id,c.purpose,c.amount_cents,c.currency,
@@ -958,12 +1089,15 @@ export async function reconcileFinance(db:DB,actor:Actor,includeTest=true) {
             iq.order_id inspection_order_id,
             io.public_no inspection_order_no,
             coalesce(io.is_test,false) is_test,
+            crp.receiving_code,
+            c.applied_payment_id,
             coalesce((
               select jsonb_agg(jsonb_build_object('order_id',a.order_id,'public_no',o.public_no,'amount_cents',a.amount_cents) order by o.public_no)
               from charge_allocations a join orders o on o.id=a.order_id
               where a.charge_id=c.id
             ),'[]'::jsonb) allocations
      from charge_items c
+     left join customer_receiving_profiles crp on crp.org_id=c.org_id
      left join inspection_quotes iq on iq.id=c.inspection_quote_id
      left join orders io on io.id=iq.order_id
      left join dispatch_quote_versions dq on dq.id=c.dispatch_quote_id
@@ -985,6 +1119,9 @@ export async function reconcileFinance(db:DB,actor:Actor,includeTest=true) {
       charge_item_id:r.charge_item_id,
       purpose:r.purpose,
       order_public_no:r.inspection_order_no,
+      receiving_code:r.receiving_code??null,
+      payment_id:r.applied_payment_id??null,
+      payment_display_ref:r.applied_payment_id?`PAY-${r.applied_payment_id.replace(/-/g,"").slice(0,8).toUpperCase()}`:null,
       amount_cents:r.amount_cents,
       currency:r.currency,
       state:r.state,
@@ -1034,6 +1171,8 @@ export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;l
     state:string;
     is_test:boolean;
     created_at:string;
+    receiving_code:string|null;
+    price_cents:number|null;
     category_slugs:string[];
     service_codes:string[];
     sample_count:number;
@@ -1050,6 +1189,8 @@ export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;l
             o.state,
             coalesce(o.is_test,false) is_test,
             o.created_at,
+            (select crp.receiving_code from customer_receiving_profiles crp where crp.org_id=o.org_id limit 1) receiving_code,
+            o.price_cents,
             coalesce(array(
               select distinct cat.slug from order_lines ol join categories cat on cat.id=ol.category_id where ol.order_id=o.id order by cat.slug
             ), array[]::text[]) category_slugs,
@@ -1140,6 +1281,8 @@ export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;l
       state:r.state,
       is_test:r.is_test,
       created_at:r.created_at,
+      receiving_code:r.receiving_code??null,
+      receivable_cents:r.price_cents??null,
       category_slug:r.category_slugs[0]??"apparel",
       category_slugs:r.category_slugs,
       service_code:r.service_codes[0]??"std",
@@ -1153,6 +1296,7 @@ export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;l
       inspection_seconds:r.inspection_seconds,
       inspection_minutes:Number((r.inspection_seconds/60).toFixed(2)),
       labor_cost_cents:laborCostCents,
+      labor_cost_estimated:true,
       contribution_cents:contributionCents,
       provider_refs:r.provider_refs,
       channel_reconciled:channelReconciled,
@@ -1208,6 +1352,7 @@ export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;l
     limit,
     order_count:orders.length,
     hourly_labor_cents:hourlyLaborCents,
+    labor_cost_estimated:true,
     inspection_paid_cents:sumInspectionPaid,
     inspection_refunded_cents:sumInspectionRefunded,
     net_inspection_cents:sumNetInspection,

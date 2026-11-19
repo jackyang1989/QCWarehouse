@@ -3,6 +3,17 @@
 import Link from "next/link";
 import { useState } from "react";
 import { Empty, ErrorBlock, Form, Panel, request, RequestError, stamp, Table, Tag, text, useLoad, type Row } from "./ui";
+import { BizTag, StatusBanner } from "./admin-labels";
+
+const EMAIL_STATE_ZH:Record<string,{label:string;tone:"green"|"yellow"|"red"|"blue"|"gray"}>={
+  queued:{label:"排队待发送",tone:"gray"},
+  submitted:{label:"已交发信通道(待收箱回执)",tone:"blue"},
+  delivered:{label:"邮箱网关已确认送达",tone:"green"},
+  deferred:{label:"临时延迟待重投",tone:"yellow"},
+  bounced:{label:"硬退信 (已抑制)",tone:"red"},
+  complained:{label:"客户举报/投诉 (已抑制)",tone:"red"},
+  unknown:{label:"发信超时未知",tone:"yellow"},
+};
 
 const jobNames:Record<string,string>={
   "report.render":"生成报告 PDF","refund.approved":"执行已审批退款","payment.checkout_expire":"关闭到期付款会话",
@@ -47,28 +58,34 @@ export function OperationsDesk() {
         }}><label>修复内容与重排依据<textarea name="reason" required minLength={4} maxLength={1000}/></label></Form>
       </details>)}
     </Panel>}
-    <Panel title="邮件投递与退信抑制">
-      <div className="form inline-form">
-        <label>投递状态<select value={emailState} onChange={e=>setEmailState(e.target.value)}>
-          <option value="">全部状态</option>
-          <option value="unknown">超时未知 (unknown)</option>
+    <Panel title="邮件投递状态与退信抑制监测">
+      <StatusBanner tone="info" title="发送语义严格区分（禁止将「通道受理」等同于「客户收妥」）">
+        <strong>submitted</strong> 仅表示平台已交第三方邮件提供商（如 Postmark）受理，<strong>不保证送达收件箱</strong>；仅当收到收件方网关送达回执后才会升格为 <strong>delivered</strong>。
+      </StatusBanner>
+      <div className="admin-toolbar" style={{marginTop:10}}>
+        <label>投递状态筛选<select value={emailState} onChange={e=>setEmailState(e.target.value)}>
+          <option value="">全部投递状态</option>
+          <option value="unknown">发信超时未知 (unknown)</option>
           <option value="deferred">延后待重试 (deferred)</option>
           <option value="bounced">硬退信 (bounced)</option>
           <option value="complained">垃圾投诉 (complained)</option>
-          <option value="submitted">已提交供应商 (submitted)</option>
-          <option value="delivered">已送达 (delivered)</option>
-          <option value="queued">排队中 (queued)</option>
+          <option value="submitted">已交第三方待确认送达 (submitted)</option>
+          <option value="delivered">网关确认已送达 (delivered)</option>
+          <option value="queued">本地排队中 (queued)</option>
         </select></label>
-        <button type="button" className="button" onClick={email.reload}>刷新邮件状态</button>
+        <div className="actions">
+          <button type="button" className="button sm" onClick={email.reload}>刷新邮件状态</button>
+        </div>
       </div>
       {email.data&&!email.data.rows.length&&<Empty>当前筛选条件下没有邮件投递记录。</Empty>}
       {email.data?.rows.map((row:Row)=><details className="card" key={row.id}>
-        <summary><span className="code">{row.masked_email}</span> · {jobNames[row.template]??row.template} · 尝试 #{row.attempt} · <Tag>{row.state}</Tag>{row.suppressed&&<> · <Tag>地址已抑制 ({row.delivery_state})</Tag></>}</summary>
-        <Table headers={["关联订单","供应商 MessageID","地址状态","错误码","更新时间"]} rows={[[
-          row.order_public_no?<Link href={"/admin/orders/"+row.order_public_no}>{row.order_public_no}</Link>:"—",
-          row.provider_message_id??"—",
+        <summary><span className="code">{row.masked_email}</span> · {jobNames[row.template]??row.template} · 尝试 #{row.attempt} · <BizTag dict={EMAIL_STATE_ZH} value={row.state}/>{row.suppressed&&<> · <Tag tone="red">地址已抑制 ({row.delivery_state})</Tag></>}</summary>
+        <Table headers={["关联订单","第三方 MessageID","邮箱地址健康度","错误码","状态语义","更新时间"]} rows={[[
+          row.order_public_no?<Link className="code nowrap" href={"/admin/orders/"+row.order_public_no}>{row.order_public_no}</Link>:"—",
+          <span key="m" className="code">{row.provider_message_id??"—"}</span>,
           row.delivery_state,
           row.error_code??"—",
+          row.state==="submitted"?"已交发信渠道，尚未确认客户端收箱":row.state==="delivered"?"收件方网关确认已妥投":row.state,
           stamp(row.updated_at),
         ]]}/>
         {row.can_retry&&<Form label="新建下一投递尝试 (attempt + 1)" run={async fields=>{

@@ -1,13 +1,26 @@
 "use client";
 
 import Link from "next/link";
-import { ScopeReview } from "./scope-review";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { Action, checked, CodeButton, DateInput, DefectAnnotator, type DefectAnnotation, Empty, ErrorBlock, Field, FileInput, Form, MediaButton, ModalDrawer, Panel, Photo, request, RequestError, Select, StaffObjectDrawer, type StaffObjectTarget, stamp, Table, Tag, text, upload, useLoad, usd, type Row } from "./ui";
 import { switchDemoPortal } from "./chrome";
-import { OverdueDisposalDesk, StocktakeReviewAndIncidentPanel } from "./storage-desk";
 import { staffTabs } from "../packages/core/portal-routes";
+import {
+  AdminTabs,
+  BizTag,
+  CopyId,
+  EmptyState,
+  Money,
+  ROLE_ZH,
+  StatusBanner,
+  SYNC_STATE_ZH,
+  TRACKING_ALERT_KIND_ZH,
+  TRANSPORT_STATE_ZH,
+} from "./admin-labels";
+import { AdminFinanceAnalytics, AdminPaymentsWorkbench, AdminRefundsWorkbench } from "./admin-finance";
+import { AdminOrdersWorkbench } from "./admin-orders";
+import { AdminDispositionsWorkbench, AdminIncidentsWorkbench, AdminOverviewDashboard } from "./admin-operations";
 
 const SAMPLE_CODE_ALPHABET="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 function generateRandomSampleCode():string {
@@ -1017,10 +1030,25 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
     </div>}
   </>;
 }
+const DIRECTION_ZH: Record<string, { label: string; tone: "blue" | "yellow" | "green" | "gray" }> = {
+  inbound: { label: "入仓运输", tone: "blue" },
+  return_to_seller: { label: "退回商家", tone: "yellow" },
+  to_forwarder: { label: "寄集运仓", tone: "green" },
+};
+
+const ALERT_STATE_ZH: Record<string, { label: string; tone: "red" | "yellow" | "green" | "gray" }> = {
+  open: { label: "待认领", tone: "red" },
+  acknowledged: { label: "跟进中", tone: "yellow" },
+  resolved: { label: "已解除", tone: "green" },
+};
+
 export function LogisticsDesk({actor}:{actor?:Row}) {
   const {data,error,reload}=useLoad("/staff/tracking");
   const monitor=useLoad("/staff/tracking/monitor");
   const carriers=useLoad("/carriers");
+  const [tab,setTab]=useState<"all"|"inbound"|"outbound"|"delivered_unreceived"|"alerts">("all");
+  const [searchQ,setSearchQ]=useState("");
+  const [transportFilter,setTransportFilter]=useState("");
   const [selectedId,setSelectedId]=useState<string>("");
   const [drawer,setDrawer]=useState<StaffObjectTarget|null>(null);
   const rows:Row[]=data?.rows??[];
@@ -1029,96 +1057,226 @@ export function LogisticsDesk({actor}:{actor?:Row}) {
   const canCorrectWaybill=Boolean(actor?.roles?.some((r:string)=>["warehouse_admin","super_admin"].includes(r)));
   const isSuperAdmin=Boolean(actor?.roles?.includes("super_admin"));
   const carrierChoices=(carriers.data?.carriers??[]).map((c:Row)=>({id:c.code,label:c.labels["zh-CN"]??c.labels.en}));
-  return <><div className="page-head row"><div><p className="eyebrow">TRACKING / OPERATIONS</p><h1>物流监控</h1><p className="muted">入仓、集运及退商家均显示中文原始轨迹与客户英文事件；点击任意运单号可速览关联包裹、订单与照片。</p></div><div className="head-actions"><button type="button" className="button sm" onClick={()=>{reload();monitor.reload();}}>刷新监控</button>{isSuperAdmin&&<Link className="button sm" href="/admin/integrations/logistics">物流接口配置</Link>}</div></div>
+
+  const q=searchQ.trim().toLowerCase();
+  const filteredRows=rows.filter((r:Row)=>{
+    if(tab==="inbound"&&r.direction!=="inbound") return false;
+    if(tab==="outbound"&&r.direction==="inbound") return false;
+    if(transportFilter&&r.transport_state!==transportFilter) return false;
+    if(!q) return true;
+    return [
+      r.tracking_norm,
+      r.receiving_code,
+      r.package_code,
+      r.carrier_name_zh,
+      ...(r.order_numbers??[]),
+    ].some(v=>String(v??"").toLowerCase().includes(q));
+  });
+
+  const openAlerts:Row[]=monitor.data?.alerts??[];
+  const pendingAlertsCount=openAlerts.filter((a:Row)=>a.state!=="resolved").length;
+  const unreceivedList:Row[]=monitor.data?.delivered_unreceived??[];
+  const errorQueue:Row[]=monitor.data?.error_queue??[];
+
+  const renderTrackCustomerAndOrders=(r:Row)=><div className="cell-stack">
+    {r.receiving_code&&r.customer_user_id
+      ?<Link className="code nowrap" href={`/admin/customers/${r.customer_user_id}`}>{r.receiving_code}</Link>
+      :<span className="muted">待归属客户</span>}
+    {(r.order_numbers?.length??0)>0&&<div className="actions">
+      {(r.order_numbers as string[]).map(no=><Link key={no} className="code nowrap" href={`/admin/orders/${no}`}>{no}</Link>)}
+    </div>}
+    {r.package_code&&<CodeButton code={r.package_code} onClick={()=>setDrawer({kind:"package",ref:r.package_code})}/>}
+  </div>;
+
+  return <>
+    <div className="page-head row">
+      <div>
+        <p className="eyebrow">TRACKING / OPERATIONS</p>
+        <h1>物流监控与轨迹翻译台</h1>
+        <p className="muted">统一监控入仓包裹、退回商家与寄出集运仓运单；所有记录关联专属收件码、质检单与仓内包裹，支持中文原始轨迹审核译文与运单纠错。</p>
+      </div>
+      <div className="head-actions">
+        <button type="button" className="button sm" onClick={()=>{reload();monitor.reload();}}>刷新监控</button>
+        {isSuperAdmin&&<Link className="button sm" href="/admin/integrations/logistics">物流接口配置</Link>}
+      </div>
+    </div>
+
     {error&&<ErrorBlock error={error}/>}
     {monitor.error&&<ErrorBlock error={monitor.error}/>}
-    {monitor.data&&<>
-      <div className="stats" aria-label="物流监控指标">
-        <div className="stat"><span className="label">24h 查询请求</span><strong className="value">{monitor.data.quota_summary.queries_24h}</strong><small className="detail">活跃订阅 {monitor.data.quota_summary.active_subscriptions}</small></div>
-        <div className="stat"><span className="label">限频 / 额度告警</span><strong className="value">{monitor.data.quota_summary.rate_limited_24h + monitor.data.quota_summary.quota_exhausted_24h}</strong><small className="detail">鉴权异常 {monitor.data.quota_summary.auth_errors_24h}</small></div>
-        <div className="stat"><span className="label">异常运输队列</span><strong className="value">{monitor.data.alerts.filter((a:Row)=>a.state!=="resolved").length}</strong><small className="detail">超期未处理 {monitor.data.alerts.filter((a:Row)=>a.overdue).length}</small></div>
-        <div className="stat"><span className="label">已签收待实收</span><strong className="value">{monitor.data.delivered_unreceived.length}</strong><small className="detail">待人工核对包裹</small></div>
-      </div>
-      <div className="ops-columns">
-        <Panel title="异常运输告警队列">
-          <Table headers={["运单号","方向","异常类型","状态","截止时间","操作"]} rows={monitor.data.alerts.map((a:Row)=>[
-            <CodeButton code={a.tracking_norm} onClick={()=>setDrawer({kind:"tracking",ref:a.tracking_norm})}/>,
-            label(a.direction),
-            <span>{a.kind} · <Tag>Ep #{a.episode}</Tag></span>,
-            <Tag>{a.state}{a.overdue?" (超期)":""}</Tag>,
-            stamp(a.due_at),
-            a.state!=="resolved"?<div className="actions">
-              {a.state==="open"&&<Action sm run={async()=>{
-                await request(`/staff/tracking-alerts/${a.id}`,"POST",{action:"acknowledge",note:"Acknowledged by staff"});
-                monitor.reload();
-              }}>认领跟进</Action>}
-              <Action sm run={async()=>{
-                await request(`/staff/tracking-alerts/${a.id}`,"POST",{action:"resolve",note:"Resolved after carrier check"});
-                monitor.reload();
-              }}>标记解除</Action>
-            </div>:"已解除",
-          ])} empty="当前无物流异常告警。"/>
-        </Panel>
-        <Panel title="承运商已签收但仓库未实收">
-          <Table headers={["运单号","承运商","订单号","签收时间","最后轨迹摘要"]} rows={monitor.data.delivered_unreceived.map((d:Row)=>[
-            <CodeButton code={d.tracking_norm} onClick={()=>setDrawer({kind:"tracking",ref:d.tracking_norm})}/>,
-            d.carrier_code,
-            d.order_no?<Link className="code" href={`/admin/orders/${d.order_no}`}>{d.order_no}</Link>:"—",
+
+    {monitor.data&&<div className="stats" aria-label="物流监控指标">
+      <div className="stat"><span className="label">24h 查询请求</span><strong className="value">{monitor.data.quota_summary.queries_24h}</strong><small className="detail">活跃订阅 {monitor.data.quota_summary.active_subscriptions} 条</small></div>
+      <div className="stat"><span className="label">限频 / 额度异常</span><strong className="value">{monitor.data.quota_summary.rate_limited_24h + monitor.data.quota_summary.quota_exhausted_24h}</strong><small className="detail">鉴权报错 {monitor.data.quota_summary.auth_errors_24h} 次</small></div>
+      <div className="stat"><span className="label">异常运输告警</span><strong className="value">{pendingAlertsCount}</strong><small className="detail">超 SLA 未处置 {openAlerts.filter((a:Row)=>a.overdue).length} 起</small></div>
+      <div className="stat"><span className="label">已签收待实收</span><strong className="value">{unreceivedList.length}</strong><small className="detail">承运商签收但未扫入仓库</small></div>
+    </div>}
+
+    <AdminTabs
+      active={tab}
+      onChange={next=>setTab(next as typeof tab)}
+      tabs={[
+        {id:"all",label:"全部运单台账",count:rows.length},
+        {id:"inbound",label:"入仓运输 (卖家→仓)",count:rows.filter(r=>r.direction==="inbound").length},
+        {id:"outbound",label:"出库运输 (退商/集运)",count:rows.filter(r=>r.direction!=="inbound").length},
+        {id:"delivered_unreceived",label:"签收未实收催办",count:unreceivedList.length},
+        {id:"alerts",label:"异常告警与错误队列",count:pendingAlertsCount+errorQueue.length},
+      ]}
+    />
+
+    {tab==="delivered_unreceived"&&(
+      <Panel title="承运商已签收但仓库尚未登记实收" subtitle="此类包裹快递已显示妥投但仓库尚未扫码入库，须核查快递柜/门卫或发起异常处理。">
+        <Table
+          headers={["运单号","承运商","所属客户","关联订单","签收时间","最新轨迹摘要"]}
+          rows={unreceivedList.map((d:Row)=>[
+            <div key="t" className="cell-stack">
+              <CodeButton code={d.tracking_norm} onClick={()=>setDrawer({kind:"tracking",ref:d.tracking_norm})}/>
+              <CopyId value={d.tracking_norm}/>
+            </div>,
+            d.carrier_name_zh??d.carrier_code??"—",
+            d.receiving_code&&d.customer_user_id?<Link className="code nowrap" href={`/admin/customers/${d.customer_user_id}`}>{d.receiving_code}</Link>:"未归属",
+            d.order_no?<Link className="code nowrap" href={`/admin/orders/${d.order_no}`}>{d.order_no}</Link>:"—",
             stamp(d.delivered_at),
             d.latest_cn??"—",
-          ])} empty="所有承运商签收包裹均已登记实收。"/>
-        </Panel>
-      </div>
+          ])}
+          empty="所有承运商签收包裹均已在仓库完成扫码实收。"
+        />
+      </Panel>
+    )}
+
+    {tab==="alerts"&&<>
+      <Panel title="异常运输告警队列" subtitle="涵盖退件、超时停滞、拒收、电话验证等承运商告警，支持认领跟进与解除闭环。">
+        <Table
+          headers={["运单号","方向与承运商","所属客户与订单","异常类型","状态 / 超期","截止时间","跟进操作"]}
+          rows={openAlerts.map((a:Row)=>[
+            <CodeButton key="tr" code={a.tracking_norm} onClick={()=>setDrawer({kind:"tracking",ref:a.tracking_norm})}/>,
+            <div key="dir" className="cell-stack">
+              <BizTag dict={DIRECTION_ZH} value={a.direction}/>
+              <small className="muted">{a.carrier_name_zh??a.carrier_code??"—"}</small>
+            </div>,
+            renderTrackCustomerAndOrders(a),
+            <div key="kind" className="cell-stack">
+              <Tag tone="yellow">{TRACKING_ALERT_KIND_ZH[a.kind]??a.kind}</Tag>
+              <small className="muted">第 {a.episode} 次异常</small>
+            </div>,
+            <div key="st" className="cell-stack">
+              <BizTag dict={ALERT_STATE_ZH} value={a.state}/>
+              {a.overdue&&<Tag tone="red">SLA 已超期</Tag>}
+            </div>,
+            stamp(a.due_at),
+            a.state!=="resolved"?<div key="op" className="actions">
+              {a.state==="open"&&<Action sm run={async()=>{
+                await request(`/staff/tracking-alerts/${a.id}`,"POST",{action:"acknowledge",note:"运营认领并跟进承运商"});
+                monitor.reload();
+              }}>认领跟进</Action>}
+              <Action sm primary run={async()=>{
+                await request(`/staff/tracking-alerts/${a.id}`,"POST",{action:"resolve",note:"已核对物流与包裹处置完毕"});
+                monitor.reload();
+              }}>标记解除</Action>
+            </div>:<Tag tone="green">已处理完结</Tag>,
+          ])}
+          empty="当前无物流异常告警。"
+        />
+      </Panel>
+      <Panel title="同步错误与需验证运单队列" subtitle="接口报错、限频、缺少手机号后4位或承运商暂不支持的记录集中展示于此。">
+        <Table
+          headers={["运单号","承运商","客户与订单","同步状态","最近错误原因","最近成功同步"]}
+          rows={errorQueue.map((e:Row)=>[
+            <CodeButton key="t" code={e.tracking_norm} onClick={()=>setDrawer({kind:"tracking",ref:e.tracking_norm})}/>,
+            e.carrier_name_zh??e.carrier_code??"—",
+            renderTrackCustomerAndOrders(e),
+            <BizTag key="sy" dict={SYNC_STATE_ZH} value={e.sync_state}/>,
+            <span key="err" className="small">{e.last_error_code??"—"}</span>,
+            stamp(e.last_success_at),
+          ])}
+          empty="当前所有运单同步状态健康，无报错队列。"
+        />
+      </Panel>
     </>}
-    <Panel title="查询状态区分标准">
-      <div className="row flexwrap" style={{justifyContent:"flex-start"}}>
-        {["正常","无物流记录","需电话验证","暂不支持","数据陈旧","英文待更新","接口故障","已签收待入库","退回"].map(x=><Tag key={x} tone="gray">{x}</Tag>)}
-      </div>
-    </Panel>
-    <Panel
-      title="入仓与寄出运输"
-      subtitle="点击运单号可速览关联包裹与订单，或点击右侧按钮展开双语翻译与修正面板。"
-      badge={<button type="button" className="button sm" onClick={()=>{reload();monitor.reload();}}>刷新列表</button>}
-    >
-      <Table
-        headers={["运单号","运输状态","同步状态","轨迹节点","最近同步","操作"]}
-        rows={rows.map((r:Row)=>[
-          <CodeButton code={r.tracking_norm} onClick={()=>setDrawer({kind:"tracking",ref:r.tracking_norm})}/>,
-          <Tag>{label(r.transport_state)}</Tag>,
-          <Tag tone={r.sync_state==="active"?"green":"yellow"}>{label(r.sync_state)}</Tag>,
-          `${r.events?.length??0} 条记录`,
-          stamp(r.last_success_at),
-          <button
-            type="button"
-            className={"button sm"+(selectedId===r.id?" primary":"")}
-            onClick={()=>setSelectedId(prev=>prev===r.id?"":r.id)}
-          >{selectedId===r.id?"收起工作区":"翻译与修正"}</button>,
-        ])}
-        empty="暂无入仓或寄出运输记录。"
-      />
-      {selectedTrack&&<div className="card-soft" style={{marginTop:14}}>
-        <div className="row between" style={{marginBottom:12}}>
-          <strong>运单轨迹详情 · <span className="code">{selectedTrack.tracking_norm}</span></strong>
-          <button type="button" className="button sm ghost" onClick={()=>setSelectedId("")}>关闭</button>
+
+    {(tab==="all"||tab==="inbound"||tab==="outbound")&&<>
+      <div className="admin-toolbar">
+        <label>
+          检索运单 / 客户码 / 订单号 / 包裹码
+          <input type="search" value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="输入单号、QCW-... 或 QW-..."/>
+        </label>
+        <label>
+          承运商状态筛选
+          <select value={transportFilter} onChange={e=>setTransportFilter(e.target.value)}>
+            <option value="">全部运输状态</option>
+            {Object.entries(TRANSPORT_STATE_ZH).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
+          </select>
+        </label>
+        <div className="actions">
+          <button type="button" className="button sm" onClick={()=>{setSearchQ("");setTransportFilter("");}}>清空筛选</button>
         </div>
-        <div className="grid cols4" style={{marginBottom:14}}>
-          <dl className="def"><dt>运单编号</dt><dd className="code">{selectedTrack.tracking_norm}</dd></dl>
-          <dl className="def"><dt>承运商运输状态</dt><dd>{label(selectedTrack.transport_state)}</dd></dl>
-          <dl className="def"><dt>同步状态</dt><dd>{label(selectedTrack.sync_state)}</dd></dl>
-          <dl className="def"><dt>最近成功同步</dt><dd>{stamp(selectedTrack.last_success_at)}</dd></dl>
+      </div>
+
+      <Panel
+        title={tab==="inbound"?"入仓运单监控":tab==="outbound"?"出库发运监控":"全部入仓与出库运单"}
+        subtitle={`共匹配 ${filteredRows.length} 条记录；点击右侧「轨迹与复核」可审核英文译文或更正运单号。`}
+      >
+        {filteredRows.length===0?(
+          <EmptyState
+            kind={q||transportFilter?"filtered":"empty"}
+            title="没有符合筛选条件的运单记录"
+            description="请检查单号/客户码关键词，或清空筛选查看全量运输监控记录。"
+            actionLabel="重置筛选"
+            onAction={()=>{setSearchQ("");setTransportFilter("");}}
+          />
+        ):(
+          <Table
+            headers={["运单号 / 方向","承运商","客户码与关联订单","运输状态","同步状态","轨迹数","最近同步","工作区"]}
+            rows={filteredRows.map((r:Row)=>[
+              <div key="tr" className="cell-stack">
+                <CodeButton code={r.tracking_norm} onClick={()=>setDrawer({kind:"tracking",ref:r.tracking_norm})}/>
+                <BizTag dict={DIRECTION_ZH} value={r.direction}/>
+              </div>,
+              <div key="ca" className="cell-stack">
+                <strong>{r.carrier_name_zh??r.carrier_code??"—"}</strong>
+                <small className="code">{r.carrier_code??"—"}</small>
+              </div>,
+              renderTrackCustomerAndOrders(r),
+              <BizTag key="ts" dict={TRANSPORT_STATE_ZH} value={r.transport_state}/>,
+              <BizTag key="ss" dict={SYNC_STATE_ZH} value={r.sync_state}/>,
+              <span key="cnt" className="nowrap">{r.events?.length??0} 条</span>,
+              stamp(r.last_success_at),
+              <button
+                key="btn"
+                type="button"
+                className={"button sm nowrap"+(selectedId===r.id?" primary":"")}
+                onClick={()=>setSelectedId(prev=>prev===r.id?"":r.id)}
+              >{selectedId===r.id?"关闭工作区":"轨迹与复核"}</button>,
+            ])}
+          />
+        )}
+      </Panel>
+    </>}
+
+    <ModalDrawer
+      open={Boolean(selectedTrack)}
+      onClose={()=>setSelectedId("")}
+      title={selectedTrack?`运单详情与双语审核 · ${selectedTrack.tracking_norm}`:""}
+      subtitle={selectedTrack?`${selectedTrack.carrier_name_zh??selectedTrack.carrier_code??""} · ${DIRECTION_ZH[selectedTrack.direction]?.label??selectedTrack.direction}`:""}
+    >
+      {selectedTrack&&<>
+        <div className="admin-kv-grid" style={{marginBottom:14}}>
+          <div className="kv-card"><span className="k">运单编号</span><CopyId value={selectedTrack.tracking_norm} short={false}/></div>
+          <div className="kv-card"><span className="k">承运商状态</span><BizTag dict={TRANSPORT_STATE_ZH} value={selectedTrack.transport_state}/></div>
+          <div className="kv-card"><span className="k">同步状态</span><BizTag dict={SYNC_STATE_ZH} value={selectedTrack.sync_state}/></div>
+          <div className="kv-card"><span className="k">关联客户 / 订单</span>{renderTrackCustomerAndOrders(selectedTrack)}</div>
         </div>
         {selectedTrack.events?.length
           ?<ol className="timeline">{selectedTrack.events.map((e:Row)=><li key={e.id}><small className="muted">{stamp(e.occurred_at)}</small><div>{e.text}</div></li>)}</ol>
-          :<Empty>暂无承运商中文轨迹（本地未开启外部快递商实时回调时保持待查询状态）。</Empty>}
+          :<Empty>暂无承运商中文轨迹（本地演示未接外部回调或尚无路由回传时保留真实空状态）。</Empty>}
         {(selectedTrack.zh_events?.length??0)>0&&<div style={{marginTop:14}}>
-          <h3 style={{marginBottom:8}}>客户英文轨迹翻译与双人复核</h3>
-          <Table headers={["发生时间","中文原文","当前英文译文","状态","人工翻译 / 复核"]} rows={selectedTrack.zh_events.map((ev:Row)=>[
+          <h3 style={{marginBottom:8}}>客户英文轨迹翻译与独立双人复核</h3>
+          <Table headers={["发生时间","中文原文","当前英文译文","状态","人工翻译 / 独立复核"]} rows={selectedTrack.zh_events.map((ev:Row)=>[
             stamp(ev.occurred_at??ev.source_time),
             ev.text_zh??"—",
             ev.text_en??<span className="muted">尚未录入</span>,
             <Tag tone={ev.reviewed_at?"green":ev.translation_id?"yellow":"gray"}>{ev.reviewed_at?"已独立复核":ev.translation_id?"草稿待复核":"待翻译"}</Tag>,
             canTranslate?<div className="stack" style={{gap:6}}>
-              <Form inline key={`tr-${ev.id}-${ev.translation_id??"new"}`} label="提交英文译稿" run={async f=>{
+              <Form inline key={`tr-${ev.id}-${ev.translation_id??"new"}`} label="提交译稿" run={async f=>{
                 await request(`/staff/tracking/${selectedTrack.id}/translations`,"POST",{
                   tracking_event_id:ev.id,
                   source_hash:ev.source_hash,
@@ -1141,7 +1299,7 @@ export function LogisticsDesk({actor}:{actor?:Row}) {
         </div>}
         {canCorrectWaybill&&carrierChoices.length>0&&<details className="card" style={{marginTop:14}}>
           <summary>修正运单号或承运商（需 15 分钟内员工验证登录会话）</summary>
-          <p className="small muted">原运单记录将归档为 superseded 并保留历史快照；已交接出库运单修正必须上传面单照片凭证。</p>
+          <p className="small muted">原运单记录将归档为历史快照并保留关联；已交接出库运单修正必须上传面单照片凭证。</p>
           <Form key={`corr-${selectedTrack.id}-${selectedTrack.revision}`} label="确认修正运单" run={async f=>{
             const file=f.get("photo");
             const evidenceIds:string[]=[];
@@ -1167,378 +1325,328 @@ export function LogisticsDesk({actor}:{actor?:Row}) {
             <label>面单照片凭证{selectedTrack.shipment_id?"（出库运单必填）":"（可选）"}<FileInput name="photo" accept="image/*" required={Boolean(selectedTrack.shipment_id)}/></label>
           </Form>
         </details>}
-      </div>}
-    </Panel>
+      </>}
+    </ModalDrawer>
     <StaffObjectDrawer target={drawer} onClose={()=>setDrawer(null)}/>
   </>;
 }
 export function LogisticsConfiguration() {
   const {data,error,reload}=useLoad("/staff/admin/tracking/health");
   const monitor=useLoad("/staff/tracking/monitor");
-  return <><div className="page-head row"><div><p className="eyebrow">TRACKING / CONFIGURATION</p><h1>物流供应商接入</h1><p className="muted">供应商配置、承运商覆盖、额度、错误及恢复状态。</p></div><Link className="button sm" href="/admin/logistics">物流监控</Link></div>
-    <Panel title="快递100配置预检" subtitle="状态来自当前应用配置。承运商覆盖、接口连通性和额度需用实际账号联调确认。" badge={<button type="button" className="button sm" onClick={()=>{reload();monitor.reload();}}>重新读取配置</button>}>
-      {error?<ErrorBlock error={error}/>:data?<Table headers={["检查项","配置状态"]} rows={[
-        ["运单查询",data.queryConfigured?"已配置":"未配置"],
-        ["HTTPS 回调地址",data.httpsCallbackConfigured?"已配置":"未配置"],
-        ["订阅接入",data.subscribeConfigured?"已配置":"未配置"],
-        ["自动同步配置",data.workerEnabled?"已启用":"未启用"],
-      ]}/>:<p role="status">正在读取配置…</p>}
+  return <>
+    <div className="page-head row">
+      <div>
+        <p className="eyebrow">TRACKING / CONFIGURATION</p>
+        <h1>物流供应商接入与承运商字典</h1>
+        <p className="muted">检查服务端快递100（Express100）密钥接入状态、回调安全开关与首发承运商校验规则。</p>
+      </div>
+      <div className="head-actions">
+        <button type="button" className="button sm" onClick={()=>{reload();monitor.reload();}}>重新读取配置</button>
+        <Link className="button sm" href="/admin/logistics">返回物流监控台</Link>
+      </div>
+    </div>
+    <StatusBanner
+      tone={data?.queryConfigured&&data?.subscribeConfigured?"info":"warning"}
+      title={data?.queryConfigured&&data?.subscribeConfigured?"快递100服务端配置已就绪":"当前环境未配置快递100实时密钥"}
+    >
+      {data?.queryConfigured&&data?.subscribeConfigured
+        ?"服务端已检测到快递100 API 配置：仍需使用生产实寄单完成联调验证并核对订阅额度。"
+        :"当前环境边界：承运商字典与人工纠偏已就绪，但快递100实时查询/订阅密钥尚未配置（密钥只允许配置在服务端环境变量，不可在前端硬编码）。"}
+    </StatusBanner>
+    <Panel title="快递100服务端配置预检" subtitle="所有敏感密钥仅由环境变量加载，后台页面仅做只读健康检查。">
+      {error?<ErrorBlock error={error}/>:data?<Table headers={["接入检查项","状态","运维说明"]} rows={[
+        ["运单实时查询接口",<Tag tone={data.queryConfigured?"green":"yellow"}>{data.queryConfigured?"已配置":"未配置"}</Tag>,"用于主动拉取中通/圆通/顺丰等国内轨迹"],
+        ["HTTPS 签名回调地址",<Tag tone={data.httpsCallbackConfigured?"green":"yellow"}>{data.httpsCallbackConfigured?"已配置":"未配置"}</Tag>,"接收承运商推送并执行签名与状态机校验"],
+        ["主动订阅推送开关",<Tag tone={data.subscribeConfigured?"green":"yellow"}>{data.subscribeConfigured?"已配置":"未配置"}</Tag>,"新运单建档后向快递100发起订阅"],
+        ["后台轮询补采 Worker",<Tag tone={data.workerEnabled?"green":"yellow"}>{data.workerEnabled?"已启用":"未启用"}</Tag>,"对沉默运单与重试队列按频控周期补采"],
+      ]}/>:<p role="status">正在读取服务端配置…</p>}
     </Panel>
-    {monitor.data&&<Panel title="首发承运商字典与手机号校验规则">
-      <Table headers={["承运商编码","中文名称","英文名称","手机号尾号要求","状态"]} rows={monitor.data.carriers.map((c:Row)=>[
+    {monitor.data&&<Panel title="首发承运商字典与手机号验证规则">
+      <Table headers={["承运商编码","中文名称","英文名称","手机号尾号校验要求","启用状态"]} rows={monitor.data.carriers.map((c:Row)=>[
         <strong className="code">{c.code}</strong>,
         c.name_zh,
         c.name_en,
-        c.requires_phone?<Tag>需收/寄件人手机号后4位</Tag>:"免手机号",
-        <Tag>{c.active?"已启用":"已停用"}</Tag>,
+        c.requires_phone?<Tag tone="yellow">顺丰等须收/寄件人手机尾号后4位</Tag>:"免手机号校验",
+        <Tag tone={c.active?"green":"gray"}>{c.active?"已启用":"已停用"}</Tag>,
       ])} empty="暂无承运商配置。"/>
     </Panel>}
   </>;
 }
-export function AdminDesk({actor,path}:{actor:Row;path:string}) {
+const LEGAL_STATE_ZH: Record<string, { label: string; tone: "green" | "yellow" | "gray" }> = {
+  published: { label: "生效发布中", tone: "green" },
+  draft: { label: "草稿待发布", tone: "yellow" },
+  archived: { label: "历史已归档", tone: "gray" },
+};
+
+const CATEGORY_STATUS_ZH: Record<string, { label: string; tone: "green" | "yellow" | "gray" }> = {
+  ACTIVE: { label: "正式可售 (Active)", tone: "green" },
+  PAUSED: { label: "已暂停售卖 (Paused)", tone: "yellow" },
+  DRAFT: { label: "规划筹备中 (Draft)", tone: "gray" },
+};
+
+const TEMPLATE_STATE_ZH: Record<string, { label: string; tone: "green" | "yellow" | "gray" | "blue" }> = {
+  PUBLISHED: { label: "已审核发布", tone: "green" },
+  IN_REVIEW: { label: "待独立审核", tone: "yellow" },
+  DRAFT: { label: "草稿", tone: "gray" },
+  ARCHIVED: { label: "已归档", tone: "gray" },
+};
+
+export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:boolean}) {
   const {data,error,reload}=useLoad("/staff/admin/desk"),terms=useLoad("/public/terms");
+  const [configTab,setConfigTab]=useState<"addresses"|"quote_policy"|"calendar">("addresses");
+  const [catalogTab,setCatalogTab]=useState<"categories"|"offers">("categories");
+  const [previewLegal,setPreviewLegal]=useState<Row|null>(null);
+  const [previewTemplate,setPreviewTemplate]=useState<Row|null>(null);
   const [drawer,setDrawer]=useState<StaffObjectTarget|null>(null);
-  useEffect(()=>{
-    if(!data||!(path==="/admin/orders"||path==="/admin/dispositions")) return;
-    function revealCase() {
-      const id=location.hash.slice(1);
-      if(!id.startsWith("case-")) return;
-      const details=document.getElementById(id);
-      if(details instanceof HTMLDetailsElement) {
-        details.open=true;
-        details.scrollIntoView({block:"start"});
-      }
-    }
-    revealCase();
-    window.addEventListener("hashchange",revealCase);
-    return ()=>window.removeEventListener("hashchange",revealCase);
-  },[data,path]);
+
   if(error)return <ErrorBlock error={error}/>;
-  if(!data)return <p>正在加载后台…</p>;
+  if(!data)return <p role="status">正在加载 Admin 工作台…</p>;
   const rawPage=path.split("/")[2]??"overview";
   const page=rawPage==="categories"?"catalog":rawPage;
   const superAdmin=actor.roles.includes("super_admin");
   const canReviewTemplate=actor.roles.some((r:string)=>["reviewer","super_admin"].includes(r));
   const canAuthorTemplate=actor.roles.some((r:string)=>["template_admin","super_admin"].includes(r));
-  const links=staffTabs("admin",actor.roles);
+
+  const alertBanner = superAdmin&&data.warehouseAddressAlert ? (
+    <StatusBanner tone="warning" title="待发布默认公共收件仓址">
+      客户注册已开始领码，请尽快核对并启用默认收件仓址。<Link className="button sm" href="/admin/config">前往仓库地址配置 →</Link>
+    </StatusBanner>
+  ) : null;
+
+  if(page==="overview") return <>{alertBanner}<AdminOverviewDashboard deskData={data} error={error} reload={reload} actor={actor}/></>;
+  if(page==="orders") return <>{alertBanner}<AdminOrdersWorkbench deskData={data} reloadDesk={reload}/></>;
+  if(page==="dispositions") return <>{alertBanner}<AdminDispositionsWorkbench deskData={data} reloadDesk={reload} actor={actor} terms={terms.data?.terms??[]}/></>;
+  if(page==="incidents") return <>{alertBanner}<AdminIncidentsWorkbench/></>;
+  if(page==="refunds") return <>{alertBanner}<AdminRefundsWorkbench/></>;
+  if(page==="payments") return <>{alertBanner}<AdminPaymentsWorkbench demo={demo}/></>;
+  if(page==="finance") return <>{alertBanner}<AdminFinanceAnalytics demo={demo}/></>;
+
   const heading:Record<string,[string,string]>={
-    overview:["运营总览","按权限聚合订单、实物、报告、资金与异常。"],
-    orders:["订单与样品管理","客服检索订单、运单与样品；客户信息在生产按角色裁剪。"],
-    dispositions:["处置与发运报价","核对每件授权、运价、重量、例外原因及交接凭证。"],
-    refunds:["退款审批","退款申请、审批、渠道执行与实际到账是不同事件。"],
-    payments:["支付与对账","按用途对账，区分发起、待处理、渠道确认与争议处置。"],
-    finance:["财务分析","金额按收款目的拆分；测试订单剔除真实收入统计。"],
-    incidents:["库存事故与异常","样品丢损、冻结、调查、客户解决方案和赔偿审批。"],
-    catalog:["品类与服务目录","分类、服务类型、检查模板与可售报价 SKU 分离管理。"],
-    templates:["品类检查模板","受控字段、版本、证据要求和双语文案；发布后的模板不可修改。"],
-    "shipping-rates":["运费费率与试算","仅配置批准的目的地区域、计重规则和版本历史。"],
-    config:["业务参数与收货地址","所有共享地址、工作日历与保管规则版本化管理，不在前端写死。"],
-    legal:["条款与声明管理","审阅、版本化、独立批准和发布；客户历史同意版本可追溯。"],
-    users:["员工账号与权限","生产操作权限由服务端强制，关键敏感动作执行双人或二次认证守卫。"],
-    settings:[superAdmin?"仓址与检查模板":"检查模板","维护当前配置与版本记录。"],
+    catalog:["品类与可售套餐目录","分类准入、服务类型与可售报价 SKU 版本价格分离管控；生产目录只发布完成 SOP 与能力审批的品类。"],
+    templates:["品类检验能力与检查模板","所有检验能力与模板版本须经作者提交 + 独立审核人双人发布；已绑定历史订单保留原模板版本快照。"],
+    "shipping-rates":["国内运费阶梯费率与试算","配置首重、续重步长及每批操作费版本，所有已确认发运报价沿用签发时费率版本。"],
+    config:["业务参数、收货公仓与工作日历","配置多版本公仓地址、报价有效期及 SLA 节假日/调休规则，禁止在前端写死业务参数。"],
+    legal:["合规条款、隐私政策与声明版本","支持先保存草稿并全文预览内容哈希，再独立发布生效；客户注册与下单历史同意版本全量可追溯。"],
+    users:["员工账号角色与 RBAC 权限管控","按职责分离 (SoD) 配置岗位权限；客户 360 档案已独立迁往「客户档案」工作台。"],
+    settings:[superAdmin?"系统参数与模板准入":"检查能力与模板准入","集中维护当前业务参数、类目准入与品类检查模板版本。"],
   };
-  const currentHeading=heading[page]??["运营总览",""];
-  const activeLinks=links.filter(([href])=>href!=="/admin");
-  const canHandleOrders=activeLinks.some(([href])=>href==="/admin/orders");
-  const queue=canHandleOrders?[
-    ...data.claims.filter((c:Row)=>c.can_decide).map((c:Row)=>({number:c.public_no,action:"核验包裹归属",detail:c.tracking_no,href:"/admin/orders#case-"+c.id})),
-    ...data.manualQuotes.filter((q:Row)=>q.state==="requested").map((q:Row)=>({number:q.public_no,action:"人工报价",detail:q.reason,href:"/admin/dispositions#case-"+q.id})),
-  ].slice(0,8):[];
-  const requestedRefunds=activeLinks.some(([href])=>href==="/admin/finance"||href==="/admin/refunds")?data.refunds.filter((r:Row)=>r.state==="requested").length:0;
-  const pad2=(n:number)=>String(n).padStart(2,"0");
-  const m=data.overviewMetrics??{};
-  return <><div className="page-head row"><div><p className="eyebrow">OPERATIONS / 管理</p><h1>{currentHeading[0]}</h1><p className="muted">{currentHeading[1]}</p></div>
-    {page==="overview"&&canHandleOrders&&<div className="head-actions"><Link className="button primary" href="/admin/orders">查看订单</Link></div>}
-  </div>
-    {superAdmin&&data.warehouseAddressAlert&&<div className="notice">
-      客户已领码，默认收件仓址待发布。<Link href="/admin/config">设置仓址</Link>
-    </div>}
-    {page==="overview"&&<>
-      <div className="stats" aria-label="运营总览指标">
-        <Link href="/admin/orders?state=awaiting_samples" className="stat">
-          <span className="label">待核实实物</span>
-          <strong className="value">{pad2((m.awaiting_samples??0)+(m.unmatched_packages??0))}</strong>
-          <small className="detail">含未匹配包裹 {m.unmatched_packages??0} 件</small>
-        </Link>
-        <Link href="/admin/orders?state=queued" className="stat">
-          <span className="label">超时检查</span>
-          <strong className="value">{pad2(m.sla_overdue??0)}</strong>
-          <small className="detail">排队/检验中 {m.queued_or_inspecting??0} 单</small>
-        </Link>
-        <Link href="/admin/dispositions" className="stat">
-          <span className="label">待客户确认</span>
-          <strong className="value">{pad2((m.dispatch_pending??0)+data.manualQuotes.length)}</strong>
-          <small className="detail">含逐件处置与人工报价</small>
-        </Link>
-        <Link href={superAdmin?"/admin/refunds":"/admin/finance"} className="stat">
-          <span className="label">退款待审批</span>
-          <strong className="value">{pad2(requestedRefunds)}</strong>
-          <small className="detail">请求 ≠ 已退款</small>
-        </Link>
+  const currentHeading=heading[page]??["平台配置","维护受控业务规则与版本记录。"];
+  const defaultAddr=(data.addresses??[]).find((a:Row)=>a.is_default&&a.active);
+  const looksLikeDemoAddr=Boolean(defaultAddr && /演示|test|demo/i.test(`${defaultAddr.address_zh??""} ${defaultAddr.address_en??""}`));
+
+  return <>
+    <div className="page-head row">
+      <div>
+        <p className="eyebrow">PLATFORM CONFIGURATION</p>
+        <h1>{currentHeading[0]}</h1>
+        <p className="muted">{currentHeading[1]}</p>
       </div>
-      <div className="grid cols2">
-        <Panel title="流程健康度" subtitle="生产汇总与明细筛选采用同一口径（近 9 日 UTC 正式单趋势）。">
-          <div className="bars" aria-label="近 9 日作业趋势">
-            {(()=>{
-              const trend:Row[]=data.dailyTrend??[];
-              const maxTotal=Math.max(1,...trend.map((t:Row)=>Number(t.total??0)));
-              return trend.map((t:Row)=><span
-                key={t.day}
-                style={{height:`${Math.max(8,Math.round((Number(t.total??0)/maxTotal)*100))}%`}}
-                data-v={`${t.day} · 新建 ${t.total} / 已出报告 ${t.completed}`}
-              />);
-            })()}
-          </div>
-          <div className="row between small muted">
-            <span>正式订单 {m.production_orders??0} · 测试订单 {m.test_orders??0}</span>
-            <span>待 QA 复核 {m.qa_review??0} 单</span>
-          </div>
-        </Panel>
-        <Panel title="需要处理的运营问题">
-          <div className="list">
-            {[
-              ["/admin/logistics","物流签收但未实收",`${m.unmatched_packages??0} 个待人工核对包裹`],
-              [superAdmin?"/admin/incidents":"/admin/tickets","实物差异与客服工单",`${m.open_tickets??0} 项待处理事件`],
-              [superAdmin?"/admin/refunds":"/admin/finance","退款与争议审批",`${requestedRefunds+(m.open_disputes??0)} 项待复核`],
-              [superAdmin?"/admin/operations":"/admin","后台重试队列",`${data.jobErrors.length} 个失败的异步适配任务`],
-            ].map(([href,title,desc])=><div key={title} className="row between" style={{borderBottom:"1px solid var(--line)",padding:"11px 0"}}>
-              <div><strong>{title}</strong><div className="small muted">{desc}</div></div>
-              <Link className="button sm" href={href}>打开 →</Link>
-            </div>)}
-          </div>
-        </Panel>
-        <Panel title="跨部门数据索引">
-          <div className="grid cols3">
-            {[
-              ["/admin/orders","订单"],
-              ["/admin/tickets","工单"],
-              [superAdmin?"/admin/dispositions":"/admin/orders","处置"],
-              [superAdmin?"/admin/payments":"/admin/finance","资金"],
-              [superAdmin?"/admin/catalog":"/admin/settings","目录"],
-              [superAdmin?"/admin/audit":"/admin","审计"],
-            ].map(([href,name])=><Link key={name} className="button sm" href={href}>{name}</Link>)}
-          </div>
-        </Panel>
-        <Panel title="生产发布提醒">
-          <p className="small">开发、模拟测试、真实支付联调、实仓验收和正式开放是不同的里程碑。未完成上线门禁签署前默认保持预发布保护。</p>
-          <Tag tone={data.effectiveLaunchMode==="production"?"green":"yellow"}>Production gate: {data.effectiveLaunchMode??"staging_only"}</Tag>
-        </Panel>
+      <div className="head-actions">
+        {page==="users"&&<Link className="button sm primary" href="/admin/customers">打开客户 360 档案目录 →</Link>}
+        {page==="templates"&&<Link className="button sm" href="/admin/inspections">前往质检任务与报告监督 →</Link>}
+        {page==="catalog"&&superAdmin&&<Link className="button sm" href="/admin/templates">管理品类检查模板 →</Link>}
+        <button type="button" className="button sm" onClick={reload}>刷新配置</button>
       </div>
-      {canHandleOrders&&queue.length>0&&<Panel title="客服待处理队列">
-        <Table headers={["业务编号","待办","线索"]} rows={queue.map(entry=>[<Link className="code" href={entry.href}>{entry.number}</Link>,entry.action,entry.detail])}/>
-      </Panel>}
-    </>}
-    {page==="orders"&&<>
-      <StaffOrderList/>
-      {data.claims.length>0&&<Panel title="未匹配包裹认领" id="claims">
-        {data.claims.map((c:Row)=><details key={c.id} className="card" id={"case-"+c.id}>
-          <summary>{c.public_no} · {c.carrier_code} {c.tracking_no} · {c.decision??c.state}</summary>
-          <div className="actions" style={{marginBlock:8}}>
-            <Link href={"/admin/tickets/"+c.id}>查看工单与客户补充回复</Link>
-            {c.tracking_no&&<CodeButton code={c.tracking_no} onClick={()=>setDrawer({kind:"tracking",ref:c.tracking_no})}/>}
-            {c.proof_id&&<MediaButton ids={[c.proof_id]} labels={[`${c.public_no} 客户发货凭证`]} label="查看客户发货凭证"/>}
-            {c.outer_photo_ids?.length>0&&<MediaButton ids={c.outer_photo_ids} label={`核对仓库外箱照片 (${c.outer_photo_ids.length})`}/>}
-          </div>
-          {c.can_decide&&<Form label="记录核验结论" run={async f=>{
-            const decision=text(f,"decision");
-            if(decision==="approve"&&!c.outer_photo_ids.length)throw new Error("先确认实物入库及外箱凭证。");
-            await request("/staff/intake-claims/"+c.id+"/decision","POST",{decision,reason:text(f,"reason")});reload();
-          }}><Select name="decision" label="归属核验" choices={[{id:"approve",label:"核实通过并认领"},{id:"reject",label:"驳回"}]}/>
-            <Field name="reason" label="核验证据和原因"/></Form>}
-        </details>)}
-      </Panel>}
-    </>}
-    {page==="dispositions"&&<>
-      <Panel title="人工询价与例外报价" id="manual-quotes">
-        {!data.manualQuotes.length&&<Empty>当前没有待人工报价的例外申请。</Empty>}
-        {data.manualQuotes.map((q:Row)=><details key={q.id} className="card" id={"case-"+q.id}>
-          <summary>{q.public_no} · {q.state}</summary><p>{q.reason}</p>
-          {(!q.assignee_id||q.assignee_id===actor.id)&&<Form label="发送人工报价" run={async f=>{
-            const lines=q.lines.map((l:Row)=>({order_line_id:l.id,amount_cents:Math.round(Number(text(f,l.id+"_amount"))*100),business_days:Number(text(f,l.id+"_days"))}));
-            await request("/staff/orders/"+q.order_id+"/quotes","POST",{revision:q.revision,lines,
-              reason:text(f,"reason"),expires_at:new Date(text(f,"expiry")).toISOString(),terms_version_ids:terms.data?.terms.map((t:Row)=>t.id)??[]});reload();
-          }}>
-            {q.lines.map((l:Row)=><div key={l.id} className="inline-form">
-              <Field name={l.id+"_amount"} label={l.title+" × "+l.quantity+" · 合计 USD"} type="number" min={0} step=".01"/>
-              <Field name={l.id+"_days"} label="工作日" type="number" min={1} max={180}/></div>)}
-            <Field name="expiry" label="报价到期时间" type="datetime-local"/><Field name="reason" label="报价依据"/>
-          </Form>}
-        </details>)}
-      </Panel>
-      <OverdueDisposalDesk/>
-    </>}
-    {page==="incidents"&&<StocktakeReviewAndIncidentPanel/>}
-    {(page==="refunds"||(page==="finance"&&!superAdmin))&&<>
-      <Panel title="退款审批队列" subtitle="原收费项与可退余额必须先核验，申请与独立审批分离。">
-        <Table headers={["原收费","申请原因","金额","退款状态","渠道凭据","操作"]} rows={data.refunds.map((r:Row)=>[
-          <div><strong>{r.public_no??({inspection:"质检费",dispatch:"运费",storage:"保管费"} as Row)[r.purpose]}</strong><br/><small className="code">{r.payment_id}</small></div>,
-          r.reason,usd(r.amount_cents),<Tag>{r.state==="requested"?"待独立审批":label(r.state)}</Tag>,r.provider_ref??"—",
-          r.state==="requested"&&superAdmin?(r.requested_by===actor.id?<small>等待另一位超管审批</small>:<RefundApproval refund={r} reload={reload}/>):null,
-        ])} empty="近期没有退款申请记录。"/>
-      </Panel>
-      <OrderRefundDesk/>
-    </>}
-    {(page==="payments"||(page==="finance"&&!superAdmin))&&<>
-      <Panel title="收费项目与支付流水">
-        <Table headers={["付款 ID","金额","状态","渠道凭据"]} rows={data.payments.map((p:Row)=>[<span className="code">{p.id}</span>,usd(p.amount_cents),<Tag>{p.state}</Tag>,<span className="code">{p.provider_ref??"—"}</span>])} empty="暂无支付流水记录。"/>
-        {actor.roles.some((r:string)=>["support","super_admin"].includes(r))&&data.payments.some((p:Row)=>p.state==="succeeded")&&<Form label="建立退款申请" run={async f=>{
-          await request("/staff/payments/"+text(f,"payment")+"/refunds","POST",{amount_cents:Math.round(Number(text(f,"amount"))*100),reason:text(f,"reason")});reload();
-        }}><Select name="payment" label="实收付款" choices={data.payments.filter((p:Row)=>p.state==="succeeded").map((p:Row)=>({id:p.id,label:p.id+" · "+usd(p.amount_cents)}))}/>
-        <Field name="amount" label="退款金额（USD）" type="number" min={.01} step=".01"/><Field name="reason" label="退款原因"/></Form>}
-      </Panel>
-      <Panel title="支付争议与阻断处置">
-        <Table headers={["争议编号","关联订单/批次","争议金额","状态","原因","人工结论","操作"]} rows={(data.disputes??[]).map((d:Row)=>[
-          <span className="code">{d.provider_dispute_id}</span>,
-          d.public_no?<Link className="code" href={`/admin/orders/${d.public_no}`}>{d.public_no}</Link>:(d.batch_id?<CodeButton code={`Batch #${d.batch_id.slice(0,8)}`} onClick={()=>setDrawer({kind:"batch",ref:d.batch_id})}/>:"—"),
-          usd(d.amount_cents),
-          <Tag>{d.status}</Tag>,
-          d.reason??"—",
-          d.staff_decision?`${d.staff_decision} (${d.staff_note??""})`:"—",
-          ["needs_response","under_review","warning_needs_response"].includes(d.status)?<small className="muted">等待渠道结案后裁决</small>:
-          d.status!=="resolved_by_staff"?<Form inline label="裁决争议" run={async f=>{
-            await request("/staff/disputes/"+encodeURIComponent(d.provider_dispute_id)+"/resolve","POST",{
-              decision:text(f,"decision"),
-              reason:text(f,"reason"),
+    </div>
+    {alertBanner}
+
+    {(page==="config"||page==="settings")&&superAdmin&&<>
+      <AdminTabs
+        active={configTab}
+        onChange={next=>setConfigTab(next as typeof configTab)}
+        tabs={[
+          {id:"addresses",label:"收货公仓地址版本",count:(data.addresses??[]).length},
+          {id:"quote_policy",label:"报价有效期规则"},
+          {id:"calendar",label:"工作日历与 SLA 节假日"},
+        ]}
+      />
+      {configTab==="addresses"&&<>
+        {looksLikeDemoAddr&&<StatusBanner tone="warning" title="当前默认仓址带有演示/测试字样">
+          当前生效公仓：{defaultAddr.address_zh}。正式对外开放接单前，请新增并切换为真实运营仓址（历史在途单仍可正常扫入旧仓址）。
+        </StatusBanner>}
+        <Panel title="仓库收货地址版本列表" subtitle="切换唯一默认公仓地址不会影响发往历史仓址的在途包裹正常入库。">
+          <Table
+            headers={["中文收货地址","英文参考地址","收件人 / 电话","关联预报数","启用状态","版本操作"]}
+            rows={(data.addresses??[]).map((a:Row)=>[
+              <div key="zh" className="cell-stack">
+                <span>{a.address_zh}</span>
+                <CopyId value={a.id}/>
+              </div>,
+              a.address_en,
+              <div key="c" className="cell-stack">
+                <strong>{a.contact_name}</strong>
+                <small className="code nowrap">{a.contact_phone}</small>
+              </div>,
+              <span key="cnt" className="nowrap">{a.advice_count??0} 单</span>,
+              <Tag key="st" tone={a.is_default?"green":a.active?"blue":"gray"}>{a.is_default?"唯一默认公仓":a.active?"候选启用":"已停用(历史保留)"}</Tag>,
+              <div key="op" className="actions">
+                {!a.is_default&&<Action sm primary run={async()=>{
+                  await request("/staff/admin/warehouse-addresses/"+a.id,"POST",{is_default:true});
+                  reload();
+                }}>设为唯一默认</Action>}
+                {!a.is_default&&<Action sm run={async()=>{
+                  await request("/staff/admin/warehouse-addresses/"+a.id,"POST",{active:!a.active});
+                  reload();
+                }}>{a.active?"停用":"恢复启用"}</Action>}
+              </div>,
+            ])}
+            empty="暂无仓库收货地址版本。"
+          />
+          <hr className="divider"/>
+          <Form label="新增公共收件仓址版本" run={async f=>{
+            await request("/staff/admin/warehouse-addresses","POST",{
+              address_zh:text(f,"address_zh"),
+              address_en:text(f,"address_en"),
+              contact_name:text(f,"contact_name"),
+              contact_phone:text(f,"contact_phone"),
+              is_default:text(f,"is_default")==="true",
             });
             reload();
           }}>
-            <Select name="decision" label="动作" choices={[
-              {id:"release_freeze",label:"解除出库与报告冻结"},
-              {id:"maintain_hold",label:"维持冻结"},
-            ]}/>
-            <Field name="reason" label="裁决原因"/>
-          </Form>:"已结案裁决",
-        ])} empty="当前无支付拒付或争议记录。"/>
-      </Panel>
+            <Field name="address_zh" label="中文地址（含专属码占位提示）"/><Field name="address_en" label="英文参考地址"/>
+            <Field name="contact_name" label="仓库收件人"/><Field name="contact_phone" label="仓库电话"/>
+            <Select name="is_default" label="生效策略" choices={[{id:"true",label:"立即设为唯一默认公仓"},{id:"false",label:"先作为候选地址保存"}]}/>
+          </Form>
+        </Panel>
+      </>}
+      {configTab==="quote_policy"&&<QuotePolicyEditor policy={data.quote_policy} onSave={reload}/>}
+      {configTab==="calendar"&&<BusinessCalendarEditor calendar={data.calendar} onSave={reload}/>}
     </>}
-    {page==="finance"&&<FinanceReconciliationPanel onOpenDrawer={setDrawer}/>}
-    {(page==="config"||page==="settings")&&superAdmin&&<>
-      <QuotePolicyEditor policy={data.quote_policy} onSave={reload}/>
-      <Panel title="仓库收货地址版本" subtitle="切换默认地址不会影响仍发往历史地址的在途包裹入库。">
-        <Table headers={["中文地址","英文地址","收件人/电话","关联预报数","状态","操作"]} rows={data.addresses.map((a:Row)=>[
-          a.address_zh,
-          a.address_en,
-          `${a.contact_name} (${a.contact_phone})`,
-          a.advice_count??0,
-          <Tag>{a.is_default?"唯一默认":a.active?"候选启用":"已停用(历史保留)"}</Tag>,
-          <div className="actions">
-            {!a.is_default&&<Action run={async()=>{
-              await request("/staff/admin/warehouse-addresses/"+a.id,"POST",{is_default:true});
-              reload();
-            }}>设为默认</Action>}
-            {!a.is_default&&<Action run={async()=>{
-              await request("/staff/admin/warehouse-addresses/"+a.id,"POST",{active:!a.active});
-              reload();
-            }}>{a.active?"停用":"启用"}</Action>}
-          </div>,
-        ])}/>
-        <Form label="新增公共收件仓址" run={async f=>{
-          await request("/staff/admin/warehouse-addresses","POST",{
-            address_zh:text(f,"address_zh"),
-            address_en:text(f,"address_en"),
-            contact_name:text(f,"contact_name"),
-            contact_phone:text(f,"contact_phone"),
-            is_default:text(f,"is_default")==="true",
+
+    {page==="legal"&&superAdmin&&<>
+      <Panel title="合规文档与条款发布版本列表" subtitle="可点击「全文预览」审阅完整 Markdown 条款与内容 SHA 摘要后再正式发布生效。">
+        <Table
+          headers={["文档类型","版本号","发布状态","生效时间","内容摘要","全文预览 / 发布"]}
+          rows={(data.termsVersions??[]).map((t:Row)=>[
+            <span key="k" className="code">{t.kind}</span>,
+            <strong key="v" className="code">{t.version}</strong>,
+            <BizTag key="st" dict={LEGAL_STATE_ZH} value={t.state}/>,
+            t.effective_at?stamp(t.effective_at):"草稿待发布",
+            <CopyId key="h" value={t.content_hash??"—"}/>,
+            <div key="op" className="actions">
+              <button type="button" className="button sm" onClick={()=>setPreviewLegal(t)}>全文预览</button>
+              {t.state==="draft"&&<Action sm primary run={async()=>{
+                await request("/staff/admin/terms/"+t.id+"/publish","POST",{});
+                reload();
+              }}>正式发布生效</Action>}
+            </div>,
+          ])}
+          empty="暂无合规条款版本。"
+        />
+      </Panel>
+      <Panel title="起草或发布新条款版本" subtitle="建议先保存草稿并全文审阅无误后再切换发布。">
+        <Form label="提交条款版本" run={async f=>{
+          await request("/staff/admin/terms","POST",{
+            kind:text(f,"kind"),
+            version:text(f,"version"),
+            content_md:text(f,"content_md"),
+            publish_now:text(f,"publish_now")==="true",
           });
           reload();
         }}>
-          <Field name="address_zh" label="中文地址"/><Field name="address_en" label="英文地址"/>
-          <Field name="contact_name" label="仓库收件人"/><Field name="contact_phone" label="仓库电话"/>
-          <Select name="is_default" label="是否立即设为唯一默认" choices={[{id:"true",label:"设为唯一默认"},{id:"false",label:"作为候选仓址保存"}]}/>
+          <div className="fields three">
+            <Select name="kind" label="条款类型" choices={[
+              {id:"terms",label:"服务条款 (terms)"},
+              {id:"privacy",label:"隐私政策 (privacy)"},
+              {id:"restricted_items",label:"禁限寄说明 (restricted_items)"},
+              {id:"report_notice",label:"报告使用声明 (report_notice)"},
+            ]}/>
+            <Field name="version" label="版本号 (如 2026.2)"/>
+            <Select name="publish_now" label="发布方式" choices={[
+              {id:"false",label:"先保存草稿预览"},
+              {id:"true",label:"立即发布生效"},
+            ]}/>
+          </div>
+          <label>Markdown 正文<textarea name="content_md" rows={8} required minLength={10}/></label>
         </Form>
       </Panel>
-      <BusinessCalendarEditor calendar={data.calendar} onSave={reload}/>
     </>}
-    {page==="legal"&&superAdmin&&<Panel title="合规文档与条款版本列表">
-      <Table headers={["类型","版本号","状态","生效时间","内容哈希","操作"]} rows={(data.termsVersions??[]).map((t:Row)=>[
-        <span className="code">{t.kind}</span>,
-        <span className="code">{t.version}</span>,
-        <Tag>{t.state}</Tag>,
-        t.effective_at?stamp(t.effective_at):"草稿待发布",
-        <span className="code">{String(t.content_hash??"").slice(0,12)}</span>,
-        <div className="actions">
-          {t.state==="draft"&&<Action primary run={async()=>{
-            await request("/staff/admin/terms/"+t.id+"/publish","POST",{});
-            reload();
-          }}>发布生效</Action>}
-        </div>,
-      ])} empty="暂无条款版本。"/>
-      <Form label="创建条款版本（预览或直接发布）" run={async f=>{
-        await request("/staff/admin/terms","POST",{
-          kind:text(f,"kind"),
-          version:text(f,"version"),
-          content_md:text(f,"content_md"),
-          publish_now:text(f,"publish_now")==="true",
-        });
-        reload();
-      }}>
-        <Select name="kind" label="条款类型" choices={[
-          {id:"terms",label:"服务条款 (terms)"},
-          {id:"privacy",label:"隐私政策 (privacy)"},
-          {id:"restricted_items",label:"禁限寄说明 (restricted_items)"},
-          {id:"report_notice",label:"报告使用声明 (report_notice)"},
-        ]}/>
-        <Field name="version" label="版本号 (如 2026.2)"/>
-        <Select name="publish_now" label="发布方式" choices={[
-          {id:"false",label:"先保存草稿预览"},
-          {id:"true",label:"立即发布生效"},
-        ]}/>
-        <label>Markdown 正文<textarea name="content_md" required minLength={10}/></label>
-      </Form>
-    </Panel>}
+
     {page==="users"&&superAdmin&&<StaffAndCustomerUsersDesk
       staffUsers={data.staffUsers??[]}
-      customerUsers={data.customerUsers??[]}
+      customerCount={Number(data.overviewMetrics?.active_customers??0)}
       actor={actor}
       onSave={reload}
     />}
+
     {(page==="catalog"||page==="settings")&&<>
-      <Panel title="类目运营准入" subtitle="新增分类不代表自动开放付费下单。">
-        <Table headers={["标识","中文名称","英文名称","状态","准入材料","操作"]} rows={data.categories.map((c:Row)=>[
-          <span className="code">{c.slug}</span>,c.labels["zh-CN"],c.labels.en,<Tag>{c.status}</Tag>,
-          c.admission_snapshot?`SOP: ${c.admission_snapshot.sop_ref??(c.admission_snapshot.demo?"演示夹具":"待补")}`:"未提交准入",
-          superAdmin&&c.status!=="ACTIVE"?<Form inline label="激活类目" run={async f=>{
-            await request("/staff/admin/categories/"+c.id+"/status","POST",{
-              status:"ACTIVE",
-              admission_snapshot:{sop_ref:text(f,"sop_ref"),pilot_evidence:text(f,"pilot_evidence"),training_completed:true,equipment_verified:true},
-            });reload();
-          }}><Field name="sop_ref" label="SOP 编号"/><Field name="pilot_evidence" label="试运行记录"/></Form>:
-          superAdmin&&c.status==="ACTIVE"?<Action run={async()=>{
-            await request("/staff/admin/categories/"+c.id+"/status","POST",{status:"PAUSED"});reload();
-          }}>暂停可售</Action>:null,
-        ])} empty="暂无类目记录。"/>
-        {canAuthorTemplate&&<Form inline label="新建规划类目" run={async f=>{
-          await request("/staff/admin/categories","POST",{slug:text(f,"slug"),labels:{en:text(f,"en"),"zh-CN":text(f,"zh")}});reload();
-        }}><Field name="slug" label="类目编码"/><Field name="zh" label="中文名称"/><Field name="en" label="英文名称"/></Form>}
-      </Panel>
-      {superAdmin&&<Panel title="可售套餐与版本价格" subtitle="生产价格调整生成新版本并由服务端签发，旧订单保留原始价格快照。">
-        <Table headers={["SKU","名称","价格版本","生效时间","计价规则","状态","操作"]} rows={(data.offers??[]).map((o:Row)=>[
-          <span className="code">{o.sku_code}</span>,o.title?.["zh-CN"]??o.title?.en??o.sku_code,
-          o.price_version?`v${o.price_version}`:"—",
-          o.effective_from?new Date(String(o.effective_from)).toISOString().slice(0,16).replace("T"," "):"—",
-          o.rules?`${o.rules.minimum}–${o.rules.maximum} 件 · ${usd(o.rules.package_cents??o.rules.unit_cents)} · ${o.rules.business_days} 工作日`:"—",
-          <Tag>{o.enabled?"可售":"已停用"}</Tag>,
-          <Action run={async()=>{
-            await request("/staff/admin/skus/"+o.sku_code+"/status","POST",{enabled:!o.enabled});
-            reload();
-          }}>{o.enabled?"停用可售":"恢复可售"}</Action>,
-        ])} empty="暂无可售套餐。"/>
-        {!!(data.offers??[]).length&&<Form inline label="发布新价格版本" run={async f=>{
-          const sku=text(f,"sku"),offer=(data.offers??[]).find((o:Row)=>o.sku_code===sku);
-          const cents=Math.round(Number(text(f,"price"))*100),days=Number(text(f,"days"));
-          const isPackage=offer?.rules?.package_cents!=null;
-          await request("/staff/admin/skus/"+sku+"/prices","POST",{rules:{
-            minimum:offer?.rules?.minimum??1,maximum:offer?.rules?.maximum??100,
-            ...(isPackage?{package_cents:cents}:{unit_cents:cents}),business_days:days,
-          }});reload();
-        }}>
-          <Select name="sku" label="套餐 SKU" choices={(data.offers??[]).map((o:Row)=>({id:o.sku_code,label:o.sku_code}))}/>
-          <Field name="price" label="新价格（USD）" type="number" min={.01} step=".01"/>
-          <Field name="days" label="承诺工作日" type="number" min={1} max={180} value={3}/>
-        </Form>}
-        {(data.templates??[]).some((t:Row)=>t.state==="PUBLISHED")&&<details className="card" style={{marginTop:12}}>
+      <AdminTabs
+        active={catalogTab}
+        onChange={next=>setCatalogTab(next as typeof catalogTab)}
+        tabs={[
+          {id:"categories",label:"类目运营准入",count:(data.categories??[]).length},
+          ...(superAdmin?[{id:"offers",label:"可售套餐 SKU 与版本定价",count:(data.offers??[]).length}]:[]),
+        ]}
+      />
+      {catalogTab==="categories"&&<Panel title="品类准入管控" subtitle="仅已完成 SOP 与质检设备验证的品类可设为正式可售（服装 Apparel 为首发运营品类）。">
+        <Table
+          headers={["类目编码","中文名称","英文名称","准入状态","SOP 与试运行材料","操作"]}
+          rows={(data.categories??[]).map((c:Row)=>[
+            <span key="sl" className="code">{c.slug}</span>,
+            c.labels["zh-CN"],
+            c.labels.en,
+            <BizTag key="st" dict={CATEGORY_STATUS_ZH} value={c.status}/>,
+            c.admission_snapshot?`SOP: ${c.admission_snapshot.sop_ref??(c.admission_snapshot.demo?"演示夹具":"待补充")}`:"未提交准入",
+            superAdmin&&c.status!=="ACTIVE"?<Form key="act" inline label="核准激活" run={async f=>{
+              await request("/staff/admin/categories/"+c.id+"/status","POST",{
+                status:"ACTIVE",
+                admission_snapshot:{sop_ref:text(f,"sop_ref"),pilot_evidence:text(f,"pilot_evidence"),training_completed:true,equipment_verified:true},
+              });reload();
+            }}><Field name="sop_ref" label="SOP 编号"/><Field name="pilot_evidence" label="试运行记录"/></Form>:
+            superAdmin&&c.status==="ACTIVE"?<Action key="pa" sm run={async()=>{
+              await request("/staff/admin/categories/"+c.id+"/status","POST",{status:"PAUSED"});reload();
+            }}>暂停可售</Action>:null,
+          ])}
+          empty="暂无类目记录。"
+        />
+        {canAuthorTemplate&&<>
+          <hr className="divider"/>
+          <Form inline label="新建规划类目（初始草稿状态，不直接开放售卖）" run={async f=>{
+            await request("/staff/admin/categories","POST",{slug:text(f,"slug"),labels:{en:text(f,"en"),"zh-CN":text(f,"zh")}});reload();
+          }}><Field name="slug" label="类目编码"/><Field name="zh" label="中文名称"/><Field name="en" label="英文名称"/></Form>
+        </>}
+      </Panel>}
+
+      {catalogTab==="offers"&&superAdmin&&<Panel title="可售套餐 SKU 与版本价格" subtitle="调价将签发新价格版本；客户已创建/已确认订单永久保留下单当时的价格快照。">
+        <Table
+          headers={["SKU 编码","套餐名称","价格版本","当前单价 / 整包价","数量区间与交期","生效时间","状态","操作"]}
+          rows={(data.offers??[]).map((o:Row)=>[
+            <strong key="s" className="code">{o.sku_code}</strong>,
+            <div key="t" className="cell-stack">
+              <strong>{o.title?.["zh-CN"]??o.sku_code}</strong>
+              <small className="muted">{o.title?.en??""}</small>
+            </div>,
+            <span key="pv" className="code nowrap">{o.price_version?`v${o.price_version}`:"—"}</span>,
+            o.rules?<div key="pr" className="cell-stack"><Money cents={o.rules.package_cents??o.rules.unit_cents} align="left"/><small className="muted">{o.rules.package_cents!=null?"整包一口价":"按件单价"}</small></div>:"—",
+            o.rules?<span key="rg" className="nowrap">{o.rules.minimum}–{o.rules.maximum} 件 · {o.rules.business_days} 工作日</span>:"—",
+            o.effective_from?stamp(o.effective_from,true):"—",
+            <Tag key="en" tone={o.enabled?"green":"gray"}>{o.enabled?"可售":"已停用"}</Tag>,
+            <Action key="op" sm run={async()=>{
+              await request("/staff/admin/skus/"+o.sku_code+"/status","POST",{enabled:!o.enabled});
+              reload();
+            }}>{o.enabled?"停用可售":"恢复可售"}</Action>,
+          ])}
+          empty="暂无可售套餐。"
+        />
+        {!!(data.offers??[]).length&&<>
+          <hr className="divider"/>
+          <Form inline label="签发新价格版本" run={async f=>{
+            const sku=text(f,"sku"),offer=(data.offers??[]).find((o:Row)=>o.sku_code===sku);
+            const cents=Math.round(Number(text(f,"price"))*100),days=Number(text(f,"days"));
+            const isPackage=offer?.rules?.package_cents!=null;
+            await request("/staff/admin/skus/"+sku+"/prices","POST",{rules:{
+              minimum:offer?.rules?.minimum??1,maximum:offer?.rules?.maximum??100,
+              ...(isPackage?{package_cents:cents}:{unit_cents:cents}),business_days:days,
+            }});reload();
+          }}>
+            <Select name="sku" label="套餐 SKU" choices={(data.offers??[]).map((o:Row)=>({id:o.sku_code,label:o.sku_code}))}/>
+            <Field name="price" label="新价格（USD）" type="number" min={.01} step=".01"/>
+            <Field name="days" label="承诺工作日" type="number" min={1} max={180} value={3}/>
+          </Form>
+        </>}
+        {(data.templates??[]).some((t:Row)=>t.state==="PUBLISHED")&&<details className="card" style={{marginTop:14}}>
           <summary>新建或绑定可售套餐 SKU（关联已发布模板）</summary>
-          <p className="small muted">新准入品类（如箱包、家居用品）完成能力审批与模板发布后，可在此直接创建可售套餐并生效上架，无需改动通用业务代码。</p>
+          <p className="small muted">新准入品类完成能力审批与模板发布后，可在此直接创建可售套餐并生效上架，无需改动通用业务代码。</p>
           <Form label="创建并发布套餐 SKU" run={async f=>{
             const tplId=text(f,"template_version_id");
             const tpl=(data.templates??[]).find((t:Row)=>t.id===tplId);
@@ -1582,28 +1690,38 @@ export function AdminDesk({actor,path}:{actor:Row;path:string}) {
         </details>}
       </Panel>}
     </>}
+
     {(page==="templates"||page==="settings")&&<>
-      <Panel title="检验能力准入与独立审批">
-        <Table headers={["能力编码","检验方法","状态","操作"]} rows={(data.allCapabilities??data.capabilities).map((cap:Row)=>[
-          <span className="code">{cap.code}</span>,cap.method,
-          <Tag>{cap.revoked_at?"已撤销":cap.approved_by?"已批准":"待独立审批"}</Tag>,
+      <Panel title="检验能力准入与独立审批" subtitle="检查模板必须绑定已获独立批准的检验能力；能力创建人与审批人不得为同一人。">
+        <Table headers={["能力编码","标准检验方法与工器具","审批状态","操作"]} rows={(data.allCapabilities??data.capabilities).map((cap:Row)=>[
+          <span key="c" className="code">{cap.code}</span>,
+          cap.method,
+          <Tag key="st" tone={cap.revoked_at?"red":cap.approved_by?"green":"yellow"}>{cap.revoked_at?"已撤销":cap.approved_by?"已独立批准":"待独立审批"}</Tag>,
           !cap.revoked_at&&!cap.approved_by&&canReviewTemplate&&cap.approval?.author_id!==actor.id?
-            <Action run={async()=>{await request("/staff/admin/capabilities/"+cap.id+"/approve","POST",{});reload();}}>独立批准能力</Action>:
+            <Action key="a" sm primary run={async()=>{await request("/staff/admin/capabilities/"+cap.id+"/approve","POST",{});reload();}}>独立批准能力</Action>:
           !cap.revoked_at&&cap.approved_by&&superAdmin?
-            <Action run={async()=>{await request("/staff/admin/capabilities/"+cap.id+"/revoke","POST",{reason:"后台调整能力准入"});reload();}}>撤销能力</Action>:null,
+            <Action key="r" sm run={async()=>{await request("/staff/admin/capabilities/"+cap.id+"/revoke","POST",{reason:"后台调整能力准入"});reload();}}>撤销能力</Action>:null,
         ])} empty="暂无检验能力记录。"/>
-        {canAuthorTemplate&&<Form inline label="提交检验能力" run={async f=>{
-          await request("/staff/admin/capabilities","POST",{code:text(f,"code"),method:text(f,"method")});reload();
-        }}><Field name="code" label="能力编码"/><Field name="method" label="标准方法与工具说明"/></Form>}
+        {canAuthorTemplate&&<>
+          <hr className="divider"/>
+          <Form inline label="提交新增检验能力" run={async f=>{
+            await request("/staff/admin/capabilities","POST",{code:text(f,"code"),method:text(f,"method")});reload();
+          }}><Field name="code" label="能力编码"/><Field name="method" label="标准方法与工具说明"/></Form>
+        </>}
       </Panel>
-      <Panel title="模板仓库与独立审核发布">
-        <Table headers={["模板键","版本","状态","关联能力","检查项预览","操作"]} rows={data.templates.map((t:Row)=>[
-          <span className="code">{t.template_key}</span>,`v${t.version}`,<Tag>{t.state}</Tag>,
+      <Panel title="模板版本仓库与独立审核发布" subtitle="审核发布前请点击「审阅完整字段」核对每项实测指标、测量环境说明和必拍机位。">
+        <Table headers={["模板键","版本","发布状态","关联能力","检查项与机位概览","操作"]} rows={(data.templates??[]).map((t:Row)=>[
+          <strong key="k" className="code">{t.template_key}</strong>,
+          <span key="v" className="code nowrap">v{t.version}</span>,
+          <BizTag key="st" dict={TEMPLATE_STATE_ZH} value={t.state}/>,
           (t.capability_codes??[]).join(", ")||"—",
-          t.content?.checks?`${t.content.checks.length} 项（${t.content.checks.map((c:Row)=>c.zh||c.key).join("、")}）`:"—",
-          t.state==="IN_REVIEW"&&canReviewTemplate&&t.author_id!==actor.id?
-            <Action run={async()=>{await request("/staff/admin/templates/"+t.id+"/publish","POST",{});reload();}}>独立审核发布</Action>:
-          t.state==="IN_REVIEW"&&t.author_id===actor.id?<small>等待非作者独立复核</small>:null,
+          t.content?.checks?`${t.content.checks.length} 项检查 / ${(t.content.shots??[]).length} 个机位`:"—",
+          <div key="op" className="actions">
+            <button type="button" className="button sm" onClick={()=>setPreviewTemplate(t)}>审阅完整字段</button>
+            {t.state==="IN_REVIEW"&&canReviewTemplate&&t.author_id!==actor.id&&
+              <Action sm primary run={async()=>{await request("/staff/admin/templates/"+t.id+"/publish","POST",{});reload();}}>独立审核发布</Action>}
+            {t.state==="IN_REVIEW"&&t.author_id===actor.id&&<small className="muted">须非作者独立复核</small>}
+          </div>,
         ])} empty="暂无模板版本。"/>
         {!!data.categories.length&&canAuthorTemplate&&<TemplateAuthorForm
           categories={data.categories}
@@ -1613,7 +1731,82 @@ export function AdminDesk({actor,path}:{actor:Row;path:string}) {
         />}
       </Panel>
     </>}
+
     {page==="shipping-rates"&&superAdmin&&<ShippingRateConfigPanel rates={data.shippingRates??[]} onSave={reload}/>}
+
+    <ModalDrawer
+      open={Boolean(previewLegal)}
+      onClose={()=>setPreviewLegal(null)}
+      title={previewLegal?`条款正文预览 · ${previewLegal.kind} v${previewLegal.version}`:""}
+      subtitle={previewLegal?`SHA-256 摘要：${previewLegal.content_hash??"—"}`:""}
+    >
+      {previewLegal&&<>
+        <div className="actions" style={{marginBottom:12}}>
+          <BizTag dict={LEGAL_STATE_ZH} value={previewLegal.state}/>
+          <CopyId value={previewLegal.content_hash??"—"}/>
+          {previewLegal.state==="draft"&&<Action sm primary run={async()=>{
+            await request("/staff/admin/terms/"+previewLegal.id+"/publish","POST",{});
+            setPreviewLegal(null);
+            reload();
+          }}>确认无误并正式发布</Action>}
+        </div>
+        <pre className="card-soft" style={{whiteSpace:"pre-wrap",fontFamily:"var(--font-mono)",fontSize:12.5,lineHeight:1.6,maxHeight:"62vh",overflow:"auto"}}>
+          {previewLegal.content_md??"（该记录仅返回元数据，未附带 Markdown 正文）"}
+        </pre>
+      </>}
+    </ModalDrawer>
+
+    <ModalDrawer
+      open={Boolean(previewTemplate)}
+      onClose={()=>setPreviewTemplate(null)}
+      title={previewTemplate?`检查模板版本审阅 · ${previewTemplate.template_key} v${previewTemplate.version}`:""}
+      subtitle={previewTemplate?`关联能力：${(previewTemplate.capability_codes??[]).join("、")||"无"}`:""}
+    >
+      {previewTemplate&&<>
+        <div className="actions" style={{marginBottom:12}}>
+          <BizTag dict={TEMPLATE_STATE_ZH} value={previewTemplate.state}/>
+          <CopyId value={previewTemplate.id}/>
+          {previewTemplate.state==="IN_REVIEW"&&canReviewTemplate&&previewTemplate.author_id!==actor.id&&<Action sm primary run={async()=>{
+            await request("/staff/admin/templates/"+previewTemplate.id+"/publish","POST",{});
+            setPreviewTemplate(null);
+            reload();
+          }}>确认字段无误并独立发布</Action>}
+        </div>
+        {previewTemplate.content?.measure_conditions&&(
+          <div className="card-soft" style={{marginBottom:12}}>
+            <strong>测量环境与工具条件</strong>
+            <p style={{margin:"6px 0 0"}}>{previewTemplate.content.measure_conditions}</p>
+          </div>
+        )}
+        <Panel title={`受控检查字段 (${(previewTemplate.content?.checks??[]).length})`}>
+          <Table
+            headers={["键名","中文名称","英文标签","类型 / 单位","方法","必检","强制拍照"]}
+            rows={(previewTemplate.content?.checks??[]).map((c:Row)=>[
+              <span key="k" className="code">{c.key}</span>,
+              c.zh??"—",
+              c.label??"—",
+              <span key="t" className="nowrap">{c.type}{c.unit?` (${c.unit})`:""}</span>,
+              c.method??"—",
+              c.required?<Tag tone="blue">必检</Tag>:"选检",
+              c.evidence?<Tag tone="yellow">必拍图</Tag>:"否",
+            ])}
+            empty="未配置检查项。"
+          />
+        </Panel>
+        <Panel title={`必拍证据机位 (${(previewTemplate.content?.shots??[]).length})`}>
+          <Table
+            headers={["机位编码","中文说明","英文标签"]}
+            rows={(previewTemplate.content?.shots??[]).map((s:Row)=>[
+              <span key="k" className="code">{s.code}</span>,
+              s.zh??"—",
+              s.name??"—",
+            ])}
+            empty="未配置必拍机位。"
+          />
+        </Panel>
+      </>}
+    </ModalDrawer>
+
     <StaffObjectDrawer target={drawer} onClose={()=>setDrawer(null)}/>
   </>;
 }
@@ -1699,35 +1892,29 @@ function BusinessCalendarEditor({calendar,onSave}:{calendar?:Row;onSave:()=>void
 }
 
 function StaffAndCustomerUsersDesk({
-  staffUsers,customerUsers,actor,onSave,
+  staffUsers,customerCount,actor,onSave,
 }:{
-  staffUsers:Row[];customerUsers:Row[];actor:Row;onSave:()=>void;
+  staffUsers:Row[];customerCount:number;actor:Row;onSave:()=>void;
 }) {
   const [editingStaff,setEditingStaff]=useState<Row|null>(null);
   const [selectedRoles,setSelectedRoles]=useState<string[]>([]);
-  const [editingCustomer,setEditingCustomer]=useState<Row|null>(null);
-  const [custQuery,setCustQuery]=useState("");
-  const [custStatus,setCustStatus]=useState("");
   const openStaffEditor=(u:Row)=>{
     setSelectedRoles([...(u.roles??[])]);
     setEditingStaff(u);
   };
-  const filteredCustomers=customerUsers.filter(c=>{
-    const q=custQuery.trim().toLowerCase();
-    const matchQ=!q || String(c.receiving_code??"").toLowerCase().includes(q) || String(c.email??"").toLowerCase().includes(q);
-    const matchSt=!custStatus || c.status===custStatus;
-    return matchQ && matchSt;
-  });
   return <>
-    <Panel title="员工权限列表" subtitle="点击「配置角色权限」通过多选卡片调整岗位权限；变更角色或停用账号均记录审计原因并即时生效。">
-      <Table headers={["员工账号","状态","当前角色","权限与账号管控"]} rows={staffUsers.map((u:Row)=>[
+    <StatusBanner tone="info" title={`客户 360 档案目录与账号管控（累计注册客户 ${customerCount} 户）`}>
+      按永久收件码 <span className="code">QCW-...</span> 检索客户、排查归属与收支往来、或管控账号风控状态，请进入专用客户工作台。<Link className="button sm primary" href="/admin/customers">前往客户档案目录 →</Link>
+    </StatusBanner>
+    <Panel title="内部员工账号与 RBAC 角色列表" subtitle="点击「配置角色权限」通过多选卡片调整岗位权限；变更角色或停用账号均记录审计原因并即时生效。">
+      <Table headers={["员工账号","账号状态","已分配岗位角色","权限与账号管控"]} rows={staffUsers.map((u:Row)=>[
         <div key={u.id} className="cell-stack">
           <strong>{u.display_name??u.id.slice(0,8)}</strong>
           <small className="code">{u.email??"—"}</small>
         </div>,
-        <Tag key="st">{u.status}</Tag>,
+        <Tag key="st" tone={u.status==="disabled"?"red":"green"}>{u.status==="disabled"?"已停用":"正常在岗"}</Tag>,
         <div key="roles" className="actions">
-          {(u.roles??[]).length?(u.roles as string[]).map(r=><Tag key={r} tone="blue">{r}</Tag>):<span className="muted">未分配角色</span>}
+          {(u.roles??[]).length?(u.roles as string[]).map(r=><Tag key={r} tone="blue">{ROLE_ZH[r]??r}</Tag>):<span className="muted">未分配角色</span>}
         </div>,
         <div key="ops" className="actions">
           <button type="button" className="button sm primary" onClick={()=>openStaffEditor(u)}>配置角色权限</button>
@@ -1739,35 +1926,13 @@ function StaffAndCustomerUsersDesk({
         </div>,
       ])} empty="暂无员工账号。"/>
     </Panel>
-    <Panel title="客户账号与专属收件码目录" subtitle="按永久收件码 QCW-... 或注册邮箱检索客户，查看履约统计或执行风控状态调整。">
-      <div className="form inline-form" style={{marginBottom:12}}>
-        <label>搜索收件码或邮箱<input type="search" placeholder="QCW-... 或客户邮箱" value={custQuery} onChange={e=>setCustQuery(e.target.value)}/></label>
-        <label>账号状态<select value={custStatus} onChange={e=>setCustStatus(e.target.value)}>
-          <option value="">全部状态</option>
-          <option value="active">正常 (active)</option>
-          <option value="restricted">限制新单 (restricted)</option>
-          <option value="disabled">已停用 (disabled)</option>
-        </select></label>
-      </div>
-      <Table
-        headers={["专属收件码","主绑定邮箱","账号状态","累计订单 / 在库件数","注册时间","管控操作"]}
-        rows={filteredCustomers.map(c=>[
-          <strong key={c.id} className="code">{c.receiving_code}</strong>,
-          <span key="em" className="code">{c.email??"—"}</span>,
-          <Tag key="st">{c.status}</Tag>,
-          <span key="cnt">{c.order_count??0} 单 · 在库 {c.stored_item_count??0} 件</span>,
-          stamp(c.created_at,true),
-          <button type="button" className="button sm" onClick={()=>setEditingCustomer(c)}>管控状态</button>,
-        ])}
-        empty="没有符合筛选条件的客户账号。"
-      />
-    </Panel>
-    <Panel title="典型职责分离">
-      <Table headers={["操作","允许角色","重要守卫"]} rows={[
-        ["报告录入与复核","检查员 / 独立复核员","检查员不能批准本人生成的报告"],
-        ["退款第二人审批","独立批准者","需重新认证并记录可追溯审批原因"],
-        ["价格与模板发布","模板管理员 + 独立审核人","已确认订单保留原价格与模板快照"],
-        ["物流接入管理","超级管理员","供应商密钥仅在服务端加密存储"],
+    <Panel title="平台核心职责分离 (SoD) 守卫矩阵">
+      <Table headers={["敏感业务操作","授权角色","强制服务端守卫"]} rows={[
+        ["报告录入与独立复核","检查员 / 独立复核员","检查员不得批准本人生成的检查报告，且须逐项覆盖图片/测量字段"],
+        ["退款独立审批与驳回","超级管理员（第二人）","申请人不得审批本人发起的退款，须 15 分钟内员工 MFA 确认"],
+        ["价格与检查模板发布","模板管理员 + 独立审核人","非作者独立审阅全部字段后方可发布；已确认订单永久保留快照"],
+        ["逾期/违禁件双人处置","仓管提交 + 另一管理员复核","执行须受控开关开启且保留通知与毁弃见证记录"],
+        ["物流密钥与接口管理","超级管理员","供应商密钥仅在服务端环境变量加密加载"],
       ]}/>
     </Panel>
     <ModalDrawer
@@ -1799,29 +1964,6 @@ function StaffAndCustomerUsersDesk({
           </label>)}
         </div>
         <Field name="reason" label="权限变更原因（审计必填）" value="岗位职责调整"/>
-      </Form>}
-    </ModalDrawer>
-    <ModalDrawer
-      open={Boolean(editingCustomer)}
-      onClose={()=>setEditingCustomer(null)}
-      centered
-      title={editingCustomer?`客户账号状态管控 · ${editingCustomer.receiving_code}`:""}
-      subtitle={editingCustomer?.email??""}
-    >
-      {editingCustomer&&<Form label="确认更新客户账号状态" run={async f=>{
-        await request("/staff/users/"+editingCustomer.id+"/status","POST",{
-          status:text(f,"status"),
-          reason:text(f,"reason"),
-        });
-        setEditingCustomer(null);
-        onSave();
-      }}>
-        <Select name="status" label="目标状态" value={editingCustomer.status} choices={[
-          {id:"active",label:"正常启用 (active)"},
-          {id:"restricted",label:"限制新建订单与付款，保留在途查询与提货 (restricted)"},
-          {id:"disabled",label:"停用账号并立即撤销所有登录会话 (disabled)"},
-        ]}/>
-        <Field name="reason" label="风控或恢复原因说明"/>
       </Form>}
     </ModalDrawer>
   </>;
@@ -1959,107 +2101,19 @@ function TemplateAuthorForm({
   </div>;
 }
 
-function FinanceReconciliationPanel({onOpenDrawer}:{onOpenDrawer?:(t:StaffObjectTarget)=>void}) {
-  const [includeTest,setIncludeTest]=useState(false);
-  const query=`?include_test=${includeTest?"1":"0"}`;
-  const {data,error,reload}=useLoad("/staff/admin/reconciliation"+query);
-  const ledger=useLoad("/staff/admin/finance/ledger"+query);
-  return <>
-    <Panel title="多笔收费联合对账与跨单分摊">
-      <div className="row">
-        <p className="muted">展示质检费、运费（含跨单分摊与零委托分摊校验）、仓储延期费与退款汇总。默认隔离测试订单。</p>
-        <div className="actions">
-          <label className="check"><input type="checkbox" checked={includeTest} onChange={e=>setIncludeTest(e.target.checked)}/> 包含测试单 (is_test)</label>
-          <button type="button" onClick={()=>{reload();ledger.reload();}}>刷新对账</button>
-        </div>
-      </div>
-      {error&&<ErrorBlock error={error}/>}
-      {!data&&!error&&<p role="status">正在加载对账数据…</p>}
-      {data&&<>
-        {data.summary&&<div className="stats">
-          <div className="stat"><span className="label">质检实收</span><strong className="value">{usd(data.summary.inspection_paid_cents)}</strong></div>
-          <div className="stat"><span className="label">运费实收</span><strong className="value">{usd(data.summary.dispatch_paid_cents)}</strong></div>
-          <div className="stat"><span className="label">仓储实收</span><strong className="value">{usd(data.summary.storage_paid_cents)}</strong></div>
-          <div className="stat"><span className="label">已退总额</span><strong className="value">{usd(data.summary.refunded_cents)}</strong></div>
-          <div className="stat"><span className="label">净实收</span><strong className="value">{usd(data.summary.net_received_cents)}</strong></div>
-        </div>}
-        <Table headers={["收费项","类型","关联订单/批次","应收","实收","已退","跨单分摊校验","状态"]} rows={(data.rows??[]).map((r:Row)=>[
-          <span className="code">{r.charge_id.slice(0,8)}</span>,
-          ({inspection:"质检费",dispatch:"运费",storage:"仓储费"} as Row)[r.purpose]??r.purpose,
-          r.order_public_no
-            ?<Link className="code" href={`/admin/orders/${r.order_public_no}`}>{r.order_public_no}</Link>
-            :(r.batch_id?(onOpenDrawer?<CodeButton code={`Batch #${r.batch_id.slice(0,8)}`} onClick={()=>onOpenDrawer({kind:"batch",ref:r.batch_id})}/>:`Batch ${r.batch_id.slice(0,8)}` ):"—"),
-          usd(r.amount_cents),usd(r.paid_cents),usd(r.refunded_cents),
-          r.purpose==="dispatch"?(r.allocation_balanced?
-            `平衡（订单分摊 ${usd(r.allocated_cents)}${r.unallocated_cents?` + 零委托 ${usd(r.unallocated_cents)}`:""}）`:"分摊异常"):"—",
-          <Tag>{label(r.state)}</Tag>,
-        ])} empty="暂无收费对账记录。"/>
-      </>}
-    </Panel>
-    <Panel title="按订单分解的经济模型与毛利账本">
-      <div className="row">
-        <p className="muted">订单明细可重算汇总，代收运费单列，渠道付款/退款凭据逐单核对。</p>
-        <a className="button primary sm" href={"/api/v1/staff/admin/finance/ledger.csv"+query}>导出 CSV 账本</a>
-      </div>
-      {ledger.error&&<ErrorBlock error={ledger.error}/>}
-      {!ledger.data&&!ledger.error&&<p role="status">正在加载对账账本…</p>}
-      {ledger.data&&<>
-        <div className="stats">
-          <div className="stat"><span className="label">账本订单数</span><strong className="value">{ledger.data.summary.order_count}</strong><small className="detail">{ledger.data.summary.include_test?"含测试单":"仅正式单"}</small></div>
-          <div className="stat"><span className="label">净质检实收</span><strong className="value">{usd(ledger.data.summary.net_inspection_cents)}</strong><small className="detail">实收 {usd(ledger.data.summary.inspection_paid_cents)} / 已退 {usd(ledger.data.summary.inspection_refunded_cents)}</small></div>
-          <div className="stat"><span className="label">代收运费（单列）</span><strong className="value">{usd(ledger.data.summary.pass_through_shipping_cents)}</strong><small className="detail">不计入质检毛利</small></div>
-          <div className="stat"><span className="label">工时成本估算</span><strong className="value">{usd(ledger.data.summary.total_labor_cost_cents)}</strong><small className="detail">总计 {ledger.data.summary.total_inspection_seconds}s · 时薪 {usd(ledger.data.summary.hourly_labor_cents)}/h</small></div>
-          <div className="stat"><span className="label">净贡献毛利</span><strong className="value">{usd(ledger.data.summary.total_contribution_cents)}</strong><small className="detail">{ledger.data.summary.recomputable_balanced?"明细重算平衡":"重算待核对"}</small></div>
-        </div>
-        <Table headers={["类目","服务","订单数","样品数","总作业秒数","单件均耗(s)","净质检收入","工时成本","净贡献"]} rows={(ledger.data.by_category_service??[]).map((g:Row)=>[
-          <span className="code">{g.category_slug}</span>,
-          <span className="code">{g.service_code}</span>,
-          g.order_count,
-          g.sample_count,
-          g.inspection_seconds,
-          g.avg_seconds_per_sample,
-          usd(g.net_inspection_cents),
-          usd(g.labor_cost_cents),
-          usd(g.contribution_cents),
-        ])} empty="暂无类目与服务工时统计。"/>
-        <Table headers={["订单与状态","类目 / 服务 / 件数","质检净实收","代收运费 / 仓储","检验工时与成本","毛利贡献","渠道凭据核对"]} rows={(ledger.data.orders??[]).map((o:Row)=>[
-          <div className="cell-stack">
-            <div><Link className="code" href={"/admin/orders/"+o.public_no}>{o.public_no}</Link>{o.is_test&&<> <Tag>TEST</Tag></>}</div>
-            <div><Tag>{label(o.state)}</Tag></div>
-          </div>,
-          <div className="cell-stack">
-            <span className="code">{o.category_slug} / {o.service_code}</span>
-            <small>{o.sample_count} 件委托样品</small>
-          </div>,
-          <div className="cell-stack">
-            <strong>{usd(o.net_inspection_cents)}</strong>
-            <small>实收 {usd(o.inspection_paid_cents)}{o.inspection_refunded_cents?` · 已退 ${usd(o.inspection_refunded_cents)}`:""}</small>
-          </div>,
-          <div className="cell-stack">
-            <span>运费 {usd(o.pass_through_shipping_cents)}</span>
-            <small>仓储 {usd(o.storage_allocated_cents)}</small>
-          </div>,
-          <div className="cell-stack">
-            <span>{usd(o.labor_cost_cents)}</span>
-            <small>计时 {o.inspection_seconds}s</small>
-          </div>,
-          <strong>{usd(o.contribution_cents)}</strong>,
-          o.channel_reconciled
-            ?<div className="cell-stack"><Tag tone="green">已对齐</Tag><small className="code">{o.provider_refs.join(", ")||"零费用"}</small></div>
-            :<Tag tone="red">渠道未对齐</Tag>,
-        ])} empty="暂无符合过滤条件的订单账本记录。"/>
-      </>}
-    </Panel>
-  </>;
-}
-
 function ShippingRateConfigPanel({rates,onSave}:{rates:Row[];onSave:()=>void}) {
   const [preview,setPreview]=useState<Row>();
-  return <Panel title="国内运价版本与运费试算">
+  return <Panel title="国内运价版本与运费试算" subtitle="支持多包裹按克计重及单批次操作费试算；历史已签发发运报价锁定对应费率版本。">
     <Table headers={["版本","首重 (g)","首重费","续重步长 (g)","续重单价","操作费","发布时间"]} rows={rates.map((r:Row)=>[
-      `v${r.version}`,r.rules?.first_weight_g??1000,usd(r.rules?.first_cents??0),
-      r.rules?.extra_step_g??500,usd(r.rules?.extra_cents??0),usd(r.rules?.handling_cents??0),stamp(r.published_at),
+      <strong key="v" className="code">v{r.version}</strong>,
+      <span key="fw" className="nowrap">{r.rules?.first_weight_g??1000} g</span>,
+      <Money key="fc" cents={r.rules?.first_cents??0}/>,
+      <span key="es" className="nowrap">{r.rules?.extra_step_g??500} g</span>,
+      <Money key="ec" cents={r.rules?.extra_cents??0}/>,
+      <Money key="hc" cents={r.rules?.handling_cents??0}/>,
+      stamp(r.effective_at??r.published_at),
     ])} empty="暂无运价版本。"/>
+    <hr className="divider"/>
     <div className="ops-columns">
       <Form label="发布新运价版本" run={async f=>{
         await request("/staff/admin/shipping-rates","POST",{
@@ -2078,7 +2132,7 @@ function ShippingRateConfigPanel({rates,onSave}:{rates:Row[];onSave:()=>void}) {
         <Field name="handling_usd" label="每批操作费 (USD)" type="number" min={0} step=".01" value={1}/>
       </Form>
       <div>
-        <Form label="试算运费" run={async f=>{
+        <Form label="试算运费（支持多包裹逗号分隔）" run={async f=>{
           const weights=text(f,"weights").split(",").map(s=>Number(s.trim())).filter(n=>n>0);
           const res=await request("/staff/admin/shipping-rates/calculate","POST",{
             ...(text(f,"rate_version_id")?{rate_version_id:text(f,"rate_version_id")}:{}),
@@ -2090,196 +2144,24 @@ function ShippingRateConfigPanel({rates,onSave}:{rates:Row[];onSave:()=>void}) {
             choices={rates.map(r=>({id:r.id,label:`v${r.version}`}))}/>
           <Field name="weights" label="包裹重量列表（克，逗号分隔，如 800, 1350）" value="1200"/>
         </Form>
-        {preview&&<p className="notice" role="status">
-          试算结果（版本 v{preview.version}）：包裹运费合计 {usd(preview.parcels.reduce((sum:number,p:Row)=>sum+p.amount_cents,0))} + 操作费 {usd(preview.handling_cents)} = <strong>{usd(preview.total_cents)}</strong>
-        </p>}
+        {preview&&<div className="card-soft" style={{marginTop:12}} role="status">
+          <div className="row between" style={{marginBottom:8}}>
+            <strong>试算分解 · 运价版本 v{preview.version}</strong>
+            <span className="actions"><strong>合计</strong><Money cents={preview.total_cents}/></span>
+          </div>
+          <Table
+            headers={["费用构成","计费克重","金额"]}
+            rows={[
+              ...(preview.parcels??[]).map((p:Row,idx:number)=>[
+                `包裹 #${idx+1}`,`${p.weight_g} g`,<Money key={`p-${idx}`} cents={p.amount_cents}/>,
+              ]),
+              ["批次打包操作费","固定按批",<Money key="h" cents={preview.handling_cents??0}/>],
+            ]}
+          />
+        </div>}
       </div>
     </div>
   </Panel>;
-}
-
-function orderSearchParams(params:Readonly<URLSearchParams>) {
-  const accepted=["query","state","from","to","test","limit","cursor"];
-  return new URLSearchParams([...params].filter(([key,value])=>accepted.includes(key)&&value!==""));
-}
-function StaffOrderList() {
-  const params=orderSearchParams(useSearchParams());
-  const suffix=params.size?"?"+params:"";
-  const result=useLoad("/staff/orders"+suffix);
-  const next=new URLSearchParams(params);
-  if(result.data?.next_cursor)next.set("cursor",result.data.next_cursor);
-  const first=new URLSearchParams(params);first.delete("cursor");
-  return <Panel title="检查订单">
-    <form className="form" method="get" action="/admin/orders" key={params.toString()}>
-      <div className="inline-form">
-        <label>订单号、卖家运单、实物码或客户邮箱<input name="query" defaultValue={params.get("query")??""} maxLength={254}/></label>
-        <label>状态<select name="state" defaultValue={params.get("state")??""}>
-          <option value="">全部</option>{["draft","awaiting_payment","awaiting_samples","samples_ready","queued","inspecting","qa_review","report_ready","action_pending","on_hold","closed","cancelled"]
-            .map(value=><option key={value} value={value}>{label(value)}</option>)}
-        </select></label>
-        <label>订单类型<select name="test" defaultValue={params.get("test")??"all"}>
-          <option value="all">全部</option><option value="production">正式单</option><option value="test">测试单</option>
-        </select></label>
-      </div>
-      <div className="inline-form">
-        <Field name="from" label="创建日期从（UTC）" type="date" required={false} value={params.get("from")??""}/>
-        <Field name="to" label="创建日期至（UTC，含当天）" type="date" required={false} value={params.get("to")??""}/>
-        <button className="button primary" type="submit">筛选订单</button><Link className="button" href="/admin/orders">清除筛选</Link>
-      </div>
-    </form>
-    {result.error&&<ErrorBlock error={result.error}/>}
-    {!result.data&&!result.error&&<p role="status">正在查询订单…</p>}
-    {!result.error&&result.data&&<>
-      <Table headers={["订单","状态","类型","创建时间"]} rows={result.data.rows.map((o:Row)=>[
-        <Link className="code" href={"/admin/orders/"+o.public_no+suffix}>{o.public_no}</Link>,label(o.state),
-        o.is_test?"测试单":"正式单",stamp(o.created_at),
-      ])} empty="没有符合条件的订单。"/>
-      <div className="actions">
-        {params.has("cursor")&&<Link className="button" href={"/admin/orders"+(first.size?"?"+first:"")}>回到首批</Link>}
-        {result.data.next_cursor&&<Link className="button" href={"/admin/orders?"+next}>下一批 →</Link>}
-        <button type="button" onClick={result.reload}>刷新</button>
-      </div>
-    </>}
-  </Panel>;
-}
-
-export function StaffOrder({number}:{number:string}) {
-  const params=orderSearchParams(useSearchParams());
-  const {data,error,reload}=useLoad("/staff/orders/by-number/"+number);
-  const [drawer,setDrawer]=useState<StaffObjectTarget|null>(null);
-  const milestones=data?[
-    ["订单创建",data.created_at],["质检付款确认",data.paid_at],["样品齐备",data.samples_ready_at],
-    ["报告已发布",data.report_published_at],["订单关闭",data.closed_at],
-  ].filter(([,at])=>at):[];
-  return <>
-    <div className="page-head"><Link href={"/admin/orders"+(params.size?"?"+params:"")}>← 检查订单</Link>
-      <p className="eyebrow report-eyebrow">OPERATIONS / INSPECTION ORDER</p><h1 className="code">{number}</h1>
-      {data&&<p><Tag>{label(data.order.state)}</Tag> · 版本 {data.order.revision}</p>}</div>
-    {error&&<><ErrorBlock error={error}/><button type="button" onClick={reload}>重试</button></>}
-    {!data&&!error&&<p role="status">正在读取订单…</p>}
-    {data&&!error&&<>
-      <div className="ops-columns">
-        <Panel title="委托范围">
-          <Table headers={["服务","订购件数","当前检查位"]} rows={data.lines.map((l:Row)=>[
-            l.title["zh-CN"]??l.title.en,l.quantity,l.current_positions,
-          ])} empty="该订单暂无委托明细。"/>
-          {data.sla_due_at&&<p>预计作业截止 {stamp(data.sla_due_at)}</p>}
-        </Panel>
-        <Panel title="履约节点">
-          <dl className="location-facts">{milestones.map(([name,at])=><div key={name}><dt>{name}</dt><dd>{stamp(at)}</dd></div>)}</dl>
-          {data.customer&&<>
-            <hr className="divider"/>
-            <p><strong>客户账号</strong> · <span className="code">{data.customer.receiving_code}</span> · {data.customer.email??"—"} · <Tag>{data.customer.status}</Tag></p>
-            <Form inline label="更新账号状态" run={async f=>{
-              await request("/staff/users/"+data.customer.id+"/status","POST",{status:text(f,"status"),reason:text(f,"reason")});
-              reload();
-            }}>
-              <Select name="status" label="状态" value={data.customer.status} choices={[
-                {id:"active",label:"正常 (active)"},
-                {id:"restricted",label:"限制新单与付款 (restricted)"},
-                {id:"disabled",label:"停用并撤销会话 (disabled)"},
-              ]}/>
-              <Field name="reason" label="处理原因"/>
-            </Form>
-          </>}
-        </Panel>
-      </div>
-      <Panel title="实物及库位" subtitle="点击实物编号或包裹编号可直接弹出速览抽屉。"><Table headers={["实物编号","来源包裹","检查位置","身份","保管状态","库位"]} rows={data.items.map((i:Row)=>[
-        <CodeButton code={i.code} onClick={()=>setDrawer({kind:"item",ref:i.code})}/>,
-        i.package_code?<CodeButton code={i.package_code} onClick={()=>setDrawer({kind:"package",ref:i.package_code})}/>:"—",
-        i.position,label(i.identity_state),label(i.custody_state),i.location??"—",
-      ])} empty="暂无实物绑定。"/></Panel>
-      <Panel title="入仓包裹" subtitle="点击卖家运单查看物流轨迹，点击包裹码查看拆包明细。"><Table headers={["卖家运单","承运商","运输状态","仓内包裹","实收时间"]} rows={data.parcels.map((p:Row)=>[
-        <CodeButton code={p.tracking_norm} onClick={()=>setDrawer({kind:"tracking",ref:p.tracking_norm})}/>,
-        p.carrier_code??"—",
-        label(p.transport_state),
-        p.code?<CodeButton code={p.code} onClick={()=>setDrawer({kind:"package",ref:p.code})}/>:"待实收",
-        stamp(p.received_at),
-      ])} empty="暂无关联卖家运单。"/></Panel>
-      <Panel title="已交接发运" subtitle="点击发运单号查看出库物流轨迹，点击批次号核对装箱记录。"><Table headers={["发运运单","发运批次","处置类型","状态","交接时间"]} rows={data.shipments.map((s:Row)=>[
-        s.tracking_norm?<CodeButton code={s.tracking_norm} onClick={()=>setDrawer({kind:"tracking",ref:s.tracking_norm})}/>:"待填单",
-        s.batch_id?<CodeButton code={`#${String(s.batch_id).slice(0,8)}`} onClick={()=>setDrawer({kind:"batch",ref:s.batch_id})}/>:"—",
-        label(s.action),label(s.state),stamp(s.shipped_at),
-      ])} empty="暂无已交接运单。"/></Panel>
-      <Panel title="关联工单与阻断">
-        <Table headers={["编号","主题","状态"]} rows={data.tickets.map((t:Row)=>[
-          <Link className="code" href={"/admin/tickets/"+t.id}>{t.public_no}</Link>,t.subject,label(t.state),
-        ])} empty="暂无关联工单。"/>
-        <Table headers={["阻断原因","开始","解除"]} rows={data.blocks.map((b:Row)=>[
-          b.reason,stamp(b.opened_at),b.resolved_at?stamp(b.resolved_at):"尚未解除",
-        ])}/>
-        <div className="ops-columns">
-          {data.order.state!=="on_hold"&&!["closed","cancelled"].includes(data.order.state)&&<Form inline label="暂停订单 (Hold)" run={async f=>{
-            await request("/staff/orders/"+data.order.id+"/hold","POST",{reason:text(f,"reason")});
-            reload();
-          }}><Field name="reason" label="暂停原因"/></Form>}
-          {data.order.state==="on_hold"&&<Form inline label="恢复订单 (Resume)" run={async f=>{
-            await request("/staff/orders/"+data.order.id+"/resume","POST",{reason:text(f,"reason")});
-            reload();
-          }}><Field name="reason" label="恢复说明"/></Form>}
-          {["report_ready","action_pending"].includes(data.order.state)&&<Action run={async()=>{
-            await request("/staff/orders/"+data.order.id+"/close","POST",{revision:data.order.revision});
-            reload();
-          }}>全部实物终态后关闭订单</Action>}
-        </div>
-      </Panel>
-      <ScopeReview orderId={data.order.id} staff onSave={reload}/>
-      <OrderRefundDesk initialOrder={number}/>
-      <Panel title="订单操作记录"><Table headers={["时间","操作","执行者"]} rows={data.activity.map((a:Row)=>[
-        stamp(a.at),({create_draft:"建立草稿",edit_draft:"修改草稿",submit_order:"提交委托",cancel_order:"取消订单",
-          propose_scope:"提出范围调整",accept_scope:"接受范围调整"} as Row)[a.action]??a.action,
-        a.display_name??({staff:"员工",customer:"客户",system:"系统"} as Row)[a.actor_type],
-      ])} empty="暂无订单操作记录。"/></Panel>
-    </>}
-    <StaffObjectDrawer target={drawer} onClose={()=>setDrawer(null)}/>
-  </>;
-}
-
-function OrderRefundDesk({initialOrder=""}:{initialOrder?:string}) {
-  const [number,setNumber]=useState(initialOrder);
-  const [receipt,setReceipt]=useState<{order:string;id:string}>();
-  const source=useLoad(number?"/staff/orders/by-number/"+number+"/refund-options":null);
-  const options:Row[]=source.data?.rows??[];
-  return <Panel title="按原质检单申请退款">
-    {!initialOrder&&<Form inline label="查原订单" run={async f=>{
-      const value=text(f,"order").toUpperCase();
-      if(!/^QW-[A-F0-9]+$/.test(value)) throw new Error("请输入完整的 QW 订单号。");
-      setNumber(value);source.reload();
-    }}><Field name="order" label="质检订单号"/></Form>}
-    {number&&!source.data&&!source.error&&<p role="status">正在查询原收费…</p>}
-    {source.error&&<ErrorBlock error={source.error}/>}
-    {source.data&&!source.error&&<>
-      <p>原订单 <strong className="code">{source.data.order.public_no}</strong></p>
-      <Table headers={["付款编号","实收","可申请余额","付款记录"]} rows={options.map(p=>[
-        <span className="code">{p.id}</span>,usd(p.amount_cents),usd(p.refundable_cents),stamp(p.created_at),
-      ])} empty="该订单没有确认实收的质检付款。"/>
-      {options.some(p=>p.refundable_cents>0)&&<Form key={number+"-"+(receipt?.id??"")} label="提交退款申请" run={async f=>{
-        const payment=options.find(p=>p.id===text(f,"payment"));
-        const cents=Math.round(Number(text(f,"amount"))*100);
-        if(!payment||cents<1||cents>payment.refundable_cents) throw new Error("申请金额须在所选实收的可退余额内。");
-        const refund=await request("/staff/orders/"+source.data!.order.id+"/refunds","POST",{payment_id:payment.id,amount_cents:cents,reason:text(f,"reason")});
-        setReceipt({order:number,id:refund.refund_id});
-        source.reload();
-      }}><Select name="payment" label="原实收付款" choices={options.filter(p=>p.refundable_cents>0).map(p=>({id:p.id,label:p.id+" · 可退 "+usd(p.refundable_cents)}))}/>
-        <Field name="amount" label="申请金额（USD）" type="number" min={.01} step=".01"/>
-        <Field name="reason" label="退款原因"/>
-      </Form>}
-      {receipt?.order===number&&<p className="notice" role="status">已提交退款申请 <span className="code">{receipt.id}</span>，待独立审批。</p>}
-    </>}
-  </Panel>;
-}
-
-function RefundApproval({refund,reload}:{refund:Row;reload:()=>void}) {
-  const [reauth,setReauth]=useState(false);
-  return reauth?<Link href="/staff/login?next=%2Fadmin%2Ffinance">重新验证员工身份</Link>:<Action run={async()=>{
-    try {
-      await request("/staff/refunds/"+refund.id+"/approve","POST",{revision:refund.revision});
-      reload();
-    } catch(error) {
-      if(error instanceof RequestError&&error.code==="STAFF_REAUTH_REQUIRED") setReauth(true);
-      else throw error;
-    }
-  }}>审批退款</Action>;
 }
 
 export function WarehouseScan() {

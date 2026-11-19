@@ -3,6 +3,15 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Action, Empty, ErrorBlock, Field, FileInput, Form, MediaButton, Panel, Photo, request, Select, stamp, useWorkspaceStamp, Table, Tag, text, usd, useLoad, type Row } from "./ui";
+import {
+  BizTag,
+  CopyId,
+  INCIDENT_KIND_ZH,
+  INCIDENT_STATE_ZH,
+  ORDER_STATE_ZH,
+  TICKET_CATEGORY_ZH,
+  TICKET_STATE_ZH,
+} from "./admin-labels";
 
 const status:Record<string,[string,string]>={
   open:["Open","待处理"],waiting_customer:["Awaiting your reply","待客户回复"],
@@ -31,8 +40,8 @@ function Conversation({events,staff=false}:{events:Row[];staff?:boolean}) {
   const stamp=useWorkspaceStamp();
   if(!events.length)return <Empty>{staff?"暂无工单记录。":"There are no messages yet."}</Empty>;
   return <ol className="timeline case-conversation">{events.map(entry=><li key={entry.id}>
-    <div className="row"><strong>{staff?entry.kind==="internal_note"?"内部备注":entry.kind==="state_change"?"操作记录":
-      entry.actor_type==="customer"?"客户":"客服":entry.actor_type==="customer"?"You":"QC Warehouse"}</strong>
+    <div className="row"><strong>{staff?entry.kind==="internal_note"?`内部备注${entry.actor_name?` · ${entry.actor_name}`:""}`:entry.kind==="state_change"?`操作记录${entry.actor_name?` · ${entry.actor_name}`:""}`:
+      entry.actor_type==="customer"?`客户${entry.actor_name?` (${entry.actor_name})`:""}`:`客服${entry.actor_name?` (${entry.actor_name})`:""}`:entry.actor_type==="customer"?"You":"QC Warehouse"}</strong>
       <small>{stamp(entry.created_at)}</small></div><p>{entry.body}</p>
       {entry.media_ids?.length>0&&<div className="actions" style={{marginTop:6}}>
         <MediaButton ids={entry.media_ids} label={staff?`查看附件照片 (${entry.media_ids.length})`:`View attached photo${entry.media_ids.length>1?`s (${entry.media_ids.length})`:""}`}/>
@@ -154,6 +163,12 @@ export function CustomerCase({id,order}:{id:string;order?:string}) {
   </>;
 }
 
+const PRIORITY_ZH:Record<string,{label:string;tone:"red"|"yellow"|"gray"}>={
+  urgent:{label:"紧急",tone:"red"},
+  high:{label:"高优",tone:"yellow"},
+  normal:{label:"常规",tone:"gray"},
+};
+
 export function StaffTicketQueue() {
   const [state,setState]=useState("");
   const [category,setCategory]=useState("");
@@ -166,33 +181,64 @@ export function StaffTicketQueue() {
   if(reference)params.set("reference",reference);
   const {data,error,reload}=useLoad("/staff/tickets"+(params.size?"?"+params:""));
   return <>
-    <div className="page-head"><p className="eyebrow">OPERATIONS / SUPPORT</p><h1>客户工单</h1>
-      <p className="muted">按下一处理时限、分类和指派状态查看工单、接手和回复。</p></div>
-    <Panel title="工单队列">
-      <div className="form inline-form">
+    <div className="page-head row">
+      <div>
+        <p className="eyebrow">OPERATIONS / SUPPORT QUEUE</p>
+        <h1>客户工单处理台</h1>
+        <p className="muted">按分类、紧急度、指派状态与处理时限追踪全部售后、包裹认领、质量异议与账号恢复工单，直达关联客户与订单上下文。</p>
+      </div>
+      <div className="head-actions">
+        <Link className="button sm" href="/admin/customers">客户 360 目录</Link>
+        <Link className="button sm" href="/admin/orders">订单工作台</Link>
+        <button type="button" className="button sm" onClick={reload}>刷新队列</button>
+      </div>
+    </div>
+    <Panel title="多维筛选工单队列">
+      <div className="admin-toolbar">
         <label>工单状态<select value={state} onChange={e=>setState(e.target.value)}>
-          <option value="">全部</option>{Object.entries(status).map(([value,names])=><option key={value} value={value}>{names[1]}</option>)}
+          <option value="">全部状态</option>{Object.entries(status).map(([value,names])=><option key={value} value={value}>{names[1]}</option>)}
         </select></label>
-        <label>工单分类<select value={category} onChange={e=>setCategory(e.target.value)}>
+        <label>业务分类<select value={category} onChange={e=>setCategory(e.target.value)}>
           <option value="">全部分类</option>{Object.entries(categories).map(([value,labelText])=><option key={value} value={value}>{labelText}</option>)}
         </select></label>
-        <label>指派范围<select value={assignee} onChange={e=>setAssignee(e.target.value)}>
-          <option value="">全部</option>
-          <option value="unassigned">未领取</option>
-          <option value="mine">我负责的</option>
+        <label>指派归属<select value={assignee} onChange={e=>setAssignee(e.target.value)}>
+          <option value="">全部处理人</option>
+          <option value="unassigned">未领取 (待接单)</option>
+          <option value="mine">我负责的工单</option>
         </select></label>
-        <button type="button" className="button" onClick={reload}>刷新</button>
+        <div className="actions">
+          {(state||category||assignee||reference)&&<button type="button" className="button sm" onClick={()=>{setState("");setCategory("");setAssignee("");setReference("");}}>重置筛选</button>}
+        </div>
       </div>
-      <Form inline label="查工单" run={async fields=>setReference(text(fields,"reference").toUpperCase())}>
-        <Field name="reference" label="完整工单或订单号" required={false}/>
+      <Form inline label="按单号或客户码精确查询" run={async fields=>setReference(text(fields,"reference").toUpperCase())}>
+        <Field name="reference" label="完整工单号 / QW 订单号 / 客户码 QCW-..." required={false}/>
       </Form>
       {error&&<ErrorBlock error={error}/>}
-      {!data&&!error&&<p role="status">正在读取工单…</p>}
-      {data&&!error&&<Table headers={["工单","分类","状态","关联订单","负责人","处理时限"]} rows={data.rows.map((entry:Row)=>[
-        <Link className="case-queue-link" href={"/admin/tickets/"+entry.id}><strong className="code">{entry.public_no}</strong><br/>{entry.subject}</Link>,
-        categories[entry.category]??entry.category,<Tag>{status[entry.state]?.[1]}</Tag>,entry.order_number??"—",
-        entry.assignee??"未领取",stamp(entry.next_action_at),
-      ])} empty="没有符合条件的工单。"/>}
+      {!data&&!error&&<p role="status">正在读取工单队列…</p>}
+      {data&&!error&&<Table headers={["工单与最新消息","所属客户","业务分类","优先级 / 状态","关联订单","负责人","响应时限 / 详情"]} rows={data.rows.map((entry:Row)=>[
+        <div key="t" className="cell-stack">
+          <Link className="case-queue-link" href={"/admin/tickets/"+entry.id}><strong className="code">{entry.public_no}</strong> · {entry.subject}</Link>
+          {entry.latest_message&&<small className="muted">{entry.latest_message}</small>}
+        </div>,
+        <div key="c" className="cell-stack">
+          {entry.receiving_code&&entry.customer_user_id?<Link className="code nowrap" href={`/admin/customers/${entry.customer_user_id}`}>{entry.receiving_code}</Link>:<span className="muted">访客/未绑定</span>}
+          {entry.customer_name&&<small className="muted">{entry.customer_name}</small>}
+        </div>,
+        <Tag key="cat" tone="blue">{TICKET_CATEGORY_ZH[entry.category]??entry.category}</Tag>,
+        <div key="st" className="cell-stack">
+          <BizTag dict={TICKET_STATE_ZH} value={entry.state}/>
+          {entry.priority&&<BizTag dict={PRIORITY_ZH} value={entry.priority}/>}
+        </div>,
+        entry.order_number?<div key="o" className="cell-stack">
+          <Link className="code nowrap" href={`/admin/orders/${entry.order_number}`}>{entry.order_number}</Link>
+          {entry.order_state&&<BizTag dict={ORDER_STATE_ZH} value={entry.order_state}/>}
+        </div>:"—",
+        entry.assignee??<Tag tone="yellow">未领取</Tag>,
+        <div key="op" className="cell-stack">
+          <small>{entry.next_action_at?stamp(entry.next_action_at):stamp(entry.created_at,true)}</small>
+          <Link className="button sm nowrap" href={`/admin/tickets/${entry.id}`}>进入处理 →</Link>
+        </div>,
+      ])} empty="没有符合条件的工单记录。"/>}
     </Panel>
   </>;
 }
@@ -208,29 +254,40 @@ export function StaffTicket({id,actor}:{id:string;actor:Row}) {
   const open=data&&isOpen(data.state);
   const canWork=open&&(data.assignee_id===actor.id||actor.roles.includes("super_admin"));
   return <>
-    <div className="page-head"><Link href="/admin/tickets">← 客户工单</Link>
-      <p className="eyebrow report-eyebrow">OPERATIONS / CASE RECORD</p><h1>{data?.subject??"工单详情"}</h1>
-      {data&&<p className="code">{data.public_no}</p>}</div>
+    <div className="page-head row">
+      <div>
+        <Link href="/admin/tickets">← 返回工单处理台</Link>
+        <p className="eyebrow report-eyebrow" style={{marginTop:8}}>OPERATIONS / CASE WORKBENCH</p>
+        <h1>{data?.subject??"工单详情工作台"}</h1>
+        {data&&<div className="actions" style={{marginTop:6}}>
+          <CopyId value={data.public_no} short={false}/>
+          <Tag tone="blue">{TICKET_CATEGORY_ZH[data.category]??data.category}</Tag>
+          <BizTag dict={TICKET_STATE_ZH} value={data.state}/>
+        </div>}
+      </div>
+      <div className="head-actions">
+        {data?.customer?.user_id&&<Link className="button sm" href={`/admin/customers/${data.customer.user_id}`}>客户档案 {data.customer.receiving_code} →</Link>}
+        {data?.order_number&&<Link className="button sm" href={`/admin/orders/${data.order_number}`}>订单 {data.order_number} →</Link>}
+        {data?.linked_payment_id&&<Link className="button sm" href={`/admin/payments/${data.linked_payment_id}`}>查看关联付款 →</Link>}
+        {data?.incident?.id&&<Link className="button sm" href={`/admin/incidents/${data.incident.id}`}>查看事故详情 →</Link>}
+      </div>
+    </div>
     {error&&<><ErrorBlock error={error}/><button type="button" onClick={reload}>重试</button></>}
-    {!error&&!data&&<p role="status">正在读取工单…</p>}
+    {!error&&!data&&<p role="status">正在读取工单完整上下文…</p>}
     {data&&!error&&<>
-      <Panel title="工单信息">
-        <dl className="location-facts">
-          <div><dt>分类</dt><dd>{categories[data.category]??data.category}</dd></div>
-          <div><dt>状态</dt><dd><Tag>{status[data.state]?.[1]}</Tag></dd></div>
-          <div><dt>关联订单</dt><dd className="code">{data.order_number?<Link href={"/admin/orders/"+data.order_number}>{data.order_number}</Link>:"—"}</dd></div>
-          {data.parcel&&<div><dt>关联入库运单</dt><dd className="code">{data.parcel.tracking_norm??"运单号待核对"}</dd></div>}
-          {data.ownership_review&&<div><dt>待核验运单</dt><dd className="code">{data.ownership_review.tracking_no} · <Link href={"/admin/orders#case-"+data.id}>查看认领核验</Link></dd></div>}
-          <div><dt>负责人</dt><dd>{data.assignee??"未领取"}</dd></div>
-          <div><dt>下一处理时间</dt><dd>{stamp(data.next_action_at)}</dd></div>
-          {data.inquiry&&<>
-            <div><dt>咨询品类</dt><dd>{data.inquiry.category["zh-CN"]??data.inquiry.category.en}</dd></div>
-            <div><dt>委托件数</dt><dd>{data.inquiry.sample_count}</dd></div>
-            <div><dt>联系邮箱</dt><dd>{data.inquiry.contact_email}</dd></div>
-          </>}
-        </dl>
-        {open&&!data.assignee_id&&<div className="actions"><Action primary run={()=>update({kind:"claim"})}>领取工单</Action></div>}
-        {open&&(data.staff_candidates?.length??0)>0&&<Form inline label="指派/转派" run={async f=>{
+      <Panel title="关联业务档案与工单信息">
+        <div className="admin-kv-grid" style={{marginBottom:14}}>
+          <div className="kv-card"><span className="k">工单分类 / 状态</span><div className="actions"><Tag tone="blue">{TICKET_CATEGORY_ZH[data.category]??data.category}</Tag><BizTag dict={TICKET_STATE_ZH} value={data.state}/></div></div>
+          <div className="kv-card"><span className="k">关联客户档案</span>{data.customer?<Link href={`/admin/customers/${data.customer.user_id}`}><strong className="code">{data.customer.receiving_code}</strong> · {data.customer.display_name??data.customer.email??"—"}</Link>:"访客 / 未关联客户"}</div>
+          <div className="kv-card"><span className="k">关联质检订单</span>{data.order_number?<div className="actions"><Link className="code" href={"/admin/orders/"+data.order_number}>{data.order_number}</Link>{data.order_state&&<BizTag dict={ORDER_STATE_ZH} value={data.order_state}/>}</div>:"无关联订单"}</div>
+          <div className="kv-card"><span className="k">当前负责人 / 时限</span><span>{data.assignee??"未领取"} · {stamp(data.next_action_at)}</span></div>
+          {data.parcel&&<div className="kv-card"><span className="k">入库关联运单</span><span className="code">{data.parcel.tracking_norm??"待核对运单"}</span></div>}
+          {data.ownership_review&&<div className="kv-card"><span className="k">认领核验待办</span><Link className="code" href={"/admin/orders?tab=claims#case-"+data.id}>{data.ownership_review.tracking_no} · 去审核 →</Link></div>}
+          {data.linked_payment_id&&<div className="kv-card"><span className="k">关联收费付款</span><Link className="code" href={`/admin/payments/${data.linked_payment_id}`}>查看原付款单 →</Link></div>}
+          {data.inquiry&&<div className="kv-card"><span className="k">售前非标咨询</span><span>{data.inquiry.category["zh-CN"]??data.inquiry.category.en} · {data.inquiry.sample_count} 件 · {data.inquiry.contact_email}</span></div>}
+        </div>
+        {open&&!data.assignee_id&&<div className="actions"><Action primary run={()=>update({kind:"claim"})}>领取并接手本工单</Action></div>}
+        {open&&(data.staff_candidates?.length??0)>0&&<Form inline label="指派 / 转派负责人" run={async f=>{
           const target=text(f,"assignee_id");
           await update({kind:"assign",assignee_id:target||null,body:text(f,"body")||undefined});
         }}>
@@ -240,19 +297,19 @@ export function StaffTicket({id,actor}:{id:string;actor:Row}) {
           </select></label>
           <Field name="body" label="转派说明（可选）" required={false}/>
         </Form>}
-        {data.category==="identity_unclear"&&open&&<p><Link href={"/admin/orders#case-"+id}>打开专用认领核验</Link></p>}
+        {data.category==="identity_unclear"&&open&&<p style={{marginTop:8}}><Link className="button sm primary" href={"/admin/orders?tab=claims#case-"+id}>前往订单台核验包裹归属与拍照凭证 →</Link></p>}
       </Panel>
-      {data.incident&&<Panel title="关联丢损与赔付单">
-        <dl className="location-facts">
-          <div><dt>实物编码</dt><dd className="code">{data.incident.item_code??data.incident.item_id}</dd></div>
-          <div><dt>类型</dt><dd>{data.incident.kind}</dd></div>
-          <div><dt>状态</dt><dd><Tag>{data.incident.status}</Tag></dd></div>
-          <div><dt>退质检费</dt><dd>{usd(data.incident.service_refund_cents??0)}</dd></div>
-          <div><dt>赔偿金额</dt><dd>{usd(data.incident.compensation_cents??0)}</dd></div>
-          <div><dt>客户决定</dt><dd>{data.incident.customer_decision??"待客户确认"}</dd></div>
+      {data.incident&&<Panel title="关联库存丢损与赔付处置" badge={data.incident.id?<Link className="button sm" href={`/admin/incidents/${data.incident.id}`}>打开事故完整工作台 →</Link>:undefined}>
+        <dl className="admin-kv-grid">
+          <div className="admin-kv-item"><dt>实物编码</dt><dd className="code">{data.incident.item_code??data.incident.item_id}</dd></div>
+          <div className="admin-kv-item"><dt>事故类型</dt><dd><Tag tone="yellow">{INCIDENT_KIND_ZH[data.incident.kind]??data.incident.kind}</Tag></dd></div>
+          <div className="admin-kv-item"><dt>事故状态</dt><dd><BizTag dict={INCIDENT_STATE_ZH} value={data.incident.status}/></dd></div>
+          <div className="admin-kv-item"><dt>建议退质检费</dt><dd className="nowrap">{usd(data.incident.service_refund_cents??0)}</dd></div>
+          <div className="admin-kv-item"><dt>建议现金赔付</dt><dd className="nowrap">{usd(data.incident.compensation_cents??0)}</dd></div>
+          <div className="admin-kv-item"><dt>客户确认结论</dt><dd>{data.incident.customer_decision??"待客户确认"}</dd></div>
         </dl>
-        <p>{data.incident.summary_en}</p>
-        {data.incident.internal_note&&<p className="muted">内部备注：{data.incident.internal_note}</p>}
+        <p style={{marginTop:10}}>{data.incident.summary_en}</p>
+        {data.incident.internal_note&&<p className="muted">内部调查备注：{data.incident.internal_note}</p>}
       </Panel>}
       {data.account_recovery&&<Panel title="账号恢复与双人审批">
         <dl className="location-facts">

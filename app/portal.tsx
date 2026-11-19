@@ -3,7 +3,11 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { CustomerActions, CustomerDesk, DemoCheckout, NewOrder, OrderFulfillment, OrderView, ReportView, TrackView } from "./customer";
-import { AdminDesk, LogisticsConfiguration, LogisticsDesk, StaffOrder, TaskView, WarehouseDesk, WarehouseDispatchBatch, WarehouseItemView, WarehousePackageView, WarehouseScan } from "./staff";
+import { AdminDesk, LogisticsConfiguration, LogisticsDesk, TaskView, WarehouseDesk, WarehouseDispatchBatch, WarehouseItemView, WarehousePackageView, WarehouseScan } from "./staff";
+import { AdminCustomerDetail, AdminCustomersDirectory } from "./admin-customers";
+import { AdminPaymentDetail, AdminRefundDetail } from "./admin-finance";
+import { AdminDisposalDetail, AdminIncidentDetail, AdminInspectionsWorkbench } from "./admin-operations";
+import { AdminOrderDetailWorkbench } from "./admin-orders";
 import { Action, request, Tag, WorkspaceTimeZone } from "./ui";
 import { Brand, PublicFooter, PublicHeader, QuickSwitch, SiteFooter, switchDemoPortal, WorkspaceNavigation } from "./chrome";
 import { FAQ } from "./faq";
@@ -79,10 +83,17 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
   else if(path==="/admin/audit") content=<AuditDesk/>;
   else if(route.view==="storage-move") content=<StorageMove path={path}/>;
   else if(route.view==="storage-locations") content=<StorageLocations warehouseLinks={warehouseLinks}/>;
-  else if(route.view==="admin") content=<AdminDesk path={path} actor={a}/>;
+  else if(route.view==="admin") content=<AdminDesk path={path} actor={a} demo={demo}/>;
+  else if(route.view==="admin-customers") content=<AdminCustomersDirectory/>;
+  else if(route.view==="admin-customer") content=<AdminCustomerDetail key={route.id} id={route.id} actor={a}/>;
+  else if(route.view==="admin-payment") content=<AdminPaymentDetail key={route.id} id={route.id} demo={demo}/>;
+  else if(route.view==="admin-refund") content=<AdminRefundDetail key={route.id} id={route.id} demo={demo}/>;
+  else if(route.view==="admin-inspections") content=<AdminInspectionsWorkbench/>;
+  else if(route.view==="admin-incident") content=<AdminIncidentDetail key={route.id} id={route.id} actor={a}/>;
+  else if(route.view==="admin-disposal") content=<AdminDisposalDetail key={route.id} id={route.id}/>;
   else if(route.view==="staff-tickets") content=<StaffTicketQueue/>;
   else if(route.view==="staff-ticket") content=<StaffTicket key={route.id} id={route.id} actor={a}/>;
-  else if(route.view==="staff-order") content=<StaffOrder key={route.id} number={route.id}/>;
+  else if(route.view==="staff-order") content=<AdminOrderDetailWorkbench key={route.id} number={route.id}/>;
   else if(route.view==="task") content=<TaskView id={route.id} actor={a}/>;
   else if(route.view==="warehouse") content=<WarehouseDesk path={path} actor={a} demo={demo}/>;
   else if(a.kind!=="customer") content=<section className="panel narrow"><h1>Customer account required</h1>
@@ -117,11 +128,13 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
   const normPath = path==="/billing"?"/account/billing":path==="/notifications"?"/account/notifications":path;
   const section=route.area==="admin"?"运营总览":route.area==="warehouse"?"仓库总览":"My Workspace";
   const currentLink=links.find(([href])=>href===normPath);
-  const parentLink=links.filter(([href])=>href!=="/wh"&&href!=="/admin"&&normPath.startsWith(href+"/")).sort(([left],[right])=>right.length-left.length)[0];
+  const parentLink =
+    links.filter(([href])=>href!=="/wh"&&href!=="/admin"&&normPath.startsWith(href+"/")).sort(([left],[right])=>right.length-left.length)[0]
+    ?? (normPath.startsWith("/admin/disposals/") ? links.find(([href])=>href==="/admin/dispositions") : undefined);
   const rawTopLinks:[string,string][]=route.area==="warehouse"?[
     ["/wh/scan","扫码查询"],["/wh/inspection","检查队列"],["/wh/review","报告复核"],["/wh/dispatch","出库管理"],
   ]:route.area==="admin"?[
-    ["/admin/orders","订单管理"],["/admin/finance","财务"],["/admin/logistics","物流监控"],["/admin/templates","模板配置"],["/admin/storage/locations","库位管理"],
+    ["/admin/orders","订单管理"],["/admin/refunds","退款审批"],["/admin/finance","财务对账"],["/admin/logistics","物流监控"],["/admin/templates","模板配置"],
   ]:[
     ["/catalog","Services"],["/categories","Product Categories"],["/how-it-works","How It Works"],["/report-guide","Sample Reports"],["/pricing","Pricing"],
   ];
@@ -131,19 +144,19 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
     <a className="skip-link" href="#main-content">{isStaff?"跳至主要内容":"Skip to main content"}</a>
     <header className="workspace-top">
       <div className="workspace-brand">
-        {route.area==="customer"&&<button
+        <button
           type="button"
           ref={menuToggle}
           className="workspace-menu-toggle"
           aria-expanded={mobileNavOpen}
           aria-controls="workspace-sidebar-nav"
-          aria-label={mobileNavOpen?"Close workspace menu":"Open workspace menu"}
+          aria-label={isStaff?(mobileNavOpen?"关闭侧栏导航":"展开侧栏导航"):(mobileNavOpen?"Close workspace menu":"Open workspace menu")}
           onClick={()=>setMobileNavOpen(v=>!v)}
         >
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             {mobileNavOpen ? <path d="M6 6l12 12M18 6L6 18"/> : <path d="M4 7h16M4 12h16M4 17h16"/>}
           </svg>
-        </button>}
+        </button>
         <Brand/>
         <span className="workspace-context">INSPECTION PLATFORM</span>
       </div>
@@ -166,7 +179,7 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
         path={normPath}
         demo={demo}
         mobileOpen={mobileNavOpen}
-        onCloseMobile={route.area==="customer"?closeMobileNavigation:undefined}
+        onCloseMobile={closeMobileNavigation}
       />
       <main className={`workspace-main view-${route.view}`} id="main-content" tabIndex={-1}>
         <nav className="breadcrumb" aria-label={isStaff?"当前位置":"Breadcrumb"}>

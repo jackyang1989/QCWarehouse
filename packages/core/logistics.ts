@@ -427,8 +427,20 @@ export async function subscribeTrackingOnce() {
 }
 export async function trackingAdmin(db:DB,actor:Actor) {
   role(actor,...staffAccess.tracking);
-  const rows=(await db.query(`select t.id,t.direction,t.carrier_code,t.tracking_norm,t.revision,t.transport_state,t.sync_state,t.package_id,t.shipment_id,
-    t.last_success_at,(select s.events_json from tracking_snapshots s where s.tracker_id=t.id and s.locale='zh-CN'
+  const rows=(await db.query(`select t.id,t.direction,t.carrier_code,c.labels->>'zh-CN' carrier_name_zh,
+    t.tracking_norm,t.revision,t.transport_state,t.sync_state,t.package_id,t.shipment_id,
+    t.last_success_at,t.latest_event_at,
+    crp.receiving_code,crp.user_id customer_user_id,
+    p.code package_code,p.state package_state,p.received_at package_received_at,
+    sh.batch_id,
+    coalesce((select array_agg(distinct o.public_no order by o.public_no)
+      from advice_orders ao join orders o on o.id=ao.order_id where ao.advice_id=t.advice_id),
+      (select array_agg(distinct o.public_no order by o.public_no)
+       from shipment_items si join order_line_item_links l on l.item_id=si.item_id and l.unlinked_at is null
+       join order_lines ol on ol.id=l.order_line_id join orders o on o.id=ol.order_id
+       where si.shipment_id=t.shipment_id),
+      array[]::text[]) order_numbers,
+    (select s.events_json from tracking_snapshots s where s.tracker_id=t.id and s.locale='zh-CN'
     order by s.latest_event_at desc nulls last,s.fetched_at desc limit 1) events,
     coalesce((select jsonb_agg(jsonb_build_object(
       'id',e.id,'occurred_at',e.occurred_at,'source_time',e.source_time,'text_zh',e.text_zh,
@@ -437,8 +449,13 @@ export async function trackingAdmin(db:DB,actor:Actor) {
     from tracking_events e
     left join tracking_translations tr on tr.event_id=e.id and tr.locale='en'
     where e.tracker_id=t.id),'[]'::jsonb) raw_events
-    from tracking_records t where t.closed_at is null
-    order by t.next_query_at desc nulls last limit 100`)).rows;
+    from tracking_records t
+    left join carriers c on c.code=t.carrier_code
+    left join customer_receiving_profiles crp on crp.org_id=t.org_id
+    left join packages p on p.id=t.package_id
+    left join shipments sh on sh.id=t.shipment_id
+    where t.closed_at is null
+    order by t.latest_event_at desc nulls last,t.next_query_at desc nulls last limit 150`)).rows;
   return rows.map((r:any)=>{
     const zh_events=(Array.isArray(r.raw_events)?r.raw_events:[]).map((ev:any)=>{
       const source_hash=hash(ev.text_zh??"");
@@ -482,9 +499,16 @@ export async function trackingMonitor(db:DB,actor:Actor) {
        (select count(*)::int from tracking_subscriptions where status in ('failed','unknown')) failed_subscriptions`
   );
   const errorQueue=(await db.query(
-    `select t.id,t.direction,t.carrier_code,t.tracking_norm,t.transport_state,t.sync_state,t.package_id,t.shipment_id,
-            t.last_success_at,t.next_query_at
+    `select t.id,t.direction,t.carrier_code,c.labels->>'zh-CN' carrier_name_zh,
+            t.tracking_norm,t.transport_state,t.sync_state,t.package_id,t.shipment_id,
+            t.last_success_at,t.next_query_at,
+            crp.receiving_code,crp.user_id customer_user_id,p.code package_code,
+            coalesce((select array_agg(distinct o.public_no order by o.public_no)
+              from advice_orders ao join orders o on o.id=ao.order_id where ao.advice_id=t.advice_id),array[]::text[]) order_numbers
      from tracking_records t
+     left join carriers c on c.code=t.carrier_code
+     left join customer_receiving_profiles crp on crp.org_id=t.org_id
+     left join packages p on p.id=t.package_id
      where t.closed_at is null
        and (t.sync_state in ('provider_error','delayed','needs_verification','needs_carrier','stopped','unsupported','no_record')
             or t.transport_state in ('exception','returning','returned'))
@@ -492,18 +516,27 @@ export async function trackingMonitor(db:DB,actor:Actor) {
   )).rows;
   const alerts=(await db.query(
     `select a.id,a.tracker_id,a.kind,a.episode,a.state,a.assignee_id,a.due_at,a.ticket_id,a.last_notified_at,
-            t.direction,t.carrier_code,t.tracking_norm,t.transport_state,t.sync_state,
+            t.direction,t.carrier_code,c.labels->>'zh-CN' carrier_name_zh,t.tracking_norm,t.transport_state,t.sync_state,
+            crp.receiving_code,crp.user_id customer_user_id,
+            coalesce((select array_agg(distinct o.public_no order by o.public_no)
+              from advice_orders ao join orders o on o.id=ao.order_id where ao.advice_id=t.advice_id),array[]::text[]) order_numbers,
             (a.due_at is not null and a.due_at<now() and a.state in ('open','acknowledged')) overdue
      from tracking_alerts a
      join tracking_records t on t.id=a.tracker_id
+     left join carriers c on c.code=t.carrier_code
+     left join customer_receiving_profiles crp on crp.org_id=t.org_id
      order by a.state in ('open','acknowledged') desc,a.due_at asc nulls last,a.episode desc limit 100`
   )).rows;
   const deliveredUnreceived=(await db.query(
-    `select t.id,t.id tracking_id,t.carrier_code,t.tracking_norm,t.advice_id,t.transport_state,t.latest_event_at,
+    `select t.id,t.id tracking_id,t.carrier_code,c.labels->>'zh-CN' carrier_name_zh,
+            t.tracking_norm,t.advice_id,t.transport_state,t.latest_event_at,
             t.latest_event_at delivered_at,
+            crp.receiving_code,crp.user_id customer_user_id,
             (select o.public_no from advice_orders ao join orders o on o.id=ao.order_id where ao.advice_id=t.advice_id limit 1) order_no,
             (select te.text_zh from tracking_events te where te.tracker_id=t.id order by te.occurred_at desc nulls last limit 1) latest_cn
      from tracking_records t
+     left join carriers c on c.code=t.carrier_code
+     left join customer_receiving_profiles crp on crp.org_id=t.org_id
      where t.closed_at is null
        and t.direction='inbound'
        and t.transport_state='delivered'

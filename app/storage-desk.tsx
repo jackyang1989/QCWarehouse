@@ -17,6 +17,8 @@ export function StorageLocations({warehouseLinks}:{warehouseLinks:[string,string
   const [status,setStatus]=useState("");
   const [result,setResult]=useState<{added:Row[];skipped:string[]}>();
   const [printedLoc,setPrintedLoc]=useState<{print_id:string;code:string}>();
+  const [detailLocId,setDetailLocId]=useState<string>("");
+  const locDetail=useLoad(detailLocId?`/staff/admin/storage/locations/${detailLocId}`:null);
   const locations:Row[]=data?.rows??[];
   const active=locations.filter(location=>location.active).length;
   const visible=locations.filter(location=>location.code.toUpperCase().includes(query.trim().toUpperCase())&&
@@ -71,9 +73,11 @@ export function StorageLocations({warehouseLinks}:{warehouseLinks:[string,string
           <img src={"/api/v1/staff/labels/"+printedLoc.print_id+"/preview.png"} alt={`库位条码 ${printedLoc.code}`} style={{maxWidth:320,border:"1px solid #cbd5e1",borderRadius:6,marginTop:6}}/>
         </div>}
         <Table headers={["库位编码","用途","占用件数","容量上限","状态","备注","操作"]} rows={visible.map(location=>[
-          <strong className="code">{location.code}</strong>,zones[location.zone]??location.zone,location.occupied,
-          location.capacity??"未设定",<Tag>{location.active?"已启用":"已停用"}</Tag>,location.notes||"—",
-          <div className="actions">
+          <button key="code" type="button" className="code" onClick={()=>setDetailLocId(location.id)}>{location.code}</button>,
+          zones[location.zone]??location.zone,location.occupied,
+          location.capacity??"未设定",<Tag tone={location.active?"green":"gray"}>{location.active?"已启用":"已停用"}</Tag>,location.notes||"—",
+          <div key="op" className="actions">
+            <button type="button" className="button sm primary nowrap" onClick={()=>setDetailLocId(location.id)}>库位明细 ({location.occupied})</button>
             <Action sm run={async()=>{
               const res=await request("/staff/labels/print","POST",{location_ids:[location.id],label_size:"shelf_100x60"});
               setPrintedLoc({print_id:res.print_id,code:location.code});
@@ -86,6 +90,44 @@ export function StorageLocations({warehouseLinks}:{warehouseLinks:[string,string
         ])} empty="没有符合条件的库位。"/>
       </Panel>
     </>}
+    <ModalDrawer
+      open={Boolean(detailLocId)}
+      onClose={()=>setDetailLocId("")}
+      title={locDetail.data?.location?`库位实物与移库详情 · ${locDetail.data.location.code}`:"正在加载库位详情…"}
+      subtitle={locDetail.data?.location?`${zones[locDetail.data.location.zone]??locDetail.data.location.zone} · 容量上限 ${locDetail.data.location.capacity??"未限"} 件`:""}
+    >
+      {locDetail.error&&<ErrorBlock error={locDetail.error}/>}
+      {!locDetail.data&&!locDetail.error&&<p role="status">正在读取当前在位实物及历史移库事件…</p>}
+      {locDetail.data&&<>
+        <Panel title={`当前存放实物 (${(locDetail.data.items??[]).length})`}>
+          <Table
+            headers={["实物码","专属客户","关联订单","来源包裹","识别/保管状态","保管到期"]}
+            rows={(locDetail.data.items??[]).map((it:Row)=>[
+              <Link key="c" className="code nowrap" href={`/wh/samples/${encodeURIComponent(it.code)}`}>{it.code}</Link>,
+              <span key="rc" className="code">{it.receiving_code??"未认领"}</span>,
+              it.order_no?<Link key="o" className="code nowrap" href={`/admin/orders/${it.order_no}`}>{it.order_no}</Link>:"—",
+              it.package_code?<Link key="p" className="code nowrap" href={`/wh/packages/${it.package_code}`}>{it.package_code}</Link>:"—",
+              `${it.identity_state} / ${it.custody_state}`,
+              stamp(it.storage_until,true),
+            ])}
+            empty="该库位当前为空置状态。"
+          />
+        </Panel>
+        <Panel title={`近期移库记录 (${(locDetail.data.moves??[]).length})`}>
+          <Table
+            headers={["时间","动作","实物码","原库位 → 目标库位","操作人"]}
+            rows={(locDetail.data.moves??[]).map((mv:Row)=>[
+              stamp(mv.created_at),
+              mv.action,
+              <span key="i" className="code">{mv.item_code}</span>,
+              `${mv.from_location??"入口"} → ${mv.to_location??"—"}`,
+              mv.operator_name??"—",
+            ])}
+            empty="暂无历史移库记录。"
+          />
+        </Panel>
+      </>}
+    </ModalDrawer>
   </>;
 }
 

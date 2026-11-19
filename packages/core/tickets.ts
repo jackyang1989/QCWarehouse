@@ -58,8 +58,8 @@ export async function createPublicInquiry(db:DB,actor:Actor|null,browser:string,
 async function ticket(db:DB,actor:Actor,id:string,orderNumber:string|null,write=false) {
   const org=actor.kind==="customer"?organization(actor):null;
   if(org===null)role(actor,...staffAccess.orders);
-  return one(db,`select k.id,k.org_id,k.public_no,k.subject,k.category,k.state,k.revision,k.next_action_at,k.assignee_id,
-    u.display_name assignee,o.public_no order_number,k.details
+  return one(db,`select k.id,k.org_id,k.order_id,k.public_no,k.subject,k.category,k.state,k.revision,k.created_at,k.resolved_at,k.next_action_at,k.assignee_id,
+    u.display_name assignee,o.public_no order_number,o.state order_state,k.details
     from tickets k left join orders o on o.id=k.order_id and o.org_id=k.org_id left join users u on u.id=k.assignee_id
     where k.id=$1 and ($2::uuid is null or k.org_id=$2) and ($3::text is null or o.public_no=$3)${write?" for update of k":""}`,
     [id,org,orderNumber]);
@@ -75,8 +75,10 @@ export async function caseDetail(db:DB,actor:Actor,id:string,orderNumber:string|
     proof_id:k.details.proof_id,
     advice_id:k.details.decision==="approve"?(await one(db,`select ${approvedIntakeAdviceSql} advice_id from tickets k where id=$1`,[id])).advice_id:null,
   }:null;
-  const {rows:events}=await db.query(`select id,actor_type,kind,body,media_ids,created_at from ticket_events
-    where ticket_id=$1 and ($2::boolean or kind='message') order by created_at,id`,[id,actor.kind==="staff"]);
+  const {rows:events}=await db.query(`select e.id,e.actor_type,e.kind,e.body,e.media_ids,e.created_at,
+    case when $2::boolean then u.display_name else null end actor_name
+    from ticket_events e left join users u on u.id=e.actor_id
+    where e.ticket_id=$1 and ($2::boolean or e.kind='message') order by e.created_at,e.id`,[id,actor.kind==="staff"]);
   const recovery=actor.kind==="staff"?(await db.query(`select r.id,r.user_id,r.state,r.requested_by as support_reviewer_id,
     r.approved_by as admin_approver_id,r.execute_after as executable_after,r.executed_at,p.receiving_code,u.status as user_status
     from recovery_requests r left join users u on u.id=r.user_id left join customer_receiving_profiles p on p.user_id=u.id
@@ -108,8 +110,17 @@ export async function caseDetail(db:DB,actor:Actor,id:string,orderNumber:string|
     from users u join staff_roles sr on sr.user_id=u.id
     where u.status='active' and sr.role in ('support','super_admin')
     order by display_name,u.id`)).rows:[];
+  const customer=(actor.kind==="staff"&&k.org_id)?(await db.query(`select u.id user_id,p.org_id,p.receiving_code,u.display_name,u.status,
+    e.original_email email
+    from customer_receiving_profiles p join users u on u.id=p.user_id left join user_emails e on e.user_id=u.id and e.is_primary
+    where p.org_id=$1 limit 1`,[k.org_id])).rows[0]??null:null;
+  const linkedPaymentId=actor.kind==="staff"&&typeof k.details?.payment_id==="string"?k.details.payment_id:null;
+  const linkedChargeItemId=actor.kind==="staff"&&typeof k.details?.charge_item_id==="string"?k.details.charge_item_id:null;
   return {id:k.id,public_no:k.public_no,subject:k.subject,category:k.category,state:k.state,revision:k.revision,
-    next_action_at:k.next_action_at,order_number:k.order_number,incident,...(parcel?{parcel}:{}),
+    created_at:k.created_at,resolved_at:k.resolved_at,
+    next_action_at:k.next_action_at,order_number:k.order_number,
+    ...(actor.kind==="staff"?{order_state:k.order_state,customer,linked_payment_id:linkedPaymentId,linked_charge_item_id:linkedChargeItemId}:{}),
+    incident,...(parcel?{parcel}:{}),
     ...(ownershipReview?{ownership_review:ownershipReview}:{}),
     ...(actor.kind==="staff"?{assignee_id:k.assignee_id,assignee:k.assignee,account_recovery:recovery,staff_candidates:staffCandidates,
       ...(k.details.public_inquiry?{inquiry:{contact_email:k.details.contact_email,category:k.details.category_labels,
@@ -145,10 +156,17 @@ export async function staffTicketQueue(
 ) {
   role(actor,...staffAccess.orders);
   const {rows}=await db.query(`select k.id,k.public_no,k.subject,k.category,k.state,k.next_action_at,k.created_at,
-      k.assignee_id,u.display_name assignee,o.public_no order_number
-    from tickets k left join users u on u.id=k.assignee_id left join orders o on o.id=k.order_id and o.org_id=k.org_id
+      k.assignee_id,u.display_name assignee,o.public_no order_number,o.state order_state,
+      crp.user_id customer_user_id,crp.receiving_code,cu.display_name customer_name,
+      k.details->>'priority' priority,
+      (select e.created_at from ticket_events e where e.ticket_id=k.id and e.actor_type='customer' order by e.created_at desc limit 1) last_customer_at,
+      (select left(e.body,140) from ticket_events e where e.ticket_id=k.id and e.kind='message' order by e.created_at desc limit 1) latest_message
+    from tickets k left join users u on u.id=k.assignee_id
+    left join orders o on o.id=k.order_id and o.org_id=k.org_id
+    left join customer_receiving_profiles crp on crp.org_id=k.org_id
+    left join users cu on cu.id=crp.user_id
     where ($1::text is null or k.state=$1)
-      and ($2::text is null or k.public_no=$2 or o.public_no=$2)
+      and ($2::text is null or k.public_no=$2 or o.public_no=$2 or upper(coalesce(crp.receiving_code,''))=$2)
       and ($3::text is null or k.category=$3)
       and ($4::text is null
         or ($4='unassigned' and k.assignee_id is null)

@@ -476,6 +476,7 @@ export async function stripeEvent(db:DB,e:Stripe.Event) {
           );
         }
       }
+      if(state==="succeeded") await syncPaymentRefundState(db,p.id);
     }
   }
   await db.query("update payment_events set processed_at=now() where provider='stripe' and event_id=$1",[e.id]);
@@ -555,7 +556,21 @@ export async function refundRequest(db:DB,actor:Actor,pid:string,cents:number,re
   await audit(db,actor,"request_refund","refunds",r.refund_id);
   return r;
 }
-export async function refundApprove(db:DB,actor:Actor,id:string,rev:number,sessionHash:string) {
+async function syncPaymentRefundState(db:DB,paymentId:string) {
+  const row=(await db.query<{amount_cents:number;state:string;refunded_cents:number}>(
+    `select p.amount_cents,p.state,
+       coalesce((select sum(r.amount_cents)::int from refunds r where r.payment_id=p.id and r.state='succeeded'),0) refunded_cents
+     from payments p where p.id=$1 for update of p`,
+    [paymentId]
+  )).rows[0];
+  if(!row || !["succeeded","partially_refunded","refunded"].includes(row.state) || row.refunded_cents<=0) return;
+  const nextState=row.refunded_cents>=row.amount_cents?"refunded":"partially_refunded";
+  if(nextState!==row.state) {
+    await db.query("update payments set state=$2,updated_at=now() where id=$1",[paymentId,nextState]);
+  }
+}
+
+export async function refundApprove(db:DB,actor:Actor,id:string,rev:number,sessionHash:string,note?:string) {
   role(actor,"super_admin");
   await requireStaffMfa(db,actor,sessionHash,refundApprovalMfaMinutes);
   const first=await one(db,`select c.org_id from refunds r join payments p on p.id=r.payment_id join charge_items c on c.id=p.charge_item_id where r.id=$1`,[id]);
@@ -566,16 +581,44 @@ export async function refundApprove(db:DB,actor:Actor,id:string,rev:number,sessi
   guard(r.amount_cents<=p.refundable_cents && refundableStates.includes(p.state),"REFUND_NOT_ALLOWED","The refundable balance has changed.");
   await db.query("update refunds set state='approved',approved_by=$2,revision=revision+1 where id=$1",[id,actor.id]);
   await event(db,"refund.approved",{refund_id:id});
-  await audit(db,actor,"approve_refund","refunds",id);
+  await audit(db,actor,"approve_refund","refunds",id,{
+    payment_id:r.payment_id,
+    amount_cents:r.amount_cents,
+    ...(note?.trim()?{reason:note.trim()}:{}),
+  });
   return {refund_id:id,state:"approved"};
+}
+export async function refundReject(db:DB,actor:Actor,id:string,rev:number,reason:string,sessionHash:string) {
+  role(actor,"super_admin");
+  const cleanReason=reason.trim();
+  guard(cleanReason.length>=4,"INVALID_REASON","请填写至少 4 个字的驳回理由与审核结论。",422);
+  await requireStaffMfa(db,actor,sessionHash,refundApprovalMfaMinutes);
+  const first=await one(db,`select c.org_id from refunds r join payments p on p.id=r.payment_id join charge_items c on c.id=p.charge_item_id where r.id=$1`,[id]);
+  await lock(db,"org:"+first.org_id);
+  const r=await one(db,"select * from refunds where id=$1 for update",[id]);
+  guard(r.revision===rev && r.state==="requested" && r.requested_by!==actor.id,"REFUND_NOT_ALLOWED","An independent reviewer and current request are required.");
+  await db.query("update refunds set state='rejected',approved_by=$2,revision=revision+1 where id=$1",[id,actor.id]);
+  await audit(db,actor,"reject_refund","refunds",id,{
+    payment_id:r.payment_id,
+    amount_cents:r.amount_cents,
+    reason:cleanReason,
+  });
+  return {refund_id:id,state:"rejected"};
 }
 export async function executeRefund(db:DB,id:string) {
   const r=await one(db,`select r.*,p.provider_data from refunds r join payments p on p.id=r.payment_id where r.id=$1 for update of r`,[id]);
   if(r.state!=="approved" || r.provider_ref) return;
   if(isDemo() && r.provider_data.demo) {
     await db.query("update refunds set state='succeeded',provider_ref=$2 where id=$1",[id,"demo_refund_"+id]);
+    await syncPaymentRefundState(db,r.payment_id);
+    await audit(db,null,"refund_executed","refunds",id,{payment_id:r.payment_id,amount_cents:r.amount_cents,provider_ref:"demo_refund_"+id});
     return;
   }
   const result=await stripe().refunds.create({payment_intent:r.provider_data.payment_intent,amount:r.amount_cents,metadata:{refund_id:id}},{idempotencyKey:id});
-  await db.query("update refunds set provider_ref=$2,state=$3 where id=$1",[id,result.id,result.status==="succeeded"?"succeeded":result.status==="failed"?"failed":"approved"]);
+  const nextState=result.status==="succeeded"?"succeeded":result.status==="failed"?"failed":"approved";
+  await db.query("update refunds set provider_ref=$2,state=$3 where id=$1",[id,result.id,nextState]);
+  if(nextState==="succeeded") {
+    await syncPaymentRefundState(db,r.payment_id);
+    await audit(db,null,"refund_executed","refunds",id,{payment_id:r.payment_id,amount_cents:r.amount_cents,provider_ref:result.id});
+  }
 }

@@ -15,7 +15,8 @@ import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote,
 import { advise, assign, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
 import { acceptQuote, amendDispatchBatch, calculateShippingPreview, cancelDisposition, checkStorageReminders, closeCompletedOrder, confirmBatch, handover, instruct, packShipment, planBatch, publishShippingRate, quoteBatch, readDispatchBatch, receiveReturn, releaseReferenceSample, storageQuote } from "./dispatch";
-import { chargeReceipt, checkout, demoPay, orderPayment, orderRefundPayments, refundApprove, refundRequest, resolvePaymentDispute, stripeEvent, verifyStripe } from "./payments";
+import { chargeReceipt, checkout, demoPay, orderPayment, orderRefundPayments, refundApprove, refundReject, refundRequest, resolvePaymentDispute, stripeEvent, verifyStripe } from "./payments";
+import { adminCustomerDetail, adminCustomerFilters, adminCustomersList, adminDisposalDetail, adminDispositionsOverview, adminIncidentDetail, adminInspectionsOverview, adminPaymentDetail, adminPaymentListFilters, adminPaymentsList, adminRefundDetail, adminRefundListFilters, adminRefundsList, adminStorageLocationDetail } from "./admin-reads";
 import { approveTrackingTranslation, correctCustomerParcelTracking, correctStaffTracking, providerCallback, refreshTracking, submitTrackingTranslation, tracking, trackingAdmin, trackingMonitor, updateTrackingAlert, verificationState, verifyTracking } from "./logistics";
 import { adminDesk, bills, customerActions, customerDesk, customerInventory, customerNotifications, customerParcelTab, dispatchQueueStates, items, listCustomerOrders, listCustomerParcels, markNotificationRead, orderLedger, orderLedgerCsv, readOrderByPublicNumber, readStaffObjectSummary, reconcileFinance, referenceSamples, searchStaffOrders, staffOrderDetail, staffOrderFilters, warehouseDesk, warehouseDispatchBatch, warehouseDispatchQueue, warehouseItem, warehousePackage } from "./reads";
 import { staffAccess } from "./staff-access";
@@ -469,6 +470,51 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   const locationState=path.match(/^\/staff\/admin\/storage\/locations\/([a-f0-9-]{36})\/state$/i);
   if(method==="POST"&&locationState) return extraWrite(req,path,actor,z.object({active:z.boolean()}),
     (db,a,b)=>setLocationActive(db,a,idSchema.parse(locationState[1]),b.active));
+  const locationDetail=path.match(/^\/staff\/admin\/storage\/locations\/([a-f0-9-]{36})$/i);
+  if(method==="GET"&&locationDetail) return json(await transaction(db=>adminStorageLocationDetail(db,actorRequired(actor),idSchema.parse(locationDetail[1]))));
+  if(method==="GET" && path==="/staff/admin/payments") {
+    const filters=adminPaymentListFilters.parse(Object.fromEntries([...url.searchParams].filter(([,v])=>v!=="")));
+    return json(await transaction(db=>adminPaymentsList(db,actorRequired(actor),filters)));
+  }
+  const adminPaymentRoute=path.match(/^\/staff\/admin\/payments\/([a-f0-9-]{36})$/i);
+  if(method==="GET"&&adminPaymentRoute) return json(await transaction(db=>adminPaymentDetail(db,actorRequired(actor),idSchema.parse(adminPaymentRoute[1]))));
+  if(method==="GET" && path==="/staff/admin/refunds") {
+    const filters=adminRefundListFilters.parse(Object.fromEntries([...url.searchParams].filter(([,v])=>v!=="")));
+    return json(await transaction(db=>adminRefundsList(db,actorRequired(actor),filters)));
+  }
+  const adminRefundRoute=path.match(/^\/staff\/admin\/refunds\/([a-f0-9-]{36})$/i);
+  if(method==="GET"&&adminRefundRoute) return json(await transaction(db=>adminRefundDetail(db,actorRequired(actor),idSchema.parse(adminRefundRoute[1]))));
+  const adminRefundDecide=path.match(/^\/staff\/(?:admin\/)?refunds\/([a-f0-9-]{36})\/(approve|reject)$/i);
+  if(method==="POST"&&adminRefundDecide) {
+    const refundId=idSchema.parse(adminRefundDecide[1]);
+    const action=adminRefundDecide[2].toLowerCase();
+    if(action==="reject") {
+      return extraWrite(req,path,actor,z.object({revision:revSchema,reason:z.string().trim().min(4).max(1000)}).strict(),
+        (db,a,b)=>refundReject(db,a,refundId,b.revision,b.reason,hash(getCookie(req,"session"))));
+    }
+    if(path.startsWith("/staff/admin/refunds/")) {
+      return extraWrite(req,path,actor,z.object({revision:revSchema,reason:z.string().trim().max(1000).optional(),note:z.string().trim().max(1000).optional()}).strict(),
+        (db,a,b)=>refundApprove(db,a,refundId,b.revision,hash(getCookie(req,"session")),b.reason??b.note),202);
+    }
+  }
+  if(method==="GET" && path==="/staff/admin/customers") {
+    const filters=adminCustomerFilters.parse(Object.fromEntries([...url.searchParams].filter(([,v])=>v!=="")));
+    return json(await transaction(db=>adminCustomersList(db,actorRequired(actor),filters)));
+  }
+  const adminCustomerRoute=path.match(/^\/staff\/admin\/customers\/([a-f0-9-]{36})$/i);
+  if(method==="GET"&&adminCustomerRoute) return json(await transaction(db=>adminCustomerDetail(db,actorRequired(actor),idSchema.parse(adminCustomerRoute[1]))));
+  if(method==="GET" && path==="/staff/admin/inspections") {
+    const q=url.searchParams.get("q")?.trim()||"";
+    const state=url.searchParams.get("state")?.trim()||"";
+    return json(await transaction(db=>adminInspectionsOverview(db,actorRequired(actor),{q,state})));
+  }
+  if(method==="GET" && path==="/staff/admin/dispositions-overview") {
+    return json(await transaction(db=>adminDispositionsOverview(db,actorRequired(actor))));
+  }
+  const adminIncidentRoute=path.match(/^\/staff\/admin\/incidents\/([a-f0-9-]{36})$/i);
+  if(method==="GET"&&adminIncidentRoute) return json(await transaction(db=>adminIncidentDetail(db,actorRequired(actor),idSchema.parse(adminIncidentRoute[1]))));
+  const adminDisposalRoute=path.match(/^\/staff\/admin\/disposals\/([a-f0-9-]{36})$/i);
+  if(method==="GET"&&adminDisposalRoute) return json(await transaction(db=>adminDisposalDetail(db,actorRequired(actor),idSchema.parse(adminDisposalRoute[1]))));
   if(method==="GET" && path==="/staff/items/by-code") {
     const code=z.string().trim().min(1).max(100).parse(url.searchParams.get("code"));
     return json(await transaction(db=>warehouseItem(db,actorRequired(actor),code)));
