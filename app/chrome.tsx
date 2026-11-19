@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { request } from "./ui";
 import type { Actor } from "../packages/core/common";
 
@@ -369,7 +369,25 @@ export function WorkspaceNavigation({area,title,links,path,demo=false,mobileOpen
     ? []
     : links.filter(([href])=>!(area==="admin"&&hasAdminCatalog&&href==="/admin/settings") && !grouped.some(([,group])=>group.some(([url])=>url===href)));
   const isStaff = area==="warehouse" || area==="admin";
-  return <aside className={`workspace-sidebar ${mobileOpen?"mobile-open":""}`} id="workspace-sidebar-nav">
+  const asideRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    const aside = asideRef.current;
+    if (!aside) return;
+    const activeEl = aside.querySelector<HTMLElement>('a[aria-current="page"]');
+    if (!activeEl) return;
+    const top = activeEl.offsetTop;
+    const bottom = top + activeEl.offsetHeight;
+    const viewTop = aside.scrollTop;
+    const viewBottom = viewTop + aside.clientHeight;
+    if (top < viewTop + 16) {
+      aside.scrollTop = Math.max(0, top - 64);
+    } else if (bottom > viewBottom - 16) {
+      aside.scrollTop = Math.max(0, bottom - aside.clientHeight + 24);
+    }
+  }, [current]);
+
+  return <aside className={`workspace-sidebar ${mobileOpen?"mobile-open":""}`} id="workspace-sidebar-nav" ref={asideRef}>
     <div className="workspace-sidebar-title">
       <div className="row" style={{justifyContent:"space-between",alignItems:"center"}}>
         <strong>{area==="customer"?"My Workspace":area==="warehouse"?"仓库作业中心":"运营管理后台"}</strong>

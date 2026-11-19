@@ -213,6 +213,7 @@ small, .small { font-size: 12px; color: var(--muted); }
 .workspace-layout, .layout {
   display: grid;
   grid-template-columns: 248px minmax(0, 1fr);
+  align-items: start;
   max-width: 1920px;
   margin: 0 auto;
   min-height: calc(100svh - 70px);
@@ -221,11 +222,32 @@ small, .small { font-size: 12px; color: var(--muted); }
   background: var(--nav);
   color: #d0deec;
   padding: 20px 14px 28px;
-  min-height: calc(100svh - 70px);
+  position: sticky;
+  top: 70px;
+  height: calc(100svh - 70px);
+  max-height: calc(100svh - 70px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  align-self: start;
   box-shadow: inset -1px 0 0 #29415d;
-  position: relative;
-  overflow: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(141, 167, 197, 0.32) transparent;
 }
+.workspace-sidebar::-webkit-scrollbar, .sidebar::-webkit-scrollbar { width: 6px; }
+.workspace-sidebar::-webkit-scrollbar-track, .sidebar::-webkit-scrollbar-track { background: transparent; }
+.workspace-sidebar::-webkit-scrollbar-thumb, .sidebar::-webkit-scrollbar-thumb {
+  background: rgba(141, 167, 197, 0.28);
+  border-radius: 99px;
+}
+.workspace-sidebar::-webkit-scrollbar-thumb:hover, .sidebar::-webkit-scrollbar-thumb:hover {
+  background: rgba(141, 167, 197, 0.48);
+}
+.workspace-admin .workspace-sidebar { padding: 14px 12px 20px; }
+.workspace-admin .workspace-sidebar-title { margin-bottom: 8px; }
+.workspace-admin .workspace-nav { gap: 10px; margin-top: 6px; }
+.workspace-admin .workspace-nav a { min-height: 33px; padding: 5px 11px; }
+.workspace-admin .sidebar-note { margin: 14px 6px 0; padding: 11px 12px; }
 .workspace-sidebar::before, .sidebar::before {
   content: "";
   pointer-events: none;
@@ -283,6 +305,7 @@ small, .small { font-size: 12px; color: var(--muted); }
 .workspace-main, .main {
   width: 100%;
   min-width: 0;
+  min-height: calc(100svh - 70px);
   max-width: 1560px;
   padding: 30px clamp(22px, 3vw, 48px) 60px;
   background: var(--bg);
@@ -1910,7 +1933,7 @@ button.option-card.disabled, .option-card.disabled {
   .workspace .workspace-layout { display: block; }
   .workspace .workspace-sidebar {
     position: fixed; top: 0; left: 0; bottom: 0; z-index: 950;
-    width: min(300px, 86vw); min-height: 100svh; overflow-y: auto;
+    width: min(300px, 86vw); height: 100svh; max-height: 100svh; min-height: 100svh; overflow-y: auto;
     visibility: hidden; transform: translateX(-102%); transition: transform 0.2s ease;
     box-shadow: 16px 0 40px rgba(10, 22, 40, 0.28);
   }
@@ -2548,5 +2571,106 @@ button.admin-tab.active .admin-tab-count {
   .workspace-admin .responsive-table .money-cell {
     text-align: left;
   }
+  .workspace-admin .responsive-table tbody tr.audit-detail-row {
+    display: block;
+    padding: 8px;
+  }
+  .workspace-admin .responsive-table tbody tr.audit-detail-row td {
+    width: 100%;
+    padding: 6px 4px;
+  }
   .diff-box { grid-template-columns: 1fr; }
+}
+
+.audit-tbl th, .audit-tbl td {
+  padding: 11px 12px;
+  vertical-align: top;
+}
+.audit-tbl tbody tr:not(.audit-detail-row):hover {
+  background: #f8fbff;
+}
+.audit-tbl .audit-time {
+  font-size: 12.5px;
+  color: #34495e;
+  font-weight: 600;
+}
+.audit-tbl .audit-primary-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.35;
+}
+.audit-tbl .audit-primary-line .tag {
+  padding: 2px 7px;
+  font-size: 11px;
+  min-height: 0;
+}
+.audit-subcode {
+  display: block;
+  margin-top: 3px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: #7a8ca1;
+  line-height: 1.35;
+  word-break: break-all;
+}
+.audit-roles-line {
+  display: block;
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: #5b718a;
+  line-height: 1.35;
+}
+.audit-entity-type {
+  display: block;
+  font-size: 11px;
+  font-weight: 650;
+  color: #73869b;
+  line-height: 1.3;
+  margin-bottom: 2px;
+}
+.audit-entity-label {
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--ink);
+}
+.audit-link {
+  font-size: 12.5px;
+  font-weight: 700;
+}
+.audit-expand-btn {
+  height: 28px;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid #d5e1ee;
+  background: #f7faff;
+  color: #1d55b8;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.audit-expand-btn:hover,
+.audit-expand-btn[aria-expanded="true"] {
+  background: #eaf2ff;
+  border-color: #a9c5f2;
+}
+.audit-detail-row td {
+  background: #f8fafd;
+  padding: 12px 16px 16px;
+  border-bottom: 2px solid #dce6f3;
+}
+.audit-meta-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 18px;
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  background: #fff;
+  border: 1px solid #e2eaf4;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #52677e;
 }
