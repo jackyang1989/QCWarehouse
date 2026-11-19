@@ -358,7 +358,11 @@ const navigationSections = {
   ],
 } satisfies Record<string,[string,string[]][]>;
 
-export function WorkspaceNavigation({area,title,links,path,demo=false,mobileOpen=false,onCloseMobile}:{area:keyof typeof navigationSections;title:string;links:[string,string][];path:string;demo?:boolean;mobileOpen?:boolean;onCloseMobile?:()=>void}) {
+export function WorkspaceNavigation({
+  area,title,links,path,demo=false,mobileOpen=false,onCloseMobile,collapsed=false,onToggleCollapse,
+}:{
+  area:keyof typeof navigationSections;title:string;links:[string,string][];path:string;demo?:boolean;mobileOpen?:boolean;onCloseMobile?:()=>void;collapsed?:boolean;onToggleCollapse?:()=>void;
+}) {
   const normPath = path==="/billing"?"/account/billing":path==="/notifications"?"/account/notifications":path;
   const current=links.find(([href])=>href===normPath)?.[0]
     ?? links.filter(([href])=>href!=="/wh"&&href!=="/admin"&&normPath.startsWith(href+"/")).sort(([left],[right])=>right.length-left.length)[0]?.[0]
@@ -369,6 +373,7 @@ export function WorkspaceNavigation({area,title,links,path,demo=false,mobileOpen
     ? []
     : links.filter(([href])=>!(area==="admin"&&hasAdminCatalog&&href==="/admin/settings") && !grouped.some(([,group])=>group.some(([url])=>url===href)));
   const isStaff = area==="warehouse" || area==="admin";
+  const toggleLabel = isStaff ? (collapsed ? "展开侧栏菜单" : "收起侧栏菜单") : (collapsed ? "Expand sidebar" : "Collapse sidebar");
   const asideRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -387,10 +392,32 @@ export function WorkspaceNavigation({area,title,links,path,demo=false,mobileOpen
     }
   }, [current]);
 
-  return <aside className={`workspace-sidebar ${mobileOpen?"mobile-open":""}`} id="workspace-sidebar-nav" ref={asideRef}>
+  return <aside
+    className={`workspace-sidebar${mobileOpen?" mobile-open":""}${collapsed?" collapsed":""}`}
+    id="workspace-sidebar-nav"
+    data-collapsed={collapsed?"true":"false"}
+    ref={asideRef}
+  >
     <div className="workspace-sidebar-title">
-      <div className="row" style={{justifyContent:"space-between",alignItems:"center"}}>
+      <div className="row" style={{justifyContent:"space-between",alignItems:"center",gap:8}}>
         <strong>{area==="customer"?"My Workspace":area==="warehouse"?"仓库作业中心":"运营管理后台"}</strong>
+        {onToggleCollapse && (
+          <button
+            type="button"
+            className="workspace-sidebar-collapse-btn"
+            aria-expanded={!collapsed}
+            aria-controls="workspace-sidebar-nav"
+            aria-label={toggleLabel}
+            title={toggleLabel}
+            onClick={onToggleCollapse}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="16" rx="2"/>
+              <path d="M9 4v16"/>
+              {collapsed ? <path d="m14 10 2.5 2-2.5 2"/> : <path d="m16 10-2.5 2 2.5 2"/>}
+            </svg>
+          </button>
+        )}
         {onCloseMobile && (
           <button
             type="button"
@@ -406,7 +433,7 @@ export function WorkspaceNavigation({area,title,links,path,demo=false,mobileOpen
     <nav className="workspace-nav" aria-label={title}>
       {[...grouped,[area==="customer"?"More":"平台配置",otherLinks] as const].filter(([,group])=>group.length>0).map(([name,group])=><div className="workspace-nav-group" key={name}>
         <p>{name}</p>
-        {group.map(([href,label])=><Link key={href} href={href} aria-current={href===current?"page":undefined} onClick={onCloseMobile}>
+        {group.map(([href,label])=><Link key={href} href={href} aria-current={href===current?"page":undefined} title={collapsed?label:undefined} onClick={onCloseMobile}>
           <PlatformIcon name={navIcons[href]??"orders"}/><span>{label}</span>
         </Link>)}
       </div>)}

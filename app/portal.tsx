@@ -30,7 +30,28 @@ import type { Actor } from "../packages/core/common";
 
 export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:string;target:string;route:PortalRoute;actor:Actor|null;demo?:boolean;timeZone?:string}) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const menuToggle=useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem("qcw_sidebar_collapsed") === "1") {
+        setSidebarCollapsed(true);
+      }
+    } catch {
+      // ignore storage failure
+    }
+  }, []);
+  function toggleSidebarCollapsed() {
+    setSidebarCollapsed(prev => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem("qcw_sidebar_collapsed", next ? "1" : "0");
+      } catch {
+        // ignore storage failure
+      }
+      return next;
+    });
+  }
   function closeMobileNavigation() {
     setMobileNavOpen(false);
     menuToggle.current?.focus();
@@ -175,7 +196,7 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
       </div>
     </header>
     {mobileNavOpen && <div className="workspace-drawer-backdrop" onClick={closeMobileNavigation} aria-hidden="true"/>}
-    <div className="workspace-layout">
+    <div className={`workspace-layout${sidebarCollapsed?" sidebar-collapsed":""}`}>
       <WorkspaceNavigation
         area={route.area as "admin"|"warehouse"|"customer"}
         title={section}
@@ -184,6 +205,8 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
         demo={demo}
         mobileOpen={mobileNavOpen}
         onCloseMobile={closeMobileNavigation}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={toggleSidebarCollapsed}
       />
       <main className={`workspace-main view-${route.view}`} id="main-content" tabIndex={-1}>
         {(!isStaff || (!currentLink && parentLink)) && (
