@@ -81,6 +81,7 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
   const [batchVerifyResult,setBatchVerifyResult]=useState<{verified:boolean;verified_count:number}>();
   const [discrepancyResult,setDiscrepancyResult]=useState<Row>();
   const [openPhotoMessage,setOpenPhotoMessage]=useState<string>("");
+  const [lookupError,setLookupError]=useState<string>("");
   const packageDetail=useLoad(packageId?"/staff/packages/"+packageId:null);
   const selectedPackage=packageDetail.data?.parcel.id===packageId?packageDetail.data:undefined;
   const [itemCode,setItemCode]=useState("");
@@ -92,14 +93,22 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
     const tracking=rawTracking.trim();
     const carrier=rawCarrier.trim();
     if(!tracking) return;
-    setLookup(undefined);setPackageId("");setPkgItemPage(1);setDeclPage(1);
-    const result=await request("/staff/intake/lookup","POST",{tracking_no:tracking,...(carrier?{carrier_code:carrier}:{})});
-    let context:Row|undefined;
+    if(!actor.roles.some((r:string)=>["receiver","warehouse_admin"].includes(r))) {
+      setLookupError("当前账号为只读监督角色：运单查询与实物到仓登记仅限收货员（receiver）与仓库主管（warehouse_admin）。");
+      return;
+    }
+    setLookupError("");setLookup(undefined);setPackageId("");setPkgItemPage(1);setDeclPage(1);
     try {
-      context=await request("/staff/intake/context?"+new URLSearchParams({tracking_no:tracking,...(carrier?{carrier_code:carrier}:{})}));
-    } catch {}
-    setLookup({tracking,carrier,result,context});
-    if(result.package_id) setPackageId(result.package_id);
+      const result=await request("/staff/intake/lookup","POST",{tracking_no:tracking,...(carrier?{carrier_code:carrier}:{})});
+      let context:Row|undefined;
+      try {
+        context=await request("/staff/intake/context?"+new URLSearchParams({tracking_no:tracking,...(carrier?{carrier_code:carrier}:{})}));
+      } catch {}
+      setLookup({tracking,carrier,result,context});
+      if(result.package_id) setPackageId(result.package_id);
+    } catch(err) {
+      setLookupError(err instanceof Error?err.message:"运单查询失败，请核对权限或运单号后重试。");
+    }
   }
 
   useEffect(()=>{
@@ -356,11 +365,12 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
         </div>
       </div>}
       <section className="panel scan-panel" id="intake-waybill"><div className="section-heading"><span className="eyebrow">01 / 运单定位</span><h2>搜索卖家运单</h2><p className="muted">承运商签收不等于 QCWarehouse 实收。须核对外箱状况（完好/压扁/破损/水渍）并拍照留证。</p></div>
-        <fieldset disabled={receiving} style={{display:"contents"}} onChange={()=>{setLookup(undefined);setPackageId("");}}>
+        <fieldset disabled={receiving} style={{display:"contents"}} onChange={()=>{setLookup(undefined);setLookupError("");setPackageId("");}}>
           <Form inline label="搜索" run={async f=>{
             await runTrackingLookup(text(f,"tracking"),text(f,"carrier"));
           }}><Field key={intakeTracking} name="tracking" label="扫描条码或手动输入运单号" value={intakeTracking}/><Select name="carrier" label="快递公司" choices={carrierOptions} required={false}/></Form>
         </fieldset>
+        {lookupError?<ErrorBlock error={lookupError}/>:null}
         {lookup&&<div className="notice"><p>运单 <strong className="code">{lookup.tracking}</strong></p>
           <p>匹配结果 <strong>{({matched:"已关联订单",user_only:"已找到客户，待关联订单",unmatched:"待认领（入仓后须停放未认领区 U-01）",ambiguous:"多个候选，请核对快递公司"} as Row)[lookup.result.match_state]}</strong></p>
           {lookup.result.receiving_code&&<p className="code">专属收件码：{lookup.result.receiving_code}</p>}

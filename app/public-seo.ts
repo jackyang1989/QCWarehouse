@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { orderSections, type PortalRoute } from "../packages/core/portal-routes";
 
 export function publicSiteOrigin(): string {
   try {
@@ -108,13 +109,106 @@ const PUBLIC_ROUTE_SEO: Record<string, RouteSeoConfig> = {
   },
 };
 
-export function metadataForPath(path: string, isPublicMarketing: boolean): Metadata {
+const PORTAL_ROUTE_TITLES: Record<string, string> = {
+  "/login": "Customer Sign In",
+  "/signup": "Customer Sign In",
+  "/onboarding": "Complete Account Setup",
+  "/account/recovery": "Account Recovery",
+  "/staff/login": "员工登录",
+  "/account": "Overview · My Workspace",
+  "/orders": "Inspection Orders · My Workspace",
+  "/orders/new": "Create an Inspection · My Workspace",
+  "/parcels": "Parcels · My Workspace",
+  "/items": "Warehouse Items · My Workspace",
+  "/reports": "Inspection Reports · My Workspace",
+  "/actions": "Action Required · My Workspace",
+  "/account/billing": "Billing · My Workspace",
+  "/billing": "Billing · My Workspace",
+  "/account/notifications": "Notifications · My Workspace",
+  "/notifications": "Notifications · My Workspace",
+  "/account/security": "Sign-in Methods & Security · My Workspace",
+  "/support": "Support · My Workspace",
+  "/wh": "仓库总览 · 仓库作业中心",
+  "/wh/scan": "扫码查询 · 仓库作业中心",
+  "/wh/intake": "收货入库 · 仓库作业中心",
+  "/wh/packages": "包裹台账 · 仓库作业中心",
+  "/wh/samples": "样品建档 · 仓库作业中心",
+  "/wh/storage": "库位移转 · 仓库作业中心",
+  "/wh/stocktakes": "库存盘点 · 仓库作业中心",
+  "/wh/inspection": "检查队列 · 仓库作业中心",
+  "/wh/execute": "执行检查 · 仓库作业中心",
+  "/wh/sync": "同步队列 · 仓库作业中心",
+  "/wh/review": "报告复核 · 仓库作业中心",
+  "/wh/dispatch": "出库待办 · 仓库作业中心",
+  "/wh/logistics": "物流监控 · 仓库作业中心",
+  "/admin": "运营总览 · 运营管理后台",
+  "/admin/orders": "全部订单 · 运营管理后台",
+  "/admin/customers": "客户档案 · 运营管理后台",
+  "/admin/tickets": "客户工单 · 运营管理后台",
+  "/admin/inspections": "质检与报告 · 运营管理后台",
+  "/admin/dispositions": "处置与报价 · 运营管理后台",
+  "/admin/refunds": "退款审批 · 运营管理后台",
+  "/admin/payments": "支付流水 · 运营管理后台",
+  "/admin/finance": "财务分析 · 运营管理后台",
+  "/admin/logistics": "物流监控 · 运营管理后台",
+  "/admin/incidents": "库存事故 · 运营管理后台",
+  "/admin/catalog": "品类与服务 · 运营管理后台",
+  "/admin/categories": "品类与服务 · 运营管理后台",
+  "/admin/templates": "检查模板 · 运营管理后台",
+  "/admin/settings": "仓址与模板 · 运营管理后台",
+  "/admin/storage/locations": "库位管理 · 运营管理后台",
+  "/admin/shipping-rates": "运费费率 · 运营管理后台",
+  "/admin/config": "业务配置 · 运营管理后台",
+  "/admin/legal": "条款管理 · 运营管理后台",
+  "/admin/users": "员工权限 · 运营管理后台",
+  "/admin/audit": "审计日志 · 运营管理后台",
+  "/admin/operations": "后台任务 · 运营管理后台",
+  "/admin/integrations/logistics": "物流接入 · 运营管理后台",
+};
+
+export function portalTitleForRoute(path: string, route?: PortalRoute): string {
+  const exact = PORTAL_ROUTE_TITLES[path];
+  if (exact) return exact;
+  if (route) {
+    if (route.view === "order") {
+      return `${route.id}${route.section ? ` · ${orderSections[route.section]}` : ""} · My Workspace`;
+    }
+    if (route.view === "report") {
+      return `Inspection Report ${route.id}${route.version ? ` v${route.version}` : ""} · My Workspace`;
+    }
+    if (route.view === "customer-case") return "Support Case · My Workspace";
+    if (route.view === "order-quote") return `Fulfillment Quote ${route.id} · My Workspace`;
+    if (route.view === "order-shipment") return `Shipment Details ${route.id} · My Workspace`;
+    if (route.view === "parcel") return "Parcel & Tracking Details · My Workspace";
+    if (route.view === "shipment") return "Shipment Tracking · My Workspace";
+    if (route.view === "demo") return "Demo Checkout · My Workspace";
+    if (route.view === "task") return "质检工作台 · 仓库作业中心";
+    if (route.view === "warehouse-package") return `包裹 ${route.id} · 仓库作业中心`;
+    if (route.view === "warehouse-item") return `实物 ${route.id} · 仓库作业中心`;
+    if (route.view === "dispatch-batch") return "发运批次 · 仓库作业中心";
+    if (route.view === "staff-report") return "报告版本复核 · 仓库作业中心";
+    if (route.view === "staff-order") return `订单 ${route.id} · 运营管理后台`;
+    if (route.view === "admin-customer") return "客户详情 · 运营管理后台";
+    if (route.view === "staff-ticket") return "工单详情 · 运营管理后台";
+    if (route.view === "admin-payment") return "支付流水详情 · 运营管理后台";
+    if (route.view === "admin-refund") return "退款审批详情 · 运营管理后台";
+    if (route.view === "admin-incident") return "库存事故详情 · 运营管理后台";
+    if (route.view === "admin-disposal") return "特殊处置单 · 运营管理后台";
+    if (route.view === "admin-inspection-task") return "质检任务监督 · 运营管理后台";
+    if (route.area === "customer") return "My Workspace";
+    if (route.area === "warehouse") return "仓库作业中心";
+    if (route.area === "admin") return "运营管理后台";
+  }
+  return "QCWarehouse";
+}
+
+export function metadataForPath(path: string, isPublicMarketing: boolean, route?: PortalRoute): Metadata {
   const origin = publicSiteOrigin();
   const seo = PUBLIC_ROUTE_SEO[path];
 
   if (!isPublicMarketing || !seo) {
     return {
-      title: path === "/login" || path === "/signup" ? "Customer Sign In" : undefined,
+      title: portalTitleForRoute(path, route),
       robots: { index: false, follow: false },
     };
   }

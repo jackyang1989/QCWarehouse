@@ -28,7 +28,7 @@ export async function generateMetadata({params}:{params:Promise<{page:string[]}>
   const route = resolvePortalRoute(path);
   if (!route) return {};
   const isMarketing = route.area === "public" && PUBLIC_MARKETING_VIEWS.has(route.view);
-  return metadataForPath(path, isMarketing);
+  return metadataForPath(path, isMarketing, route);
 }
 
 export default async function Page({params,searchParams}:{params:Promise<{page:string[]}>;searchParams:Promise<Search>}) {
