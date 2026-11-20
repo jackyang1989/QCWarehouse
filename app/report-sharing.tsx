@@ -28,18 +28,29 @@ export function PublishedReports() {
     return "/reports"+(next.size?"?"+next:"");
   }
   const inProgress:Row[]=data?.in_progress_orders??[];
+  const progressLabels:Record<string,{label:string;tone:"yellow"|"blue"|"red"|"gray"}>={
+    awaiting_samples:{label:"Awaiting warehouse check-in",tone:"yellow"},
+    on_hold:{label:"On hold · review needed",tone:"red"},
+    samples_ready:{label:"Samples ready",tone:"blue"},
+    queued:{label:"Queued for inspection",tone:"blue"},
+    inspecting:{label:"Inspection underway",tone:"blue"},
+    qa_review:{label:"Independent QA review",tone:"yellow"},
+  };
   return <>
     <div className="page-head"><h1>Reports</h1>
       <p className="muted">Find a published report, search by SKU or product name, or track active inspections in progress.</p></div>
     {inProgress.length>0&&<Panel title={`Inspections In Progress (${inProgress.length})`} subtitle="Reports are published automatically after inspection and independent QA approval.">
-      <Table headers={["Order","Service","Stage","Units","Estimated / SLA",""]} rows={inProgress.map((o:Row)=>[
-        <Link key="o" className="code" href={"/orders/"+o.order_number}>{o.order_number}</Link>,
-        o.service_title??"Inspection",
-        o.state.replace(/_/g," "),
-        `${o.unit_count} unit(s)`,
-        stamp(o.eta_at),
-        <Link key="go" className="button sm" href={"/orders/"+o.order_number}>View order →</Link>,
-      ])}/>
+      <Table headers={["Order","Service","Stage","Units","Estimated / SLA",""]} rows={inProgress.map((o:Row)=>{
+        const st=progressLabels[o.state]??{label:String(o.state).replace(/_/g," "),tone:"gray" as const};
+        return [
+          <Link key="o" className="code" href={"/orders/"+o.order_number}>{o.order_number}</Link>,
+          o.service_title??"Inspection",
+          <Tag tone={st.tone}>{st.label}</Tag>,
+          `${o.unit_count} unit(s)`,
+          o.eta_at?stamp(o.eta_at):<span className="small muted">Starts once samples arrive &amp; verified</span>,
+          <Link key="go" className="button sm" href={"/orders/"+o.order_number}>View order →</Link>,
+        ];
+      })}/>
     </Panel>}
     <Panel title="Published inspections">
       <form action="/reports" method="get" className="form inline-form" key={query}>

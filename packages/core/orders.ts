@@ -479,6 +479,8 @@ export type ExpectedLineBreakdown={
   mismatch_qty:number;
   damaged_qty:number;
   missing_qty:number;
+  unverified_short_qty:number;
+  confirmed_short_qty:number;
   unidentified_pending_qty:number;
   extra_qty:number;
   inspected_qty:number;
@@ -504,6 +506,8 @@ export type ParcelReconciliationRow={
   unidentified_item_count:number;
   damaged_item_count:number;
   short_qty:number;
+  unverified_short_qty:number;
+  confirmed_short_qty:number;
   extra_qty:number;
   item_codes:string[];
 };
@@ -648,6 +652,8 @@ export function summarizeExpectedLines(
           mismatch_qty:mismatchQty,
           damaged_qty:damagedQty,
           missing_qty:0,
+          unverified_short_qty:0,
+          confirmed_short_qty:0,
           unidentified_pending_qty:0,
           extra_qty:extraQty,
           inspected_qty:inspectedQty,
@@ -714,6 +720,8 @@ export function summarizeExpectedLines(
             mismatch_qty:0,
             damaged_qty:0,
             missing_qty:0,
+            unverified_short_qty:0,
+            confirmed_short_qty:0,
             unidentified_pending_qty:0,
             extra_qty:0,
             inspected_qty:0,
@@ -745,7 +753,7 @@ export function summarizeExpectedLines(
   const checkedInParcels=parcelRows.filter(p=>Boolean(p.warehouse_state));
   const parcelLoggedTotal=checkedInParcels.reduce((s,p)=>s+(Number(p.logged_item_count??p.received_quantity??0)||0),0);
   const loggedUnitsTotal=Math.max(parcelLoggedTotal,arrivedUnitsTotal);
-  const unidentifiedUnitsTotal=Math.max(0,parcelLoggedTotal-arrivedUnitsTotal);
+  const unidentifiedUnitsTotal=Math.max(0,parcelLoggedTotal-identifiedUnitsTotal-mismatchUnitsTotal);
   const parcelDamagedTotal=checkedInParcels.reduce((s,p)=>s+(Number(p.damaged_item_count??0)||0),0);
   const damagedUnitsTotal=Math.max(parcelDamagedTotal,breakdown.reduce((s,r)=>s+r.damaged_qty,0));
   const anyContentsUnknown=plannedParcels.some(pp=>Boolean(pp.contents_unknown));
@@ -768,6 +776,8 @@ export function summarizeExpectedLines(
     const checkedIn=Boolean(p.warehouse_state);
     const shortQty=checkedIn && declaredQty>0?Math.max(0,declaredQty-loggedCount):0;
     const extraQty=checkedIn && declaredQty>0?Math.max(0,loggedCount-declaredQty):0;
+    const unverifiedShortQty=unidentifiedCount>0?shortQty:0;
+    const confirmedShortQty=unidentifiedCount===0?shortQty:0;
     return {
       advice_id:p.id,
       tracking_norm:p.tracking_norm,
@@ -785,33 +795,69 @@ export function summarizeExpectedLines(
       unidentified_item_count:unidentifiedCount,
       damaged_item_count:damagedCount,
       short_qty:shortQty,
+      unverified_short_qty:unverifiedShortQty,
+      confirmed_short_qty:confirmedShortQty,
       extra_qty:extraQty,
       item_codes:Array.isArray(p.item_codes)?p.item_codes:[],
     };
   });
 
-  // Only mark per-SKU confirmed Missing when warehouse check-in happened and all physically logged items on the checked-in parcel(s) are SKU-identified (never fabricate SKU attribution while unidentified physical items exist)
-  const canAttributeSkuMissing=checkedInParcels.length>0 && unidentifiedUnitsTotal===0 && (allExpectedParcelsCheckedIn || parcelReconciliation.some(pr=>pr.short_qty>0));
+  // Never attribute per-SKU Missing to in-transit parcels or while physically logged units are awaiting SKU identification
   for(const row of breakdown) {
-    const lineCheckedIn=checkedInParcels.some(p=>normTrack(p.tracking_norm)===row.tracking_no) || (parcelRows.length===1 && checkedInParcels.length===1 && !row.tracking_no);
-    if(unidentifiedUnitsTotal>0 && lineCheckedIn) {
-      row.unidentified_pending_qty=Math.max(0,row.expected_qty-row.arrived_qty);
+    const rowCheckedIn=row.tracking_no
+      ?checkedInParcels.some(p=>normTrack(p.tracking_norm)===row.tracking_no)
+      :(allExpectedParcelsCheckedIn || (parcelRows.length===1 && checkedInParcels.length===1));
+    if(!rowCheckedIn) {
+      row.unidentified_pending_qty=0;
       row.missing_qty=0;
-    } else if((canAttributeSkuMissing || (lineCheckedIn && unidentifiedUnitsTotal===0)) && row.arrived_qty<row.expected_qty) {
-      row.missing_qty=Math.max(0,row.expected_qty-row.arrived_qty);
+      row.unverified_short_qty=0;
+      row.confirmed_short_qty=0;
+    } else if(unidentifiedUnitsTotal>0) {
+      row.unidentified_pending_qty=Math.max(0,row.expected_qty-row.identified_qty);
+      row.missing_qty=0;
+      row.unverified_short_qty=0;
+      row.confirmed_short_qty=0;
+    } else if(row.arrived_qty<row.expected_qty) {
+      const short=Math.max(0,row.expected_qty-row.arrived_qty);
+      row.missing_qty=short;
+      row.confirmed_short_qty=short;
+      row.unverified_short_qty=0;
       row.unidentified_pending_qty=0;
     }
   }
 
-  const shortUnitsTotal=(allExpectedParcelsCheckedIn || parcelReconciliation.some(pr=>pr.short_qty>0))
+  const parcelDeclaredSum=parcelReconciliation.reduce((s,pr)=>s+pr.declared_qty,0);
+  const canUseOrderTotalShort=allExpectedParcelsCheckedIn && (plannedParcels.length===0 || parcelDeclaredSum>=expectedUnitsTotal);
+  const shortUnitsTotal=canUseOrderTotalShort
     ?Math.max(0,expectedUnitsTotal-loggedUnitsTotal)
     :parcelReconciliation.reduce((s,pr)=>s+pr.short_qty,0);
   const extraUnitsTotal=allExpectedParcelsCheckedIn
     ?Math.max(0,loggedUnitsTotal-expectedUnitsTotal)
     :parcelReconciliation.reduce((s,pr)=>s+pr.extra_qty,0);
+  const unarrivedUnitsTotal=allExpectedParcelsCheckedIn
+    ?0
+    :Math.max(0,expectedUnitsTotal-loggedUnitsTotal-shortUnitsTotal);
+  const unverifiedShortUnitsTotal=shortUnitsTotal>0 && (unidentifiedUnitsTotal>0 || !allExpectedParcelsCheckedIn)
+    ?shortUnitsTotal
+    :0;
+  const confirmedShortUnitsTotal=shortUnitsTotal>0 && allExpectedParcelsCheckedIn && unidentifiedUnitsTotal===0
+    ?shortUnitsTotal
+    :0;
+  const reconciliationStatus=checkedInParcels.length===0
+    ?"awaiting_arrival"
+    :confirmedShortUnitsTotal>0
+      ?"confirmed_shortage"
+      :(unverifiedShortUnitsTotal>0 || extraUnitsTotal>0 || damagedUnitsTotal>0 || mismatchUnitsTotal>0)
+        ?"discrepancy_under_review"
+        :unidentifiedUnitsTotal>0
+          ?"received_pending_identification"
+          :!allExpectedParcelsCheckedIn
+            ?"awaiting_arrival"
+            :"matched";
   const hasIntakeDiscrepancy=checkedInParcels.length>0 && (
-    parcelReconciliation.some(pr=>pr.short_qty>0 || pr.extra_qty>0 || ["crushed","torn","wet"].includes(String(pr.outer_condition??"")))
-    || (allExpectedParcelsCheckedIn && loggedUnitsTotal!==expectedUnitsTotal)
+    shortUnitsTotal>0
+    || extraUnitsTotal>0
+    || parcelReconciliation.some(pr=>["crushed","torn","wet"].includes(String(pr.outer_condition??"")))
     || damagedUnitsTotal>0
     || mismatchUnitsTotal>0
   );
@@ -824,7 +870,11 @@ export function summarizeExpectedLines(
     logged_units_total:loggedUnitsTotal,
     identified_units_total:identifiedUnitsTotal,
     unidentified_units_total:unidentifiedUnitsTotal,
+    unarrived_units_total:unarrivedUnitsTotal,
     short_units_total:shortUnitsTotal,
+    unverified_short_units_total:unverifiedShortUnitsTotal,
+    confirmed_short_units_total:confirmedShortUnitsTotal,
+    reconciliation_status:reconciliationStatus,
     extra_units_total:extraUnitsTotal,
     damaged_units_total:damagedUnitsTotal,
     mismatch_units_total:mismatchUnitsTotal,
@@ -898,11 +948,31 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
   const shipments=await orderShipments(db,id,order.org_id);
   const quotes=(await orderQuotes(db,id,order.org_id)).map(({id,revision,purpose,action,state,amount_cents,expires_at,batch_id,item_codes})=>
     ({id,revision,purpose,action,state,amount_cents,expires_at,batch_id:batch_id??null,item_codes:item_codes??null}));
+  const tasks=(await db.query(`select t.id,t.state,tv.template_key,w.code item_code,
+    so.title->>'en' service_title,st.code service,
+    e.declared_fields->>'name' product_name,e.declared_fields->>'sku_code' sku_code,
+    e.declared_fields->>'color_declared' color_declared,e.declared_fields->>'size_label' size_label
+    from inspection_tasks t join order_lines l on l.id=t.order_line_id
+    join service_offers so on so.id=l.offer_id join service_types st on st.id=so.service_type_id
+    join template_versions tv on tv.id=t.template_version_id
+    left join order_line_item_links a on a.id=t.assignment_id
+    left join expected_items e on e.id=a.expected_item_id
+    left join warehouse_items w on w.id=a.item_id
+    where l.order_id=$1 and t.state<>'VOID'
+    order by l.id,w.code nulls last,t.id`,[id])).rows;
+  const tasks_summary={
+    total:tasks.length,
+    ready:tasks.filter(t=>t.state==="READY").length,
+    in_progress:tasks.filter(t=>t.state==="IN_PROGRESS").length,
+    submitted:tasks.filter(t=>t.state==="SUBMITTED").length,
+    completed:tasks.filter(t=>["QA_APPROVED","COMPLETED"].includes(t.state)).length,
+    returned:tasks.filter(t=>order.state==="inspecting"&&t.state==="IN_PROGRESS").length,
+  };
   const expected_lines_summary={...summarizeExpectedLines(lines,rows,parcels),discrepancy_resolution_record:discrepancyResolutionRecord};
   return {...orderDTO(order as Parameters<typeof orderDTO>[0]),price_cents:order.price_cents,
     customer_notes:order.customer_notes??null,held_at:order.held_at??null,held_from_state:order.held_from_state??null,hold_reason:order.hold_reason??null,
     created_at:order.created_at,report_published_at:order.report_published_at??null,closed_at:order.closed_at??null,paid_at:order.paid_at??null,samples_ready_at:order.samples_ready_at??null,sla_due_at:order.sla_due_at??null,
-    lines,items:rows,expected_lines_summary,report_version:progress.published_version??null,scope_payment:progress.scope_payment,manual_quote:manual??null,manual_quote_renewable:manualQuoteRenewable,
+    lines,items:rows,expected_lines_summary,tasks_summary,tasks,report_version:progress.published_version??null,scope_payment:progress.scope_payment,manual_quote:manual??null,manual_quote_renewable:manualQuoteRenewable,
     parcel_registration_due:progress.parcel_registration_due,unregistered_waybills:progress.unregistered_waybills,
     parcels,cases,shipments,quotes,consents};
 }

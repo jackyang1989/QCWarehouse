@@ -14,6 +14,8 @@ export const locationBatchSchema = z.object({
 export const itemHandlingHoldSql=`case
   when exists(select 1 from stocktake_items si join stocktakes st on st.id=si.stocktake_id
     where si.item_id=w.id and si.state='investigating' and st.state in ('in_progress','submitted')) then 'stocktake'
+  when w.org_id is null and w.custody_state in ('received','stored') and exists(select 1 from stocktake_items si join inventory_adjustments ia on ia.stocktake_item_id=si.id
+    where si.item_id=w.id and si.actual_location is null and ia.approved_by is not null and si.state='adjusted') then 'stocktake'
   when exists(select 1 from incident_cases ic
     where ic.item_id=w.id and ic.state not in ('resolved','closed')) then 'incident' end`;
 
@@ -98,16 +100,30 @@ export async function setLocationActive(db:DB,actor:Actor,id:string,active:boole
   }
   return {id,active};
 }
-export async function storageMovementDesk(db:DB,actor:Actor) {
+export async function storageMovementDesk(
+  db:DB,
+  actor:Actor,
+  filters?:{item?:string;location?:string;staff?:string;action?:string;days?:number}
+) {
   role(actor,...staffAccess.intake);
+  const itemQ=filters?.item?.trim()||null;
+  const locQ=filters?.location?.trim()||null;
+  const staffQ=filters?.staff?.trim()||null;
+  const actionQ=filters?.action?.trim()||null;
+  const days=filters?.days && filters.days>0?Math.min(365,filters.days):null;
   const {rows:locations}=await db.query(`select l.id,l.code,l.zone,l.capacity,l.notes,
     (select count(*)::int from warehouse_items w where w.location_id=l.id and ${occupied}) occupied
     from storage_locations l where l.active order by l.code`);
-  const {rows:moves}=await db.query(`select e.id,w.code,origin.code origin,origin.zone origin_zone,destination.code destination,destination.zone destination_zone,u.display_name operator,e.created_at
+  const {rows:moves}=await db.query(`select e.id,w.code,e.action,origin.code origin,origin.zone origin_zone,destination.code destination,destination.zone destination_zone,u.display_name operator,e.created_at
     from storage_events e join warehouse_items w on w.id=e.item_id join users u on u.id=e.operator_id
     left join storage_locations origin on origin.id=e.from_location_id
     left join storage_locations destination on destination.id=e.to_location_id
-    where e.action='move' order by e.created_at desc,e.id desc limit 50`);
+    where ($1::text is null or e.action=$1)
+      and ($2::text is null or strpos(upper(w.code),upper($2))>0)
+      and ($3::text is null or upper(coalesce(origin.code,''))=upper($3) or upper(coalesce(destination.code,''))=upper($3))
+      and ($4::text is null or e.operator_id::text=$4 or strpos(lower(coalesce(u.display_name,'')),lower($4))>0)
+      and ($5::int is null or e.created_at>=now()-make_interval(days=>$5))
+    order by e.created_at desc,e.id desc limit 100`,[actionQ,itemQ,locQ,staffQ,days]);
   const {rows:pending_reference_tasks}=await db.query(`select
       r.id reference_id,
       r.item_id,
@@ -137,26 +153,36 @@ export async function storageMovementDesk(db:DB,actor:Actor) {
 export async function listStocktakes(db:DB,actor:Actor) {
   role(actor,"receiver","warehouse_admin","super_admin");
   const {rows:stocktakes}=await db.query(
-    `select s.id,s.scope,s.snapshot_at,s.operator_id,u.display_name operator_name,s.state
+    `select s.id,s.scope,s.snapshot_at,s.operator_id,u.display_name operator_name,s.state,
+            (select au.display_name from audit_events ae join users au on au.id=ae.actor_id
+              where ae.entity_type='stocktakes' and ae.entity_id=s.id and ae.action='approve_stocktake'
+              order by ae.at desc limit 1) approved_by_name,
+            (select ae.after->>'reason' from audit_events ae
+              where ae.entity_type='stocktakes' and ae.entity_id=s.id and ae.action='approve_stocktake'
+              order by ae.at desc limit 1) approval_reason
      from stocktakes s join users u on u.id=s.operator_id
      order by s.snapshot_at desc limit 30`
   );
   const stocktakeIds=stocktakes.map(s=>s.id);
   const {rows:items}=stocktakeIds.length?(await db.query(
-    `select si.id,si.stocktake_id,si.item_id,w.code item_code,w.custody_state,
+    `select si.id,si.stocktake_id,si.item_id,w.code item_code,w.custody_state live_custody_state,w.custody_state,
+            ll.code live_location_code,
             si.expected_location,el.code expected_location_code,
             si.actual_location,al.code actual_location_code,
             si.revision,si.evidence,si.state,
-            ia.id adjustment_id,ia.reason adjustment_reason,ia.requested_by,ia.approved_by,
+            ia.id adjustment_id,ia.reason adjustment_reason,ia.before_state,ia.after_state,ia.requested_by,ia.approved_by,
+            ap.display_name approved_by_name,
             (select crp.receiving_code from customer_receiving_profiles crp where crp.org_id=w.org_id limit 1) receiving_code,
             o.public_no order_no,
             coalesce(e.declared_fields->>'name',l.attributes->>'name') product_name,
             e.declared_fields->>'sample_code' sample_code
      from stocktake_items si
      join warehouse_items w on w.id=si.item_id
+     left join storage_locations ll on ll.id=w.location_id
      left join storage_locations el on el.id=si.expected_location
      left join storage_locations al on al.id=si.actual_location
      left join inventory_adjustments ia on ia.stocktake_item_id=si.id
+     left join users ap on ap.id=ia.approved_by
      left join order_line_item_links a on a.item_id=w.id and a.unlinked_at is null
      left join expected_items e on e.id=a.expected_item_id
      left join order_lines l on l.id=a.order_line_id
@@ -166,10 +192,17 @@ export async function listStocktakes(db:DB,actor:Actor) {
     [stocktakeIds]
   )):{rows:[]};
   return {
-    rows:stocktakes.map(s=>({
-      ...s,
-      items:items.filter(i=>i.stocktake_id===s.id),
-    })),
+    rows:stocktakes.map(s=>{
+      const stItems=items.filter(i=>i.stocktake_id===s.id);
+      const originalDiscrepancyCount=stItems.filter(i=>i.state==="investigating"||i.state==="adjusted"||Boolean(i.adjustment_id)).length;
+      const approvedAdjustmentCount=stItems.filter(i=>i.state==="adjusted"||Boolean(i.approved_by)).length;
+      return {
+        ...s,
+        original_discrepancy_count:originalDiscrepancyCount,
+        approved_adjustment_count:approvedAdjustmentCount,
+        items:stItems,
+      };
+    }),
   };
 }
 
@@ -296,6 +329,7 @@ export async function scanStocktakeItem(
       "update stocktake_items set actual_location=$2,state='matched',revision=$3,evidence=$4 where id=$1",
       [si.id,loc,item.revision,JSON.stringify(nextEvidence)]
     );
+    await db.query("delete from inventory_adjustments where stocktake_item_id=$1 and approved_by is null",[si.id]);
     return {stocktake_item_id:si.id,item_id:item.id,state:"matched",frozen:false};
   }
 
@@ -311,6 +345,7 @@ export async function scanStocktakeItem(
       "update stocktake_items set actual_location=$2,state='matched',evidence=$3 where id=$1",
       [si.id,loc,JSON.stringify(nextEvidence)]
     );
+    await db.query("delete from inventory_adjustments where stocktake_item_id=$1 and approved_by is null",[si.id]);
     await audit(db,actor,"stocktake_item_recovered","stocktakes",stocktakeId,{item_id:item.id,location_id:loc,note:input.note??null});
     return {stocktake_item_id:si.id,item_id:item.id,state:"matched",frozen:false,recovered:true};
   }
@@ -341,21 +376,25 @@ export async function submitStocktake(db:DB,actor:Actor,stocktakeId:string,input
   const unfinished=items.filter(i=>["pending","recount_required"].includes(i.state));
   guard(unfinished.length===0,"STOCKTAKE_INCOMPLETE","Scan or recount all pending items before submitting the stocktake.");
   const discrepancies=items.filter(i=>i.state==="investigating");
+  const matchedIds=items.filter(i=>i.state==="matched").map(i=>i.id);
+  if(matchedIds.length) {
+    await db.query("delete from inventory_adjustments where stocktake_item_id=any($1::uuid[]) and approved_by is null",[matchedIds]);
+  }
   const reason=(input.reason??"Stocktake discrepancy adjustment").trim();
   for(const d of discrepancies) {
-    const existing=(await db.query("select id from inventory_adjustments where stocktake_item_id=$1",[d.id])).rows[0];
+    const beforeState={expected_location:d.expected_location,custody_state:d.custody_state};
+    const afterState={actual_location:d.actual_location,proposed:d.actual_location?"relocate":"missing_confirmed"};
+    const existing=(await db.query("select id,approved_by from inventory_adjustments where stocktake_item_id=$1",[d.id])).rows[0];
     if(!existing) {
       await db.query(
         `insert into inventory_adjustments(id,stocktake_item_id,reason,before_state,after_state,requested_by,approved_by)
          values($1,$2,$3,$4,$5,$6,null)`,
-        [
-          uuid(),
-          d.id,
-          reason,
-          {expected_location:d.expected_location,custody_state:d.custody_state},
-          {actual_location:d.actual_location,proposed:d.actual_location?"relocate":"missing_confirmed"},
-          actor.id,
-        ]
+        [uuid(),d.id,reason,beforeState,afterState,actor.id]
+      );
+    } else if(!existing.approved_by) {
+      await db.query(
+        `update inventory_adjustments set reason=$2,before_state=$3,after_state=$4,requested_by=$5 where id=$1`,
+        [existing.id,reason,beforeState,afterState,actor.id]
       );
     }
   }
@@ -375,9 +414,12 @@ export async function approveStocktake(
   const st=await one(db,"select * from stocktakes where id=$1 for update",[stocktakeId]);
   guard(st.state==="submitted","STOCKTAKE_UNAVAILABLE","Only submitted stocktakes with discrepancies require review.");
   const adjustments=(await db.query(
-    `select ia.*,si.item_id,si.expected_location,si.actual_location
-     from inventory_adjustments ia join stocktake_items si on si.id=ia.stocktake_item_id
-     where si.stocktake_id=$1 for update of ia,si`,
+    `select ia.*,si.item_id,si.state item_state,si.expected_location,si.actual_location,
+            w.org_id,w.code item_code
+     from inventory_adjustments ia
+     join stocktake_items si on si.id=ia.stocktake_item_id
+     join warehouse_items w on w.id=si.item_id
+     where si.stocktake_id=$1 for update of ia,si,w`,
     [stocktakeId]
   )).rows;
   guard(
@@ -392,7 +434,12 @@ export async function approveStocktake(
     await audit(db,actor,"recount_stocktake","stocktakes",stocktakeId,{reason:input.reason.trim()});
     return {id:stocktakeId,state:"in_progress"};
   }
+  let appliedAdjustments=0;
   for(const adj of adjustments) {
+    if(adj.item_state!=="investigating") {
+      await db.query("delete from inventory_adjustments where id=$1 and approved_by is null",[adj.id]);
+      continue;
+    }
     await db.query("update inventory_adjustments set approved_by=$2 where id=$1",[adj.id,actor.id]);
     if(adj.actual_location) {
       await requireSpace(db,adj.actual_location,1);
@@ -401,12 +448,53 @@ export async function approveStocktake(
         "insert into storage_events(item_id,from_location_id,to_location_id,action,operator_id) values($1,$2,$3,'stocktake_adjustment',$4)",
         [adj.item_id,adj.expected_location,adj.actual_location,actor.id]
       );
+    } else {
+      await db.query(
+        "insert into storage_events(item_id,from_location_id,to_location_id,action,operator_id) values($1,$2,null,'stocktake_adjustment',$3)",
+        [adj.item_id,adj.expected_location,actor.id]
+      );
+      const existingIncident=(await db.query(
+        "select id from incident_cases where item_id=$1 and state not in ('resolved','closed') limit 1",
+        [adj.item_id]
+      )).rows[0];
+      if(!existingIncident && adj.org_id) {
+        const link=(await db.query<{order_line_id:string;order_id:string}>(
+          `select l.id order_line_id,l.order_id from order_line_item_links a join order_lines l on l.id=a.order_line_id
+           where a.item_id=$1 and a.unlinked_at is null limit 1`,
+          [adj.item_id]
+        )).rows[0];
+        const ticketId=uuid(),incidentId=uuid();
+        await db.query(
+          `insert into tickets(id,public_no,org_id,order_id,category,state,subject,details,next_action_at)
+           values($1,$2,$3,$4,'damage_or_loss','open',$5,$6,now()+interval '24 hours')`,
+          [ticketId,code("INC-"),adj.org_id,link?.order_id??null,`Stocktake confirmed missing item ${adj.item_code}`,{incident_id:incidentId,item_id:adj.item_id,kind:"loss",priority:"urgent",stocktake_id:stocktakeId}]
+        );
+        await db.query(
+          `insert into ticket_events(id,ticket_id,actor_type,actor_id,kind,body)
+           values($1,$2,'staff',$3,'message',$4)`,
+          [uuid(),ticketId,actor.id,`Warehouse stocktake confirmed item ${adj.item_code} missing from shelf (${input.reason.trim()}).`]
+        );
+        await db.query(
+          `insert into incident_cases(id,item_id,ticket_id,order_line_id,evidence,state,resolution,payment_proof)
+           values($1,$2,$3,$4,$5,'open',$6,null)`,
+          [incidentId,adj.item_id,ticketId,link?.order_line_id??null,JSON.stringify({stocktake_id:stocktakeId,adjustment_id:adj.id}),{kind:"loss",summary_en:`Stocktake confirmed item ${adj.item_code} missing (${input.reason.trim()})`,created_by:actor.id,created_at:new Date().toISOString(),compensation_state:"pending_proposal"}]
+        );
+        if(link?.order_id) {
+          await db.query(
+            `insert into order_blocks(id,order_id,reason,object_key,opened_at)
+             values($1,$2,'incident_hold',$3,now())
+             on conflict(order_id,reason,object_key) where resolved_at is null do nothing`,
+            [uuid(),link.order_id,incidentId]
+          );
+        }
+      }
     }
     await db.query("update stocktake_items set state='adjusted' where id=$1",[adj.stocktake_item_id]);
+    appliedAdjustments+=1;
   }
   await db.query("update stocktakes set state='approved' where id=$1",[stocktakeId]);
-  await audit(db,actor,"approve_stocktake","stocktakes",stocktakeId,{reason:input.reason.trim(),adjusted_count:adjustments.length});
-  return {id:stocktakeId,state:"approved",adjusted_count:adjustments.length};
+  await audit(db,actor,"approve_stocktake","stocktakes",stocktakeId,{reason:input.reason.trim(),adjusted_count:appliedAdjustments});
+  return {id:stocktakeId,state:"approved",adjusted_count:appliedAdjustments};
 }
 
 function canSeeIncidentFinance(actor:Actor) {

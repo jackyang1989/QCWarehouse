@@ -31,11 +31,11 @@ export async function listPublishedReports(db:DB,actor:Actor,reference:string|nu
     order by v.published_at desc nulls last,v.id limit $5 offset $6`,[org,reference,version,latest,
     page===undefined?size:size+1,((page??1)-1)*size]);
   const in_progress_orders=includeProgress?(await db.query(`select o.id order_id,o.public_no order_number,o.state,
-    coalesce(o.sla_due_at,o.samples_ready_at,o.updated_at) eta_at,
+    o.sla_due_at eta_at,
     (select so.title->>'en' from order_lines l join service_offers so on so.id=l.offer_id where l.order_id=o.id order by l.id limit 1) service_title,
     (select coalesce(sum(l.quantity),0)::int from order_lines l where l.order_id=o.id) unit_count
     from orders o left join reports r on r.order_id=o.id
-    where o.org_id=$1 and o.state in ('samples_ready','queued','inspecting','qa_review')
+    where o.org_id=$1 and o.state in ('awaiting_samples','samples_ready','queued','inspecting','qa_review','on_hold')
     and r.published_version is null
     and ${searchSql.replace(" or strpos(lower(r.public_no),lower($2))>0","")}
     order by o.updated_at desc nulls last,o.id desc limit 20`,[org,reference])).rows:undefined;

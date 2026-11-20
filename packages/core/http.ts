@@ -12,7 +12,7 @@ import { failedJobs, retryFailedJob } from "./worker";
 import { quotePolicy, quotePolicyInput, saveQuotePolicy } from "./quote-policy";
 import { customerEmailDeliveryStatus, receivePostmarkWebhook, retryEmailDelivery, staffEmailDeliveries } from "./email";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
-import { advise, assign, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, savePhoto, unassignItem, waybill } from "./intake";
+import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
 import { acceptQuote, amendDispatchBatch, calculateShippingPreview, cancelDisposition, checkStorageReminders, closeCompletedOrder, confirmBatch, handover, instruct, packShipment, planBatch, publishShippingRate, quoteBatch, readDispatchBatch, receiveReturn, releaseReferenceSample, storageQuote } from "./dispatch";
 import { chargeReceipt, checkout, demoPay, orderPayment, orderRefundPayments, refundApprove, refundReject, refundRequest, resolvePaymentDispute, stripeEvent, verifyStripe } from "./payments";
@@ -481,7 +481,14 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const reference=raw?idSchema.safeParse(raw).success?raw.toLowerCase():waybill(raw):null;
     return json(await transaction(db=>warehouseDispatchQueue(db,actorRequired(actor),state,reference)));
   }
-  if(method==="GET" && path==="/staff/storage") return json(await transaction(db=>storageMovementDesk(db,actorRequired(actor))));
+  if(method==="GET" && path==="/staff/storage") {
+    const item=z.string().trim().max(64).optional().parse(url.searchParams.get("item")||undefined);
+    const location=z.string().trim().max(64).optional().parse(url.searchParams.get("location")||undefined);
+    const staff=z.string().trim().max(64).optional().parse(url.searchParams.get("staff")||undefined);
+    const action=z.string().trim().max(40).optional().parse(url.searchParams.get("action")||undefined);
+    const days=z.coerce.number().int().min(1).max(365).optional().parse(url.searchParams.get("days")||undefined);
+    return json(await transaction(db=>storageMovementDesk(db,actorRequired(actor),{item,location,staff,action,days})));
+  }
   if(path==="/staff/admin/storage/locations") {
     if(method==="GET") return json(await transaction(db=>locationMaster(db,actorRequired(actor))));
     if(method==="POST") return extraWrite(req,path,actor,locationBatchSchema,createLocations);
@@ -748,6 +755,13 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
       note:z.string().trim().min(4).max(1000),
       evidence_ids:z.array(idSchema).optional(),
     }),(db,a,b)=>reportPackageQuantityDiscrepancy(db,a,idSchema.parse(pkgDiscrepancy[1]),b));
+  }
+  const pkgOpenPhotos=path.match(/^\/staff\/packages\/([a-f0-9-]{36})\/open-photos$/i);
+  if(method==="POST" && pkgOpenPhotos) {
+    return extraWrite(req,path,actor,z.object({
+      revision:revSchema,
+      open_media_ids:z.array(idSchema).min(1).max(12),
+    }),(db,a,b)=>attachPackageOpenPhotos(db,a,idSchema.parse(pkgOpenPhotos[1]),b));
   }
   if(method==="POST" && path==="/staff/media") {
     csrf(req);

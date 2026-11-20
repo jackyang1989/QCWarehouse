@@ -164,6 +164,8 @@ export async function createMediaUploadUrl(
   } else {
     if (input.kind === "attachment") {
       role(actor, "receiver", "inspector", "warehouse_admin", "support", "finance", "super_admin");
+    } else if (input.kind === "label_photo") {
+      role(actor, "receiver", "inspector", "warehouse_admin", "support", "super_admin");
     } else {
       role(actor, "receiver", "inspector", "warehouse_admin", "super_admin");
     }
@@ -475,18 +477,26 @@ export async function authorizeMediaRead(db: DB, actor: Actor, id: string) {
         )
       ).rowCount;
     const claimOuter =
-      m.kind === "intake_outer" &&
+      ["intake_outer", "label_photo"].includes(m.kind) &&
       m.org_id === null &&
       actor.roles.some(r => ["support", "super_admin"].includes(r)) &&
       (
-        await db.query(
-          `select 1 from tracking_records t join tickets k on k.details->>'tracking_no'=t.tracking_norm
-           and coalesce(t.carrier_code,k.details->>'carrier_code')=k.details->>'carrier_code'
-           where t.package_id=$1 and t.closed_at is null and t.org_id is null
-           and k.category='identity_unclear' and k.details ? 'proof_id' and ${pendingIntakeClaimSql}`,
-          [m.package_id]
-        )
-      ).rowCount;
+        (
+          await db.query(
+            `select 1 from packages p where p.id=$1 and p.org_id is null and p.state='unmatched'`,
+            [m.package_id]
+          )
+        ).rowCount ||
+        (
+          await db.query(
+            `select 1 from tracking_records t join tickets k on k.details->>'tracking_no'=t.tracking_norm
+             and coalesce(t.carrier_code,k.details->>'carrier_code')=k.details->>'carrier_code'
+             where t.package_id=$1 and t.closed_at is null and t.org_id is null
+             and k.category='identity_unclear' and k.details ? 'proof_id' and ${pendingIntakeClaimSql}`,
+            [m.package_id]
+          )
+        ).rowCount
+      );
     guard(
       claimProof ||
         complianceAttachment ||

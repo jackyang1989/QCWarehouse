@@ -43,6 +43,12 @@ export function ScopeReview({orderId,staff=false,onSave}:{orderId:string;staff?:
     const item=positions.find(p=>p.id===id);
     return item?(staff?item.title["zh-CN"]??item.title.en:item.title.en)+" · "+item.position+(item.item_code?" · "+item.item_code:""):id;
   };
+  if(!staff && data && !error && mismatchedPositions.length===0 && data.proposals.length===0 && unreceivedCompare.length===0) {
+    return <details className="card" style={{marginTop:12}}>
+      <summary style={{cursor:"pointer"}}>Scope changes &amp; sample discrepancies · None pending</summary>
+      <p className="small muted" style={{margin:"8px 0 0"}}>No post-payment inspection scope changes or sample discrepancies have been reported for this order.</p>
+    </details>;
+  }
   return <Panel title={staff?"委托范围变更与收货差异":"Inspection scope & sample discrepancies"}>
     {error&&<><ErrorBlock error={error}/><button type="button" onClick={reload}>{staff?"重新读取范围":"Retry scope changes"}</button></>}
     {!data&&!error&&<p role="status">{staff?"正在读取范围…":"Loading scope changes…"}</p>}

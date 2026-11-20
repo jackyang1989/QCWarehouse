@@ -537,43 +537,74 @@ export function StocktakeReviewAndIncidentPanel() {
 }
 
 export function StorageMove({path="/wh/storage",actor}:{path?:string;actor?:Row}) {
-  const {data,error,reload}=useLoad(path==="/wh/stocktakes"?null:"/staff/storage");
+  const [filterItem,setFilterItem]=useState("");
+  const [filterLoc,setFilterLoc]=useState("");
+  const [filterStaff,setFilterStaff]=useState("");
+  const [filterAction,setFilterAction]=useState("");
+  const [filterDays,setFilterDays]=useState("");
+  const storageUrl=(()=>{
+    if(path==="/wh/stocktakes") return null;
+    const p=new URLSearchParams();
+    if(filterItem.trim()) p.set("item",filterItem.trim());
+    if(filterLoc.trim()) p.set("location",filterLoc.trim());
+    if(filterStaff.trim()) p.set("staff",filterStaff.trim());
+    if(filterAction.trim()) p.set("action",filterAction.trim());
+    if(filterDays.trim()) p.set("days",filterDays.trim());
+    const qs=p.toString();
+    return "/staff/storage"+(qs?"?"+qs:"");
+  })();
+  const {data,error,reload}=useLoad(storageUrl);
   const [code,setCode]=useState("");
+  const [prefilledLoc,setPrefilledLoc]=useState("");
+  const [lockedTarget,setLockedTarget]=useState("");
+  const [batchMoveCount,setBatchMoveCount]=useState(0);
   const [receipt,setReceipt]=useState("");
-  useEffect(()=>setCode(new URLSearchParams(location.search).get("item")??""),[]);
+  useEffect(()=>{
+    const qs=new URLSearchParams(location.search);
+    const it=qs.get("item")??"";
+    const loc=qs.get("location")??"";
+    if(it) setCode(it);
+    if(loc) { setPrefilledLoc(loc); setLockedTarget(loc); }
+  },[]);
   const found=useLoad(code?"/staff/items/by-code?"+new URLSearchParams({code}):null);
   const item=found.data?.item;
   const canMove=Boolean(!actor?.roles || actor.roles.some((r:string)=>["receiver","warehouse_admin"].includes(r)));
+  const canManageLocations=Boolean(actor?.roles?.includes("super_admin"));
   if(path==="/wh/stocktakes") {
     return <>
       <div className="page-head row">
-        <div><p className="eyebrow">WAREHOUSE / STOCKTAKES</p><h1>库存盘点</h1>
-          <p className="muted">按仓区创建盘点任务，支持扫码实盘与主管独立复核审批。</p></div>
-        <Link className="button" href="/wh/storage">库位移转</Link>
+        <div><h1>库存盘点与差异核销</h1>
+          <p className="muted">按仓区或全仓创建盘点快照，支持扫码实盘与主管独立复核；历史原始差异、批准调整及事故冻结永久留痕。</p></div>
+        <div className="head-actions"><Link className="button" href="/wh/storage">库位移转</Link></div>
       </div>
       <StocktakeWorkspace actor={actor}/>
     </>;
   }
   const refLocations=(data?.locations??[]).filter((row:Row)=>row.zone==="reference");
   const pendingRefTasks:Row[]=data?.pending_reference_tasks??[];
+  const ACTION_ZH:Record<string,string>={move:"常规移位",intake:"收货上架",quarantine:"异常隔离",stocktake_adjustment:"盘点调账",stocktake_recovery:"盘点寻回",receive_return:"退回返仓",handover:"出库交接"};
   return <>
-    <div className="page-head row"><div><p className="eyebrow">WAREHOUSE / STORAGE</p><h1>样品库位移转</h1>
-      <p className="muted">逐件扫码，记录原位置、目标位置和操作人；客户申请转为确认样的商品在此完成铅封并存入确认样专区（REF_SAFE）。</p></div>
-      <div className="head-actions"><Link className="button sm" href="/wh/samples">样品建档</Link><Link className="button sm" href="/admin/storage/locations">管理库位</Link></div></div>
+    <div className="page-head row"><div><h1>样品库位移转与批量上架</h1>
+      <p className="muted">逐件或连续扫码核对实物与目标货架，记录原库位、目标库位与操作员；确认样在此完成铅封并存入参考样专柜（REF_SAFE）。</p></div>
+      <div className="head-actions">
+        <Link className="button sm" href="/wh/samples">样品建档</Link>
+        {canManageLocations&&<Link className="button sm" href="/admin/storage/locations">管理库位</Link>}
+      </div></div>
     {error&&<><ErrorBlock error={error}/><button type="button" onClick={reload}>重试</button></>}
+    {!canMove&&<div className="notice" style={{marginBottom:12}}><strong>只读查看模式：</strong>库位移动与确认样铅封激活仅限收货员（receiver）或仓库主管（warehouse_admin）执行，当前账号仅可查阅库存位置与历史记录。</div>}
     {pendingRefTasks.length>0&&<Panel
       title={`确认样（Golden Sample）待铅封入专柜任务 (${pendingRefTasks.length})`}
-      subtitle="客户已发起设为确认样申请（当前暂未改变正式保管身份）。请现场核对样品、加施防拆铅封并扫码存入确认样专区（reference），完成后系统自动激活确认样并通知客户。"
+      subtitle="客户已发起设为确认样申请。请现场核对样品、加施防拆铅封并扫码存入确认样专区（reference），完成后系统自动激活确认样并通知客户。"
     >
       {pendingRefTasks.map((task:Row)=><div className="card" key={task.reference_id} style={{marginBottom:10}}>
         <div className="row between flexwrap" style={{marginBottom:8}}>
           <div>
-            <strong className="code">{task.item_code}</strong> · 当前位置 <span className="code">{task.current_location_code??"未上架"}</span>（{zones[task.current_zone]??task.current_zone??"—"}） · 预分配铅封号 <span className="code">{task.seal_code??"待录入"}</span>
+            <Link className="code" href={`/wh/samples/${encodeURIComponent(task.item_code)}`}><strong>{task.item_code}</strong></Link> · 当前位置 <span className="code">{task.current_location_code??"未上架"}</span>（{zones[task.current_zone]??task.current_zone??"—"}） · 预分配铅封号 <span className="code">{task.seal_code??"待录入"}</span>
             {task.condition_note&&<div className="small muted">封存说明：{task.condition_note}</div>}
           </div>
           <Tag tone="yellow">待铅封存入确认样专区</Tag>
         </div>
-        {refLocations.length>0?<Form key={`ref-${task.reference_id}-${task.item_revision}`} label="扫码铅封并存入确认样专区" run={async f=>{
+        {canMove?(refLocations.length>0?<Form key={`ref-${task.reference_id}-${task.item_revision}`} idempotent={true} label="扫码铅封并存入确认样专区" run={async f=>{
           const locId=text(f,"target_location_id");
           const targetLoc=refLocations.find((l:Row)=>l.id===locId);
           if(!targetLoc) throw new Error("请选择已启用的确认样专区库位。");
@@ -594,62 +625,103 @@ export function StorageMove({path="/wh/storage",actor}:{path?:string;actor?:Row}
           <div className="fields three">
             <Field label="扫描样品条码确认" name="scanned_item_code" value={task.item_code}/>
             <Field label="防拆铅封编号 (Seal Code)" name="seal_code" value={task.seal_code??""}/>
-            <Select label="目标确认样专柜库位 (REF_SAFE)" name="target_location_id" value={refLocations[0]?.id} choices={refLocations.map((l:Row)=>({id:l.id,label:`${l.code} · ${zones[l.zone]??l.zone}`}))}/>
+            <Select label="目标确认样专柜库位 (REF_SAFE)" name="target_location_id" value={refLocations[0]?.id} choices={refLocations.map((l:Row)=>({id:l.id,label:`${l.code} · ${zones[l.zone]??l.zone} (${l.occupied}/${l.capacity??"∞"})`}))}/>
           </div>
-        </Form>:<p className="bad small">当前尚未启用用途为“确认样区 (reference)”的库位，请先在库位管理中启用确认样专柜（如 A-04-02-03）。</p>}
+        </Form>:<p className="bad small">当前尚未启用用途为“确认样区 (reference)”的库位，请先由超级管理员在库位管理中启用确认样专柜。</p>):<p className="small muted">当前角色仅查看确认样封存任务状态。</p>}
       </div>)}
     </Panel>}
     <div className="ops-columns">
-      <Panel title="01 / 扫描实物码">
-        <div onChange={()=>{setCode("");setReceipt("");}}>
-          <Form label="查询实物" run={async f=>{setCode(text(f,"item"));setReceipt("");found.reload();}}>
-            <Field label="实物编号" name="item"/>
-          </Form>
-        </div>
+      <Panel title="01 / 扫描或锁定目标库位">
+        {canMove&&<div style={{marginBottom:12,padding:10,border:"1px solid var(--line)",borderRadius:8,background:"#f8fafd"}}>
+          <label className="small" style={{display:"grid",gap:6}}>
+            <strong>连续上架锁定目标库位（可选 · 适合同批多件快速扫描移位）</strong>
+            <input
+              value={lockedTarget}
+              list="all-location-codes"
+              placeholder="输入或扫描目标货架码，例如 A-01-01-01"
+              onChange={e=>{setLockedTarget(e.target.value.toUpperCase());}}
+            />
+          </label>
+          {lockedTarget&&<small className="muted">已锁定目标库位 <strong className="code">{lockedTarget}</strong>{batchMoveCount>0?` · 本次已连续上架 ${batchMoveCount} 件`:""}</small>}
+        </div>}
+        <Form label="查询实物" run={async f=>{setCode(text(f,"item").trim().toUpperCase());setReceipt("");found.reload();}}>
+          <label>扫描或输入实物编号<input name="item" defaultValue={code} placeholder="例如 S-XXXXXX 或 DSP-..." required/></label>
+        </Form>
         {code&&!item&&!found.error&&<p role="status">正在读取实物…</p>}
         {found.error&&<ErrorBlock error={found.error}/>}
         {item&&!found.error&&<dl className="location-facts">
-          <div><dt>实物编号</dt><dd className="code">{item.code}</dd></div>
-          <div><dt>原位置（系统记录）</dt><dd className="code">{item.location??"尚未登记"}</dd></div>
-          <div><dt>实收包裹</dt><dd className="code">{item.package_code}</dd></div>
-          {item.reference_sample_state==="pending_safe_storage"&&<div><dt>确认样待办</dt><dd><Tag tone="yellow">待铅封存入确认样区 · {item.reference_seal_code??""}</Tag></dd></div>}
+          <div><dt>实物编号</dt><dd><Link className="code" href={`/wh/samples/${encodeURIComponent(item.code)}`}>{item.code}</Link></dd></div>
+          <div><dt>核身 / 异常状态</dt><dd><Tag tone={item.identity_state==="quarantined"?"red":item.identity_state==="identified"?"green":"yellow"}>{item.identity_state}</Tag>{item.handling_hold&&<> <Tag tone="red">冻结：{item.handling_hold}</Tag></>}</dd></div>
+          <div><dt>原位置（系统记录）</dt><dd className="code">{item.location??"尚未登记"}{item.location_zone?` (${zones[item.location_zone]??item.location_zone})`:""}</dd></div>
+          <div><dt>实收包裹</dt><dd><Link className="code" href={`/wh/packages/${encodeURIComponent(item.package_code)}`}>{item.package_code}</Link></dd></div>
+          {item.reference_sample_state&&<div><dt>确认样状态</dt><dd><Tag tone="yellow">{item.reference_sample_state}{item.reference_seal_code?` · ${item.reference_seal_code}`:""}</Tag></dd></div>}
         </dl>}
       </Panel>
-      {!canMove&&<div className="notice" style={{marginBottom:12}}><strong>只读查看模式：</strong>库位移动写操作仅限收货员（receiver）或仓库主管（warehouse_admin）执行。</div>}
-      <Panel title="02 / 目标库位与确认">
-        {!item&&!found.error&&<Empty>请先查询实物编号。</Empty>}
-        {item&&!item.movable&&<Empty>此实物当前不处于可移位的在库状态。</Empty>}
-        {item?.movable&&data&&!found.error&&canMove&&<Form key={item.id+"-"+item.revision} label="确认移位" run={async f=>{
-          const target=data.locations.find((row:Row)=>row.code===text(f,"target")&&row.code!==item.location);
-          if(!target)throw new Error("请输入不同于原位置的已启用库位码。");
-          if(!checked(f,"confirmed"))throw new Error("请核对实际位置。");
-          const scannedItem=text(f,"scanned_item_code")||item.code;
-          const sealCode=text(f,"seal_code");
+      <Panel title="02 / 目标库位校验与移位确认">
+        {!item&&!found.error&&<Empty>请先扫描或查询实物编号。</Empty>}
+        {item&&!item.movable&&<Empty>此实物当前不处于可移位的在库状态（{item.custody_state}）。</Empty>}
+        {item&&item.handling_hold&&<Empty>该实物当前处于「{item.handling_hold}」冻结管控中，须先完成盘点复核或事故结案后方可移位。</Empty>}
+        {item?.movable&&!item.handling_hold&&data&&!found.error&&canMove&&<Form key={item.id+"-"+item.revision+"-"+(lockedTarget||prefilledLoc)} idempotent={true} label="确认移位" run={async f=>{
+          const targetCode=text(f,"target").trim().toUpperCase();
+          const target=data.locations.find((row:Row)=>row.code.toUpperCase()===targetCode&&row.code!==item.location);
+          if(!target)throw new Error("请输入不同于原位置的已启用目标库位码。");
+          if(!checked(f,"confirmed"))throw new Error("请勾选已现场扫描核对实物与货架标签。");
+          const scannedItem=text(f,"scanned_item_code").trim();
+          const scannedLoc=text(f,"scanned_location_code").trim();
+          const sealCode=text(f,"seal_code").trim();
           await request("/staff/storage/move","POST",{
             item_id:item.id,
             revision:item.revision,
             location_id:target.id,
-            scanned_item_code:scannedItem,
-            scanned_location_code:target.code,
+            ...(scannedItem?{scanned_item_code:scannedItem}:{}),
+            ...(scannedLoc?{scanned_location_code:scannedLoc}:{}),
             ...(sealCode?{seal_code:sealCode}:{}),
           });
-          setReceipt(item.code+" 已移至 "+target.code+(target.zone==="reference"&&item.reference_sample_state==="pending_safe_storage"?"（已完成确认样铅封激活并通知客户）。":"（已完成实物与货架双码校验）。"));found.reload();reload();
+          setReceipt(item.code+" 已移至 "+target.code+(target.zone==="reference"&&item.reference_sample_state==="pending_safe_storage"?"（已完成确认样铅封激活并通知客户）。":"（已完成实物与货架校验）。"));
+          setBatchMoveCount(c=>c+1);
+          setCode("");
+          found.reload();reload();
         }}>
-          <Field label="扫描确认实物标签码" name="scanned_item_code" value={item.code}/>
+          <Field label="扫描实物条码复核（须与左侧待移位件一致）" name="scanned_item_code" value={item.code}/>
           {item.reference_sample_state==="pending_safe_storage"&&<Field label="防拆铅封编号 (转入确认样区必填)" name="seal_code" value={item.reference_seal_code??""} required={false}/>}
-          <label>扫描或输入目标库位码（系统自动校验分区用途）<input name="target" list="active-location-codes" required/></label>
+          <label>目标库位码（系统校验分区用途及容量）<input name="target" list="active-location-codes" defaultValue={lockedTarget||prefilledLoc} required/></label>
+          <Field label="目标货架标签复核扫入码（与目标库位一致）" name="scanned_location_code" value={lockedTarget||prefilledLoc} required={false}/>
           <datalist id="active-location-codes">{data.locations.filter((row:Row)=>row.code!==item.location).map((row:Row)=>
-            <option key={row.id} value={row.code}>{zones[row.zone]}</option>)}</datalist>
+            <option key={row.id} value={row.code}>{`${zones[row.zone]??row.zone} · 占用 ${row.occupied}/${row.capacity??"∞"}`}</option>)}</datalist>
+          <datalist id="all-location-codes">{data.locations.map((row:Row)=>
+            <option key={row.id} value={row.code}>{`${zones[row.zone]??row.zone} · 占用 ${row.occupied}/${row.capacity??"∞"}`}</option>)}</datalist>
           <label className="check"><input name="confirmed" type="checkbox" required/>已现场扫描核对实物标签及目标货架标签</label>
         </Form>}
+        {!canMove&&item&&<Empty>当前角色无权提交库位变更操作。</Empty>}
         {receipt&&<p className="notice" role="status">{receipt}</p>}
       </Panel>
     </div>
-    <Panel title="最近移位记录">
+    <Panel title="库内作业与移位历史">
+      <div className="fields four" style={{marginBottom:10}}>
+        <label style={{display:"grid",gap:4}}>按实物编码筛选<input value={filterItem} onChange={e=>setFilterItem(e.target.value)} placeholder="S- / DSP-"/></label>
+        <label style={{display:"grid",gap:4}}>按库位筛选<input value={filterLoc} onChange={e=>setFilterLoc(e.target.value)} placeholder="A-01-..."/></label>
+        <label style={{display:"grid",gap:4}}>按操作人筛选<input value={filterStaff} onChange={e=>setFilterStaff(e.target.value)} placeholder="姓名"/></label>
+        <label style={{display:"grid",gap:4}}>动作与时间范围
+          <div className="actions">
+            <select value={filterAction} onChange={e=>setFilterAction(e.target.value)}>
+              <option value="">全部动作</option>
+              {Object.entries(ACTION_ZH).map(([k,v])=><option key={k} value={k}>{v}</option>)}
+            </select>
+            <select value={filterDays} onChange={e=>setFilterDays(e.target.value)}>
+              <option value="">全部时间</option>
+              <option value="1">近 24 小时</option>
+              <option value="7">近 7 天</option>
+              <option value="30">近 30 天</option>
+            </select>
+          </div>
+        </label>
+      </div>
       {!data&&!error&&<p role="status">正在读取移位记录…</p>}
-      {data&&<Table headers={["实物码","原位置","目标位置","操作员","时间"]} rows={data.moves.map((row:Row)=>[
-        <span className="code">{row.code}</span>,row.origin??"—",row.destination??"—",row.operator,stamp(row.created_at),
-      ])} empty="暂无移位记录。"/>}
+      {data&&<Table headers={["实物码","动作类型","原位置","目标位置","操作员","时间"]} rows={data.moves.map((row:Row)=>[
+        <Link key="c" className="code" href={`/wh/samples/${encodeURIComponent(row.code)}`}>{row.code}</Link>,
+        ACTION_ZH[row.action]??row.action??"move",
+        row.origin??"—",row.destination??"—",row.operator,stamp(row.created_at),
+      ])} empty="暂无符合筛选条件的移位历史。"/>}
     </Panel>
   </>;
 }
@@ -685,8 +757,14 @@ function StocktakeWorkspace({actor}:{actor?:Row}) {
         {active?<div className="stack">
           <div className="row" style={{justifyContent:"space-between"}}>
             <div>
-              <strong className="code">盘点 #{active.id.slice(0,8)}</strong> · <Tag>{active.state==="in_progress"?"盘点中":active.state==="submitted"?"待主管复核":active.state==="approved"?"已完成归档":active.state}</Tag> · 发起人 {active.operator_name??"—"}
-              <p className="muted">快照时间：{stamp(active.snapshot_at)} · 总数 {activeItems.length} / 匹配 {activeItems.filter(i=>i.state==="matched"||i.state==="adjusted").length} / 差异 {activeItems.filter(i=>i.state==="investigating"||i.state==="recount_required").length}</p>
+              <strong className="code">盘点 #{active.id.slice(0,8)}</strong> · <Tag>{active.state==="in_progress"?"盘点中":active.state==="submitted"?"待主管复核":active.state==="approved"?"已完成归档":active.state}</Tag> · 发起人 {active.operator_name??"—"}{active.approved_by_name?` · 审批人 ${active.approved_by_name}`:""}
+              <p className="muted">
+                快照时间：{stamp(active.snapshot_at)} · 总数 {activeItems.length}
+                {" / "}当前相符 {activeItems.filter(i=>i.state==="matched").length}
+                {" / "}原始发现差异 {active.original_discrepancy_count??activeItems.filter(i=>i.state==="investigating"||i.state==="adjusted"||Boolean(i.adjustment_id)).length}
+                {" / "}已批准调账 {active.approved_adjustment_count??activeItems.filter(i=>i.state==="adjusted"||Boolean(i.approved_by)).length}
+                {" / "}未决冻结 {activeItems.filter(i=>i.state==="investigating"||i.state==="recount_required").length}
+              </p>
             </div>
             {rows.length>1&&<select value={active.id} onChange={e=>setSelectedId(e.target.value)}>
               {rows.map(r=><option key={r.id} value={r.id}>盘点 #{r.id.slice(0,8)} ({r.state})</option>)}
@@ -743,19 +821,27 @@ function StocktakeWorkspace({actor}:{actor?:Row}) {
                 </div>
             ):<div className="notice">盘点已提交，等待仓库主管独立复核批准。</div>
           )}
-          <Table headers={["实物编号","客户 / 订单","品名 / 款号","快照库位","实盘库位","盘点状态","备注"]} rows={activeItems.map((it:Row)=>[
-            <span className="code">{it.item_code}</span>,
-            <div className="cell-stack">
+          <Table headers={["实物编号","客户 / 订单","品名 / 款号","快照库位","实盘 / 调整库位","盘点与调账留痕","依据说明"]} rows={activeItems.map((it:Row)=>[
+            <Link key="ic" className="code" href={`/wh/samples/${encodeURIComponent(it.item_code)}`}>{it.item_code}</Link>,
+            <div key="co" className="cell-stack">
               <span className="code">{it.receiving_code??"—"}</span>
               {it.order_no&&<small className="code">{it.order_no}</small>}
             </div>,
-            <div className="cell-stack">
+            <div key="pn" className="cell-stack">
               <span>{it.product_name??"—"}</span>
               {it.sample_code&&<small className="code">{it.sample_code}</small>}
             </div>,
-            <span className="code">{it.expected_location_code??"—"}</span>,
-            <span className="code">{it.actual_location_code??"—"}</span>,
-            <Tag>{it.state}</Tag>,
+            <span key="ex" className="code">{it.expected_location_code??"—"}</span>,
+            <div key="ac" className="cell-stack">
+              <span className="code">{it.actual_location_code??(it.state==="adjusted"?"确认缺失（未在库）":"—")}</span>
+              {it.live_location_code&&<small className="muted">现库位 {it.live_location_code}</small>}
+            </div>,
+            <div key="st" className="cell-stack">
+              <Tag tone={it.state==="investigating"?"red":it.state==="adjusted"?"yellow":"green"}>
+                {it.state==="adjusted"?"已批准差异调账":it.state==="investigating"?"差异冻结调查中":it.state==="recount_required"?"退回重盘":"账实相符"}
+              </Tag>
+              {it.approved_by_name&&<small className="muted">审批：{it.approved_by_name}</small>}
+            </div>,
             it.adjustment_reason||"—",
           ])} empty="该盘点范围下无在库实物。"/>
         </div>:<Empty>尚无盘点任务，请先在左侧创建。</Empty>}

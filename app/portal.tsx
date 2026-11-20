@@ -96,11 +96,11 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
     </div></section>;
   else if(route.view==="logistics") content=<LogisticsDesk actor={a}/>;
   else if(route.view==="logistics-configuration") content=<LogisticsConfiguration/>;
-  else if(route.view==="warehouse-scan") content=<WarehouseScan/>;
+  else if(route.view==="warehouse-scan") content=<WarehouseScan actor={a}/>;
   else if(route.view==="warehouse-item") content=<WarehouseItemView code={route.id} actor={a}/>;
   else if(route.view==="warehouse-package") content=<WarehousePackageView code={route.id} actor={a}/>;
   else if(route.view==="dispatch-batch") content=<WarehouseDispatchBatch key={route.id} id={route.id} actor={a}/>;
-  else if(route.view==="report-desk") content=<ReportDesk/>;
+  else if(route.view==="report-desk") content=<ReportDesk actor={a}/>;
   else if(route.view==="staff-report") content=<StaffReport key={route.id} id={route.id} actor={a}/>;
   else if(route.view==="operations") content=<OperationsDesk/>;
   else if(path==="/admin/audit") content=<AuditDesk/>;
@@ -114,10 +114,10 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
   else if(route.view==="admin-inspections") content=<AdminInspectionsWorkbench actor={a}/>;
   else if(route.view==="admin-inspection-task") content=<AdminInspectionTaskDetail key={route.id} id={route.id} actor={a}/>;
   else if(route.view==="admin-incident") content=<AdminIncidentDetail key={route.id} id={route.id} actor={a}/>;
-  else if(route.view==="admin-disposal") content=<AdminDisposalDetail key={route.id} id={route.id}/>;
+  else if(route.view==="admin-disposal") content=<AdminDisposalDetail key={route.id} id={route.id} actor={a}/>;
   else if(route.view==="staff-tickets") content=<StaffTicketQueue/>;
   else if(route.view==="staff-ticket") content=<StaffTicket key={route.id} id={route.id} actor={a}/>;
-  else if(route.view==="staff-order") content=<AdminOrderDetailWorkbench key={route.id} number={route.id}/>;
+  else if(route.view==="staff-order") content=<AdminOrderDetailWorkbench key={route.id} number={route.id} actor={a}/>;
   else if(route.view==="task") content=<TaskView id={route.id} actor={a}/>;
   else if(route.view==="warehouse") content=<WarehouseDesk path={path} actor={a} demo={demo}/>;
   else if(a.kind!=="customer") content=<section className="panel narrow"><h1>Customer account required</h1>
@@ -128,7 +128,7 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
       </button>}
       <Link className={demo?"button":"button primary"} href={withDestination("/login",customerDestination(target))}>Sign in as a customer</Link>
     </div></section>;
-  else if(route.view==="new-order") content=<NewOrder key={a.id+target} customerId={a.id}/>;
+  else if(route.view==="new-order") content=<NewOrder key={a.id+target} customerId={a.id} demo={demo}/>;
   else if(route.view==="customer-actions") content=<CustomerActions/>;
   else if(route.view==="customer-case") content=<CustomerCase key={route.recordId??route.id} id={route.recordId??route.id} order={route.recordId?route.id:undefined}/>;
   else if((route.view==="order-quote"||route.view==="order-shipment")&&route.recordId) content=<OrderFulfillment key={route.recordId} order={route.id} id={route.recordId} kind={route.view==="order-quote"?"quotes":"shipments"}/>;

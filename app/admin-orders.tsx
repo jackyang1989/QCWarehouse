@@ -55,10 +55,13 @@ import {
 export function AdminOrdersWorkbench({
   deskData,
   reloadDesk,
+  actor,
 }: {
   deskData?: Row;
   reloadDesk: () => void;
+  actor?: Row;
 }) {
+  const canIntakeRoute = Boolean(actor?.roles?.some((r: string) => ["receiver", "warehouse_admin", "super_admin"].includes(r)));
   const searchParams = useSearchParams();
   const initQuery = (searchParams.get("query") ?? "").trim();
   const initState = searchParams.get("state") ?? "";
@@ -284,15 +287,21 @@ export function AdminOrdersWorkbench({
                         <div key="prog" className="cell-stack nowrap">
                           <span>实收 <strong>{arrived}</strong> · 核身 <strong>{identified}</strong> · 已检 <strong>{inspected}</strong></span>
                           <small>
-                            {arrived === 0
+                            {arrived === 0 && Number(o.arrived_parcel_count ?? 0) === 0
                               ? "包裹未到仓"
-                              : diff === 0 && identified === expected
-                                ? "账实核身一致"
-                                : diff < 0
-                                  ? `少到 ${Math.abs(diff)} 件`
-                                  : diff > 0
-                                    ? `多收 +${diff} 件`
-                                    : `待核身 ${Math.max(0, arrived - identified)} 件`}
+                              : arrived === 0 && Number(o.arrived_parcel_count ?? 0) > 0
+                                ? "包裹已到待拆包登记"
+                                : diff === 0 && identified === expected
+                                  ? "账实核身一致"
+                                  : arrived > identified
+                                    ? `待核身 ${arrived - identified} 件${diff < 0 ? ` · 包差/在途 ${Math.abs(diff)} 件` : ""}`
+                                    : Number(o.parcel_count ?? 0) === 0 || Number(o.arrived_parcel_count ?? 0) < Number(o.parcel_count ?? 0)
+                                      ? `部分到仓（${o.arrived_parcel_count ?? 0}/${o.parcel_count ?? 0} 包）· 待到/待核 ${Math.max(0, expected - arrived)} 件`
+                                      : diff < 0
+                                        ? `确认实少 ${Math.abs(diff)} 件`
+                                        : diff > 0
+                                          ? `多收 +${diff} 件`
+                                          : "待核对"}
                             {o.report_version ? ` · 已发报告 v${o.report_version}` : ""}
                           </small>
                         </div>,
@@ -387,7 +396,9 @@ export function AdminOrdersWorkbench({
             <Table
               headers={["包裹编号", "承运商 / 运单号", "实收凭证与状况", "实收时间", "人工核验操作"]}
               rows={unmatchedPackages.map(pkg => [
-                <Link key="p" className="code nowrap" href={`/wh/packages/${pkg.code}`}>{pkg.code}</Link>,
+                canIntakeRoute
+                  ? <Link key="p" className="code nowrap" href={`/wh/packages/${pkg.code}`}>{pkg.code}</Link>
+                  : <CodeButton key="p" code={pkg.code} onClick={() => setDrawer({ kind: "package", ref: pkg.code })} />,
                 <span key="t" className="code nowrap">{pkg.tracking_norm ?? "无运单号"}</span>,
                 <div key="m" className="cell-stack">
                   <span>{pkg.condition_note ?? "无异常备注"}{pkg.location_code ? ` · ${pkg.location_code}` : ""}</span>
@@ -448,7 +459,7 @@ export function AdminOrdersWorkbench({
         )}
       </ModalDrawer>
 
-      <StaffObjectDrawer target={drawer} onClose={() => setDrawer(null)} />
+      <StaffObjectDrawer target={drawer} actor={actor} onClose={() => setDrawer(null)} />
     </>
   );
 }
@@ -526,7 +537,9 @@ export function OrderRefundDesk({ number, onDone }: { number: string; onDone?: (
   );
 }
 
-export function AdminOrderDetailWorkbench({ number }: { number: string }) {
+export function AdminOrderDetailWorkbench({ number, actor }: { number: string; actor?: Row }) {
+  const canIntakeRoute = Boolean(actor?.roles?.some((r: string) => ["receiver", "warehouse_admin", "super_admin"].includes(r)));
+  const canDispatchRoute = Boolean(actor?.roles?.some((r: string) => ["warehouse_admin", "super_admin"].includes(r)));
   const searchParams = useSearchParams();
   const fromOrders = searchParams.get("from_orders") ?? "";
   const backHref = fromOrders ? `/admin/orders?${fromOrders}` : "/admin/orders";
@@ -601,11 +614,15 @@ export function AdminOrderDetailWorkbench({ number }: { number: string }) {
               <span>③ 实收 / ④ 核身 / ⑤ 已检 / ⑥ 差异</span>
               <strong>实收 {skuSummary?.logged_units_total ?? 0} · 核身 {skuSummary?.identified_units_total ?? 0} · 已检 {skuSummary?.inspected_units_total ?? 0}</strong>
               <small>
-                {skuSummary?.short_units_total > 0
-                  ? `缺件差异 ${skuSummary.short_units_total} 件`
+                {(skuSummary?.confirmed_short_units_total ?? 0) > 0
+                  ? `仓库确认实少 ${skuSummary.confirmed_short_units_total} 件`
                   : (skuSummary?.unidentified_units_total ?? 0) > 0
-                    ? `待 SKU 核身 ${skuSummary.unidentified_units_total} 件`
-                    : "实收与核身口径无差异"}
+                    ? `待 SKU 核身 ${skuSummary.unidentified_units_total} 件${(skuSummary?.unverified_short_units_total ?? 0) > 0 ? ` · 包差/在途 ${skuSummary.unverified_short_units_total} 件` : ""}`
+                    : (skuSummary?.unverified_short_units_total ?? 0) > 0
+                      ? `未核实差异 ${skuSummary.unverified_short_units_total} 件`
+                      : (skuSummary?.unarrived_units_total ?? 0) > 0
+                        ? `未到仓 ${skuSummary.unarrived_units_total} 件`
+                        : "实收与核身口径无差异"}
               </small>
             </div>
             <div className="metric">
@@ -725,12 +742,13 @@ export function AdminOrderDetailWorkbench({ number }: { number: string }) {
                 {skuSummary?.has_intake_discrepancy && (
                   <StatusBanner tone="warning" title="检测到收货数量或外箱异常差异">
                     委托总计 {skuSummary.expected_units_total} 件，仓库累计实收 {skuSummary.logged_units_total} 件，已核身 {skuSummary.identified_units_total} 件
-                    {skuSummary.short_units_total > 0 ? `，缺件 ${skuSummary.short_units_total} 件` : ""}
-                    {skuSummary.unidentified_units_total > 0 ? `（尚有 ${skuSummary.unidentified_units_total} 件在库未完成 SKU 核身）` : ""}。
+                    {skuSummary.confirmed_short_units_total > 0 ? `，仓库已确认短缺 ${skuSummary.confirmed_short_units_total} 件` : ""}
+                    {(skuSummary.unverified_short_units_total ?? 0) > 0 ? `，未核实包差/在途差 ${skuSummary.unverified_short_units_total} 件` : ""}
+                    {skuSummary.unidentified_units_total > 0 ? `（尚有 ${skuSummary.unidentified_units_total} 件在库待 SKU 核身）` : ""}。
                   </StatusBanner>
                 )}
                 <Table
-                  headers={["商品 / SKU", "颜色 / 尺码", "供应商", "关联预报运单", "委托数", "实收数", "已核身", "待核身", "已确认缺少", "破损", "已检验", "关联实物码"]}
+                  headers={["商品 / SKU", "颜色 / 尺码", "供应商", "关联预报运单", "委托数", "已关联 / 核身", "待核身", "确认短缺 / 未核实差", "破损", "已检验", "关联实物码"]}
                   rows={breakdown.map(b => [
                     <div key="sku" className="cell-stack">
                       <strong>{b.product_name || "标准商品"}</strong>
@@ -740,10 +758,15 @@ export function AdminOrderDetailWorkbench({ number }: { number: string }) {
                     b.supplier_alias || "—",
                     b.tracking_no ? <CodeButton key="tr" code={b.tracking_no} onClick={() => setDrawer({ kind: "tracking", ref: b.tracking_no })} /> : "未拆分包裹",
                     b.expected_qty,
-                    b.arrived_qty,
                     b.identified_qty,
                     b.unidentified_pending_qty > 0 ? <Tag tone="yellow">{b.unidentified_pending_qty}</Tag> : 0,
-                    b.missing_qty > 0 ? <Tag tone="red">{b.missing_qty}</Tag> : 0,
+                    b.confirmed_short_qty > 0
+                      ? <Tag tone="red">确认少 {b.confirmed_short_qty}</Tag>
+                      : b.unverified_short_qty > 0
+                        ? <Tag tone="yellow">差 {b.unverified_short_qty} (待核)</Tag>
+                        : b.missing_qty > 0
+                          ? <Tag tone="red">{b.missing_qty}</Tag>
+                          : 0,
                     b.damaged_qty > 0 ? <Tag tone="red">{b.damaged_qty}</Tag> : 0,
                     b.inspected_qty,
                     <div key="itms" className="actions">
@@ -787,7 +810,11 @@ export function AdminOrderDetailWorkbench({ number }: { number: string }) {
                         <BizTag dict={TRANSPORT_STATE_ZH} value={p.transport_state} />
                         <BizTag dict={SYNC_STATE_ZH} value={p.sync_state} />
                       </div>,
-                      p.code ? <Link key="pk" className="code" href={`/wh/packages/${p.code}`}>{p.code}</Link> : <Tag tone="yellow">尚未收货入库</Tag>,
+                      p.code
+                        ? (canIntakeRoute
+                          ? <Link key="pk" className="code" href={`/wh/packages/${p.code}`}>{p.code}</Link>
+                          : <CodeButton key="pk" code={p.code} onClick={() => setDrawer({ kind: "package", ref: p.code })} />)
+                        : <Tag tone="yellow">尚未收货入库</Tag>,
                       p.code ? `${p.logged_item_count ?? p.received_quantity ?? 0} 件 (${pr?.declared_qty ? `申报 ${pr.declared_qty}` : "多箱混装"})` : "—",
                       p.code ? `${p.outer_condition ?? "intact"} · ${p.weight_g ? `${p.weight_g}g` : "未称重"}` : "—",
                       stamp(p.received_at, true),
@@ -806,7 +833,7 @@ export function AdminOrderDetailWorkbench({ number }: { number: string }) {
                     return [
                       <div key="c" className="actions">
                         <CodeButton code={item.code} onClick={() => setDrawer({ kind: "item", ref: item.code })} />
-                        <Link className="small" href={`/wh/samples/${item.code}`}>工作台</Link>
+                        {canIntakeRoute && <Link className="small" href={`/wh/samples/${item.code}`}>工作台</Link>}
                       </div>,
                       `#${item.position}`,
                       `${df.sku_code ?? df.sample_code ?? "—"} · ${df.color_declared ?? df.color ?? "—"} / ${df.size_label ?? "—"}`,
@@ -867,7 +894,11 @@ export function AdminOrderDetailWorkbench({ number }: { number: string }) {
                     <CodeButton key="it" code={dp.item_code} onClick={() => setDrawer({ kind: "item", ref: dp.item_code })} />,
                     DISPOSITION_ACTION_ZH[dp.action] ?? dp.action,
                     <Tag key="st">{dp.state}</Tag>,
-                    dp.batch_id ? <Link key="b" className="code" href={`/wh/dispatch/${dp.batch_id}`}>批次 #{String(dp.batch_id).slice(0, 8)} ({dp.batch_state})</Link> : "—",
+                    dp.batch_id
+                      ? (canDispatchRoute
+                        ? <Link key="b" className="code" href={`/wh/dispatch/${dp.batch_id}`}>批次 #{String(dp.batch_id).slice(0, 8)} ({dp.batch_state})</Link>
+                        : <CodeButton key="b" code={`批次 #${String(dp.batch_id).slice(0, 8)} (${dp.batch_state})`} onClick={() => setDrawer({ kind: "batch", ref: String(dp.batch_id) })} />)
+                      : "—",
                   ])}
                   empty="报告发布后客户暂未提交检后处置指令。"
                 />
@@ -882,7 +913,9 @@ export function AdminOrderDetailWorkbench({ number }: { number: string }) {
                     DISPOSITION_ACTION_ZH[s.action] ?? s.action,
                     <Tag key="st">{s.state}</Tag>,
                     stamp(s.shipped_at, true),
-                    <Link key="b" className="button sm" href={`/wh/dispatch/${s.batch_id}`}>出库工作台</Link>,
+                    canDispatchRoute
+                      ? <Link key="b" className="button sm" href={`/wh/dispatch/${s.batch_id}`}>出库工作台</Link>
+                      : <CodeButton key="b" code={`批次 #${String(s.batch_id).slice(0, 8)}`} onClick={() => setDrawer({ kind: "batch", ref: String(s.batch_id) })} />,
                   ])}
                   empty="该订单尚未发生出库发运交接。"
                 />
@@ -977,7 +1010,7 @@ export function AdminOrderDetailWorkbench({ number }: { number: string }) {
         </>
       )}
 
-      <StaffObjectDrawer target={drawer} onClose={() => setDrawer(null)} />
+      <StaffObjectDrawer target={drawer} actor={actor} onClose={() => setDrawer(null)} />
     </>
   );
 }

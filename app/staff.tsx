@@ -65,23 +65,58 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
   const [receiving,setReceiving]=useState(false);
   const [packageId,setPackageId]=useState("");
   const [intakeTracking,setIntakeTracking]=useState("");
+  const [pkgItemSearch,setPkgItemSearch]=useState("");
+  const [pkgItemPage,setPkgItemPage]=useState(1);
+  const [declSearch,setDeclSearch]=useState("");
+  const [declPage,setDeclPage]=useState(1);
+  const [pkgSearch,setPkgSearch]=useState("");
+  const [pkgTab,setPkgTab]=useState<"all"|"unpacked"|"unmatched"|"quarantined"|"checked_in">("all");
+  const [pkgPage,setPkgPage]=useState(1);
+  const [sampleSearch,setSampleSearch]=useState("");
+  const [sampleTab,setSampleTab]=useState<"all"|"pending"|"identified"|"mismatch">("all");
+  const [samplePage,setSamplePage]=useState(1);
   const [queueSearch,setQueueSearch]=useState("");
-  const [queueFilter,setQueueFilter]=useState<"all"|"returned"|"overdue"|"READY"|"IN_PROGRESS"|"SUBMITTED">("all");
+  const [queueFilter,setQueueFilter]=useState<"all"|"mine"|"unclaimed"|"others"|"returned"|"overdue"|"SUBMITTED">("all");
   const [batchPrintResult,setBatchPrintResult]=useState<{print_id:string;pdf_url:string;preview_png_url:string;codes:string[]}>();
   const [batchVerifyResult,setBatchVerifyResult]=useState<{verified:boolean;verified_count:number}>();
   const [discrepancyResult,setDiscrepancyResult]=useState<Row>();
+  const [openPhotoMessage,setOpenPhotoMessage]=useState<string>("");
   const packageDetail=useLoad(packageId?"/staff/packages/"+packageId:null);
   const selectedPackage=packageDetail.data?.parcel.id===packageId?packageDetail.data:undefined;
   const [itemCode,setItemCode]=useState("");
   const [drawer,setDrawer]=useState<StaffObjectTarget|null>(null);
   const itemDetail=useLoad(itemCode?"/staff/items/by-code?"+new URLSearchParams({code:itemCode}):null);
+  const autoLookupRef=useRef<string>("");
+
+  async function runTrackingLookup(rawTracking:string,rawCarrier="") {
+    const tracking=rawTracking.trim();
+    const carrier=rawCarrier.trim();
+    if(!tracking) return;
+    setLookup(undefined);setPackageId("");setPkgItemPage(1);setDeclPage(1);
+    const result=await request("/staff/intake/lookup","POST",{tracking_no:tracking,...(carrier?{carrier_code:carrier}:{})});
+    let context:Row|undefined;
+    try {
+      context=await request("/staff/intake/context?"+new URLSearchParams({tracking_no:tracking,...(carrier?{carrier_code:carrier}:{})}));
+    } catch {}
+    setLookup({tracking,carrier,result,context});
+    if(result.package_id) setPackageId(result.package_id);
+  }
+
   useEffect(()=>{
     if(path!=="/wh/intake")return;
     const params=new URLSearchParams(location.search);
-    setPackageId(params.get("package")??"");
-    setItemCode(params.get("item")??"");
-    setIntakeTracking(params.get("tracking")??"");
+    const qpPkg=params.get("package")??"";
+    const qpItem=params.get("item")??"";
+    const qpTracking=(params.get("tracking")??"").trim();
+    setPackageId(qpPkg);
+    setItemCode(qpItem);
+    setIntakeTracking(qpTracking);
+    if(qpTracking && autoLookupRef.current!==qpTracking) {
+      autoLookupRef.current=qpTracking;
+      void runTrackingLookup(qpTracking,"");
+    }
   },[path]);
+
   if(error)return <ErrorBlock error={error}/>;
   if(!data)return <p>正在加载工作台…</p>;
   const availableLinks=staffTabs("warehouse",actor.roles);
@@ -91,7 +126,9 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
   const canInspect=actor.roles.includes("inspector");
   const canViewTasks=actor.roles.some((r:string)=>["inspector","reviewer","warehouse_admin","super_admin"].includes(r));
   const canReview=actor.roles.some((r:string)=>["reviewer","warehouse_admin","super_admin"].includes(r));
+  const canReviewWrite=actor.roles.includes("reviewer");
   const canShip=actor.roles.some((r:string)=>["warehouse_admin","super_admin"].includes(r));
+  const canShipWrite=actor.roles.includes("warehouse_admin");
   const item=itemDetail.data?.item;
   const selectItem=(code:string)=>{setItemCode(code);itemDetail.reload();};
   const locations=options(data.locations);
@@ -99,42 +136,49 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
   const current=path.split("/")[2]??"overview";
   const qLower=queueSearch.trim().toLowerCase();
   const filteredTasks=(data.tasks??[]).filter((t:Row)=>{
+    if(queueFilter==="mine"&&t.assignee_id!==actor.id) return false;
+    if(queueFilter==="unclaimed"&&(t.assignee_id||t.state!=="READY")) return false;
+    if(queueFilter==="others"&&(!t.assignee_id||t.assignee_id===actor.id)) return false;
     if(queueFilter==="returned"&&!t.returned_reason) return false;
     if(queueFilter==="overdue"&&!t.sla_overdue) return false;
-    if(["READY","IN_PROGRESS","SUBMITTED"].includes(queueFilter)&&t.state!==queueFilter) return false;
+    if(queueFilter==="SUBMITTED"&&t.state!=="SUBMITTED") return false;
     if(!qLower) return true;
     const df=t.declared_fields??{};
-    return [t.public_no,t.item_code,t.receiving_code,df.name,df.sku_code,df.sample_code,t.location_code].some(v=>String(v??"").toLowerCase().includes(qLower));
+    return [t.public_no,t.item_code,t.receiving_code,t.assignee_name,df.name,df.sku_code,df.sample_code,t.location_code].some(v=>String(v??"").toLowerCase().includes(qLower));
   });
   const groups=Object.values(filteredTasks.reduce((g:Record<string,Row[]>,t:Row)=>{(g[t.order_id]??=[]).push(t);return g;},{})) as Row[][];
   const heading={
     overview:["仓库总览","按登录员工岗位角色展示实时精确作业待办、签收催查、质检与出库队列。"],
-    intake:["收货入库","快递公司签收不等于 QCWarehouse 仓库实收。记录外箱与实物后才能确认。"],
+    intake:["收货入库","快递公司签收不等于 QCWarehouse 仓库实收。记录外箱、开箱照片与逐件实物后才能确认。"],
     packages:["包裹详情","实物包裹与原始运单、入库事务分别保存。"],
-    samples:["样品识别与建档","客户物件标识与委托明细独立管理。"],
-    inspection:["检查任务队列","按委托任务而非按订单数量派工，逐件检查与样品比较独立。"],
+    samples:["样品识别与建档","客户物件标识与委托明细独立管理，支持快速筛选与核身。"],
+    inspection:["检查任务队列","按本人负责、未领取、QA退回与SLA超时分层派工，逐件检查与样品比较独立。"],
     execute:["检查执行工作台","按受控模板录入观察事实、测量值与必拍证据。"],
     sync:["本地同步与冲突处理","仓库移动设备断网后不能覆盖已发布服务端数据。"],
     dispatch:["出库与退商家待办","只有授权、报价、付款和样品可用状态全部满足，才能进入可交接队列。"],
   }[current]??["仓库总览","实物、证据、费用与物流是不同的业务事实。"];
   const m=data.metrics??{};
-  const overviewMetrics:[string,string,number,string][]=[
-    ...(canReceive?[
-      ["/wh/logistics","签收未实收",Number(m.delivered_unreceived_count??0),"承运商妥投但未扫码"],
-      ["/wh/intake#intake-unpack","待拆包包裹",Number(m.unpacked_pending_count??0),"已签收待逐件建档"],
-      ["/wh/packages","无主待认领",Number(m.unmatched_parcel_count??0),"缺少专属收件码"],
-      ["/wh/samples","待核身绑定",Number(m.pending_id_count??0),"在库待绑委托/核身"],
-    ] as [string,string,number,string][]:[]),
-    ...(canViewTasks?[
-      ["/wh/inspection","待检任务",data.tasks.length,`含退回 ${m.returned_task_count??0} / 超时 ${m.overdue_task_count??0}`],
-    ] as [string,string,number,string][]:[]),
-    ...(canReview?[
-      ["/wh/review","待 QA 复核",Number(m.pending_qa_count??0),"含新报告与修订版"],
-    ] as [string,string,number,string][]:[]),
-    ...(canShip?[
-      ["/wh/dispatch","待处理出库",Number(m.actionable_dispatch_count??0),"待报价/待付款/待发运"],
-    ] as [string,string,number,string][]:[]),
+  const intakeMetrics:[string,string,number,string][]=[
+    ["/wh/logistics","签收未实收",Number(m.delivered_unreceived_count??0),"承运商妥投待扫码入库"],
+    ["/wh/intake#intake-unpack","待拆包包裹",Number(m.unpacked_pending_count??0),"已核收待逐件建档"],
+    ["/wh/packages","无主待认领",Number(m.unmatched_parcel_count??0),"缺专属收件码或未绑定"],
+    ["/wh/samples","待核身绑定",Number(m.pending_id_count??0),"在库待绑定订单/SKU"],
+    ["/wh/storage","待封存留样",Number(m.pending_reference_count??0),"待移入专柜/盘点 ("+Number(m.active_stocktakes_count??0)+"进行中)"],
+    ["/wh/packages","已隔离异常包",Number(m.quarantined_packages_count??0),"待主管或客服介入"],
   ];
+  const qcMetrics:[string,string,number,string][]=[
+    ...(canViewTasks?[
+      ["/wh/inspection","待领取任务",Number(m.ready_task_count??0),`在检 ${m.in_progress_task_count??0} / 活跃总计 ${m.total_active_task_count??0}`] as [string,string,number,string],
+      ["/wh/inspection","QA 退回 / SLA超时",Number(m.returned_task_count??0)+Number(m.overdue_task_count??0),`退回 ${m.returned_task_count??0} / 超时 ${m.overdue_task_count??0}`] as [string,string,number,string],
+    ]:[]),
+    ...(canReview?[
+      ["/wh/review","待 QA 复核",Number(m.pending_qa_count??0),"独立审核后生成客户报告"] as [string,string,number,string],
+    ]:[]),
+    ...(canShip?[
+      ["/wh/dispatch","待处理出库",Number(m.actionable_dispatch_count??0),"待报价 / 待付款 / 待打包交接"] as [string,string,number,string],
+    ]:[]),
+  ];
+  const overviewMetrics=[...(canReceive?intakeMetrics:[]),...qcMetrics];
   const activeRoleKey=actor.roles.includes("super_admin")?"admin":actor.roles.includes("reviewer")?"reviewer":actor.roles.includes("inspector")?"inspector":actor.roles.includes("warehouse_admin")?"warehouse":"receiving";
   const todayRows:[ReactNode,ReactNode,ReactNode,ReactNode,ReactNode][]=[
     ...(canReceive?data.packages.slice(0,4).map((parcel:Row):[ReactNode,ReactNode,ReactNode,ReactNode,ReactNode]=>[
@@ -144,11 +188,17 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
       </div>,
       <div className="cell-stack">
         <span className="code">{parcel.receiving_code??"无主包裹"}</span>
-        <small className="muted">建档 {parcel.logged_item_count??parcel.received_quantity??0} 件</small>
+        <small className="muted">建档 {parcel.logged_item_count??parcel.received_quantity??0} 件 · {parcel.received_by_name??"收货员"}</small>
       </div>,
-      <span className="code">{parcel.tracking_norm??"—"}</span>,
-      <Tag tone={parcel.state==="unmatched"||parcel.state==="quarantined"?"yellow":"green"}>{label(parcel.state)}</Tag>,
-      <Link className="button sm" href={"/wh/packages/"+encodeURIComponent(parcel.code)}>核对与拆包</Link>,
+      <div className="cell-stack">
+        <span className="code">{parcel.tracking_norm??"—"}</span>
+        {parcel.sla_due_at&&<small className="muted">订单SLA {stamp(parcel.sla_due_at)}</small>}
+      </div>,
+      <div className="cell-stack">
+        <Tag tone={parcel.state==="unmatched"||parcel.state==="quarantined"?"yellow":"green"}>{label(parcel.state)}</Tag>
+        {parcel.outer_condition&&parcel.outer_condition!=="intact"&&<small className="bad">{label(parcel.outer_condition)}</small>}
+      </div>,
+      <Link className="button sm" href={"/wh/packages/"+encodeURIComponent(parcel.code)}>{canIntakeWrite?"核对与拆包":"只读查看"}</Link>,
     ]):[]),
     ...(canViewTasks?data.tasks.slice(0,5).map((task:Row):[ReactNode,ReactNode,ReactNode,ReactNode,ReactNode]=>[
       <div className="cell-stack">
@@ -156,7 +206,7 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
         <small className="code">{task.item_code??"对比组"}</small>
       </div>,
       <div className="cell-stack">
-        <span className="code">{task.receiving_code??"—"}</span>
+        <span className="code">{task.receiving_code??"—"} · {task.assignee_name??"未指派"}</span>
         <small>{task.declared_fields?.name||task.declared_fields?.sku_code||task.title?.["zh-CN"]||"—"}</small>
       </div>,
       <div className="cell-stack">
@@ -164,31 +214,88 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
         {task.sla_overdue?<Tag tone="red">SLA 超时</Tag>:<small className="muted">SLA {stamp(task.sla_due_at)}</small>}
       </div>,
       <div className="cell-stack">
-        <Tag tone={task.returned_reason?"red":task.state==="IN_PROGRESS"?"blue":"yellow"}>{label(task.state)}</Tag>
+        <Tag tone={task.returned_reason||(task.order_blocks?.length>0)?"red":task.state==="IN_PROGRESS"?"blue":"yellow"}>{label(task.state)}</Tag>
         {task.returned_reason&&<small className="bad">已退回补正</small>}
+        {(task.order_blocks?.length??0)>0&&<small className="bad">阻塞：{task.order_blocks.join("；")}</small>}
       </div>,
-      <Link className="button sm primary" href={"/wh/task/"+task.id}>{canInspect?"进入检查":"查看详情"}</Link>,
+      <Link className={"button sm"+(canInspect?" primary":"")} href={"/wh/task/"+task.id}>{canInspect?(task.state==="READY"?"领取并检查":"进入检查"):"只读查看"}</Link>,
     ]):[]),
     ...(canReview?data.reports.slice(0,3).map((rep:Row):[ReactNode,ReactNode,ReactNode,ReactNode,ReactNode]=>[
       <div className="cell-stack">
         <Link className="code" href={"/wh/review/"+rep.id}>{rep.public_no}</Link>
-        <small className="code">v{rep.version}</small>
+        <small className="code">v{rep.version}{rep.item_codes?.length?` · ${rep.item_codes.slice(0,2).join(",")}`:""}</small>
       </div>,
       <div className="cell-stack">
         <span className="code">{rep.receiving_code??"—"}</span>
         <small>{rep.service_title?.["zh-CN"]??rep.service_title?.en??"—"}</small>
       </div>,
-      <span className="small">{rep.created_by_name??"—"} · {stamp(rep.submitted_at)}</span>,
+      <div className="cell-stack">
+        <span className="small">{rep.created_by_name??"—"} · {stamp(rep.submitted_at)}</span>
+        {rep.sla_due_at&&<small className="muted">SLA {stamp(rep.sla_due_at)}</small>}
+      </div>,
       <Tag tone="yellow">{label(rep.state)}</Tag>,
-      <Link className="button sm primary" href={"/wh/review/"+rep.id}>独立复核</Link>,
+      <Link className={"button sm"+(canReviewWrite?" primary":"")} href={"/wh/review/"+rep.id}>{canReviewWrite?"独立复核":"只读监督"}</Link>,
     ]):[]),
   ];
+
+  const groupedSkuRows=(selectedPackage?.intake_context?.orders??[]).flatMap((ord:Row)=>
+    (ord.expected_lines_summary?.lines_breakdown??[]).map((line:Row)=>({
+      order_public_no:ord.public_no,
+      reconciliation_status:ord.expected_lines_summary?.reconciliation_status,
+      ...line,
+    }))
+  );
+  const declaredItems:Row[]=selectedPackage?.intake_context?.declared_items??[];
+  const declLower=declSearch.trim().toLowerCase();
+  const filteredDeclared=declaredItems.filter((di:Row)=>!declLower||[di.order_public_no,di.sample_code,di.color,di.size,di.supplier_alias,di.bound_item_code,di.declared_tracking_no].some(v=>String(v??"").toLowerCase().includes(declLower)));
+  const DECL_PER_PAGE=15;
+  const declTotalPages=Math.max(1,Math.ceil(filteredDeclared.length/DECL_PER_PAGE));
+  const safeDeclPage=Math.min(declPage,declTotalPages);
+  const declSlice=filteredDeclared.slice((safeDeclPage-1)*DECL_PER_PAGE,safeDeclPage*DECL_PER_PAGE);
+
+  const selPkgItems:Row[]=selectedPackage?.items??[];
+  const pkgItemLower=pkgItemSearch.trim().toLowerCase();
+  const filteredPkgItems=selPkgItems.filter((i:Row)=>!pkgItemLower||[i.code,i.location,i.custody_state,i.inspection_stage].some(v=>String(v??"").toLowerCase().includes(pkgItemLower)));
+  const PKG_ITEM_PER_PAGE=15;
+  const pkgItemTotalPages=Math.max(1,Math.ceil(filteredPkgItems.length/PKG_ITEM_PER_PAGE));
+  const safePkgItemPage=Math.min(pkgItemPage,pkgItemTotalPages);
+  const pkgItemSlice=filteredPkgItems.slice((safePkgItemPage-1)*PKG_ITEM_PER_PAGE,safePkgItemPage*PKG_ITEM_PER_PAGE);
+
+  const pkgQuery=pkgSearch.trim().toLowerCase();
+  const filteredPackages=(data.packages??[]).filter((p:Row)=>{
+    if(pkgTab==="unpacked" && Number(p.logged_item_count??p.received_quantity??0)>0) return false;
+    if(pkgTab==="unmatched" && p.state!=="unmatched") return false;
+    if(pkgTab==="quarantined" && p.state!=="quarantined") return false;
+    if(pkgTab==="checked_in" && p.state!=="checked_in") return false;
+    if(!pkgQuery) return true;
+    return [p.code,p.tracking_norm,p.receiving_code,...(p.order_numbers??[])].some(v=>String(v??"").toLowerCase().includes(pkgQuery));
+  });
+  const PKG_PER_PAGE=15;
+  const pkgTotalPages=Math.max(1,Math.ceil(filteredPackages.length/PKG_PER_PAGE));
+  const safePkgPage=Math.min(pkgPage,pkgTotalPages);
+  const pkgSlice=filteredPackages.slice((safePkgPage-1)*PKG_PER_PAGE,safePkgPage*PKG_PER_PAGE);
+
+  const smpQuery=sampleSearch.trim().toLowerCase();
+  const filteredSamples=(data.items??[]).filter((it:Row)=>{
+    if(sampleTab==="pending" && it.identity_state!=="pending") return false;
+    if(sampleTab==="identified" && it.identity_state!=="identified") return false;
+    if(sampleTab==="mismatch" && it.identity_state!=="mismatch") return false;
+    if(!smpQuery) return true;
+    const df=it.declared_fields??{};
+    return [it.code,it.package_code,it.receiving_code,it.order_no,it.location,df.name,df.sku_code,df.sample_code].some(v=>String(v??"").toLowerCase().includes(smpQuery));
+  });
+  const SMP_PER_PAGE=20;
+  const smpTotalPages=Math.max(1,Math.ceil(filteredSamples.length/SMP_PER_PAGE));
+  const safeSmpPage=Math.min(samplePage,smpTotalPages);
+  const smpSlice=filteredSamples.slice((safeSmpPage-1)*SMP_PER_PAGE,safeSmpPage*SMP_PER_PAGE);
+
   return <><div className="page-head row"><div><p className="eyebrow">WAREHOUSE OPERATIONS</p><h1>{heading[0]}</h1><p className="muted">{heading[1]}</p></div>
     {current==="overview"&&<div className="head-actions">
-      <Link className="button primary" href="/wh/scan">扫码查件</Link>
-      {canReceive&&<Link className="button" href="/wh/intake">收货入库</Link>}
-      {canViewTasks&&<Link className="button" href="/wh/inspection">检查队列</Link>}
-      {canReview&&<Link className="button" href="/wh/review">QA 复核</Link>}
+      <Link className="button primary" href="/wh/scan">扫码工作台</Link>
+      {canIntakeWrite?<Link className="button" href="/wh/intake">收货入库</Link>:canReceive&&<Link className="button" href="/wh/packages">包裹台账</Link>}
+      {canViewTasks&&<Link className="button" href="/wh/inspection">{canInspect?"检查队列":"质检监督"}</Link>}
+      {canReview&&<Link className="button" href="/wh/review">{canReviewWrite?"QA 复核":"复核监督"}</Link>}
+      {canShip&&<Link className="button" href="/wh/dispatch">{canShipWrite?"出库交接":"出库监督"}</Link>}
     </div>}
   </div>
     {demo&&<div className="row flexwrap" role="region" aria-label="演示员工角色切换" style={{marginBottom:16,justifyContent:"flex-start",gap:10}}>
@@ -222,36 +329,36 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
       <div className="stats" aria-label="仓库作业摘要">{overviewMetrics.map(([href,title,value,detail])=>
         <Link className="stat" href={href} key={title}><span className="label">{title}</span><strong className="value">{value}</strong><small className="detail">{detail}</small></Link>)}</div>
       <div className="grid cols2">
-        <Panel title="本岗位今日作业队列" subtitle="严格按当前岗位权限裁剪可见队列，避免无权限误操作。">
-          <Table headers={["订单 / 对象","客户 / 品名","运单 / 库位 / SLA","状态","下一步"]} rows={todayRows} empty="本岗位当前暂无待处理作业。"/>
+        <Panel title="本岗位今日作业队列" subtitle="严格按当前岗位权限裁剪可见队列与可执行动作，避免越权或盲目跳转。">
+          <Table headers={["对象 / 订单","客户 / 责任人","运单 / 库位 / SLA","状态 / 阻塞","下一步"]} rows={todayRows} empty="本岗位当前暂无待处理作业。"/>
         </Panel>
         <Panel title="本岗位开放工作台入口">
           <div className="grid cols2">
-            {availableLinks.filter(([href])=>href!=="/wh").slice(0,8).map(([href,name])=><Link className="button sm" key={href} href={href}>{name}</Link>)}
+            {availableLinks.filter(([href])=>href!=="/wh").map(([href,name])=><Link className="button sm" key={href} href={href}>{name}</Link>)}
           </div>
           <hr className="sep"/>
-          <div className="line-note">员工端全本地部署，所有页面与写入权限严格与服务端 RBAC / OpenAPI 契约对齐。</div>
+          <div className="line-note">员工端所有页面与写入权限严格与服务端 RBAC / OpenAPI 契约对齐；只读角色禁止执行写操作。</div>
         </Panel>
       </div>
     </>}
     {current==="intake"&&canReceive&&<>
       <ol className="intake-stages" aria-label="收货步骤">
         <li><a href="#intake-waybill"><span>01</span>核对运单与外箱</a></li>
-        <li><a href="#intake-unpack"><span>02</span>逐件建档与上架</a></li>
+        <li><a href="#intake-unpack"><span>02</span>开箱照 · 建档与标签</a></li>
         <li><a href="#item-intake"><span>03</span>核对身份与委托</a></li>
       </ol>
-      <section className="panel scan-panel" id="intake-waybill"><div className="section-heading"><span className="eyebrow">01 / 运单定位</span><h2>搜索卖家运单</h2><p className="muted">承运商签收后，仍需仓库核对外箱状况（完好/压扁/破损/水渍）并确认实收。</p></div>
+      {(data.delivered_unreceived?.length??0)>0&&<div className="notice" style={{marginBottom:12}}>
+        <strong>承运商已签收、仓库尚未实收登记 ({data.delivered_unreceived.length})：</strong>
+        <div className="actions" style={{marginTop:6,flexWrap:"wrap"}}>
+          {data.delivered_unreceived.map((du:Row)=><button key={du.id} type="button" className="button sm" onClick={()=>{setIntakeTracking(du.tracking_norm);void runTrackingLookup(du.tracking_norm,du.carrier_code??"");}}>
+            填入并查单：<span className="code">{du.tracking_norm}</span>{du.receiving_code?` · ${du.receiving_code}`:""}
+          </button>)}
+        </div>
+      </div>}
+      <section className="panel scan-panel" id="intake-waybill"><div className="section-heading"><span className="eyebrow">01 / 运单定位</span><h2>搜索卖家运单</h2><p className="muted">承运商签收不等于 QCWarehouse 实收。须核对外箱状况（完好/压扁/破损/水渍）并拍照留证。</p></div>
         <fieldset disabled={receiving} style={{display:"contents"}} onChange={()=>{setLookup(undefined);setPackageId("");}}>
           <Form inline label="搜索" run={async f=>{
-            const tracking=text(f,"tracking"),carrier=text(f,"carrier");
-            setLookup(undefined);setPackageId("");
-            const result=await request("/staff/intake/lookup","POST",{tracking_no:tracking,...(carrier?{carrier_code:carrier}:{})});
-            let context:Row|undefined;
-            try {
-              context=await request("/staff/intake/context?"+new URLSearchParams({tracking_no:tracking,...(carrier?{carrier_code:carrier}:{})}));
-            } catch {}
-            setLookup({tracking,carrier,result,context});
-            if(result.package_id)setPackageId(result.package_id);
+            await runTrackingLookup(text(f,"tracking"),text(f,"carrier"));
           }}><Field key={intakeTracking} name="tracking" label="扫描条码或手动输入运单号" value={intakeTracking}/><Select name="carrier" label="快递公司" choices={carrierOptions} required={false}/></Form>
         </fieldset>
         {lookup&&<div className="notice"><p>运单 <strong className="code">{lookup.tracking}</strong></p>
@@ -269,12 +376,15 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
           {lookup.result.package_id&&<p>此运单已有实收记录，已定位到拆包登记。</p>}
         </div>}
         {lookup&&lookup.result.match_state!=="ambiguous"&&!lookup.result.package_id&&(canIntakeWrite?<Form key={lookup.tracking+"-"+lookup.carrier} label="确认实物到仓" run={async f=>{
+          const outerCondition=text(f,"outer_condition")||"intact";
+          const conditionNote=text(f,"condition_note").trim();
+          if(outerCondition!=="intact" && conditionNote.length<4) {
+            throw new Error("外箱处于压扁/破损/水渍异常时，请填写不少于 4 个字的异常情况说明。");
+          }
           setReceiving(true);
           try {
             const photo=await upload(f.get("photo"),"intake_outer");
             const weight=text(f,"weight");
-            const outerCondition=text(f,"outer_condition")||"intact";
-            const conditionNote=text(f,"condition_note");
             const parcel=await request("/staff/intake/check-in","POST",{
               tracking_no:lookup.tracking,
               ...(lookup.carrier?{carrier_code:lookup.carrier}:{}),
@@ -297,44 +407,95 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
               {id:"torn",label:"破损开裂 (torn)"},
               {id:"wet",label:"水渍受潮 (wet)"},
             ]}/>
-            <Field name="condition_note" label="外箱破损/异常备注（外箱异常时必填）" required={false}/>
+            <Field name="condition_note" label="外箱破损/异常备注（外箱异常时必填 ≥4字）" required={false}/>
           </div>
           <Photo label="包裹外箱照片（含快递面单与外箱全貌）"/>
         </Form>:<p className="notice">当前为只读监督模式：收货实收写操作仅限收货员（receiver）与仓库主管（warehouse_admin）。</p>)}
       </section>
-      <Panel title="02 / 拆包登记、同屏核对与批量标签打印" id="intake-unpack">
-        <label>入仓包裹<select value={packageId} onChange={e=>{setPackageId(e.target.value);setBatchPrintResult(undefined);setBatchVerifyResult(undefined);setDiscrepancyResult(undefined);}}>
+      <Panel title="02 / 拆包开箱留证、分组 SKU 核对与逐件建档" id="intake-unpack">
+        <label>入仓包裹<select value={packageId} onChange={e=>{setPackageId(e.target.value);setBatchPrintResult(undefined);setBatchVerifyResult(undefined);setDiscrepancyResult(undefined);setPkgItemPage(1);setDeclPage(1);setOpenPhotoMessage("");}}>
           <option value="">选择包裹</option>
           {packageId&&!data.packages.some((p:Row)=>p.id===packageId)&&<option value={packageId}>{selectedPackage?.parcel.code??"正在定位包裹"}</option>}
           {data.packages.map((p:Row)=><option key={p.id} value={p.id}>{p.code} · {p.tracking_norm??"—"}</option>)}
         </select></label>
         {packageId&&packageDetail.error&&<><ErrorBlock error={packageDetail.error}/><button type="button" onClick={packageDetail.reload}>重新读取包裹</button></>}
         {packageId&&!selectedPackage&&!packageDetail.error&&<p role="status">正在读取包裹…</p>}
-        {selectedPackage&&<><p><Link className="code" href={"/wh/packages/"+selectedPackage.parcel.code}>{selectedPackage.parcel.code}</Link> · 本包已建档 <strong>{selectedPackage.parcel.received_quantity}</strong> 件 · 外箱 <Tag>{label(selectedPackage.parcel.outer_condition??"intact")}</Tag> · 状态 <Tag>{label(selectedPackage.parcel.state)}</Tag></p>
+        {selectedPackage&&<><div className="row flexwrap" style={{marginBottom:8}}>
+            <p style={{margin:0}}><Link className="code" href={"/wh/packages/"+encodeURIComponent(selectedPackage.parcel.code)}>{selectedPackage.parcel.code}</Link> · 本包已建档 <strong>{selectedPackage.parcel.received_quantity}</strong> 件 · 外箱 <Tag>{label(selectedPackage.parcel.outer_condition??"intact")}</Tag> · 状态 <Tag>{label(selectedPackage.parcel.state)}</Tag></p>
+            <div className="actions">
+              {(selectedPackage.parcel.open_media_ids?.length??0)>0
+                ?<MediaButton ids={selectedPackage.parcel.open_media_ids} label={`查看开箱照 (${selectedPackage.parcel.open_media_ids.length})`}/>
+                :<Tag tone="yellow">尚未补充开箱照</Tag>}
+              <Link className="button sm" href={"/wh/packages/"+encodeURIComponent(selectedPackage.parcel.code)}>打开包裹详情页</Link>
+            </div>
+          </div>
+          {canIntakeWrite&&selectedPackage.parcel.state!=="quarantined"&&<div className="card" style={{marginBottom:12}}>
+            <Form key={`open-photo-${selectedPackage.parcel.id}-${selectedPackage.parcel.revision}`} inline label="上传并登记开箱照" run={async f=>{
+              const file=f.get("open_photo");
+              const mid=await upload(file,"intake_open");
+              await request("/staff/packages/"+selectedPackage.parcel.id+"/open-photos","POST",{
+                revision:selectedPackage.parcel.revision,
+                open_media_ids:[mid],
+              });
+              setOpenPhotoMessage("已补充登记开箱照片，客户与质检工作台可同步查阅。");
+              packageDetail.reload();reload();
+            }}>
+              <Photo name="open_photo" label="开箱照（拆箱全貌 / 吊牌内衬）"/>
+            </Form>
+            {openPhotoMessage&&<p className="notice" role="status">{openPhotoMessage}</p>}
+          </div>}
           {selectedPackage.parcel.order_numbers.length>0&&<p>关联订单 {selectedPackage.parcel.order_numbers.join("、")}</p>}
-          {selectedPackage.intake_context&&selectedPackage.intake_context.orders?.length>0&&<div className="card" style={{marginBottom:12}}>
-            <div className="row">
-              <strong>客户申报 vs 仓库累计实收同屏核对（支持多包裹分批到仓）</strong>
-              <span className="small muted">
-                订单总申报 <strong>{selectedPackage.intake_context.total_declared_qty}</strong> 件 · 累计已收 <strong>{selectedPackage.intake_context.cumulative_received_qty}</strong> 件 · 仍差 <strong>{selectedPackage.intake_context.remaining_unreceived_qty}</strong> 件 · 在途未到运单 <strong>{selectedPackage.intake_context.in_transit_advices_count}</strong> 单
-              </span>
+          {groupedSkuRows.length>0&&<div className="card" style={{marginBottom:12}}>
+            <div className="row flexwrap">
+              <strong>SKU / 颜色 / 尺码分组对账汇总（区分已建档待核身与实短）</strong>
+              {selectedPackage.intake_context&&<span className="small muted">
+                订单总申报 <strong>{selectedPackage.intake_context.total_declared_qty}</strong> 件 · 仓库累计实收 <strong>{selectedPackage.intake_context.cumulative_received_qty}</strong> 件 · 在途未到运单 <strong>{selectedPackage.intake_context.in_transit_advices_count}</strong> 单
+              </span>}
             </div>
             <Table
-              headers={["订单号 / 位置","款号 (Sample Code)","颜色","尺码","供应商","服装子类","申报运单","已绑实物码"]}
-              rows={(selectedPackage.intake_context.declared_items??[]).map((di:Row)=>[
+              headers={["订单号","品名 / SKU","颜色 / 尺码","委托件数","已绑实收","待核身 / 待到","已确认缺少"]}
+              rows={groupedSkuRows.map((g:Row)=>{
+                const unvShort=Number(g.unverified_short_qty??0);
+                const confShort=Number(g.confirmed_short_qty??g.missing_qty??0);
+                return [
+                  <span className="code">{g.order_public_no}</span>,
+                  <div className="cell-stack"><span>{g.product_name||"—"}</span><small className="code">{g.sku_code||"—"}</small></div>,
+                  `${g.color_declared||"—"} / ${g.size_label||"—"}`,
+                  g.expected_qty,
+                  g.identified_qty,
+                  g.unidentified_pending_qty>0?<Tag tone="yellow">待核身 {g.unidentified_pending_qty}</Tag>:(unvShort>0?`待到/核 ${unvShort}`:0),
+                  confShort>0?<Tag tone="red">{confShort}</Tag>:0,
+                ];
+              })}
+            />
+          </div>}
+          {declaredItems.length>0&&<details className="card" style={{marginBottom:12}} open={declaredItems.length<=10}>
+            <summary>逐件委托明细（共 {declaredItems.length} 项，按需展开核对）</summary>
+            <div className="admin-toolbar" style={{marginTop:8}}>
+              <label>筛选委托明细<input type="search" value={declSearch} onChange={e=>{setDeclSearch(e.target.value);setDeclPage(1);}} placeholder="款号 / 颜色 / 尺码 / 运单 / 实物码"/></label>
+            </div>
+            <Table
+              headers={["订单号 / 位置","款号 (Sample Code)","颜色 / 尺码","供应商","申报运单","已绑实物码"]}
+              rows={declSlice.map((di:Row)=>[
                 <span className="code">{di.order_public_no} #{di.position}</span>,
                 <span className="code">{di.sample_code??"—"}</span>,
-                di.color??"—",
-                di.size??"—",
+                `${di.color??"—"} / ${di.size??"—"}`,
                 di.supplier_alias??"—",
-                di.garment_type??"—",
                 <span className="code">{di.declared_tracking_no??"—"}</span>,
                 di.bound_item_code?<CodeButton code={di.bound_item_code} onClick={()=>selectItem(di.bound_item_code)}/>:<Tag tone="yellow">待绑定</Tag>,
               ])}
-              empty="该包裹关联订单暂无逐件申报明细。"
+              empty="无匹配委托明细。"
             />
-          </div>}
-          <Table headers={["实物码","类型","库存状态","质检阶段","当前库位","同屏快捷操作"]} rows={selectedPackage.items.map((i:Row)=>[
+            {declTotalPages>1&&<div className="actions" style={{marginTop:8}}>
+              <button type="button" className="button sm" disabled={safeDeclPage<=1} onClick={()=>setDeclPage(p=>Math.max(1,p-1))}>上一页</button>
+              <span className="small muted">第 {safeDeclPage} / {declTotalPages} 页</span>
+              <button type="button" className="button sm" disabled={safeDeclPage>=declTotalPages} onClick={()=>setDeclPage(p=>Math.min(declTotalPages,p+1))}>下一页</button>
+            </div>}
+          </details>}
+          <div className="admin-toolbar" style={{marginTop:8}}>
+            <label>筛查本包已建档实物 ({selPkgItems.length} 件)<input type="search" value={pkgItemSearch} onChange={e=>{setPkgItemSearch(e.target.value);setPkgItemPage(1);}} placeholder="实物码 S-... / 库位 / 状态"/></label>
+          </div>
+          <Table headers={["实物码","类型","库存状态","质检阶段","当前库位","同屏快捷操作"]} rows={pkgItemSlice.map((i:Row)=>[
             <span className="code">{i.code}</span>,
             i.parent_item_id?"套装组件":"主件",
             label(i.custody_state),
@@ -358,7 +519,12 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
                 <Select name="to_loc" label="" choices={locations.filter((l:{id:string;label:string})=>l.label!==i.location)}/>
               </Form>}
             </div>,
-          ])}/>
+          ])} empty="该包裹尚未建档任何实物。"/>
+          {pkgItemTotalPages>1&&<div className="actions" style={{marginTop:8}}>
+            <button type="button" className="button sm" disabled={safePkgItemPage<=1} onClick={()=>setPkgItemPage(p=>Math.max(1,p-1))}>上一页</button>
+            <span className="small muted">第 {safePkgItemPage} / {pkgItemTotalPages} 页</span>
+            <button type="button" className="button sm" disabled={safePkgItemPage>=pkgItemTotalPages} onClick={()=>setPkgItemPage(p=>Math.min(pkgItemTotalPages,p+1))}>下一页</button>
+          </div>}
           {canIntakeWrite&&selectedPackage.parcel.state!=="quarantined"&&<Form key={packageId} label="逐件建档（自动生成无歧义 6 位 Base32 样品码）" run={async f=>{
             const n=Number(text(f,"quantity"));
             const parentId=text(f,"component_of");
@@ -379,7 +545,7 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
             </div>
           </Form>}
           {canPrintLabels&&selectedPackage.items.length>0&&<div className="card" style={{marginTop:12}}>
-            <h3 style={{marginTop:0}}>同屏批量打印本包样品标签与连续扫码回读 ({selectedPackage.items.length} 件)</h3>
+            <h3 style={{marginTop:0}}>同屏批量打印本包样品标签与独立扫码回读 ({selectedPackage.items.length} 件)</h3>
             <Form inline label="批量生成本包样品条码标签" run={async f=>{
               const res=await request("/staff/labels/print","POST",{
                 item_ids:selectedPackage.items.map((i:Row)=>i.id),
@@ -406,17 +572,19 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
               <img src={"/api/v1/staff/labels/"+batchPrintResult.print_id+"/preview.png"} alt="真实条码预览" style={{maxWidth:320,border:"1px solid #cbd5e1",borderRadius:6,marginTop:6}}/>
             </div>}
             <Form inline label="连续扫码批量回读核验" run={async f=>{
-              const scanned=text(f,"scanned_codes").split(/[\s,，;；]+/).map(s=>s.trim()).filter(Boolean);
+              const scanned=text(f,"scanned_codes").split(/[\s,，;；]+/).map(s=>s.trim().toUpperCase()).filter(Boolean);
+              if(!scanned.length) throw new Error("请实际使用扫码枪扫入或输入贴好后的样品码。");
               const expected=selectedPackage.items.map((i:Row)=>i.code);
               const res=await request("/staff/labels/verify","POST",{expected_codes:expected,scanned_codes:scanned});
               setBatchVerifyResult(res);
             }}>
-              <Field name="scanned_codes" label="依次扫描贴好后的样品码（空格或逗号分隔）" value={selectedPackage.items.map((i:Row)=>i.code).join(" ")}/>
+              <Field name="scanned_codes" label="扫码录入已贴标签 S-... 条码（空格/逗号分隔，严禁预填）"/>
             </Form>
             {batchVerifyResult&&<p className="notice" role="status">批量回读核验通过：共 {batchVerifyResult.verified_count} 件样品条码与数据库 100% 一致。</p>}
           </div>}
           {canIntakeWrite&&<details className="card" style={{marginTop:12}}>
             <summary>实收件数与申报不符 / 多包裹分批在途登记</summary>
+            <p className="small muted" style={{marginTop:6}}>仅当本包裹确有实少/多发/错货或确认为分批在途时提交；若仅是已实收建档尚未完成 SKU 核身，请先完成第 03 步绑定。</p>
             <Form label="提交包裹数量核对结论" run={async f=>{
               const chosenOrderId=text(f,"order_id")||(selectedPackage.intake_context?.orders?.[0]?.order_id??selectedPackage.intake_context?.orders?.[0]?.id??"");
               const res=await request("/staff/packages/"+selectedPackage.parcel.id+"/discrepancy","POST",{
@@ -436,12 +604,12 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
                 value={selectedPackage.intake_context.orders[0].order_id??selectedPackage.intake_context.orders[0].id}
                 choices={selectedPackage.intake_context.orders.map((o:Row)=>({
                   id:o.order_id??o.id,
-                  label:`${o.public_no}（申报 ${o.total_declared_qty} 件 · 已收 ${o.cumulative_received_qty} 件）`,
+                  label:`${o.public_no}（订单共声明 ${o.total_declared_qty} 件 · 累计实收 ${o.cumulative_received_qty} 件）`,
                 }))}
               />}
               <div className="fields three">
-                <Field name="expected_qty" label="订单申报总件数" type="number" min={1} value={selectedPackage.intake_context?.total_declared_qty||selectedPackage.parcel.received_quantity||1}/>
-                <Field name="actual_qty" label="本包实收件数" type="number" min={0} value={selectedPackage.parcel.received_quantity||0}/>
+                <Field name="expected_qty" label="对应应收件数（本包或该单口径）" type="number" min={1} value={selectedPackage.intake_context?.total_declared_qty||selectedPackage.parcel.received_quantity||1}/>
+                <Field name="actual_qty" label="本包清点实收件数" type="number" min={0} value={selectedPackage.parcel.received_quantity||0}/>
                 <Select name="discrepancy_type" label="差异类型" choices={[
                   {id:"partial_shipment_in_transit",label:"多包裹分批到货（其余运单在途，保持待收齐）"},
                   {id:"shortage",label:"卖家少发/短装（挂起订单并通知客户）"},
@@ -472,8 +640,22 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
       </Panel>
     </>}
     {current==="packages"&&<>
-      <Panel title="外箱及实收包裹列表" subtitle="展示客户码、关联订单、实重、实收件数及外箱状态；点击原始运单可核对物流轨迹。">
-        <Table headers={["包裹 / 实收时间","客户码 / 关联订单","原始运单","实收 / 实重","入库状态","操作"]} rows={data.packages.map((parcel:Row)=>[
+      <Panel title={`外箱及实收包裹列表 (${filteredPackages.length})`} subtitle="支持按包裹号/运单号/专属收件码/订单号搜索，按拆包与认领状态筛选。">
+        <div className="admin-toolbar">
+          <label>检索包裹 / 运单 / 客户码 / 订单号
+            <input type="search" value={pkgSearch} onChange={e=>{setPkgSearch(e.target.value);setPkgPage(1);}} placeholder="P-... / SF... / QCW-... / QW-..."/>
+          </label>
+          <div className="actions" aria-label="包裹状态筛选">
+            {([
+              ["all","全部"],
+              ["unpacked","待拆包建档"],
+              ["unmatched","无主待认领"],
+              ["quarantined","已隔离"],
+              ["checked_in","已实收"],
+            ] as const).map(([tid,tlbl])=><button key={tid} type="button" className={"button sm"+(pkgTab===tid?" primary":"")} onClick={()=>{setPkgTab(tid);setPkgPage(1);}}>{tlbl}</button>)}
+          </div>
+        </div>
+        <Table headers={["包裹 / 实收时间","客户码 / 关联订单","原始运单","实收 / 实重","入库状态","操作"]} rows={pkgSlice.map((parcel:Row)=>[
           <div key="pc" className="cell-stack">
             <Link className="code" href={"/wh/packages/"+encodeURIComponent(parcel.code)}>{parcel.code}</Link>
             <small className="muted">{stamp(parcel.received_at)}</small>
@@ -487,14 +669,35 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
             <span>实收 {parcel.logged_item_count??parcel.received_quantity} 件</span>
             <small className="muted">{parcel.weight_g?`${parcel.weight_g} g`:"未称重"}</small>
           </div>,
-          <Tag tone={parcel.state==="unmatched"||parcel.state==="quarantined"?"yellow":"green"}>{label(parcel.state)}</Tag>,
+          <div key="st" className="cell-stack">
+            <Tag tone={parcel.state==="unmatched"||parcel.state==="quarantined"?"yellow":"green"}>{label(parcel.state)}</Tag>
+            {parcel.outer_condition&&parcel.outer_condition!=="intact"&&<small className="bad">{label(parcel.outer_condition)}</small>}
+          </div>,
           <Link className="button sm" href={"/wh/packages/"+encodeURIComponent(parcel.code)}>包裹详情</Link>,
-        ])} empty="暂无实收包裹记录，请前往收货入库登记。"/>
+        ])} empty="暂无符合筛选条件的包裹记录。"/>
+        {pkgTotalPages>1&&<div className="actions" style={{marginTop:10}}>
+          <button type="button" className="button sm" disabled={safePkgPage<=1} onClick={()=>setPkgPage(p=>Math.max(1,p-1))}>上一页</button>
+          <span className="small muted">第 {safePkgPage} / {pkgTotalPages} 页（共 {filteredPackages.length} 个包裹）</span>
+          <button type="button" className="button sm" disabled={safePkgPage>=pkgTotalPages} onClick={()=>setPkgPage(p=>Math.min(pkgTotalPages,p+1))}>下一页</button>
+        </div>}
       </Panel>
     </>}
     {current==="samples"&&<>
-      <Panel title="在库样品与实物清单" subtitle="逐件独立编号，绑定客户委托位置前须完成身份核对；展示客户码、商品名称/款号、当前库位及质检进度。">
-        <Table headers={["样品码 / 包裹","客户码 / 订单","品名 / 款号","当前库位","身份 / 库存","质检进度","作业入口"]} rows={data.items.slice(0,50).map((it:Row)=>[
+      <Panel title={`在库样品与实物清单 (${filteredSamples.length})`} subtitle="支持按样品码/客户码/订单/品名/SKU检索与核身状态筛选，并支持下方扫码快速核身。">
+        <div className="admin-toolbar">
+          <label>检索样品码 / 包裹 / 订单 / 品名 / SKU
+            <input type="search" value={sampleSearch} onChange={e=>{setSampleSearch(e.target.value);setSamplePage(1);}} placeholder="S-... / P-... / QW-... / 款号"/>
+          </label>
+          <div className="actions" aria-label="样品核身筛选">
+            {([
+              ["all","全部"],
+              ["pending","待核身"],
+              ["identified","已识别"],
+              ["mismatch","身份异常"],
+            ] as const).map(([sid,slbl])=><button key={sid} type="button" className={"button sm"+(sampleTab===sid?" primary":"")} onClick={()=>{setSampleTab(sid);setSamplePage(1);}}>{slbl}</button>)}
+          </div>
+        </div>
+        <Table headers={["样品码 / 包裹","客户码 / 订单","品名 / 款号","当前库位","身份 / 库存","质检进度","作业入口"]} rows={smpSlice.map((it:Row)=>[
           <div key="sc" className="cell-stack">
             <Link className="code" href={"/wh/samples/"+encodeURIComponent(it.code)}>{it.code}</Link>
             <small className="code muted">{it.package_code??"—"}</small>
@@ -517,7 +720,12 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
             <Link className="button sm" href={"/wh/samples/"+encodeURIComponent(it.code)}>样品详情</Link>
             {canIntakeWrite&&<Link className="button sm" href={"/wh/storage?"+new URLSearchParams({item:it.code})}>移到库位</Link>}
           </div>,
-        ])} empty="暂无在库样品记录。"/>
+        ])} empty="暂无符合条件的在库样品。"/>
+        {smpTotalPages>1&&<div className="actions" style={{marginTop:10}}>
+          <button type="button" className="button sm" disabled={safeSmpPage<=1} onClick={()=>setSamplePage(p=>Math.max(1,p-1))}>上一页</button>
+          <span className="small muted">第 {safeSmpPage} / {smpTotalPages} 页（共 {filteredSamples.length} 件）</span>
+          <button type="button" className="button sm" disabled={safeSmpPage>=smpTotalPages} onClick={()=>setSamplePage(p=>Math.min(smpTotalPages,p+1))}>下一页</button>
+        </div>}
       </Panel>
       <Panel title="按编号快速核对样品" id="sample-quick-lookup">
         <Form inline label="定位实物" run={async f=>selectItem(text(f,"item_code"))}>
@@ -528,33 +736,34 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
       </Panel>
     </>}
     {current==="inspection"&&<>
-      <Panel title="待处理任务队列" subtitle="按订单汇总分组，支持检索订单/样品码/品名及按退回/超时筛选；同单仅待全部任务提交后方可由检查员汇总提交报告。">
+      <Panel title="待处理任务队列" subtitle="按本人负责/待认领/QA退回/超时筛选，按订单汇总派工。">
         <Form inline label="扫码定位任务" run={async f=>{
           const hit=await request("/staff/inspection-tasks/lookup?"+new URLSearchParams({code:text(f,"scan_code")}));
           location.assign("/wh/task/"+hit.task_id);
         }}><Field name="scan_code" label="扫描或输入样品码 S-... / 订单号 QW-..."/></Form>
         <div className="admin-toolbar" style={{marginTop:10}}>
-          <label>检索订单 / 样品码 / 客户码 / 品名
+          <label>检索订单 / 样品码 / 客户码 / 执行人 / 品名
             <input type="search" value={queueSearch} onChange={e=>setQueueSearch(e.target.value)} placeholder="QW-... / S-... / QCW-... / 款号"/>
           </label>
           <div className="actions" aria-label="任务状态快速筛选">
             {([
-              ["all","全部"],
-              ["returned",`QA退回 (${m.returned_task_count??0})`],
-              ["overdue",`SLA超时 (${m.overdue_task_count??0})`],
-              ["READY","待领取"],
-              ["IN_PROGRESS","检查中"],
-              ["SUBMITTED","待汇总/复核"],
-            ] as const).map(([fid,lbl])=><button key={fid} type="button" className={"button sm"+(queueFilter===fid?" primary":"")} onClick={()=>setQueueFilter(fid)}>{lbl}</button>)}
+              ["all","全部"] as const,
+              ...(canInspect?([["mine","我负责的"],["unclaimed","待领取"]] as const):([["unclaimed","待领取"]] as const)),
+              ["others","他人负责"] as const,
+              ["returned",`QA退回 (${m.returned_task_count??0})`] as const,
+              ["overdue",`SLA超时 (${m.overdue_task_count??0})`] as const,
+              ["SUBMITTED","待汇总/复核"] as const,
+            ]).map(([fid,lbl])=><button key={fid} type="button" className={"button sm"+(queueFilter===fid?" primary":"")} onClick={()=>setQueueFilter(fid)}>{lbl}</button>)}
           </div>
         </div>
-        {!canInspect&&<p className="notice">当前岗位无检查执行写入权限（仅检查员 inspector 可领取/录入/提交报告），点击任务可进入只读监督。</p>}
+        {!canInspect&&<p className="notice">当前岗位无检查执行写入权限（仅检查员 inspector 可领取/录入/提交报告），点击任务仅支持只读监督。</p>}
         {!groups.length&&<Empty>当前筛选条件下暂无任务。</Empty>}
         {groups.map(ts=><div key={ts[0].order_id} className="card">
           <div className="row flexwrap">
             <div>
               <h3 style={{margin:0}}>{ts[0].public_no} · {ts[0].receiving_code??"—"} · {ts[0].category_labels?.["zh-CN"]??"商品"} · {ts.length} 项任务</h3>
               {ts[0].customer_notes&&<p className="small muted" style={{margin:"4px 0 0"}}>客户备注：{ts[0].customer_notes}</p>}
+              {(ts[0].order_blocks?.length??0)>0&&<p className="small bad" style={{margin:"4px 0 0"}}>订单阻塞：{ts[0].order_blocks.join("；")}</p>}
             </div>
             <div className="actions">
               {ts[0].has_tolerances&&<Tag tone="blue">含客户公差设定</Tag>}
@@ -562,7 +771,7 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
               <span>{ts[0].sla_overdue?<Tag tone="red">SLA 已超时</Tag>:<span className="muted small">SLA 截止：{stamp(ts[0].sla_due_at)}</span>}</span>
             </div>
           </div>
-          <Table headers={["物件 / 库位","品名 / 规格","服务","状态 / 退回意见","操作"]} rows={ts.map(t=>[
+          <Table headers={["物件 / 库位","品名 / 规格","服务","执行人 / 状态","退回意见 / 阻塞","操作"]} rows={ts.map(t=>[
             <div key="o" className="cell-stack">
               <span className="code">{t.item_code??"比较组"}</span>
               {t.location_code&&<small className="code muted">{t.location_code}</small>}
@@ -574,9 +783,10 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
             t.title["zh-CN"],
             <div key="s" className="cell-stack">
               <Tag tone={t.returned_reason?"red":t.state==="IN_PROGRESS"?"blue":"yellow"}>{label(t.state)}</Tag>
-              {t.returned_reason&&<small className="bad">{t.returned_reason}</small>}
+              <small className="muted">执行人：{t.assignee_name??"未指派"}</small>
             </div>,
-            <Link className="button sm" href={"/wh/task/"+t.id}>{canInspect?"进入工作台":"只读查看"}</Link>
+            t.returned_reason?<small className="bad">{t.returned_reason}</small>:(t.order_blocks?.length?<small className="bad">{t.order_blocks.join("；")}</small>:<span className="muted">—</span>),
+            <Link className={"button sm"+(canInspect?" primary":"")} href={"/wh/task/"+t.id}>{canInspect?(t.state==="READY"?"领取并检查":"进入工作台"):"只读查看"}</Link>
           ])}/>
           {canInspect&&ts[0].order_state!=="qa_review"&&ts.every(t=>t.state==="SUBMITTED")&&ts.some(t=>t.assignee_id===actor.id)&&<Action primary run={async()=>{
             const res=await request("/staff/inspection-tasks/"+ts[0].id);
@@ -586,17 +796,18 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
       </Panel>
     </>}
     {current==="execute"&&<>
+      {!canInspect&&<p className="notice" style={{marginBottom:12}}><strong>只读监督模式：</strong>当前角色（{actor.roles.join(", ")}）无检查录入写入权限；扫码进入后仅可浏览检查单与证据，不可保存或提交。</p>}
       <Panel title="选择或扫描检查任务" subtitle="扫描样品标签或从下方待执行任务直接进入检查录入工作台。">
         <Form inline label="打开检查工作台" run={async f=>{
           const hit=await request("/staff/inspection-tasks/lookup?"+new URLSearchParams({code:text(f,"scan_code")}));
           location.assign("/wh/task/"+hit.task_id);
-        }}><Field name="scan_code" label="样品码 S-... / 订单号 QW-..."/></Form>
+        }}><Field name="scan_code" label="扫描或输入样品码 S-... / 订单号 QW-..."/></Form>
         <div className="admin-toolbar" style={{marginTop:10}}>
-          <label>检索订单 / 样品码 / 客户码 / 品名
+          <label>检索订单 / 样品码 / 客户码 / 执行人 / 品名
             <input type="search" value={queueSearch} onChange={e=>setQueueSearch(e.target.value)} placeholder="QW-... / S-... / QCW-..."/>
           </label>
         </div>
-        <Table headers={["关联订单 / 客户","样品码 / 库位","品名 / 规格","服务类型","当前状态","操作"]} rows={filteredTasks.map((t:Row)=>[
+        <Table headers={["关联订单 / 客户","样品码 / 库位","品名 / 规格","服务类型","执行人 / 状态","操作"]} rows={filteredTasks.map((t:Row)=>[
           <div key="o" className="cell-stack">
             <span className="code">{t.public_no}</span>
             <small className="code muted">{t.receiving_code??"—"}</small>
@@ -612,20 +823,23 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
           t.title?.["zh-CN"]??t.service,
           <div key="st" className="cell-stack">
             <Tag tone={t.returned_reason?"red":t.state==="IN_PROGRESS"?"blue":"yellow"}>{label(t.state)}</Tag>
-            {t.returned_reason&&<small className="bad">退回补正</small>}
+            <small className="muted">{t.assignee_name??"未指派"}{t.returned_reason?" · 退回补正":""}</small>
           </div>,
-          <Link className="button sm primary" href={"/wh/task/"+t.id}>{canInspect?"进入执行检查":"只读查看"}</Link>,
+          <Link className={"button sm"+(canInspect?" primary":"")} href={"/wh/task/"+t.id}>{canInspect?"进入执行检查":"只读查看"}</Link>,
         ])} empty="当前没有待执行的检查任务。"/>
       </Panel>
     </>}
     {current==="sync"&&<OfflineSyncQueue tasks={data.tasks} actor={actor}/>}
     {current==="dispatch"&&<>
-      {canShip?<><DispatchQueue onOpenDrawer={setDrawer}/>
+      {canShip?<><DispatchQueue onOpenDrawer={setDrawer} canShipWrite={canShipWrite}/>
       {!!data.retain.length&&<Panel title="续存报价">
-        {data.retain.map((i:Row)=><p key={i.id}><CodeButton code={i.code} onClick={()=>setDrawer({kind:"item",ref:i.code})}/> {typeof i.days==="number"?`客户申请 ${i.days} 天 · `:""}<Action run={async()=>{await request("/staff/dispositions/"+i.id+"/storage-quote","POST",{});reload();}}>{i.renewal?"重新报价":"生成续存报价"}</Action></p>)}
-      </Panel>}</>:<Panel title="出库待办"><p className="muted">当前演示角色无出库交接权限，请切换为“仓管”或“超级管理员”查看并操作发运批次。</p></Panel>}
+        {data.retain.map((i:Row)=><p key={i.id}><CodeButton code={i.code} onClick={()=>setDrawer({kind:"item",ref:i.code})}/> {i.order_no?<span className="code muted">{i.order_no} </span>:null}{typeof i.days==="number"?`客户申请 ${i.days} 天 · `:""}
+          {canShipWrite
+            ?<Action run={async()=>{await request("/staff/dispositions/"+i.id+"/storage-quote","POST",{});reload();}}>{i.renewal?"重新报价":"生成续存报价"}</Action>
+            :<Tag>仅查看（仓管可执行报价）</Tag>}</p>)}
+      </Panel>}</>:<Panel title="出库待办"><p className="muted">当前演示角色无出库交接权限，请切换为“仓管”或“超级管理员”查看发运批次。</p></Panel>}
     </>}
-    <StaffObjectDrawer target={drawer} onClose={()=>setDrawer(null)}/>
+    <StaffObjectDrawer target={drawer} actor={actor} onClose={()=>setDrawer(null)}/>
   </>;
 }
 
@@ -677,7 +891,7 @@ const dispatchQueueLabels:Record<string,string>={
   weighing:"待称重报价",payment:"待客户确认或付款",packing:"待装箱",
   handover:"待交接",shipped:"已交接",returned:"有退回记录",blocked:"付款需核对",
 };
-function DispatchQueue({onOpenDrawer}:{onOpenDrawer?:(t:StaffObjectTarget)=>void}) {
+function DispatchQueue({onOpenDrawer,canShipWrite=true}:{onOpenDrawer?:(t:StaffObjectTarget)=>void;canShipWrite?:boolean}) {
   const search=useSearchParams();
   const state=search.get("state")??"weighing",reference=search.get("reference")?.trim()??"";
   const params=new URLSearchParams({state,...(reference?{reference}:{})});
@@ -689,36 +903,40 @@ function DispatchQueue({onOpenDrawer}:{onOpenDrawer?:(t:StaffObjectTarget)=>void
     </div>
     <form action="/wh/dispatch" method="get" className="form inline-form" key={state+reference}>
       <input type="hidden" name="state" value={state}/>
-      <label>批次 ID 或实际运单<input name="reference" defaultValue={reference} maxLength={64}/></label>
+      <label>批次 ID / 实际运单 / 客户码 / 订单号<input name="reference" defaultValue={reference} maxLength={64}/></label>
       <button type="submit" className="button primary">查批次</button>
       {reference&&<Link className="button" href={"/wh/dispatch?"+new URLSearchParams({state})}>清除编号</Link>}
       <button type="button" className="button" onClick={reload}>刷新</button>
     </form>
     {error&&<ErrorBlock error={error}/>}
     {!data&&!error&&<p role="status">正在查询批次…</p>}
-    {data&&!error&&<Table headers={["批次编号","去向与状态","实物进度","关联运单","退货 / 报价截止","操作"]} rows={data.rows.map((batch:Row)=>[
-      <div className="cell-stack">
-        <Link className="code" href={"/wh/dispatch/"+batch.id} title={batch.id}>#{String(batch.id).slice(0,8)}</Link>
+    {data&&!error&&<Table headers={["批次 / 客户与订单","去向与状态","实物进度","关联运单","退货 / 报价截止","操作"]} rows={data.rows.map((batch:Row)=>[
+      <div key="b" className="cell-stack">
+        <div className="actions">
+          <Link className="code" href={"/wh/dispatch/"+batch.id} title={batch.id}>#{String(batch.id).slice(0,8)}</Link>
+          {batch.receiving_code&&<small className="code">{batch.receiving_code}</small>}
+        </div>
+        {(batch.order_numbers?.length??0)>0&&<small className="code">{batch.order_numbers.join(", ")}</small>}
         {onOpenDrawer&&<small><button type="button" className="code-btn" onClick={()=>onOpenDrawer({kind:"batch",ref:batch.id})}>速览清单</button></small>}
       </div>,
-      <div className="cell-stack">
+      <div key="s" className="cell-stack">
         <strong>{dispatchAction(batch.action)}</strong>
         <div><Tag>{label(batch.state)}</Tag></div>
       </div>,
-      <div className="cell-stack">
+      <div key="p" className="cell-stack">
         <span>待发 <strong>{batch.remaining}</strong> · 已装箱 <strong>{batch.packed}</strong></span>
         <small>已交接 {batch.shipped}{batch.returns?` · 退回 ${batch.returns}`:""}</small>
       </div>,
-      (batch.waybills?.length)?<div className="actions">
+      (batch.waybills?.length)?<div key="w" className="actions">
         {(batch.waybills as string[]).map(wb=>onOpenDrawer
           ?<CodeButton key={wb} code={wb} onClick={()=>onOpenDrawer({kind:"tracking",ref:wb})}/>
           :<span key={wb} className="code">{wb}</span>)}
-      </div>:<span className="muted">—</span>,
-      <div className="cell-stack">
+      </div>:<span key="w" className="muted">—</span>,
+      <div key="t" className="cell-stack">
         <span>退货：{stamp(batch.return_deadline)}</span>
         <small>报价：{stamp(batch.expires_at)}</small>
       </div>,
-      <Link className="button sm primary" href={"/wh/dispatch/"+batch.id}>进入作业 →</Link>,
+      <Link key="go" className={"button sm"+(canShipWrite?" primary":"")} href={"/wh/dispatch/"+batch.id}>{canShipWrite?"进入作业 →":"只读查看"}</Link>,
     ])} empty="这个状态下暂无符合条件的批次。"/>}
   </Panel>;
 }
@@ -738,16 +956,28 @@ function PackParcel({batch,parcel,reload}:{batch:Row;parcel:Row;reload:()=>void}
 }
 function ScanAndSubmit({items,label,run,children}:{items:Row[];label:string;run:(fields:FormData)=>Promise<void>;children?:ReactNode}) {
   const [scanned,setScanned]=useState<string[]>([]);
+  const [scanInput,setScanInput]=useState("");
+  const [scanErr,setScanErr]=useState("");
+  const scanRef=useRef<HTMLInputElement>(null);
   return <>
     <div className="card">
       <p><strong>逐件核对</strong> · {scanned.length} / {items.length}</p>
-      <Form inline label="核对实物" run={async fields=>{
-        const item=items.find(i=>i.code.toUpperCase()===text(fields,"scan").toUpperCase());
-        if(!item)throw new Error("该实物不在本包裹清单，请核对包裹。");
-        if(scanned.includes(item.id))throw new Error("该实物已核对。");
+      <form className="form inline-form" onSubmit={e=>{
+        e.preventDefault();
+        setScanErr("");
+        const val=scanInput.trim().toUpperCase();
+        const item=items.find(i=>i.code.toUpperCase()===val);
+        if(!item) { setScanErr("该实物不在本包裹清单，请核对包裹。"); scanRef.current?.select(); return; }
+        if(scanned.includes(item.id)) { setScanErr("该实物已核对。"); setScanInput(""); scanRef.current?.focus(); return; }
         setScanned(previous=>[...previous,item.id]);
-      }}><Field name="scan" label="扫描或输入实物码"/></Form>
-      <ul>{items.map(item=><li key={item.id}><span className="code">{item.code}</span> · {scanned.includes(item.id)?"已核对":"待核对"}</li>)}</ul>
+        setScanInput("");
+        scanRef.current?.focus();
+      }}>
+        <label>扫描或输入实物码<input ref={scanRef} value={scanInput} onChange={e=>setScanInput(e.target.value)} placeholder="扫入实物条码回车确认" required/></label>
+        <button type="submit" className="button primary">核对实物</button>
+      </form>
+      {scanErr&&<p className="bad small" role="alert">{scanErr}</p>}
+      <ul>{items.map(item=><li key={item.id}><span className="code">{item.code}</span> · {scanned.includes(item.id)?<Tag tone="green">已核对</Tag>:<Tag tone="gray">待核对</Tag>}</li>)}</ul>
     </div>
     <Form label={label} run={async fields=>{
       if(!items.length||scanned.length!==items.length||!items.every(item=>scanned.includes(item.id)))
@@ -845,7 +1075,7 @@ export function WarehouseDispatchBatch({id,actor}:{id:string;actor?:Row}) {
         </div>)}
       </Panel>
     </>}
-    <StaffObjectDrawer target={drawer} onClose={()=>setDrawer(null)}/>
+    <StaffObjectDrawer target={drawer} actor={actor} onClose={()=>setDrawer(null)}/>
   </>;
 }
 function DispatchQuoteForm({batch,rates,reload}:{batch:Row;rates:Row[];reload:()=>void}) {
@@ -921,10 +1151,13 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
   const [online,setOnline]=useState(true);
   const [checkFilter,setCheckFilter]=useState<"all"|"pending"|"issue"|"done">("all");
   const [expandedKeys,setExpandedKeys]=useState<Record<string,boolean>>({});
+  const [dirtyRows,setDirtyRows]=useState<Record<string,boolean>>({});
   const [annotationsByKey,setAnnotationsByKey]=useState<Record<string,DefectAnnotation[]>>({});
   const [liveNumeric,setLiveNumeric]=useState<Record<string,string>>({});
   const attemptKeysRef=useRef<Record<string,string>>({});
   const syncKeyRef=useRef<string>("");
+  const inputRefs=useRef<Record<string,HTMLInputElement|HTMLSelectElement|null>>({});
+  const focusNextKeyRef=useRef<string|null>(null);
   useEffect(()=>{
     try {
       const saved=localStorage.getItem(draftKey);
@@ -936,6 +1169,20 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
     window.addEventListener("offline",onOffline);
     return ()=>{window.removeEventListener("online",onOnline);window.removeEventListener("offline",onOffline);};
   },[draftKey]);
+  const hasDirty=Object.values(dirtyRows).some(Boolean)||drafts.length>0;
+  useEffect(()=>{
+    if(!hasDirty) return;
+    const onBeforeUnload=(e:BeforeUnloadEvent)=>{e.preventDefault();e.returnValue="";};
+    window.addEventListener("beforeunload",onBeforeUnload);
+    return ()=>window.removeEventListener("beforeunload",onBeforeUnload);
+  },[hasDirty]);
+  useEffect(()=>{
+    if(focusNextKeyRef.current) {
+      const target=inputRefs.current[focusNextKeyRef.current];
+      focusNextKeyRef.current=null;
+      target?.focus();
+    }
+  });
   function saveLocalDrafts(next:Row[]) {
     setDrafts(next);
     syncKeyRef.current=crypto.randomUUID();
@@ -947,12 +1194,15 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
   if(error)return <ErrorBlock error={error}/>;
   if(!data)return <p>正在加载检查项…</p>;
   const canExecute=actor.roles.includes("inspector");
+  const canAdminOrder=actor.roles.some((r:string)=>["support","super_admin"].includes(r));
+  const claimedByOther=Boolean(data.state==="IN_PROGRESS"&&data.assignee_id&&data.assignee_id!==actor.id);
   const writable=canExecute&&data.state==="IN_PROGRESS"&&data.assignee_id===actor.id;
   const completeness=data.completeness??{ok:true,missing:[]};
   const tolerances:Row[]=Array.isArray(data.tolerances)?data.tolerances:[];
   const minRequiredAttempts=(c:Row)=>c.type==="number"&&Number(data.content.measurement_policy?.attempts??0)>=2?2:1;
   const allChecks=data.components.flatMap((m:Row)=>
     data.content.checks.filter((c:Row)=>Boolean(data.group_id)||!c.component||c.component===m.id).map((c:Row)=>{
+      const rowKey=`${m.id}:${c.key}`;
       const attempts=data.results.filter((r:Row)=>r.item_key===c.key&&r.component===m.id);
       const prev=attempts.find((r:Row)=>r.is_final)??attempts.at(-1);
       const retryNeeded=attempts.some((r:Row)=>r.details?.retry_required) && attempts.length<3;
@@ -961,14 +1211,13 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
       const needsEvidence=Boolean(c.evidence&&prev&&["RECORDED","OBSERVED_ISSUE"].includes(prev.status)&&!attempts.some((a:Row)=>(a.evidence_ids?.length??0)>0));
       const isIssue=Boolean(retryNeeded || prev?.details?.uncertain || (prev && ["OBSERVED_ISSUE","BLOCKED"].includes(prev.status)));
       const isDone=Boolean(prev && !retryNeeded && !needsMoreAttempts && !needsEvidence && !prev?.details?.uncertain);
-      return {m,c,attempts,prev,retryNeeded,needsMoreAttempts,needsEvidence,isIssue,isDone};
+      return {m,c,rowKey,attempts,prev,retryNeeded,needsMoreAttempts,needsEvidence,isIssue,isDone};
     })
   );
   const doneCount=allChecks.filter((x:Row)=>x.isDone).length;
   const issueCount=allChecks.filter((x:Row)=>x.isIssue).length;
   const pendingCount=allChecks.length-doneCount;
-  const syncAllDrafts=async()=>{
-    if(!syncKeyRef.current) syncKeyRef.current=crypto.randomUUID();
+  const uploadDrafts=async()=>{
     const resolvedDrafts:Row[]=[];
     for(const d of drafts) {
       const copy={...d};
@@ -980,9 +1229,14 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
       delete copy.offline_photo;
       resolvedDrafts.push(copy);
     }
+    return resolvedDrafts;
+  };
+  const syncAllDrafts=async()=>{
+    if(!syncKeyRef.current) syncKeyRef.current=crypto.randomUUID();
+    const resolvedDrafts=await uploadDrafts();
     try {
       await request("/staff/inspection-tasks/"+id+"/results","PUT",{revision:data.revision,results:resolvedDrafts},syncKeyRef.current);
-      saveLocalDrafts([]);reload();
+      saveLocalDrafts([]);setDirtyRows({});reload();
     } catch(e) {
       if(e instanceof RequestError && e.code==="VERSION_CONFLICT") {
         const fresh=await request("/staff/inspection-tasks/"+id);
@@ -994,55 +1248,93 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
   };
   const df:Row=data.declared_fields??{};
   const refComponents=(data.components??[]).filter((m:Row)=>m.is_reference);
-  const safeProductUrl=typeof df.product_url==="string"&&/^https?:\/\//i.test(df.product_url)?df.product_url:null;
+  const safeProductUrl=typeof data.product_url==="string"&&/^https?:\/\//i.test(data.product_url)?data.product_url:(typeof df.product_url==="string"&&/^https?:\/\//i.test(df.product_url)?df.product_url:null);
   const purchaseEvidences:Row[]=Array.isArray(data.purchase_evidences)?data.purchase_evidences:[];
-  const attachmentIds:string[]=Array.isArray(data.attachment_ids)?data.attachment_ids:[];
+  const refAttachments:Row[]=Array.isArray(data.reference_attachments)?data.reference_attachments:(Array.isArray(data.attachment_ids)?data.attachment_ids.map((mid:string)=>({id:mid,purpose:"reference_photo",name:null})):[]);
   const numericChecks=(data.content.checks??[]).filter((c:Row)=>c.type==="number");
-  return <><div className="page-head row"><div><p className="eyebrow">WAREHOUSE / INSPECTION WORKBENCH</p><h1 className="code">{data.public_no}</h1>
-      <p className="muted">
-        {data.item_code??"对比组"} · {data.service_title?.["zh-CN"]??data.service_title?.en??"标准检查"} · {data.category_labels?.["zh-CN"]??""} · <Tag>{label(data.state)}</Tag>
-        {data.receiving_code&&<> · 客户 <span className="code">{data.receiving_code}</span></>}
-        {data.package_code&&<> · 包裹 <span className="code">{data.package_code}</span></>}
-        {data.location_code&&<> · 库位 <span className="code">{data.location_code}</span></>}
-        {" · SLA "}{stamp(data.sla_due_at)}
-      </p></div>
-      <div className="actions"><Tag>{online?"网络在线":"离线草稿模式"}</Tag>{drafts.length>0&&<Tag>待同步草稿 {drafts.length} 项</Tag>}<Link className="button" href="/wh/inspection">返回检查队列</Link></div></div>
-    {!canExecute&&<div className="notice" style={{marginBottom:12}}><strong>只读监督视图：</strong>按 OpenAPI 职责边界，检验开始、结果录入、照片上传与任务提交仅限现场检查员（inspector）执行；其他岗位仅可查看客户要求与已录入实测。</div>}
-    {data.review_feedback&&<div className="notice"><strong>QA 复核退回意见</strong><p>{data.review_feedback}</p></div>}
-    <Panel title="客户委托要求、商品申报、参考附件与公差范围" subtitle="由客户下单时锁定的规格要求与参考资料，请逐项核对实测与外观。">
-      <div className="ops-columns">
-        <div>
-          <dl className="location-facts">
-            <div><dt>品名 / 款号</dt><dd>{df.name||"—"} {df.sku_code||df.sample_code?<span className="code">({df.sku_code??df.sample_code})</span>:null}</dd></div>
-            <div><dt>申报颜色 / 尺码</dt><dd>{df.color_declared||df.color||"—"} / {df.size_label||df.size||"—"}</dd></div>
-            <div><dt>供应商 / 商品链接</dt><dd>{df.supplier_alias||"—"}{safeProductUrl&&<> · <a href={safeProductUrl} target="_blank" rel="noreferrer noopener">打开商品链接 ↗</a></>}</dd></div>
-            {df.notes&&<div><dt>单品申报备注</dt><dd>{df.notes}</dd></div>}
-            <div><dt>客户订单特别备注</dt><dd>{data.customer_notes||"无额外书面备注"}</dd></div>
-          </dl>
-          {(attachmentIds.length>0||purchaseEvidences.length>0)&&<div className="actions" style={{marginTop:8,flexWrap:"wrap"}}>
-            {attachmentIds.length>0&&<MediaButton ids={attachmentIds} label={`查看客户参考附件 (${attachmentIds.length})`}/>}
-            {purchaseEvidences.filter(pe=>pe.media_id).length>0&&<MediaButton ids={purchaseEvidences.filter(pe=>pe.media_id).map(pe=>pe.media_id)} label={`查看采购凭证图 (${purchaseEvidences.filter(pe=>pe.media_id).length})`}/>}
-            {purchaseEvidences.filter(pe=>typeof pe.url==="string"&&/^https?:\/\//i.test(pe.url)).map((pe,idx)=><a key={idx} className="button sm" href={pe.url} target="_blank" rel="noreferrer noopener">采购参考链接 #{idx+1} ↗</a>)}
-          </div>}
+  const requiredShots:Row[]=data.content.shots??[];
+  const uploadedAngleSet=new Set((data.shots??[]).map((s:Row)=>`${s.component??"main"}:${s.shot_code}`));
+  return <>
+    {/* Layer 1: Top Task Context Bar */}
+    <div className="page-head row">
+      <div>
+        <div className="actions" style={{marginBottom:4}}>
+          <h1 className="code" style={{fontSize:"1.35rem",margin:0}}>{data.public_no}</h1>
+          <Tag tone={data.state==="IN_PROGRESS"?"blue":data.state==="SUBMITTED"?"yellow":data.state==="QA_APPROVED"?"green":"outline"}>{label(data.state)}</Tag>
+          {tolerances.length>0?<Tag tone="blue">客户公差模式 ({tolerances.length} 项)</Tag>:<Tag tone="gray">仅客观记录实测值</Tag>}
         </div>
-        <div>
-          {tolerances.length>0?<>
-            <strong>客户设定尺寸目标与公差范围 ({tolerances.length} 项)</strong>
-            <Table
-              headers={["测量项","目标值","允许上下限"]}
-              rows={tolerances.map((t:Row)=>{
-                const matchedCheck=(data.content.checks??[]).find((ck:Row)=>ck.key===t.point_code);
-                return [
-                  matchedCheck?(matchedCheck.zh??matchedCheck.label):<span className="code">{t.point_code}</span>,
-                  <strong className="code">{t.target??"—"} {t.unit??matchedCheck?.unit??""}</strong>,
-                  <span className="code">{t.min??"—"} ~ {t.max??"—"} {t.unit??matchedCheck?.unit??""}</span>,
-                ];
-              })}
-            />
-          </>:<Empty>客户选择“仅客观记录实测值（Record actual measurements only）”，未设定固定公差上下限。</Empty>}
-        </div>
+        <p className="muted small" style={{margin:0}}>
+          实物 <span className="code">{data.item_code??"对比组"}</span>
+          {data.package_code&&<> · 包裹 <span className="code">{data.package_code}</span></>}
+          {data.location_code&&<> · 库位 <span className="code">{data.location_code}</span></>}
+          {data.receiving_code&&<> · 客户 <span className="code">{data.receiving_code}</span></>}
+          {" · "}{data.service_title?.["zh-CN"]??data.service_title?.en??"标准检查"}
+          {data.template_key&&<> · 模板 <span className="code">{data.template_key} v{data.template_version??1}</span></>}
+          {" · 执行人："}<strong>{data.assignee_name??"待领取"}</strong>
+          {" · SLA "}{stamp(data.sla_due_at)}
+        </p>
+      </div>
+      <div className="head-actions">
+        <Tag>{online?"网络在线":"离线草稿模式"}</Tag>
+        {drafts.length>0&&<Tag tone="yellow">本地草稿 {drafts.length} 项</Tag>}
+        {canAdminOrder&&<Link className="button sm" href={"/admin/orders/"+encodeURIComponent(data.public_no)}>查看订单工作台</Link>}
+        <Link className="button sm" href="/wh/inspection">返回检查队列</Link>
+      </div>
+    </div>
+    {!canExecute&&<div className="notice" style={{marginBottom:12}}><strong>只读监督视图：</strong>按 OpenAPI 职责边界，检验领取、实测录入、机位拍照与提交仅限现场质检员（inspector）执行。</div>}
+    {canExecute&&claimedByOther&&<div className="notice" style={{marginBottom:12}}><strong>并发领取锁生效（只读）：</strong>本任务已由质检员 <strong>{data.assignee_name??data.assignee_id?.slice(0,8)}</strong> 领取执行中，当前账号不可覆盖录入。</div>}
+    {canExecute&&data.state==="SUBMITTED"&&<div className="notice" style={{marginBottom:12}}><strong>已提交等待 QA 复核：</strong>检验任务已锁定不可编辑，可查看全部录入记录与证据。</div>}
+    {data.review_feedback&&<div className="notice" style={{marginBottom:12,borderLeft:"4px solid #dc2626"}}><strong>QA 复核退回补正意见：</strong>{data.review_feedback}</div>}
+
+    {/* Layer 2: Unified Compact Requirements, Customer Notes, Reference Attachments & Tolerances */}
+    <Panel title="委托要求、申报资料与参考依据" subtitle="紧凑展示商品申报、客户备注、参考附图/尺寸表与公差基准，无空白占位。">
+      <div className="task-ctx-grid">
+        <div className="task-ctx-cell"><small>品名 / 款号 SKU</small><strong>{df.name||"—"} {df.sku_code||df.sample_code?<span className="code">({df.sku_code??df.sample_code})</span>:null}</strong></div>
+        <div className="task-ctx-cell"><small>申报颜色 / 尺码</small><strong>{[df.color_declared||df.color,df.size_label||df.size].filter(Boolean).join(" / ")||"—"}</strong></div>
+        <div className="task-ctx-cell"><small>供应商 / 商品来源</small><strong>{df.supplier_alias||"—"}{safeProductUrl&&<> · <a href={safeProductUrl} target="_blank" rel="noreferrer noopener">参考链接 ↗</a></>}</strong></div>
+        <div className="task-ctx-cell"><small>品类与检查要求</small><strong>{data.category_labels?.["zh-CN"]??"—"} · {data.service_title?.["zh-CN"]??"标准检查"}</strong></div>
+      </div>
+      {(data.customer_notes||df.notes)&&<div className="task-notes-banner">
+        {data.customer_notes&&<div><strong>客户整单特别要求：</strong>{data.customer_notes}</div>}
+        {df.notes&&<div style={{marginTop:data.customer_notes?4:0}}><strong>本品申报备注：</strong>{df.notes}</div>}
+      </div>}
+      {(refAttachments.length>0||purchaseEvidences.length>0)&&<div className="task-ref-strip">
+        {refAttachments.map((att:Row,idx:number)=><div className="task-ref-card" key={att.id??idx}>
+          <div className="row"><Tag tone={att.purpose==="size_chart"?"blue":"outline"}>{att.purpose==="size_chart"?"尺寸表":"参考照片"}</Tag><small className="muted">#{idx+1}</small></div>
+          <img src={`/api/v1/media/${att.id}/thumb`} alt={att.name||"客户参考附图"} style={{width:"100%",height:92,objectFit:"cover",borderRadius:6,background:"#f1f5f9"}}/>
+          <MediaButton ids={[att.id]} labels={[`${att.purpose==="size_chart"?"尺寸表":"参考照片"}${att.name?` · ${att.name}`:""}`]} label={att.name||"点击放大查看"}/>
+        </div>)}
+        {purchaseEvidences.filter(pe=>pe.media_id).map((pe:Row,idx:number)=><div className="task-ref-card" key={`pe-${idx}`}>
+          <div className="row"><Tag tone="outline">采购凭证图</Tag><small className="muted">#{idx+1}</small></div>
+          <img src={`/api/v1/media/${pe.media_id}/thumb`} alt={`采购凭证 #${idx+1}`} style={{width:"100%",height:92,objectFit:"cover",borderRadius:6,background:"#f1f5f9"}}/>
+          <MediaButton ids={[pe.media_id]} label={`放大采购图 #${idx+1}`}/>
+        </div>)}
+        {purchaseEvidences.filter(pe=>typeof pe.url==="string"&&/^https?:\/\//i.test(pe.url)).map((pe,idx)=><div className="task-ref-card" key={`pel-${idx}`}>
+          <Tag tone="outline">采购商品链接</Tag>
+          <a className="button sm" href={pe.url} target="_blank" rel="noreferrer noopener">打开外部链接 #{idx+1} ↗</a>
+        </div>)}
+      </div>}
+      <div style={{marginTop:12}}>
+        {tolerances.length>0?<>
+          <strong className="small">客户设定目标尺寸与公差范围 ({tolerances.length} 项 — 系统按此范围实时提示公差内/超公差)</strong>
+          <Table
+            headers={["测量项","目标值","允许上下限","单位"]}
+            rows={tolerances.map((t:Row)=>{
+              const matchedCheck=(data.content.checks??[]).find((ck:Row)=>ck.key===t.point_code);
+              return [
+                matchedCheck?(matchedCheck.zh??matchedCheck.label):<span className="code">{t.point_code}</span>,
+                <strong key="tg" className="code">{t.target??"—"}</strong>,
+                <span key="rg" className="code">{t.min??"—"} ~ {t.max??"—"}</span>,
+                t.unit??matchedCheck?.unit??"—",
+              ];
+            })}
+          />
+        </>:<div className="notice" style={{margin:0}}>
+          <strong>客观记录模式（Record actual measurements only）：</strong>客户未设置公差上下限，仅需忠实记录实测值，系统不产生合格/不合格误判（双次测量差值 &gt; 0.5 cm 仍触发第 3 次复测）。
+        </div>}
       </div>
     </Panel>
+
     {refComponents.length>0&&<Panel title="确认样对比基准 (Golden Sample Baseline)" subtitle="将待检样品与以下封存确认样进行实测尺寸与外观横向对照。">
       <div className="actions" style={{flexWrap:"wrap"}}>
         {refComponents.map((rc:Row)=><div className="card" key={rc.id}>
@@ -1077,15 +1369,15 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
       <div className="actions">
         <Action primary run={async()=>{
           const fresh=await request("/staff/inspection-tasks/"+id);
-          const cleaned=drafts.map(({offline_photo:_o,...rest})=>rest);
-          await request("/staff/inspection-tasks/"+id+"/results","PUT",{revision:fresh.revision,results:cleaned});
-          saveLocalDrafts([]);setConflict(null);reload();
-        }}>拉取最新基线并合并重放本机草稿（{drafts.length} 项）</Action>
+          const resolved=await uploadDrafts();
+          await request("/staff/inspection-tasks/"+id+"/results","PUT",{revision:fresh.revision,results:resolved});
+          saveLocalDrafts([]);setDirtyRows({});setConflict(null);reload();
+        }}>拉取最新基线并上传照片合并草稿（{drafts.length} 项）</Action>
         <Action run={async()=>{saveLocalDrafts([]);setConflict(null);reload();}}>放弃本机草稿并采用服务端版本</Action>
       </div>
     </Panel>}
     {drafts.length>0&&!conflict&&writable&&<Panel title="本机离线草稿与待同步队列">
-      <p className="muted small">已暂存 {drafts.length} 条检查项结果在本机浏览器（归属当前账号 {actor.id.slice(0,8)}），断网不丢失，恢复在线后可幂等批量上传照片并写入服务端。</p>
+      <p className="muted small">已暂存 {drafts.length} 条检查项结果在本机浏览器（归属当前账号 {actor.id.slice(0,8)}），恢复在线后可幂等批量上传照片并写入服务端。</p>
       <div className="actions">
         <Action primary run={syncAllDrafts}>立即同步全部本机草稿</Action>
         <Action run={async()=>saveLocalDrafts([])}>清空本机草稿</Action>
@@ -1097,17 +1389,21 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
         location.assign("/wh/task/"+hit.task_id);
       }}><Field name="item_scan" label="扫描同单样品码 S-..."/></Form>
       <div className="actions" style={{flexWrap:"wrap",marginTop:8}}>
-        {data.sibling_tasks.map((st:Row)=><Link key={st.id} className={st.id===id?"button primary":"button"} href={"/wh/task/"+st.id}>
+        {data.sibling_tasks.map((st:Row)=><Link key={st.id} className={st.id===id?"button primary sm":"button sm"} href={"/wh/task/"+st.id}>
           {st.item_code??("位置 #"+(st.position??""))}{st.declared_fields?.size_label?` (${st.declared_fields.size_label})`:""} · {label(st.state)}
         </Link>)}
       </div>
     </Panel>}
-    {data.state==="READY"&&canExecute&&<Action primary run={async()=>{await request("/staff/inspection-tasks/"+id+"/start","POST",{revision:data.revision});reload();}}>领取并开始</Action>}
-    <Panel title="检查进度与视图筛选">
+    {data.state==="READY"&&canExecute&&<div className="actions" style={{marginBottom:12}}>
+      <Action primary run={async()=>{await request("/staff/inspection-tasks/"+id+"/start","POST",{revision:data.revision});reload();}}>领取并开始执行质检</Action>
+    </div>}
+
+    {/* Layer 3: Primary Inspection Execution Area */}
+    <Panel title="检查进度、必拍机位与快速筛选">
       <div className="row">
         <div>
           <strong>已完成 {doneCount} / {allChecks.length} 项检查</strong>
-          <span className="muted"> · 必拍机位 {(data.shots??[]).length} 张 · 剩余待补齐 {completeness.missing.length} 项</span>
+          <span className="muted"> · 必拍机位 {uploadedAngleSet.size} / {requiredShots.length} 张 · 剩余待补齐 {completeness.missing.length} 项 · 回车可快速保存数值并跳下一项</span>
         </div>
         <div className="actions">
           {([
@@ -1133,22 +1429,28 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
       {(data.step_timings?.length??0)>0&&<p className="muted small">已记录步骤：{data.step_timings.map((s:Row)=>`${s.step_code}(${s.seconds??0}s)`).join("、")}</p>}
     </Panel>}
     {data.content.measure_conditions&&<div className="notice"><strong>测量与拍摄条件</strong><p>{data.content.measure_conditions}</p></div>}
-    {data.content.diagram&&<Panel id="task-diagram" title="标准测量部位与机位示意图">
-      <div className="row" style={{alignItems:"center",gap:16,flexWrap:"wrap"}}>
+    {data.content.diagram&&<details className="panel" id="task-diagram">
+      <summary style={{cursor:"pointer",fontWeight:700}}>查看标准测量部位与机位示意图</summary>
+      <div className="row" style={{alignItems:"center",gap:16,flexWrap:"wrap",marginTop:10}}>
         <img src={data.content.diagram} alt="标准测量部位示意图" style={{maxWidth:360,border:"1px solid #cbd5e1",borderRadius:8,background:"#fff"}}/>
         <div className="small muted">
           <p><strong>示意图操作规范：</strong></p>
           <ul>
             <li>严格按红色标注线所示起止点自然平铺无拉伸测量。</li>
-            <li>每个数值尺寸项需连续测量 2 次（差值 ≤0.5cm 默认采用第 1 次实测值；超差触发第 3 次复核，采用第 3 次复核值）。</li>
+            <li>每个数值尺寸项需连续测量 2 次（差值 ≤0.5cm 默认采用第 1 次实测值；超差触发第 3 次复测，系统按最接近两值的较早值，等距取中位数作为最终值）。</li>
             <li>发现瑕疵部位请选择对应部位编码，并在照片上进行非破坏性框选标注（保留原图不覆写）。</li>
           </ul>
         </div>
       </div>
-    </Panel>}
-    {data.components.map((m:Row)=><Panel key={m.id} title={m.id==="main"?(data.item_code??"实物"):m.code}>
-      {data.content.checks.filter((c:Row)=>Boolean(data.group_id)||!c.component||c.component===m.id).map((c:Row)=>{
+    </details>}
+    {data.components.map((m:Row)=><Panel key={m.id} title={`检验项与实测录入 · ${m.id==="main"?(data.item_code??"实物"):m.code}`}>
+      {data.content.checks.filter((c:Row)=>Boolean(data.group_id)||!c.component||c.component===m.id).map((c:Row,idxInComp:number,compChecks:Row[])=>{
         const rowKey=`${m.id}:${c.key}`;
+        const nextPending=compChecks.slice(idxInComp+1).find((nc:Row)=>{
+          const atts=data.results.filter((r:Row)=>r.item_key===nc.key&&r.component===m.id);
+          return !atts.length;
+        });
+        const nextFocusKey=nextPending?`${m.id}:${nextPending.key}`:null;
         const attempts=data.results.filter((r:Row)=>r.item_key===c.key&&r.component===m.id);
         const prev=attempts.find((r:Row)=>r.is_final)??attempts.at(-1);
         const retryNeeded=attempts.some((r:Row)=>r.details?.retry_required) && attempts.length<3;
@@ -1183,12 +1485,13 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
         const availParts:string[]=rawParts.map(p=>typeof p==="string"?p:String(p.code??p.label??"")).filter(Boolean);
         const availPartChoices=availParts.map(p=>({id:p,label:partLabelMap.get(p)??p}));
         const nextAttemptNum=(attempts.at(-1)?.attempt??0)+1;
-        const typedNumStr=liveNumeric[rowKey]??(prev?.typed_value!=null?String(prev.typed_value):"");
+        const typedNumStr=liveNumeric[rowKey]??"";
         const parsedLiveNum=typedNumStr!==""&&Number.isFinite(Number(typedNumStr))?Number(typedNumStr):null;
         const liveOutOfRange=tol&&parsedLiveNum!==null&&((typeof tol.min==="number"&&parsedLiveNum<tol.min)||(typeof tol.max==="number"&&parsedLiveNum>tol.max));
         const liveDev=tol&&typeof tol.target==="number"&&parsedLiveNum!==null?Math.round((parsedLiveNum-tol.target)*1000)/1000:null;
         const attempt1Val=attempts[0]?.status==="RECORDED"&&typeof attempts[0]?.typed_value==="number"?Number(attempts[0].typed_value):null;
-        const liveAttemptDelta=attempt1Val!==null&&nextAttemptNum===2&&parsedLiveNum!==null?Math.round(Math.abs(parsedLiveNum-attempt1Val)*1000)/1000:null;
+        const liveAttemptDelta=attempt1Val!==null&&nextAttemptNum>=2&&parsedLiveNum!==null?Math.round(Math.abs(parsedLiveNum-attempt1Val)*1000)/1000:null;
+        const numDefaultVal=c.type==="number"&&attempts.length>0?"":(prev?.typed_value??"");
         return <div className="card" key={c.key} id={`comp-${m.id}-${c.key}`}>
           <div className="row">
             <div>
@@ -1205,16 +1508,17 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
                 const key=attemptKeysRef.current[rowKey+":quick"]??=crypto.randomUUID();
                 await request("/staff/inspection-tasks/"+id+"/results","PUT",{revision:data.revision,results:[payload]},key);
                 delete attemptKeysRef.current[rowKey+":quick"];
+                if(nextFocusKey) focusNextKeyRef.current=nextFocusKey;
                 reload();
               }}>快速记为未见异常</Action>}
               {isDone&&<button type="button" className="button sm" onClick={()=>setExpandedKeys(s=>({...s,[rowKey]:false}))}>收起</button>}
             </div>
           </div>
           {c.diagram&&c.diagram.startsWith("/")&&<div style={{margin:"8px 0"}}><img src={c.diagram} alt={`${c.zh??c.label} 示意图`} style={{maxWidth:240,border:"1px solid #cbd5e1",borderRadius:6,background:"#fff"}}/></div>}
-          {tol&&<div className="actions" style={{margin:"6px 0",flexWrap:"wrap"}}>
-            <Tag tone="blue">客户目标 {tol.target??"—"} {tol.unit??c.unit??""} · 公差 [{tol.min??"—"} ~ {tol.max??"—"}]</Tag>
-            {liveDev!==null&&<Tag tone={liveOutOfRange?"red":"green"}>{liveOutOfRange?"超公差":"公差内"} ({liveDev>0?`+${liveDev}`:liveDev} {tol.unit??c.unit??""})</Tag>}
-            {liveAttemptDelta!==null&&<Tag tone={liveAttemptDelta>0.5?"yellow":"green"}>与第1次差值 {liveAttemptDelta} {c.unit??""}</Tag>}
+          {(tol||liveAttemptDelta!==null)&&<div className="actions" style={{margin:"6px 0",flexWrap:"wrap"}}>
+            {tol?<Tag tone="blue">客户目标 {tol.target??"—"} {tol.unit??c.unit??""} · 公差 [{tol.min??"—"} ~ {tol.max??"—"}]</Tag>:<Tag tone="gray">仅记录实测值</Tag>}
+            {liveDev!==null&&<Tag tone={liveOutOfRange?"red":"green"}>{liveOutOfRange?"超公差":"公差内"} ({liveDev>0?`+${liveDev}`:liveDev} {tol?.unit??c.unit??""})</Tag>}
+            {liveAttemptDelta!==null&&<Tag tone={liveAttemptDelta>0.5?"yellow":"green"}>与第1次差值 {liveAttemptDelta} {c.unit??""}{liveAttemptDelta>0.5?" (超 0.5cm 将触发第3次复测)":""}</Tag>}
           </div>}
           {needsMoreAttempts&&<p className="notice">该数值检查项需连续测量 2 次（已完成第 1 次，请继续录入第 2 次实测值）。</p>}
           {needsEvidence&&<p className="notice">该检查项要求必拍证据照片，请上传照片后再提交任务。</p>}
@@ -1230,7 +1534,7 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
               onChange={next=>setAnnotationsByKey(s=>({...s,[rowKey]:next}))}
             />
           </div>}
-          {writable&&<Form key={`${rowKey}-${nextAttemptNum}-${data.revision}`} label={`保存第 ${nextAttemptNum} 次录入`} run={async f=>{
+          {writable&&<Form key={`${rowKey}-${attempts.length}-${prev?.id??"new"}`} label={`保存第 ${nextAttemptNum} 次录入`} run={async f=>{
             const status=text(f,"status"),value=text(f,"value"),reason=text(f,"reason"),photo=f.get("photo");
             const severity=text(f,"severity"),partCode=text(f,"part_code"),offlineSave=checked(f,"save_offline");
             const isOffline=offlineSave||!online;
@@ -1263,13 +1567,17 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
             };
             if(isOffline) {
               saveLocalDrafts([...drafts.filter(d=>!(d.item_key===payload.item_key&&d.component===payload.component&&d.attempt===payload.attempt)),payload]);
+              setDirtyRows(s=>({...s,[rowKey]:false}));
               return;
             }
             const attemptKey=attemptKeysRef.current[`${rowKey}:${nextAttemptNum}`]??=crypto.randomUUID();
             try {
               await request("/staff/inspection-tasks/"+id+"/results","PUT",{revision:data.revision,results:[payload]},attemptKey);
               delete attemptKeysRef.current[`${rowKey}:${nextAttemptNum}`];
+              setLiveNumeric(s=>{const n={...s};delete n[rowKey];return n;});
+              setDirtyRows(s=>({...s,[rowKey]:false}));
               setExpandedKeys(s=>({...s,[rowKey]:false}));
+              if(nextFocusKey) focusNextKeyRef.current=nextFocusKey;
               reload();
             } catch(e) {
               if(e instanceof RequestError && e.code==="VERSION_CONFLICT") {
@@ -1284,8 +1592,16 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
             <Select name="status" label="结果" value={prev?.status??"RECORDED"} choices={[
               {id:"RECORDED",label:"已测量或观察"},{id:"OBSERVED_ISSUE",label:"发现问题"},{id:"NOT_OBSERVED",label:"未观察到问题"},
               {id:"NOT_TESTED",label:"未检查"},{id:"NOT_APPLICABLE",label:"不适用"},{id:"BLOCKED",label:"无法继续"}]}/>
-            {c.type==="boolean"?<Select name="value" label="观察值" required={false} choices={[{id:"true",label:"是"},{id:"false",label:"否"}]}/>:
-              <label>实际值{c.unit?` (${c.unit})`:""}<input name="value" type={c.type==="number"?"number":"text"} step="any" defaultValue={prev?.typed_value??""} onChange={e=>setLiveNumeric(s=>({...s,[rowKey]:e.target.value}))}/></label>}
+            {c.type==="boolean"?<Select name="value" label="观察值" required={false} value={prev?.typed_value!=null?String(prev.typed_value):""} choices={[{id:"true",label:"是"},{id:"false",label:"否"}]}/>:
+              <label>实际值{c.unit?` (${c.unit})`:""}<input
+                ref={el=>{inputRefs.current[rowKey]=el;}}
+                name="value"
+                type={c.type==="number"?"number":"text"}
+                step="any"
+                defaultValue={numDefaultVal}
+                onChange={e=>{setLiveNumeric(s=>({...s,[rowKey]:e.target.value}));setDirtyRows(s=>({...s,[rowKey]:Boolean(e.target.value.trim())}));}}
+                onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();e.currentTarget.form?.requestSubmit();}}}
+              /></label>}
             <Select name="severity" label="严重度（发现问题时必填）" required={false} choices={[
               {id:"attention",label:"Attention（需留意）"},{id:"material_issue",label:"Material issue（明显缺陷）"},{id:"uncertain",label:"Uncertain（不确定）"}
             ]}/>
@@ -1296,45 +1612,69 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
           </Form>}
         </div>;
       })}
-      {(data.content.shots??[]).filter((s:Row)=>Boolean(data.group_id)||!s.component||s.component===m.id).map((s:Row)=>{
-        const existing=(data.shots??[]).find((x:Row)=>x.shot_code===s.code&&(x.component??"main")===m.id);
-        return <div className="card" key={s.code} id={`comp-${m.id}-${s.code}`}>
-          <div className="row">
-            <h3 style={{margin:0}}>必拍机位：{s.zh??s.name} · <span className="code">{s.code}</span></h3>
-            {existing?<div className="actions"><Tag>已上传</Tag><MediaButton ids={[existing.id]} labels={[`${s.zh??s.name} (${s.code})`]} label="查看机位照片"/></div>:<span className="muted small">尚未上传本组件该机位照片</span>}
-          </div>
-          {writable&&<Form label="上传组件必拍照" run={async f=>{
-            const mediaId=await upload(f.get("photo"),"shot");
-            await request("/staff/inspection-tasks/"+id+"/shots","POST",{revision:data.revision,component:m.id,shot_code:s.code,media_id:mediaId});
-            reload();
-          }}><Photo label="选择或拍摄机位照"/></Form>}
-        </div>;
-      })}
+      {(data.content.shots??[]).filter((s:Row)=>Boolean(data.group_id)||!s.component||s.component===m.id).length>0&&<div style={{marginTop:14}}>
+        <h3>必拍机位拍照清单（组件：{m.id==="main"?(data.item_code??"主件"):m.code}）</h3>
+        <div className="task-shots-grid">
+          {(data.content.shots??[]).filter((s:Row)=>Boolean(data.group_id)||!s.component||s.component===m.id).map((s:Row)=>{
+            const matchingShots=(data.shots??[]).filter((x:Row)=>x.shot_code===s.code&&(x.component??"main")===m.id);
+            return <div className="card" key={s.code} id={`comp-${m.id}-${s.code}`}>
+              <div className="row" style={{marginBottom:6}}>
+                <strong>{s.zh??s.name} · <span className="code">{s.code}</span></strong>
+                {matchingShots.length>0?<Tag tone="green">已传 {matchingShots.length} 张</Tag>:<Tag tone="yellow">必拍待传</Tag>}
+              </div>
+              {matchingShots.length>0&&<div className="actions" style={{marginBottom:8,flexWrap:"wrap"}}>
+                {matchingShots.map((sh:Row,i:number)=><img key={sh.id} src={`/api/v1/media/${sh.id}/thumb`} alt={`${s.zh??s.name} #${i+1}`} style={{width:72,height:54,objectFit:"cover",borderRadius:5,border:"1px solid var(--border)"}}/>)}
+                <MediaButton ids={matchingShots.map((sh:Row)=>sh.id)} labels={matchingShots.map((_:Row,i:number)=>`${s.zh??s.name} (${s.code}) #${i+1}`)} label={`查看机位照 (${matchingShots.length})`}/>
+              </div>}
+              {writable&&<Form label={matchingShots.length>0?"补拍并追加该机位照":"上传必拍机位照"} run={async f=>{
+                const mediaId=await upload(f.get("photo"),"shot");
+                await request("/staff/inspection-tasks/"+id+"/shots","POST",{revision:data.revision,component:m.id,shot_code:s.code,media_id:mediaId});
+                reload();
+              }}><Photo label="选择或拍摄机位照"/></Form>}
+            </div>;
+          })}
+        </div>
+      </div>}
     </Panel>)}
     {data.group_id&&(data.content.order_shots?.length??0)>0&&<Panel title="对比组同框必拍照">
-      {data.content.order_shots.map((code:string)=>{
-        const existing=(data.shots??[]).find((x:Row)=>x.shot_code===code&&["group","order","main",null].includes(x.component));
-        return <div className="card" key={code} id={`comp-group-${code}`}>
-          <div className="row">
-            <h3 style={{margin:0}}>对比组机位：<span className="code">{code}</span></h3>
-            {existing?<div className="actions"><Tag>已上传</Tag><MediaButton ids={[existing.id]} labels={[`对比组 (${code})`]} label="查看对比组照"/></div>:<span className="muted small">尚未上传该对比组照</span>}
-          </div>
-          {writable&&<Form label="上传对比组照" run={async f=>{
-            const mediaId=await upload(f.get("photo"),"shot");
-            await request("/staff/inspection-tasks/"+id+"/shots","POST",{revision:data.revision,component:"group",shot_code:code,media_id:mediaId});
-            reload();
-          }}><Photo label="拍摄并排对比照"/></Form>}
-        </div>;
-      })}
+      <div className="task-shots-grid">
+        {data.content.order_shots.map((code:string)=>{
+          const matchingGroup=(data.shots??[]).filter((x:Row)=>x.shot_code===code&&["group","order","main",null].includes(x.component));
+          return <div className="card" key={code} id={`comp-group-${code}`}>
+            <div className="row" style={{marginBottom:6}}>
+              <strong>对比组机位：<span className="code">{code}</span></strong>
+              {matchingGroup.length>0?<Tag tone="green">已传 {matchingGroup.length} 张</Tag>:<Tag tone="yellow">待传</Tag>}
+            </div>
+            {matchingGroup.length>0&&<div className="actions" style={{marginBottom:8}}>
+              <MediaButton ids={matchingGroup.map((x:Row)=>x.id)} labels={matchingGroup.map((_:Row,i:number)=>`对比组 (${code}) #${i+1}`)} label={`查看对比组照 (${matchingGroup.length})`}/>
+            </div>}
+            {writable&&<Form label="上传对比组照" run={async f=>{
+              const mediaId=await upload(f.get("photo"),"shot");
+              await request("/staff/inspection-tasks/"+id+"/shots","POST",{revision:data.revision,component:"group",shot_code:code,media_id:mediaId});
+              reload();
+            }}><Photo label="拍摄并排对比照"/></Form>}
+          </div>;
+        })}
+      </div>
     </Panel>}
     <Panel title="提交前完整性检查">
-      {completeness.ok?<p><Tag>完整性通过</Tag> 所有必测项、复测、证据照与组件必拍照均已齐全。</p>:<>
-        <p className="notice">当前仍有 {completeness.missing.length} 项缺漏，补齐前不可提交任务：</p>
-        <ul>{completeness.missing.map((item:Row,idx:number)=><li key={idx}>
-          <a href={`#comp-${item.component}-${item.code}`}><strong>{item.sample_id} · {item.label}</strong></a>：{item.hint}
-        </li>)}</ul>
+      {completeness.ok&&drafts.length===0?<p><Tag tone="green">完整性通过</Tag> 所有必测项、复测、证据照与组件必拍照均已齐全。</p>:<>
+        {drafts.length>0&&<p className="notice">当前仍有 <strong>{drafts.length}</strong> 条未同步的本机离线草稿，请先同步后再提交任务。</p>}
+        {!completeness.ok&&<>
+          <p className="notice">当前仍有 {completeness.missing.length} 项缺漏，补齐前不可提交任务：</p>
+          <ul>{completeness.missing.map((item:Row,idx:number)=><li key={idx}>
+            <a href={`#comp-${item.component}-${item.code}`} onClick={()=>{
+              setCheckFilter("all");
+              const rk=`${item.component}:${item.code}`;
+              setExpandedKeys(s=>({...s,[rk]:true}));
+              focusNextKeyRef.current=rk;
+            }}><strong>{item.sample_id} · {item.label}</strong></a>：{item.hint}
+          </li>)}</ul>
+        </>}
       </>}
-      {writable&&<Action primary run={async()=>{await request("/staff/inspection-tasks/"+id+"/submit","POST",{revision:data.revision});location.assign("/wh/inspection");}}>提交此任务</Action>}
+      {writable&&(completeness.ok&&drafts.length===0
+        ?<Action primary run={async()=>{await request("/staff/inspection-tasks/"+id+"/submit","POST",{revision:data.revision});location.assign("/wh/inspection");}}>提交此任务</Action>
+        :<button type="button" className="button primary" disabled title="请先补齐缺失检查项/机位照并同步本地草稿">提交此任务（请先补齐 {completeness.missing.length + drafts.length} 项待完成内容）</button>)}
     </Panel>
     {drafts.length>0&&!conflict&&writable&&<div className="sticky-batch-bar">
       <div><strong>本机已暂存 {drafts.length} 条结果草稿</strong> <span className="muted">确认网络畅通后可一键批量写入服务端</span></div>
@@ -1393,12 +1733,15 @@ export function LogisticsDesk({actor}:{actor?:Row}) {
   const unreceivedList:Row[]=monitor.data?.delivered_unreceived??[];
   const errorQueue:Row[]=monitor.data?.error_queue??[];
 
+  const canAdminOrders=Boolean(actor?.roles?.some((r:string)=>["support","super_admin"].includes(r)));
+  const canIntakeView=Boolean(actor?.roles?.some((r:string)=>["receiver","warehouse_admin","super_admin"].includes(r)));
   const renderTrackCustomerAndOrders=(r:Row)=><div className="cell-stack">
-    {r.receiving_code&&r.customer_user_id
+    {r.receiving_code&&(canAdminOrders&&r.customer_user_id
       ?<Link className="code nowrap" href={`/admin/customers/${r.customer_user_id}`}>{r.receiving_code}</Link>
-      :<span className="muted">待归属客户</span>}
+      :<span className="code nowrap">{r.receiving_code}</span>)}
+    {!r.receiving_code&&<span className="muted">待归属客户</span>}
     {(r.order_numbers?.length??0)>0&&<div className="actions">
-      {(r.order_numbers as string[]).map(no=><Link key={no} className="code nowrap" href={`/admin/orders/${no}`}>{no}</Link>)}
+      {(r.order_numbers as string[]).map(no=>canAdminOrders?<Link key={no} className="code nowrap" href={`/admin/orders/${no}`}>{no}</Link>:<span key={no} className="code nowrap">{no}</span>)}
     </div>}
     {r.package_code&&<CodeButton code={r.package_code} onClick={()=>setDrawer({kind:"package",ref:r.package_code})}/>}
   </div>;
@@ -1447,8 +1790,8 @@ export function LogisticsDesk({actor}:{actor?:Row}) {
               <CopyId value={d.tracking_norm}/>
             </div>,
             d.carrier_name_zh??d.carrier_code??"—",
-            d.receiving_code&&d.customer_user_id?<Link className="code nowrap" href={`/admin/customers/${d.customer_user_id}`}>{d.receiving_code}</Link>:"未归属",
-            d.order_no?<Link className="code nowrap" href={`/admin/orders/${d.order_no}`}>{d.order_no}</Link>:"—",
+            d.receiving_code&&(canAdminOrders&&d.customer_user_id?<Link className="code nowrap" href={`/admin/customers/${d.customer_user_id}`}>{d.receiving_code}</Link>:<span className="code nowrap">{d.receiving_code}</span>),
+            d.order_no?(canAdminOrders?<Link className="code nowrap" href={`/admin/orders/${d.order_no}`}>{d.order_no}</Link>:<span className="code nowrap">{d.order_no}</span>):"—",
             stamp(d.delivered_at),
             d.latest_cn??"—",
           ])}
@@ -1690,7 +2033,7 @@ export function LogisticsDesk({actor}:{actor?:Row}) {
         )}
       </Panel>
     </>}
-    <StaffObjectDrawer target={drawer} onClose={()=>setDrawer(null)}/>
+    <StaffObjectDrawer target={drawer} actor={actor} onClose={()=>setDrawer(null)}/>
   </>;
 }
 export function LogisticsConfiguration() {
@@ -1785,9 +2128,9 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
   ) : null;
 
   if(page==="overview") return <>{alertBanner}<AdminOverviewDashboard deskData={data} error={error} reload={reload} actor={actor}/></>;
-  if(page==="orders") return <>{alertBanner}<AdminOrdersWorkbench deskData={data} reloadDesk={reload}/></>;
+  if(page==="orders") return <>{alertBanner}<AdminOrdersWorkbench deskData={data} reloadDesk={reload} actor={actor}/></>;
   if(page==="dispositions") return <>{alertBanner}<AdminDispositionsWorkbench deskData={data} reloadDesk={reload} actor={actor} terms={terms.data?.terms??[]}/></>;
-  if(page==="incidents") return <>{alertBanner}<AdminIncidentsWorkbench/></>;
+  if(page==="incidents") return <>{alertBanner}<AdminIncidentsWorkbench actor={actor}/></>;
   if(page==="refunds") return <>{alertBanner}<AdminRefundsWorkbench/></>;
   if(page==="payments") return <>{alertBanner}<AdminPaymentsWorkbench demo={demo}/></>;
   if(page==="finance") return <>{alertBanner}<AdminFinanceAnalytics demo={demo}/></>;
@@ -2294,7 +2637,7 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
 
     {page==="shipping-rates"&&superAdmin&&<ShippingRateConfigPanel rates={data.shippingRates??[]} onSave={reload}/>}
 
-    <StaffObjectDrawer target={drawer} onClose={()=>setDrawer(null)}/>
+    <StaffObjectDrawer target={drawer} actor={actor} onClose={()=>setDrawer(null)}/>
   </>;
 }
 
@@ -2678,23 +3021,36 @@ function ShippingRateConfigPanel({rates,onSave}:{rates:Row[];onSave:()=>void}) {
   </>;
 }
 
-const ZONE_ZH:Record<string,string>={receiving:"收货待检区",storage:"标准在库区",quarantine:"隔离区",reference:"确认样专柜 (REF_SAFE)"};
-export function WarehouseScan() {
+const ZONE_ZH:Record<string,string>={receiving:"收货区",queue:"待检区",inspecting:"检查区",post_inspection:"检后区",storage:"在库保管区",quarantine:"隔离区",unmatched:"未认领区",reference:"确认样专柜 (REF_SAFE)"};
+const SCAN_ACTION_ZH:Record<string,string>={
+  open_package:"打开包裹工作台",unpack_items:"拆包建档",print_label:"打印标签",
+  open_item:"打开样品详情",move_storage:"移转库位",assign_order_position:"绑定委托位置",
+  open_inspection_task:"打开质检任务",open_order:"打开订单详情",open_customer:"打开客户档案",
+  open_storage:"前往库位移转",start_stocktake:"发起库区盘点",view_location:"仅查看库位明细",
+  open_dispatch_batch:"打开出库批次",open_logistics:"查看物流监控",select_carrier:"选择承运商重查",
+  check_in:"前往收货实收",
+};
+export function WarehouseScan({actor}:{actor?:Row}={}) {
   const [match,setMatch]=useState<{title:string;detail:string;link?:string|null;action?:string;allowed?:string[];raw?:Row}>();
+  const [scanText,setScanText]=useState("");
+  const [scanCarrier,setScanCarrier]=useState("");
+  const [scanErr,setScanErr]=useState("");
   const [cameraNotice,setCameraNotice]=useState<string>();
+  const scanInputRef=useRef<HTMLInputElement>(null);
   const carriers=useLoad("/carriers");
-  async function lookupScan(code:string,carrier?:string) {
-    setMatch(undefined);
-    const query=carrier?"?"+new URLSearchParams({carrier_code:carrier}):"";
-    const result=await request("/staff/scan/"+encodeURIComponent(code)+query);
+  const roles:string[]=actor?.roles??[];
+  const canIntakeWrite=roles.some(r=>["receiver","warehouse_admin"].includes(r));
+  const canIntakeRead=roles.some(r=>["receiver","warehouse_admin","super_admin"].includes(r));
+  const canMove=roles.some(r=>["receiver","warehouse_admin"].includes(r));
+  function applyScanResult(result:Row) {
     const actionLabel=result.kind==="package"?"打开包裹详情"
       :result.kind==="item"?(result.link?.startsWith("/wh/task/")?"打开质检任务":"打开实物详情")
       :result.kind==="location"?"前往库位移转"
-      :result.kind==="order"?"查看订单详情"
-      :result.kind==="customer"?"查看客户详情"
-      :result.kind==="golden_sample"?"查看确认样记录"
-      :result.kind==="shipment"?"打开发运批次"
-      :result.package_id?"打开拆包登记":"前往收货核对";
+      :result.kind==="order"?(result.link?.startsWith("/wh/task/")?"打开质检任务":result.link?.startsWith("/admin/orders/")?"打开管理订单":"打开收货工作台")
+      :result.kind==="customer"?(result.link?.startsWith("/admin/customers/")?"查看客户档案":"查看关联包裹")
+      :result.kind==="reference_seal"?"查看确认样详情"
+      :result.kind==="outbound_waybill"?(result.link?.startsWith("/wh/dispatch/")?"打开发运批次":"查看物流监控")
+      :result.package_id?"打开包裹详情":"前往收货核对";
     setMatch({
       title:result.code,
       detail:result.summary,
@@ -2704,12 +3060,27 @@ export function WarehouseScan() {
       raw:result,
     });
   }
+  async function lookupScan(code:string,carrier?:string) {
+    setScanErr("");
+    try {
+      const query=carrier?"?"+new URLSearchParams({carrier_code:carrier}):"";
+      const result=await request("/staff/scan/"+encodeURIComponent(code.trim())+query);
+      applyScanResult(result);
+    } catch(e) {
+      setScanErr(e instanceof Error?e.message:"未找到匹配对象，请核对条码并确认类型或承运商。");
+    }
+  }
   return <>
-    <div className="page-head row"><div><p className="eyebrow">WAREHOUSE / SCAN</p><h1>扫码查询</h1>
-      <p className="muted">支持扫描或输入卖家运单、出库运单、订单号 (QW-)、客户码 (QCW-)、包裹码 (P-)、实物码 (S-)、铅封号 (GS-) 或库位码 (A-04-02-01 / R-01)。</p></div><Link className="button" href="/wh/intake">收货入库</Link></div>
-    <Panel title="查询仓库对象">
-      <div className="actions">
-        <button type="button" onClick={async()=>{
+    <div className="page-head row">
+      <div><h1>扫码查询与对象工作台</h1>
+        <p className="muted">支持扫码枪连续回车扫描（卖家运单、出库运单、订单 QW-、客户码 QCW-、包裹 P-、实物 S-/DSP-、铅封 GS-、库位码），扫后直达对应作业上下文。</p></div>
+      <div className="head-actions">
+        {canIntakeWrite&&<Link className="button primary sm" href="/wh/intake">收货入库台</Link>}
+      </div>
+    </div>
+    <Panel title="连续扫码 / 条码图像识别">
+      <div className="actions" style={{marginBottom:10}}>
+        <button type="button" className="button sm" onClick={async()=>{
           setCameraNotice(undefined);
           if(typeof navigator==="undefined" || !navigator.mediaDevices?.getUserMedia) {
             setCameraNotice("当前设备或浏览器未开放相机扫码权限，请使用扫码枪、上传条码图片或下方手动输入。");
@@ -2718,50 +3089,101 @@ export function WarehouseScan() {
           try {
             const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}});
             stream.getTracks().forEach(t=>t.stop());
-            setCameraNotice("相机权限已就绪，请将条码对准取景框、上传条码照片或使用扫码枪直接输入。");
+            setCameraNotice("相机权限已就绪，推荐使用蓝牙/USB 扫码枪直扫或上传条码照片自动识别。");
           } catch {
             setCameraNotice("未能获取相机权限，已切换为扫码枪/图片解码/手动输入模式。");
           }
-        }}>启用相机扫码</button>
+        }}>测试相机扫码</button>
       </div>
       {cameraNotice&&<p className="muted small" role="status">{cameraNotice}</p>}
-      <div onChange={()=>setMatch(undefined)}><Form inline label="查询" run={async f=>{
-        await lookupScan(text(f,"scan_code"),text(f,"carrier")||undefined);
+      <form className="form inline-form" onSubmit={async e=>{
+        e.preventDefault();
+        const code=scanText.trim();
+        if(!code) return;
+        await lookupScan(code,scanCarrier||undefined);
+        setScanText("");
+        scanInputRef.current?.focus();
       }}>
-        <Field name="scan_code" label="条码、订单号、客户码或运单号（QW- / QCW- / P- / S- / GS- / 库位码）"/>
-        <Select name="carrier" label="承运商（运单查询）" required={false}
-          choices={(carriers.data?.carriers??[]).map((c:Row)=>({id:c.code,label:c.labels["zh-CN"]??c.labels.en}))}/>
-      </Form></div>
-      <Form inline label="从条码图片解码并查询" run={async f=>{
+        <label>扫描或输入编码（自动清空以便连扫）
+          <input ref={scanInputRef} autoFocus name="scan_code" value={scanText} onChange={e=>setScanText(e.target.value)} placeholder="QW- / QCW- / P- / S- / DSP- / GS- / 库位 / 运单" required/>
+        </label>
+        <label>承运商（运单歧义时选填）
+          <select value={scanCarrier} onChange={e=>setScanCarrier(e.target.value)}>
+            <option value="">自动识别</option>
+            {(carriers.data?.carriers??[]).map((c:Row)=><option key={c.code} value={c.code}>{c.labels["zh-CN"]??c.labels.en}</option>)}
+          </select>
+        </label>
+        <button type="submit" className="button primary">扫码定位</button>
+      </form>
+      <Form inline label="上传条码照片自动解码" run={async f=>{
         const file=f.get("barcode_image");
-        if(!(file instanceof File)||!file.size) throw new Error("请选择包含 QR 或 Code-128 条码的 PNG 图片。");
+        if(!(file instanceof File)||!file.size) throw new Error("请选择包含 QR 或 Code-128 条码的图片。");
         const buf=await file.arrayBuffer();
         const bytes=new Uint8Array(buf);
         let binary="";
         for(let i=0;i<bytes.length;i++) binary+=String.fromCharCode(bytes[i]!);
         const res=await request("/staff/scan/decode-image","POST",{image_base64:btoa(binary)});
-        await lookupScan(res.decoded_code);
+        if(res.scan_result) applyScanResult(res.scan_result);
+        else if(res.decoded_code) await lookupScan(res.decoded_code);
+        else throw new Error("未能从该图像中识别出有效条码，请确认条码清晰度后手动补录编号。");
       }}>
-        <label>上传条码图像识别 (QR / Code-128)<FileInput name="barcode_image" accept="image/png"/></label>
+        <label>条码照片 (QR / Code-128)<FileInput name="barcode_image" accept="image/*"/></label>
       </Form>
-      {match&&<div className="notice" role="status"><strong className="code">{match.title}</strong><p>{match.detail}</p>
-        {match.raw?.custody_state&&["disposed","outbound"].includes(match.raw.custody_state)&&<p className="small"><Tag tone="gray">{label(match.raw.custody_state)}</Tag> 该实物已离开常规在库状态，不再建议补打内部在库标签。</p>}
-        {match.allowed?.length?<p className="small muted">可执行操作：{match.allowed.join(" · ")}</p>:null}
-        {match.raw?.kind==="location"&&match.raw?.location&&<div className="card" style={{marginTop:8}}>
-          <strong>库位详情：{match.raw.location.code}（仓区：{ZONE_ZH[match.raw.location.zone]??match.raw.location.zone} · 占用 {match.raw.location.occupied}/{match.raw.location.capacity??"不限"}）</strong>
-          <Table
-            headers={["实物码","库存状态","质检阶段","关联订单","操作"]}
-            rows={(match.raw.items??[]).map((it:Row)=>[
-              <span className="code">{it.code}</span>,
-              label(it.custody_state),
-              <Tag tone={it.inspection_stage==="in_inspection"?"yellow":it.inspection_stage==="inspected"?"green":"gray"}>{label(it.inspection_stage??"pending")}</Tag>,
-              <span className="code">{it.order_number??"—"}</span>,
-              <Link className="button sm" href={"/wh/samples/"+encodeURIComponent(it.code)}>查看实物</Link>,
+      {scanErr&&<div className="notice" role="alert" style={{borderLeft:"4px solid #dc2626"}}>
+        <p style={{margin:"0 0 6px"}}>{scanErr}</p>
+        {canIntakeWrite&&<Link className="button sm" href={"/wh/intake?"+new URLSearchParams(scanText?{tracking:scanText.trim()}:{})}>前往收货入库手动补录 / 登记隔离 →</Link>}
+      </div>}
+      {match&&match.raw&&(()=>{
+        const r=match.raw;
+        return <div className="panel" role="status" style={{marginTop:12,background:"#f8fafd"}}>
+          <div className="row" style={{marginBottom:8}}>
+            <div>
+              <Tag tone="blue">{r.kind}</Tag> <strong className="code" style={{fontSize:"1.1rem"}}>{match.title}</strong>
+              <p style={{margin:"4px 0 0"}}>{match.detail}</p>
+            </div>
+            <div className="actions">
+              {match.link&&match.action&&<Link className="button primary" href={match.link}>{match.action} →</Link>}
+            </div>
+          </div>
+          {r.custody_state&&["disposed","outbound"].includes(r.custody_state)&&<p className="notice small"><Tag tone="gray">{label(r.custody_state)}</Tag> 该实物已出库或已处置完成，不得再次上架或补打内部标签。</p>}
+          <div className="inline-workbench-grid">
+            {r.receiving_code&&<div className="task-ctx-cell"><small>客户专属码</small><strong className="code">{r.receiving_code}</strong></div>}
+            {r.order_number&&<div className="task-ctx-cell"><small>关联订单</small><strong className="code">{r.order_number}</strong></div>}
+            {r.package_code&&<div className="task-ctx-cell"><small>来源包裹</small><strong className="code">{r.package_code}</strong></div>}
+            {r.location&&<div className="task-ctx-cell"><small>当前库位</small><strong className="code">{r.location}</strong></div>}
+            {r.tracking_norm&&<div className="task-ctx-cell"><small>关联运单</small><strong className="code">{r.tracking_norm}</strong></div>}
+            {r.product_name&&<div className="task-ctx-cell"><small>商品 / 款号</small><strong>{r.product_name} {r.sku_code?`(${r.sku_code})`:""}</strong></div>}
+            {r.kind==="order"&&<div className="task-ctx-cell"><small>订单状态 / 数量口径</small><strong>{label(r.state)} · 预计 {r.expected_qty??0} / 实收 {r.logged_qty??0} / 核身 {r.identified_qty??0}</strong></div>}
+            {r.kind==="waybill"&&<div className="task-ctx-cell"><small>承运商 / 物流状态</small><strong>{r.carrier_code??"待识别"} · {r.transport_state?label(r.transport_state):"未查询"}</strong></div>}
+            {r.kind==="location"&&<div className="task-ctx-cell"><small>库位容量占用</small><strong>{ZONE_ZH[r.zone]??r.zone} · {r.occupied}/{r.capacity??"∞"} 件</strong></div>}
+            {r.kind==="reference_seal"&&<div className="task-ctx-cell"><small>铅封状态</small><strong>{label(r.state)} · 实物 {r.item_code}</strong></div>}
+          </div>
+          {r.kind==="package"&&Array.isArray(r.items_preview)&&r.items_preview.length>0&&<Table
+            headers={["包内实物预览（前 10 件）","身份状态","库位","操作"]}
+            rows={r.items_preview.map((it:Row)=>[
+              <span key="c" className="code">{it.code}</span>,
+              <Tag key="id" tone={it.identity_state==="identified"?"green":"yellow"}>{label(it.identity_state)}</Tag>,
+              <span key="lc" className="code">{it.location??"—"}</span>,
+              canIntakeRead?<Link key="go" className="button sm" href={"/wh/samples/"+encodeURIComponent(it.code)}>详情</Link>:"—",
             ])}
-            empty="当前库位内无登记样品。"
-          />
-        </div>}
-        {match.link&&<Link className="button" href={match.link}>{match.action}</Link>}</div>}
+          />}
+          {r.kind==="location"&&<Table
+            headers={["库位内实物编码","库存与身份","关联订单","包裹","操作"]}
+            rows={(r.items??[]).map((it:Row)=>[
+              <span key="c" className="code">{it.code}</span>,
+              <span key="s">{label(it.custody_state)} · {label(it.identity_state)}</span>,
+              <span key="o" className="code">{it.order_number??"—"}</span>,
+              <span key="p" className="code">{it.package_code??"—"}</span>,
+              <div key="op" className="actions">
+                {canIntakeRead&&<Link className="button sm" href={"/wh/samples/"+encodeURIComponent(it.code)}>查看实物</Link>}
+                {canMove&&<Link className="button sm" href={"/wh/storage?"+new URLSearchParams({item:it.code})}>移位</Link>}
+              </div>,
+            ])}
+            empty="当前库位内无在库登记实物。"
+          />}
+          {(r.allowed_actions?.length??0)>0&&<p className="small muted" style={{margin:"8px 0 0"}}>当前岗位可执行动作：{r.allowed_actions.map((a:string)=>SCAN_ACTION_ZH[a]??a).join(" · ")}</p>}
+        </div>;
+      })()}
     </Panel>
   </>;
 }
@@ -2805,7 +3227,7 @@ function LabelPrintPanel({targetType,targetId,code}:{targetType:"package"|"item"
       await request("/staff/labels/verify","POST",{expected_code:code,scanned_code:text(f,"scanned_code")});
       setVerified(true);
     }}>
-      <Field name="scanned_code" label="扫描贴好后的标签条码以确认一致" value={code}/>
+      <label>请扫码枪扫入贴好后的标签码以核验一致<input name="scanned_code" placeholder={`扫入 ${code}`} required/></label>
     </Form>
     {verified&&<p className="notice" role="status">标签回读核验通过：<span className="code">{code}</span></p>}
   </Panel>;
@@ -2813,21 +3235,42 @@ function LabelPrintPanel({targetType,targetId,code}:{targetType:"package"|"item"
 
 export function WarehousePackageView({code,actor}:{code:string;actor?:Row}) {
   const {data,error,reload}=useLoad("/staff/packages/by-code/"+code);
+  const [itemSearch,setItemSearch]=useState("");
+  const [itemPage,setItemPage]=useState(1);
   const parcel=data?.parcel;
   const canIntakeWrite=Boolean(!actor?.roles || actor.roles.some((r:string)=>["receiver","warehouse_admin"].includes(r)));
   const canBindOwner=Boolean(!actor?.roles || actor.roles.some((r:string)=>["receiver","warehouse_admin","support","super_admin"].includes(r)));
   const canPrintLabels=Boolean(!actor?.roles || actor.roles.some((r:string)=>["receiver","warehouse_admin","super_admin"].includes(r)));
+  const pkgItems:Row[]=data?.items??[];
+  const filteredPkgItems=pkgItems.filter((it:Row)=>{
+    const q=itemSearch.trim().toLowerCase();
+    if(!q) return true;
+    return [it.code,it.location,it.order_number,it.declared_fields?.sku_code,it.declared_fields?.name].some(v=>String(v??"").toLowerCase().includes(q));
+  });
+  const pkgItemTotalPages=Math.max(1,Math.ceil(filteredPkgItems.length/15));
+  const pkgItemCurPage=Math.min(itemPage,pkgItemTotalPages);
+  const pkgItemSlice=filteredPkgItems.slice((pkgItemCurPage-1)*15,pkgItemCurPage*15);
+  const skuGroups:Row[]=(data?.intake_context?.orders??[]).flatMap((ord:Row)=>
+    (ord.expected_lines_summary?.lines_breakdown??[]).map((row:Row)=>({...row,order_public_no:ord.public_no}))
+  );
+  const inTransitCount=Number(data?.intake_context?.in_transit_advices_count??0);
+  const unreceivedGap=data?.intake_context?.remaining_unreceived_qty??Math.max(0,(data?.intake_context?.total_declared_qty??0)-(data?.intake_context?.cumulative_received_qty??0));
   return <>
     <div className="page-head row"><div><p className="eyebrow">WAREHOUSE / PACKAGE RECORD</p><h1>包裹详情</h1>
-      <p className="code">{code}</p></div>{parcel&&canIntakeWrite&&<Link className="button primary" href={"/wh/intake?package="+parcel.id+"#intake-unpack"}>打开拆包登记</Link>}</div>
+      <p className="code">{code}</p></div>
+      <div className="head-actions">
+        {parcel&&canIntakeWrite&&<Link className="button primary" href={"/wh/intake?package="+parcel.id+"#intake-unpack"}>打开拆包登记</Link>}
+        <Link className="button" href="/wh/packages">返回包裹列表</Link>
+      </div></div>
+    {!canIntakeWrite&&<div className="notice" style={{marginBottom:12}}><strong>只读监督模式：</strong>收货拆包、包裹隔离与库位操作仅限收货员（receiver）及仓库主管（warehouse_admin）执行。</div>}
     {error&&<><ErrorBlock error={error}/><button type="button" onClick={reload}>重试</button></>}
     {!data&&!error&&<p role="status">正在读取包裹…</p>}
     {data&&parcel&&<>
       <div className="ops-columns">
-        <Panel title="仓库实收">
+        <Panel title="仓库实收与外箱证据">
           <dl className="location-facts">
             <div><dt>包裹状态</dt><dd><Tag>{label(parcel.state)}</Tag></dd></div>
-            <div><dt>外箱状况</dt><dd><Tag>{label(parcel.outer_condition??"intact")}</Tag></dd></div>
+            <div><dt>外箱状况</dt><dd><Tag tone={parcel.outer_condition&&parcel.outer_condition!=="intact"?"red":"green"}>{label(parcel.outer_condition??"intact")}</Tag></dd></div>
             <div><dt>实际入仓时间</dt><dd>{stamp(parcel.received_at)}</dd></div>
             <div><dt>实收件数</dt><dd>{parcel.received_quantity} 件</dd></div>
             <div><dt>外箱实重</dt><dd>{parcel.weight_g==null?"未记录":parcel.weight_g+" 克"}</dd></div>
@@ -2835,6 +3278,7 @@ export function WarehousePackageView({code,actor}:{code:string;actor?:Row}) {
             <div><dt>客户收件码</dt><dd className="code">{parcel.receiving_code??"待核验"}</dd></div>
             <div><dt>关联委托</dt><dd className="code">{parcel.order_numbers.join("、")||"尚未关联"}</dd></div>
             {parcel.outer_media_ids?.length>0&&<div><dt>入库外箱实拍照</dt><dd><MediaButton ids={parcel.outer_media_ids} label={`查看外箱照 (${parcel.outer_media_ids.length})`}/></dd></div>}
+            {parcel.open_media_ids?.length>0&&<div><dt>开箱清点照</dt><dd><MediaButton ids={parcel.open_media_ids} label={`查看开箱照 (${parcel.open_media_ids.length})`}/></dd></div>}
             {parcel.condition_note&&<div><dt>外箱异常与隔离说明</dt><dd>{parcel.condition_note}</dd></div>}
           </dl>
         </Panel>
@@ -2845,24 +3289,34 @@ export function WarehousePackageView({code,actor}:{code:string;actor?:Row}) {
             <li key={event.id}>{stamp(event.occurred_at)} · {event.text}</li>)}</ol>:<Empty>暂无承运商中文轨迹。</Empty>}
         </Panel>
       </div>
-      {data.intake_context&&data.intake_context.orders?.length>0&&<Panel title="客户申报与仓库累计实收对照">
+      {data.intake_context&&data.intake_context.orders?.length>0&&<Panel title="SKU 数量汇总与到货差额对照">
         <p className="small muted">
-          订单申报总件数：<strong>{data.intake_context.total_declared_qty}</strong> 件 · 仓库累计已实收：<strong>{data.intake_context.cumulative_received_qty}</strong> 件 · 仍差在途件数：<strong>{data.intake_context.remaining_unreceived_qty??Math.max(0,(data.intake_context.total_declared_qty??0)-(data.intake_context.cumulative_received_qty??0))}</strong> 件 · 在途未到仓预报运单：<strong>{data.intake_context.in_transit_advices_count}</strong> 单
+          订单申报总件数：<strong>{data.intake_context.total_declared_qty}</strong> 件 · 仓库累计实收：<strong>{data.intake_context.cumulative_received_qty}</strong> 件 · {inTransitCount>0?<>仍差在途件数：<strong>{unreceivedGap}</strong> 件（在途未到仓运单 {inTransitCount} 单）</>:<>全部预报运单已到仓 · 实收差额：<strong>{unreceivedGap}</strong> 件</>}
         </p>
         <Table
-          headers={["订单号 / 位置","款号","颜色","尺码","供应商","服装子类","申报运单","当前绑定实物"]}
-          rows={(data.intake_context.declared_items??[]).map((di:Row)=>[
-            <span className="code">{di.order_public_no} #{di.position}</span>,
-            <span className="code">{di.sample_code??"—"}</span>,
-            di.color??"—",
-            di.size??"—",
-            di.supplier_alias??"—",
-            di.garment_type??"—",
-            <span className="code">{di.declared_tracking_no??"—"}</span>,
-            di.bound_item_code?<Link className="code" href={"/wh/samples/"+encodeURIComponent(di.bound_item_code)}>{di.bound_item_code}</Link>:<Tag tone="yellow">待绑定</Tag>,
+          headers={["订单号","品名 / SKU","颜色 / 尺码","供应商","预计","已关联","待核身","确认短少"]}
+          rows={skuGroups.map((sg:Row)=>[
+            <span key="o" className="code">{sg.order_public_no}</span>,
+            <span key="s">{sg.product_name||"—"} {sg.sku_code?<span className="code">({sg.sku_code})</span>:null}</span>,
+            [sg.color_declared,sg.size_label].filter(Boolean).join(" / ")||"—",
+            sg.supplier_alias||"—",
+            sg.expected_qty,sg.arrived_qty,sg.unidentified_pending_qty??0,sg.missing_qty??0,
           ])}
-          empty="暂无客户逐件申报明细。"
+          empty="暂无客户 SKU 汇总。"
         />
+        {(data.intake_context.declared_items?.length??0)>0&&<details style={{marginTop:8}}>
+          <summary className="small" style={{cursor:"pointer"}}>展开客户逐件申报位置槽位 ({data.intake_context.declared_items.length})</summary>
+          <Table
+            headers={["订单号 / 位置","款号","颜色 / 尺码","申报运单","当前绑定实物"]}
+            rows={data.intake_context.declared_items.slice(0,50).map((di:Row)=>[
+              <span key="p" className="code">{di.order_public_no} #{di.position}</span>,
+              <span key="s" className="code">{di.sample_code??"—"}</span>,
+              [di.color,di.size].filter(Boolean).join(" / ")||"—",
+              <span key="t" className="code">{di.declared_tracking_no??"—"}</span>,
+              di.bound_item_code?<Link key="b" className="code" href={"/wh/samples/"+encodeURIComponent(di.bound_item_code)}>{di.bound_item_code}</Link>:<Tag key="b" tone="yellow">待绑定</Tag>,
+            ])}
+          />
+        </details>}
       </Panel>}
       {canBindOwner&&parcel.state==="unmatched"&&<Panel title="无预报包裹归属核验">
         <p className="muted">若外箱面单写有客户专属收件码（QCW-），上传面单标签照并核验绑定归属。</p>
@@ -2896,15 +3350,38 @@ export function WarehousePackageView({code,actor}:{code:string;actor?:Row}) {
         </details>
       </Panel>}
       {canPrintLabels&&parcel.state!=="quarantined"&&<LabelPrintPanel targetType="package" targetId={parcel.id} code={parcel.code}/>}
-      <Panel title="拆包实物">
-        <Table headers={["实物码","类型","库存状态","质检阶段","当前位置",""]} rows={data.items.map((item:Row)=>[
-          <span className="code">{item.code}</span>,
+      <Panel title={`拆包实物明细 (${pkgItems.length} 件)`}>
+        <div className="admin-toolbar" style={{marginBottom:10}}>
+          <label>筛选包内实物编号 / 库位 / SKU
+            <input type="search" value={itemSearch} onChange={e=>{setItemSearch(e.target.value);setItemPage(1);}} placeholder="S-... / DSP-... / 库位"/>
+          </label>
+          {pkgItemTotalPages>1&&<div className="actions">
+            <button type="button" className="button sm" disabled={pkgItemCurPage<=1} onClick={()=>setItemPage(pkgItemCurPage-1)}>上一页</button>
+            <span className="small muted">第 {pkgItemCurPage} / {pkgItemTotalPages} 页</span>
+            <button type="button" className="button sm" disabled={pkgItemCurPage>=pkgItemTotalPages} onClick={()=>setItemPage(pkgItemCurPage+1)}>下一页</button>
+          </div>}
+        </div>
+        <Table headers={["实物码","类型","身份/库存状态","质检阶段","当前位置","操作"]} rows={pkgItemSlice.map((item:Row)=>[
+          <span key="c" className="code">{item.code}</span>,
           item.parent_item_id?"套装组件":"主件",
-          label(item.custody_state),
-          <Tag tone={item.inspection_stage==="in_inspection"?"yellow":item.inspection_stage==="inspected"?"green":"gray"}>{label(item.inspection_stage??"pending")}</Tag>,
+          `${label(item.identity_state)} · ${label(item.custody_state)}`,
+          <Tag key="qc" tone={item.inspection_stage==="in_inspection"?"yellow":item.inspection_stage==="inspected"?"green":"gray"}>{label(item.inspection_stage??"pending")}</Tag>,
           item.location??"—",
-          <Link href={"/wh/samples/"+encodeURIComponent(item.code)}>核对实物</Link>,
+          <Link key="go" href={"/wh/samples/"+encodeURIComponent(item.code)}>核对实物</Link>,
         ])} empty="尚未登记包内实物。"/>
+      </Panel>
+      <Panel title={`包裹与包内件操作历史 (${(data.history??[]).length})`}>
+        <Table
+          headers={["时间","操作动作","实物码","原库位 → 目标库位","操作人"]}
+          rows={(data.history??[]).map((h:Row)=>[
+            stamp(h.created_at),
+            h.action,
+            h.item_code?<span className="code">{h.item_code}</span>:"包裹级",
+            [h.from_location,h.to_location].some(Boolean)?`${h.from_location??"—"} → ${h.to_location??"—"}`:"—",
+            h.actor_name??"—",
+          ])}
+          empty="暂无历史记录。"
+        />
       </Panel>
     </>}
   </>;
@@ -2931,23 +3408,51 @@ function ItemIdentity({data,actor,onSave}:{data:Row;actor?:Row;onSave:()=>void})
     )
   );
   const expectedTrackDisplay=posPerItemTrack || posAdvisedTracks.join(", ") || "—";
+  const storageEvents:Row[]=data.storage_events??[];
+  const inspectionTasks:Row[]=data.inspection_tasks??[];
+  const activeTickets:Row[]=data.active_tickets??[];
   return <>
-    <div className="notice">
-      <strong className="code">{item.code}</strong> · {label(item.custody_state)} · 身份状态 {label(item.identity_state)} · 质检进度 <Tag tone={item.inspection_stage==="in_inspection"?"yellow":item.inspection_stage==="inspected"?"green":"gray"}>{label(item.inspection_stage??"pending")}</Tag> · 库位 <span className="code">{item.location??"未登记"}</span>
-      <p>实收包裹 <Link href={"/wh/packages/"+item.package_code}>{item.package_code}</Link>{item.source_tracking_no?<> · 实际入库运单 <span className="code">{item.source_tracking_no}</span></>:null}{item.order_number?" · 委托 "+item.order_number:" · 无委托实物"}</p>
-      {item.components?.length>0&&<p className="small">包含套装组件：{item.components.map((c:Row)=>c.code).join("、")}</p>}
-      {item.is_reference_sample&&<p><Tag tone="yellow">确认样核对委托 (Golden Sample · 铅封 {item.reference_seal_code??"—"})</Tag></p>}
-      {item.reference_sample_state==="pending_safe_storage"&&<p><Tag tone="yellow">待转入 REF_SAFE 确认样专柜 · 铅封号 {item.reference_seal_code??"待分配"}</Tag></p>}
-      {item.reference_zone_warning&&<p className="bad"><strong>确认样库位告警：</strong>{item.reference_zone_warning}</p>}
-      {!item.ownership_verified&&<p>待核验客户归属。完成认领后才能关联委托。</p>}
+    {!canIntakeWrite&&<div className="notice" style={{marginBottom:12}}><strong>只读监督模式：</strong>实物核身确认、绑定委托、解绑与违禁隔离仅限收货员（receiver）或仓库主管（warehouse_admin）执行；当前账号仅查看关联状态与证据。</div>}
+    <div className="task-ctx-grid" style={{marginBottom:12}}>
+      <div className="task-ctx-cell"><small>实物编码 / 保管状态</small><strong className="code">{item.code} · {label(item.custody_state)}</strong></div>
+      <div className="task-ctx-cell"><small>核身 / 质检状态</small><span><Tag tone={item.identity_state==="identified"?"green":item.identity_state==="quarantined"?"red":"yellow"}>{label(item.identity_state)}</Tag> <Tag tone={item.inspection_stage==="inspected"?"green":"outline"}>{item.inspection_stage==="inspected"?"已质检":item.inspection_stage==="in_progress"?"质检中":"待质检"}</Tag></span></div>
+      <div className="task-ctx-cell"><small>来源包裹与运单</small><span><Link className="code" href={"/wh/packages/"+encodeURIComponent(item.package_code)}>{item.package_code}</Link>{item.source_tracking_no?<> · <span className="code">{item.source_tracking_no}</span></>:""}</span></div>
+      <div className="task-ctx-cell"><small>客户 / 订单 / 服务</small><span><strong className="code">{item.customer_receiving_code??"无主待核验"}</strong>{item.order_number?<> · <span className="code">{item.order_number}</span></>:" · 未绑单"}{item.service_title?` (${item.service_title["zh-CN"]??item.service_title.en})`:""}</span></div>
+      <div className="task-ctx-cell"><small>当前库位 / 免费保管至</small><strong className="code">{item.location??"未上架"}{item.location_zone?` (${item.location_zone})`:""} · {stamp(item.storage_until)}</strong></div>
+      <div className="task-ctx-cell"><small>冻结 / 处置去向</small><span>{item.handling_hold?<Tag tone="red">冻结：{item.handling_hold}</Tag>:item.active_disposition?<Tag tone="yellow">{item.active_disposition.action} · {item.active_disposition.state}</Tag>:"正常在库"}</span></div>
     </div>
+    {item.components?.length>0&&<p className="small">包含套装组件：{item.components.map((c:Row)=>c.code).join("、")}</p>}
+    {(item.is_reference_sample||item.reference_sample_state)&&<div className="notice" style={{marginBottom:10}}>
+      <Tag tone="yellow">确认样记录 ({item.reference_sample_state})</Tag> 铅封号 <span className="code">{item.reference_seal_code??"—"}</span> · 到期 {stamp(item.reference_expires_at)} {item.reference_in_use?" · 当前正被批次引用锁定中":""}
+      {item.reference_zone_warning&&<p className="bad" style={{margin:"4px 0 0"}}>{item.reference_zone_warning}</p>}
+    </div>}
+    {!item.ownership_verified&&<p className="notice">待核验客户归属。完成认领后才能关联委托。</p>}
     {item.declared_fields&&<div className="card">
-      <strong>客户委托申报信息（位置 #{item.expected_position}）</strong>
+      <strong>客户委托申报与实物标签核对依据（位置 #{item.expected_position}）</strong>
       <p className="small">
-        款号/编号：<span className="code">{item.declared_summary?.sample_code||item.declared_fields.sample_code||"—"}</span> · 颜色：{item.declared_summary?.color||item.declared_fields.color_declared||item.declared_fields.color||"—"} · 尺码：{item.declared_summary?.size||item.declared_fields.size_label||item.declared_fields.size||"—"} · 供应商：{item.declared_summary?.supplier_alias||item.declared_fields.supplier_alias||"—"} · 服装子类：{item.declared_summary?.garment_type||item.declared_fields.garment_type||"—"} · 申报运单：<span className="code">{item.declared_summary?.declared_tracking_no||item.declared_fields.tracking_no||item.declared_fields.source_tracking_no||"—"}</span>
+        品名：{item.declared_summary?.product_name||"—"} · 款号：<span className="code">{item.declared_summary?.sample_code||item.declared_fields.sample_code||"—"}</span> · 颜色：{item.declared_summary?.color||item.declared_fields.color_declared||"—"} · 尺码：{item.declared_summary?.size||item.declared_fields.size_label||"—"} · 供应商：{item.declared_summary?.supplier_alias||item.declared_fields.supplier_alias||"—"}
       </p>
+      {item.actual_label_info&&<p className="small muted">实际吊牌核对：尺码 {item.actual_label_info.size_label??"—"} · 颜色 {item.actual_label_info.color_found??"—"}</p>}
+      {(item.label_media_ids?.length??0)>0&&<MediaButton ids={item.label_media_ids} label={`查看标签/实物证据照 (${item.label_media_ids.length})`}/>}
       {item.declared_fields.mismatch_note&&<p className="bad small">当前登记不符：{item.declared_fields.mismatch_note}</p>}
     </div>}
+    {inspectionTasks.length>0&&<div className="card">
+      <strong>关联质检任务 ({inspectionTasks.length})</strong>
+      <div className="actions" style={{marginTop:6,flexWrap:"wrap"}}>
+        {inspectionTasks.map((t:Row)=><Link key={t.id} className="button sm" href={`/wh/task/${t.id}`}>任务 #{t.id.slice(0,8)} · {label(t.state)} ({t.assignee_name??"待领取"}) →</Link>)}
+      </div>
+    </div>}
+    {activeTickets.length>0&&<div className="card">
+      <strong>关联异常工单 ({activeTickets.length})</strong>
+      <ul>{activeTickets.map((tk:Row)=><li key={tk.id}><span className="code">{tk.public_no}</span> · {tk.subject} (<Tag>{({open:"待处理",in_progress:"跟进中",waiting_customer:"待客户回复",resolved:"已解决",closed:"已结案"} as Record<string,string>)[tk.state]??tk.state}</Tag>)</li>)}</ul>
+    </div>}
+    {storageEvents.length>0&&<details className="card">
+      <summary style={{cursor:"pointer"}}>查看实物库位流转历史 ({storageEvents.length})</summary>
+      <Table
+        headers={["时间","动作","原库位","目标库位","操作员"]}
+        rows={storageEvents.map((ev:Row)=>[stamp(ev.created_at),ev.action,ev.from_location??"—",ev.to_location??"—",ev.operator_name??"—"])}
+      />
+    </details>}
     {canIntakeWrite&&item.can_identify&&<details className="card" open={item.identity_state==="mismatch"}>
       <summary>实物身份核对与收货不符登记</summary>
       <Form label="提交身份核对结论" run={async f=>{
@@ -3039,6 +3544,15 @@ function ItemIdentity({data,actor,onSave}:{data:Row;actor?:Row;onSave:()=>void})
         onSave();
       }}>
         <Field name="reason" label="解除并重新映射原因"/>
+      </Form>
+    </details>}
+    {canIntakeWrite&&item.identity_state!=="quarantined"&&["received","stored"].includes(item.custody_state)&&<details className="card">
+      <summary>将单件实物隔离为违禁/受损异常件 (Quarantine)</summary>
+      <Form label="确认转入隔离区" run={async f=>{
+        await request("/staff/items/"+item.id+"/quarantine","POST",{revision:item.revision,reason:text(f,"reason")});
+        onSave();
+      }}>
+        <Field name="reason" label="单件异常/禁限原因（≥4 字）"/>
       </Form>
     </details>}
     {canIntakeWrite&&item.movable&&<Link className="button" href={"/wh/storage?"+new URLSearchParams({item:item.code})}>移转此实物</Link>}

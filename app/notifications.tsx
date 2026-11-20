@@ -41,7 +41,7 @@ function UpdatesTable({notices,onRead}:{notices:Row[];onRead:()=>void}) {
         notice.advice_id?"/parcels/"+notice.advice_id:
         notice.charge_id?billingChargePath(notice.charge_id):
         notice.order_number?"/orders/"+notice.order_number+(notice.template==="quote.offered"?"#manual-quote-request":""):
-        notice.template==="email.delivery_failed"?"/account":
+        notice.template==="account.registered"||notice.template==="email.delivery_failed"?"/account":
         notice.template==="payment.confirmed"||notice.template==="dispatch.quoted"?"/account/billing":null;
       const title=noticeTitles[notice.template]??"Account update";
       return [<span className="cell-stack"><span style={{fontWeight:notice.read_at?500:750}}>{title}</span>
@@ -50,7 +50,11 @@ function UpdatesTable({notices,onRead}:{notices:Row[];onRead:()=>void}) {
           {notice.case_number&&<small>Case <span className="code">{notice.case_number}</span></small>}
           {notice.order_number&&<small>Order <span className="code">{notice.order_number}</span>{notice.report_version?` · Report v${notice.report_version}`:""}</small>}</span>,
         stamp(notice.created_at),notice.read_at?"Read":"Unread",
-        <div className="actions">{href&&<Link href={href}>Open</Link>}
+        <div className="actions">{href&&<Link href={href} onClick={()=>{
+            if(!notice.read_at) {
+              void request("/me/notifications/"+notice.id+"/read","POST",{}).then(onRead).catch(()=>{});
+            }
+          }}>Open</Link>}
           {!notice.read_at&&<Action run={async()=>{
             await request("/me/notifications/"+notice.id+"/read","POST",{});onRead();
           }}>Mark as read</Action>}
@@ -63,6 +67,16 @@ export function RecentUpdates({notices,onRead}:{notices:Row[];onRead:()=>void}) 
     <Link href="/account/notifications">View all notifications →</Link>
   </Panel>;
 }
+function noticeMatchesCategory(notice:Row,cat:"all"|"orders"|"reports"|"parcels"|"billing"|"support") {
+  if(cat==="all") return true;
+  const t=String(notice.template??"");
+  if(cat==="orders") return t.startsWith("order.");
+  if(cat==="reports") return t.startsWith("report.");
+  if(cat==="parcels") return t.startsWith("package.")||t.startsWith("shipment.")||t.startsWith("tracking.")||t==="reference.sealed";
+  if(cat==="billing") return t.startsWith("payment.")||t.endsWith(".quoted")||t==="quote.offered";
+  if(cat==="support") return t.startsWith("ticket.")||t.startsWith("incident.")||t==="email.delivery_failed"||t==="account.registered";
+  return true;
+}
 export function NotificationInbox() {
   const search=useSearchParams(),params=new URLSearchParams();
   const [cat,setCat]=useState<"all"|"orders"|"reports"|"parcels"|"billing"|"support">("all");
@@ -73,16 +87,8 @@ export function NotificationInbox() {
   const first=unread?"/account/notifications?unread=1":"/account/notifications";
   const next=new URLSearchParams(params);
   if(data?.next_before)next.set("before",data.next_before);
-  const visibleRows=(data?.rows??[]).filter((n:Row)=>{
-    if(cat==="all") return true;
-    const t=String(n.template??"");
-    if(cat==="orders") return t.startsWith("order.");
-    if(cat==="reports") return t.startsWith("report.");
-    if(cat==="parcels") return t.startsWith("package.")||t.startsWith("shipment.")||t.startsWith("tracking.")||t==="reference.sealed";
-    if(cat==="billing") return t.startsWith("payment.")||t.endsWith(".quoted")||t==="quote.offered";
-    if(cat==="support") return t.startsWith("ticket.")||t.startsWith("incident.")||t==="email.delivery_failed";
-    return true;
-  });
+  const allRows:Row[]=data?.rows??[];
+  const visibleRows=allRows.filter(n=>noticeMatchesCategory(n,cat));
   return <>
     <div className="page-head"><Link href="/account">← Account</Link>
       <h1>Notifications</h1><p className="muted">Find updates about reports, payments, parcels, and support cases.</p></div>
@@ -100,10 +106,11 @@ export function NotificationInbox() {
           ["reports","Reports"],
           ["parcels","Parcels & Tracking"],
           ["billing","Billing & Quotes"],
-          ["support","Support & Notices"],
-        ] as const).map(([cid,clabel])=>(
-          <button key={cid} type="button" className={"button sm"+(cat===cid?" primary":"")} onClick={()=>setCat(cid)}>{clabel}</button>
-        ))}
+          ["support","Support & Account"],
+        ] as const).map(([cid,clabel])=>{
+          const count=allRows.filter(n=>noticeMatchesCategory(n,cid)).length;
+          return <button key={cid} type="button" className={"button sm"+(cat===cid?" primary":"")} onClick={()=>setCat(cid)}>{clabel}{data?` (${count})`:""}</button>;
+        })}
       </div>
       {error&&<ErrorBlock error={error}/>}
       {!data&&!error&&<p role="status">Loading updates…</p>}

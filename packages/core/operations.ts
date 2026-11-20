@@ -596,6 +596,8 @@ export async function moveItem(
   revision(w.revision,rev);
   guard(["stored","received"].includes(w.custody_state),"ITEM_UNAVAILABLE","This item is not in storage.");
   await assertItemNotFrozen(db,[id],"ITEM_UNAVAILABLE");
+  const packed=(await db.query("select 1 from shipment_items si join shipments s on s.id=si.shipment_id where si.item_id=$1 and s.state='packed' limit 1",[id])).rowCount;
+  guard(!packed,"ITEM_UNAVAILABLE","Items packed in an active outbound shipment cannot be moved to a storage bin.");
   guard(w.location_id!==location,"LOCATION_UNCHANGED","Choose a different storage location.");
   if(options?.scanned_item_code) {
     guard(
@@ -618,6 +620,9 @@ export async function moveItem(
     quarantined:w.identity_state==="quarantined" || w.condition_state==="restricted",
     isReferenceSample:Boolean(refRow || dispRow),
   });
+  if(refRow?.state==="active" && targetLoc.zone!=="reference") {
+    guard(false,"ITEM_UNAVAILABLE","Active sealed Golden Samples cannot leave the reference zone until released.",409);
+  }
   if(options?.scanned_location_code) {
     guard(
       options.scanned_location_code.trim().toUpperCase()===String(targetLoc.code).toUpperCase(),

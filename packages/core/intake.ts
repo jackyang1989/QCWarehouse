@@ -81,6 +81,7 @@ export async function savePhoto(db:DB,actor:Actor,bytes:Buffer,kind:string) {
   const org=actor.kind==="customer"?organization(actor):null;
   if(org) guard(kind==="attachment","FORBIDDEN","Only claim documents can be uploaded.",403);
   else if(kind==="attachment") role(actor,"receiver","inspector","warehouse_admin","support","finance","super_admin");
+  else if(kind==="label_photo") role(actor,"receiver","inspector","warehouse_admin","support","super_admin");
   else role(actor,"receiver","inspector","warehouse_admin","super_admin");
   guard(bytes.length>0 && bytes.length<=25_000_000,"FILE_INVALID","Upload a photo up to 25 MB.",422);
   const rawSha=hash(bytes);
@@ -890,6 +891,25 @@ export async function getIntakeContext(
       "select id,quantity,attributes,draft_items from order_lines where order_id=$1 order by id",
       [ord.id]
     )).rows;
+    const parcelStatsRows=(await db.query<{
+      id:string;tracking_norm:string;carrier_code:string|null;package_code:string|null;
+      warehouse_state:string|null;outer_condition:string|null;received_quantity:number|null;
+      logged_item_count:number|null;identified_item_count:number|null;damaged_item_count:number|null;
+    }>(
+      `select ao.advice_id id,coalesce(t.tracking_norm,'') tracking_norm,t.carrier_code,
+              p.code package_code,p.state warehouse_state,
+              substring(p.condition_note from '^\\[outer:(intact|crushed|torn|wet)\\]') outer_condition,
+              p.received_quantity,
+              (select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null) logged_item_count,
+              (select count(*)::int from warehouse_items wi join order_line_item_links olil on olil.item_id=wi.id and olil.unlinked_at is null
+                join order_lines ol on ol.id=olil.order_line_id where wi.package_id=p.id and wi.parent_item_id is null and ol.order_id=$1) identified_item_count,
+              (select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null and wi.condition_state not in ('good','unchecked')) damaged_item_count
+       from advice_orders ao
+       left join tracking_records t on t.advice_id=ao.advice_id and t.direction='inbound' and t.closed_at is null
+       left join packages p on p.id=t.package_id
+       where ao.order_id=$1`,
+      [ord.id]
+    )).rows;
     const expectedLinesSummary=summarizeExpectedLines(
       orderLines,
       declaredItems.map(d=>({
@@ -900,7 +920,8 @@ export async function getIntakeContext(
         declared_fields:d.declared_fields,
         linked_item_id:d.linked_item_id,
         identity_state:d.identity_state,
-      }))
+      })),
+      parcelStatsRows
     );
 
     const totalDeclaredQty=declaredItems.length;
@@ -1078,4 +1099,21 @@ export async function reportPackageQuantityDiscrepancy(
     ticket_id:ticketId,
     ticket_no:publicNo,
   };
+}
+export async function attachPackageOpenPhotos(
+  db:DB,
+  actor:Actor,
+  packageId:string,
+  input:{revision:number;open_media_ids:string[]}
+) {
+  role(actor,"receiver","warehouse_admin");
+  const initial=await one<{org_id:string|null}>(db,"select org_id from packages where id=$1",[packageId]);
+  if(initial.org_id) await lock(db,"org:"+initial.org_id);
+  const pkg=await one<{id:string;org_id:string|null;state:string;revision:number}>(db,"select * from packages where id=$1 for update",[packageId]);
+  revision(pkg.revision,input.revision);
+  guard(pkg.state!=="quarantined","PACKAGE_QUARANTINED","Quarantined parcels cannot be unpacked or have open-box photos attached.");
+  await attachEvidence(db,actor,input.open_media_ids,"intake_open",{org:pkg.org_id??null,package:pkg.id});
+  await db.query("update packages set revision=revision+1 where id=$1",[pkg.id]);
+  await audit(db,actor,"attach_open_photos","packages",pkg.id,{count:input.open_media_ids.length});
+  return {package_id:pkg.id,revision:pkg.revision+1,count:input.open_media_ids.length};
 }

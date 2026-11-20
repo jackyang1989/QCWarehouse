@@ -445,9 +445,9 @@ export function CodeButton({code,onClick,title}:{code:ReactNode;onClick:()=>void
 }
 
 export function ModalDrawer({
-  open,onClose,title,subtitle,centered=false,footer,children,
+  open,onClose,title,subtitle,centered=false,wide=false,footer,children,
 }:{
-  open:boolean;onClose:()=>void;title:ReactNode;subtitle?:ReactNode;centered?:boolean;footer?:ReactNode;children:ReactNode;
+  open:boolean;onClose:()=>void;title:ReactNode;subtitle?:ReactNode;centered?:boolean;wide?:boolean;footer?:ReactNode;children:ReactNode;
 }) {
   const zh=useIsStaffLocale();
   const headingId=useId(),descriptionId=useId();
@@ -472,7 +472,7 @@ export function ModalDrawer({
   return <div className={"drawer-backdrop"+(centered?" centered":"")} role="dialog" aria-modal="true"
     aria-labelledby={headingId} aria-describedby={subtitle?descriptionId:undefined}
     onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}>
-    <div className="drawer-panel" onKeyDown={event=>{
+    <div className={"drawer-panel"+(wide?" wide":"")} onKeyDown={event=>{
       if(event.key!=="Tab") return;
       const focusable=Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
         'a[href], button, input, select, textarea, summary, [tabindex="0"]',
@@ -694,16 +694,24 @@ export function DefectAnnotator({
 export type StaffObjectTarget={kind:"tracking"|"package"|"item"|"batch";ref:string};
 
 export function StaffObjectDrawer({
-  target,onClose,onNavigateTarget,
+  target,onClose,onNavigateTarget,actor,
 }:{
-  target:StaffObjectTarget|null;onClose:()=>void;onNavigateTarget?:(next:StaffObjectTarget)=>void;
+  target:StaffObjectTarget|null;onClose:()=>void;onNavigateTarget?:(next:StaffObjectTarget)=>void;actor?:Row;
 }) {
   const [current,setCurrent]=useState<StaffObjectTarget|null>(target);
-  useEffect(()=>{setCurrent(target);},[target?.kind,target?.ref]);
+  const [itemPage,setItemPage]=useState(1);
+  useEffect(()=>{setCurrent(target);setItemPage(1);},[target?.kind,target?.ref]);
   const switchTo=(next:StaffObjectTarget)=>{
     setCurrent(next);
+    setItemPage(1);
     onNavigateTarget?.(next);
   };
+  const me=useLoad(current&&!actor?"/me":null);
+  const roles:string[]=actor?.roles??me.data?.actor?.roles??[];
+  const canIntake=roles.some(r=>["receiver","warehouse_admin","super_admin"].includes(r));
+  const canAdminOrders=roles.some(r=>["support","super_admin"].includes(r));
+  const canLogistics=roles.some(r=>["support","super_admin"].includes(r));
+  const canDispatch=roles.some(r=>["warehouse_admin","super_admin"].includes(r));
   const path=current?`/staff/object-summary?kind=${encodeURIComponent(current.kind)}&ref=${encodeURIComponent(current.ref)}`:null;
   const view=useLoad(path);
   if(!current)return null;
@@ -717,13 +725,14 @@ export function StaffObjectDrawer({
   return <ModalDrawer
     open={Boolean(current)}
     onClose={onClose}
+    wide={current.kind==="package"||current.kind==="batch"}
     title={titleMap[current.kind]}
     subtitle="点击关联单号可在当前抽屉内直接穿透查看上下游对象"
     footer={<div className="actions">
-      {current.kind==="tracking"&&<Link className="button sm" href="/admin/logistics" onClick={onClose}>前往物流监控台 →</Link>}
-      {current.kind==="package"&&d?.parcel?.code&&<Link className="button sm" href={`/wh/packages/${d.parcel.code}`} onClick={onClose}>打开完整包裹工作台 →</Link>}
-      {current.kind==="item"&&d?.item?.code&&<Link className="button sm" href={`/wh/samples/${d.item.code}`} onClick={onClose}>打开完整样品工作台 →</Link>}
-      {current.kind==="batch"&&d?.batch?.id&&<Link className="button sm" href={`/wh/dispatch/${d.batch.id}`} onClick={onClose}>打开完整出库作业页 →</Link>}
+      {current.kind==="tracking"&&canLogistics&&<Link className="button sm" href="/admin/logistics" onClick={onClose}>前往物流监控台 →</Link>}
+      {current.kind==="package"&&canIntake&&d?.parcel?.code&&<Link className="button sm" href={`/wh/packages/${d.parcel.code}`} onClick={onClose}>打开完整包裹工作台 →</Link>}
+      {current.kind==="item"&&canIntake&&d?.item?.code&&<Link className="button sm" href={`/wh/samples/${d.item.code}`} onClick={onClose}>打开完整样品工作台 →</Link>}
+      {current.kind==="batch"&&canDispatch&&d?.batch?.id&&<Link className="button sm" href={`/wh/dispatch/${d.batch.id}`} onClick={onClose}>打开完整出库作业页 →</Link>}
     </div>}
   >
     {view.error&&<ErrorBlock error={view.error}/>}
@@ -742,7 +751,7 @@ export function StaffObjectDrawer({
             <div><small className="muted">最近同步 / 最新节点</small><div>{stamp(t.last_success_at??t.latest_event_at,true)}</div></div>
             <div><small className="muted">关联包裹</small><div>{t.package_code?<CodeButton code={t.package_code} onClick={()=>switchTo({kind:"package",ref:t.package_code})}/>:"尚未登记实收"}</div></div>
             <div><small className="muted">关联订单 / 出库批次</small><div className="actions">
-              {(t.order_numbers??[]).map((no:string)=><Link key={no} className="code-btn" href={`/admin/orders/${no}`} onClick={onClose}>{no}</Link>)}
+              {(t.order_numbers??[]).map((no:string)=>canAdminOrders?<Link key={no} className="code-btn" href={`/admin/orders/${no}`} onClick={onClose}>{no}</Link>:<span key={no} className="code">{no}</span>)}
               {t.batch_id&&<CodeButton code={`批次 #${String(t.batch_id).slice(0,8)}`} onClick={()=>switchTo({kind:"batch",ref:t.batch_id})}/>}
               {!(t.order_numbers?.length)&&!t.batch_id&&<span className="muted">—</span>}
             </div></div>
@@ -776,7 +785,7 @@ export function StaffObjectDrawer({
             <div><small className="muted">实收时间 / 重量</small><div>{stamp(p.received_at,true)} · {p.weight_g?`${p.weight_g} g`:"未称重"}</div></div>
             <div><small className="muted">当前库位 / 拆包件数</small><div>{p.location_code??"—"} · {p.received_quantity??0} 件</div></div>
             <div><small className="muted">关联订单</small><div className="actions">
-              {(p.order_numbers??[]).length?(p.order_numbers as string[]).map(no=><Link key={no} className="code-btn" href={`/admin/orders/${no}`} onClick={onClose}>{no}</Link>):"—"}
+              {(p.order_numbers??[]).length?(p.order_numbers as string[]).map(no=>canAdminOrders?<Link key={no} className="code-btn" href={`/admin/orders/${no}`} onClick={onClose}>{no}</Link>:<span key={no} className="code">{no}</span>):"—"}
             </div></div>
           </div>
           {p.media_ids?.length>0&&<div className="actions" style={{marginTop:10}}>
@@ -784,29 +793,44 @@ export function StaffObjectDrawer({
           </div>}
         </div>
         <div className="panel" style={{margin:0}}>
-          <h3>包裹内拆出实物 ({(d.items??[]).length})</h3>
-          <Table
-            headers={["实物编码","订单","保管与核身状态","库位"]}
-            rows={(d.items??[]).map((it:Row)=>{
-              const custody = it.custody_state === "disposed" ? "已特殊处置" : it.custody_state === "outbound" ? "已出库交接" : it.custody_state === "stored" ? "在库保管" : "已实收暂存";
-              const identity = it.custody_state === "disposed" && it.identity_state === "pending"
-                ? "逾期免核身"
-                : it.custody_state === "outbound" && it.identity_state === "pending"
-                  ? "未绑单退回"
-                  : it.identity_state === "identified"
-                    ? "已核身"
-                    : it.identity_state === "quarantined"
-                      ? "隔离管控"
-                      : "待 SKU 核身";
-              return [
-                <CodeButton key={it.id} code={it.code} onClick={()=>switchTo({kind:"item",ref:it.code})}/>,
-                it.order_no?<Link className="code-btn" href={`/admin/orders/${it.order_no}`} onClick={onClose}>{it.order_no}</Link>:"未绑单",
-                <div key="st" className="actions"><Tag>{custody}</Tag><Tag tone="outline">{identity}</Tag></div>,
-                it.location??"—",
-              ];
-            })}
-            empty="该包裹尚未拆包生成逐件条码。"
-          />
+          {(()=>{
+            const allPkgItems:Row[]=d.items??[];
+            const totalPages=Math.max(1,Math.ceil(allPkgItems.length/10));
+            const curPage=Math.min(itemPage,totalPages);
+            const slice=allPkgItems.slice((curPage-1)*10,curPage*10);
+            return <>
+              <div className="row" style={{marginBottom:8}}>
+                <h3 style={{margin:0}}>包裹内拆出实物 ({allPkgItems.length})</h3>
+                {totalPages>1&&<div className="actions">
+                  <button type="button" className="button sm" disabled={curPage<=1} onClick={()=>setItemPage(curPage-1)}>上一页</button>
+                  <span className="small muted">第 {curPage} / {totalPages} 页</span>
+                  <button type="button" className="button sm" disabled={curPage>=totalPages} onClick={()=>setItemPage(curPage+1)}>下一页</button>
+                </div>}
+              </div>
+              <Table
+                headers={["实物编码","订单","保管与核身状态","库位"]}
+                rows={slice.map((it:Row)=>{
+                  const custody = it.custody_state === "disposed" ? "已特殊处置" : it.custody_state === "outbound" ? "已出库交接" : it.custody_state === "stored" ? "在库保管" : "已实收暂存";
+                  const identity = it.custody_state === "disposed" && it.identity_state === "pending"
+                    ? "逾期免核身"
+                    : it.custody_state === "outbound" && it.identity_state === "pending"
+                      ? "未绑单退回"
+                      : it.identity_state === "identified"
+                        ? "已核身"
+                        : it.identity_state === "quarantined"
+                          ? "隔离管控"
+                          : "待 SKU 核身";
+                  return [
+                    <CodeButton key={it.id} code={it.code} onClick={()=>switchTo({kind:"item",ref:it.code})}/>,
+                    it.order_no?(canAdminOrders?<Link className="code-btn" href={`/admin/orders/${it.order_no}`} onClick={onClose}>{it.order_no}</Link>:<span className="code">{it.order_no}</span>):"未绑单",
+                    <div key="st" className="actions"><Tag>{custody}</Tag><Tag tone="outline">{identity}</Tag></div>,
+                    it.location??"—",
+                  ];
+                })}
+                empty="该包裹尚未拆包生成逐件条码。"
+              />
+            </>;
+          })()}
         </div>
       </>;
     })()}
@@ -834,7 +858,7 @@ export function StaffObjectDrawer({
               {it.inbound_tracking_norm&&<CodeButton code={it.inbound_tracking_norm} onClick={()=>switchTo({kind:"tracking",ref:it.inbound_tracking_norm})}/>}
             </div></div>
             <div><small className="muted">当前库位 / 免费保管至</small><div>{it.location??"已出库/无库位"} · {stamp(it.storage_until,true)}</div></div>
-            <div><small className="muted">绑定质检单</small><div>{it.order_no?<Link className="code-btn" href={`/admin/orders/${it.order_no}`} onClick={onClose}>{it.order_no} (#{it.expected_position??"-"})</Link>:"未委托实物"}</div></div>
+            <div><small className="muted">绑定质检单</small><div>{it.order_no?(canAdminOrders?<Link className="code-btn" href={`/admin/orders/${it.order_no}`} onClick={onClose}>{it.order_no} (#{it.expected_position??"-"})</Link>:<span className="code">{it.order_no} (#{it.expected_position??"-"})</span>):"未委托实物"}</div></div>
             <div><small className="muted">当前处置 / 出库批次</small><div className="actions">
               {it.active_disposition?<Tag>{it.active_disposition.action} · {it.active_disposition.state}</Tag>:<span className="muted">无进行中处置</span>}
               {it.active_batch_id&&<CodeButton code={`批次 #${String(it.active_batch_id).slice(0,8)}`} onClick={()=>switchTo({kind:"batch",ref:it.active_batch_id})}/>}
@@ -865,7 +889,7 @@ export function StaffObjectDrawer({
           </div>
           <div className="grid cols2" style={{marginTop:10}}>
             <div><small className="muted">收件人 / 电话</small><div>{dest.recipient??"—"} · {dest.phone??"—"}</div></div>
-            <div><small className="muted">最新运费报价</small><div>{b.amount_cents!=null?`${usd(b.amount_cents)} (至 ${stamp(b.expires_at,true)})`:"待称重报价"}</div></div>
+            <div><small className="muted">最新运费报价</small><div>{b.financial_restricted?"仅财务/超管可见":b.amount_cents!=null?`${usd(b.amount_cents)} (至 ${stamp(b.expires_at,true)})`:"待称重报价"}</div></div>
             <div style={{gridColumn:"1 / -1"}}><small className="muted">收件地址</small><div>{dest.address??"—"} {dest.member_code?`(进仓码: ${dest.member_code})`:""}</div></div>
           </div>
           <div className="actions" style={{marginTop:10}}>

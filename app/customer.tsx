@@ -33,9 +33,15 @@ const states:Record<string,string>={
   reconciliation:"Payment status to verify",
 };
 const label=(state:string|null|undefined)=>state?states[state]??(state.charAt(0).toUpperCase()+state.slice(1).replaceAll("_"," ")):"—";
-const itemInspectionLabel=(item:Row)=>item.inspection_stage==="inspected"?"Inspection complete":item.inspection_stage==="in_inspection"?"Inspection underway":
-  item.inspection_stage==="pending"||["awaiting_samples","samples_ready","queued","inspecting","qa_review"].includes(item.order_state)?"Awaiting inspection":
-  item.order_no?"No active inspection":"Not commissioned";
+const itemInspectionLabel=(item:Row)=>{
+  if(item.identity_state==="quarantined") return "Quarantined — review required";
+  if(item.identity_state==="mismatch") return "Identity mismatch — awaiting confirmation";
+  if(item.identity_state==="pending") return "Pending SKU verification";
+  if(item.inspection_stage==="inspected") return "Inspection complete";
+  if(item.inspection_stage==="in_inspection") return "Inspection underway";
+  if(item.inspection_stage==="pending"||["awaiting_samples","samples_ready","queued","inspecting","qa_review"].includes(item.order_state)) return "Awaiting inspection";
+  return item.order_no?"No active inspection":"Not commissioned";
+};
 const parcelLinkStates=["draft","awaiting_payment","awaiting_samples","on_hold"];
 const orderNext:Record<string,string>={
   draft:"Review the inspection scope and calculate a quote.",
@@ -491,7 +497,7 @@ const maximumDraftItems=300;
 const wizardPolicyKinds=["terms","privacy","restricted_items","report_notice"];
 const quoteTimeoutMs=15000;
 
-export function NewOrder({customerId}:{customerId:string}) {
+export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolean}) {
   const stamp=useWorkspaceStamp();
   const {data,error,reload:reloadCatalog}=useLoad("/catalog");
   const refs=useLoad("/me/reference-samples");
@@ -565,6 +571,8 @@ export function NewOrder({customerId}:{customerId:string}) {
   const [showAdvancedUnits,setShowAdvancedUnits]=useState(false);
   const [bulkSupplierInput,setBulkSupplierInput]=useState("");
   const [bulkTrackingInput,setBulkTrackingInput]=useState("");
+  const [selectedLineIds,setSelectedLineIds]=useState<string[]>([]);
+  const [compactLineView,setCompactLineView]=useState<boolean|null>(null);
   const [itemPage,setItemPage]=useState(0);
   const [showFullChecklist,setShowFullChecklist]=useState(false);
   const [notes,setNotes]=useState("");
@@ -1135,15 +1143,20 @@ export function NewOrder({customerId}:{customerId:string}) {
     applyExpectedLinesUpdate([...merged.values()]);
   }
 
-  function bulkFillExpectedLines(mode:"empty"|"all") {
+  function bulkFillExpectedLines(mode:"empty"|"all"|"selected") {
     const sup=bulkSupplierInput.trim();
     const trk=normalizeTrackingCode(bulkTrackingInput);
     if(!sup&&!trk) return;
-    const next=expectedLines.map(line=>({
-      ...line,
-      supplier_alias:sup?(mode==="all"||!line.supplier_alias.trim()?sup:line.supplier_alias):line.supplier_alias,
-      tracking_no:trk?(mode==="all"||!line.tracking_no?.trim()?trk:line.tracking_no):line.tracking_no,
-    }));
+    const selectedSet=new Set(selectedLineIds);
+    const next=expectedLines.map(line=>{
+      if(mode==="selected"&&!selectedSet.has(line.id)) return line;
+      const force=mode==="all"||mode==="selected";
+      return {
+        ...line,
+        supplier_alias:sup?(force||!line.supplier_alias.trim()?sup:line.supplier_alias):line.supplier_alias,
+        tracking_no:trk?(force||!line.tracking_no?.trim()?trk:line.tracking_no):line.tracking_no,
+      };
+    });
     applyExpectedLinesUpdate(next);
   }
 
@@ -1259,7 +1272,7 @@ export function NewOrder({customerId}:{customerId:string}) {
           purchase_order_ref:"",
           uploaded_at:new Date().toISOString(),
           extraction_status:"manual_only",
-          extraction_note:"Recorded PDF metadata & SHA-256. Binary PDF upload & automated PDF OCR are OPEN — paste order text below or upload screenshots for visual reference.",
+          extraction_note:"Recorded PDF metadata & SHA-256. Automated PDF OCR extraction is disabled in this environment — paste order text below or upload screenshots for visual reference.",
           candidates:[],
         };
         setPurchaseEvidences(prev=>[...prev,newEv]);
@@ -1855,11 +1868,13 @@ export function NewOrder({customerId}:{customerId:string}) {
     });
   }
 
-  function syncDraftAndQuote() {
+  function syncDraftAndQuote(options?:{preserveStep?:boolean}) {
     return runWizard("Calculating quote…",async()=>{
       setServerQuote(undefined);
-      setConsents({});
-      setPolicyAccepted(false);
+      if(quotedFingerprint!==fingerprint) {
+        setConsents({});
+        setPolicyAccepted(false);
+      }
       if(unconfirmedEvidences.length>0) throw new Error("Confirm or discard pending extracted candidate rows before requesting a quote.");
       if(!currentLine||!effectiveDisplayName) throw new Error("Review the service, quantity and product lines before requesting a quote.");
       const order=await persistDraft();
@@ -1875,7 +1890,7 @@ export function NewOrder({customerId}:{customerId:string}) {
       submitKey.current=crypto.randomUUID();
       setQuotedFingerprint(fingerprint);
       setServerQuote(quote);
-      syncDraftUrl(order.public_no,4);
+      if(!options?.preserveStep) syncDraftUrl(order.public_no,4);
       return quote;
     });
   }
@@ -2191,7 +2206,7 @@ export function NewOrder({customerId}:{customerId:string}) {
       if(!allConsentsChecked) {
         const firstUncheckedKey=Object.keys(acknowledged).find(k=>!consents[k]);
         return {
-          reason:"Accept the platform policies and check all 5 disclosures above to continue to Payment Preview.",
+          reason:"Complete all 6 required acknowledgements above (1 platform policy acceptance + 5 service disclosures) to continue to Payment Preview.",
           targetId:!policyAccepted?"step5-policy-accept-check":(firstUncheckedKey?"step5-consent-"+firstUncheckedKey:"step5-policy-accept-check"),
         };
       }
@@ -2308,6 +2323,11 @@ export function NewOrder({customerId}:{customerId:string}) {
 
           <div className="sep"/>
           <div className="label" style={{marginBottom:8}}>1B · INSPECTION SERVICE</div>
+          {draftOrder&&quotedFingerprint&&quotedFingerprint!==fingerprint&&!hasValidQuote&&(
+            <div className="notice warning" role="status" style={{marginBottom:12}}>
+              <strong>Draft updated since previous quote:</strong> You modified service or category selections after your previous server quote. Continue through Step 5 to calculate a current quote.
+            </div>
+          )}
           {serviceSwitchBanner&&(
             <div className="notice ok" data-testid="step1-service-switch-banner" role="status" style={{marginBottom:12}}>
               <div>{serviceSwitchBanner}</div>
@@ -2334,7 +2354,9 @@ export function NewOrder({customerId}:{customerId:string}) {
               const priceText=unitPrices.length>0
                 ?`${lowestUnit<highestUnit?"From ":""}${usd(lowestUnit)} / item`
                 :pkgPrices.length>0
-                  ?`${usd(lowestPackage)}${lowestPackage<highestPackage?"–"+usd(highestPackage):""} / set`
+                  ?(card.service==="reference_match"
+                    ?`${usd(lowestPackage)} / comparison set (1 candidate)`
+                    :`${usd(lowestPackage)}${lowestPackage<highestPackage?"–"+usd(highestPackage):""} / set`)
                   :isServiceAvailable?"Quote on request":"Not available";
               const isSelected=serviceKind===card.service;
               const isGoldenService=card.service==="reference_match";
@@ -2541,6 +2563,24 @@ export function NewOrder({customerId}:{customerId:string}) {
                 }}
               >Request a manual quote</button>}
             </div>
+
+            {expectedLines.length>0&&hasQuantityMismatch&&!manualQuoteMode&&(()=>{
+              const canSyncOnline=serviceKind!=="compare"&&expectedTotalQty>=minQty&&expectedTotalQty<=maxOnlineQty&&Boolean(offerFor(templateOffers,templateVariant,expectedTotalQty));
+              const canSyncCompare=serviceKind==="compare"&&(expectedTotalQty===2||expectedTotalQty===3)&&Boolean(offerFor(serviceOffers,templateVariant,expectedTotalQty));
+              return <div className="notice warning" id="step2-qty-mismatch-banner" role="status" style={{marginTop:14}}>
+                <div className="row between flexwrap" style={{gap:8}}>
+                  <span>
+                    <strong>Commissioned qty ({clampedQty}) differs from Step 3B confirmed line units ({expectedTotalQty}).</strong>{" "}
+                    Both counts must match before requesting a quote in Step 5.
+                  </span>
+                  {(canSyncOnline||canSyncCompare)&&(
+                    <button type="button" className="button sm primary" onClick={()=>applyExpectedLinesUpdate(expectedLines,{recordUndo:false,forceSync:true})}>
+                      {canSyncCompare?`Switch to ${expectedTotalQty}-Sample Comparison Package`:`Sync Commissioned Qty to ${expectedTotalQty}`}
+                    </button>
+                  )}
+                </div>
+              </div>;
+            })()}
 
             {manualQuoteMode && serviceKind==="inspection" && (
               <div className="card flat" id="step2-manual-quote-card" style={{marginTop:16,borderColor:"#98b4ee",background:"#f4f8ff"}}>
@@ -2761,7 +2801,7 @@ export function NewOrder({customerId}:{customerId:string}) {
           </div>
 
           <div className="line-note" data-testid="step3a-no-auto-ocr-note" style={{marginTop:8}}>
-            <strong>Reference only (No Auto-OCR):</strong> Automated image/PDF OCR is not active (<strong>OPEN</strong>). Files uploaded here are SHA-256 deduplicated and kept strictly in Step 3A for warehouse intake reference (never copied into Step 3B reference photos and never billed as SKUs). Convert your order into confirmed lines using <strong>+ Transcribe Row</strong>, <strong>Paste Order / CSV / 1688 Text</strong>, or <strong>Quick Matrix (3B)</strong>.
+            <strong>Reference only (Manual Confirmation Required):</strong> Automated image/PDF OCR extraction is disabled in this environment; files uploaded here are SHA-256 deduplicated and kept strictly in Step 3A for warehouse intake reference (never copied into Step 3B reference photos and never billed as SKUs). Convert your order into confirmed lines using <strong>+ Transcribe Row</strong>, <strong>Paste Order / CSV / 1688 Text</strong>, or <strong>Quick Matrix (3B)</strong>.
           </div>
 
           {evidenceDuplicateWarning&&<div className="notice warning" role="alert" style={{marginTop:10}}>
@@ -2854,7 +2894,7 @@ export function NewOrder({customerId}:{customerId:string}) {
               {ev.candidates.length===0&&ev.extraction_status!=="confirmed"&&ev.extraction_status!=="pending_reassociation"&&(
                 <div className="step3a-next-action-guide" data-testid="step3a-next-action-guide">
                   <div className="small" style={{marginBottom:6}}>
-                    <strong>Recommended Next Step for {ev.file_name}:</strong> Automated image/PDF OCR is currently <strong>OPEN</strong>. Choose the fastest way to turn this document into confirmed 3B product lines:
+                    <strong>Recommended Next Step for {ev.file_name}:</strong> Automated image/PDF OCR extraction is disabled in this environment; files are stored safely as purchase evidence. Choose the fastest way to turn this document into confirmed 3B product lines:
                   </div>
                   <div className="actions" style={{margin:0,gap:8}}>
                     <button
@@ -3039,28 +3079,6 @@ export function NewOrder({customerId}:{customerId:string}) {
                 </label>
               </div>
             </div>
-            {expectedLines.length>0&&(
-              <div className="wizard-batch-toolbar" style={{marginTop:10}}>
-                <div className="row flexwrap" style={{gap:8}}>
-                  <input
-                    className="input"
-                    style={{maxWidth:180}}
-                    placeholder="Bulk supplier name"
-                    value={bulkSupplierInput}
-                    onChange={e=>setBulkSupplierInput(e.target.value)}
-                  />
-                  <input
-                    className="input"
-                    style={{maxWidth:180}}
-                    placeholder="Bulk waybill (optional)"
-                    value={bulkTrackingInput}
-                    onChange={e=>setBulkTrackingInput(e.target.value)}
-                  />
-                  <button type="button" className="button sm" onClick={()=>bulkFillExpectedLines("empty")}>Fill Empty Fields</button>
-                  <button type="button" className="button sm" onClick={()=>bulkFillExpectedLines("all")}>Overwrite All Lines</button>
-                </div>
-              </div>
-            )}
           </details>
 
           {showMatrixBuilder&&<div className="card flat" style={{marginTop:12}}>
@@ -3106,8 +3124,47 @@ export function NewOrder({customerId}:{customerId:string}) {
             </div>
           </div>}
 
-          {expectedLines.length>0&&(
-            <>
+          {expectedLines.length>0&&(()=>{
+            const useDenseTable=compactLineView ?? expectedLines.length>=4;
+            const validSelectedCount=selectedLineIds.filter(id=>expectedLines.some(l=>l.id===id)).length;
+            const allSelected=validSelectedCount>0&&validSelectedCount===expectedLines.length;
+            return <>
+              <div className="wizard-batch-toolbar" style={{marginTop:12}} data-testid="step3b-batch-toolbar">
+                <div className="row between flexwrap" style={{gap:8,width:"100%"}}>
+                  <div className="row flexwrap" style={{gap:8}}>
+                    <input
+                      className="input"
+                      style={{maxWidth:170}}
+                      placeholder="Batch supplier name"
+                      aria-label="Batch supplier name"
+                      value={bulkSupplierInput}
+                      onChange={e=>setBulkSupplierInput(e.target.value)}
+                    />
+                    <input
+                      className="input"
+                      style={{maxWidth:170}}
+                      placeholder="Batch waybill (optional)"
+                      aria-label="Batch waybill"
+                      value={bulkTrackingInput}
+                      onChange={e=>setBulkTrackingInput(e.target.value)}
+                    />
+                    <button type="button" className="button sm" disabled={!validSelectedCount} onClick={()=>bulkFillExpectedLines("selected")}>
+                      Apply to Selected ({validSelectedCount})
+                    </button>
+                    <button type="button" className="button sm" onClick={()=>bulkFillExpectedLines("empty")}>Fill Empty Fields</button>
+                    <button type="button" className="button sm" onClick={()=>bulkFillExpectedLines("all")}>Overwrite All Lines</button>
+                  </div>
+                  <div className="row flexwrap" style={{gap:6}}>
+                    <button type="button" className="button sm" onClick={()=>setSelectedLineIds(allSelected?[]:expectedLines.map(l=>l.id))}>
+                      {allSelected?"Clear Selection":"Select All"}
+                    </button>
+                    <button type="button" className="button sm" onClick={()=>setCompactLineView(!useDenseTable)}>
+                      {useDenseTable?"Card View":"Dense Table"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
               <div className="row between flexwrap" style={{marginTop:10,gap:8}}>
                 <label className="checkrow" style={{margin:0}}>
                   <input
@@ -3124,52 +3181,104 @@ export function NewOrder({customerId}:{customerId:string}) {
                 {expectedLines.some(l=>l.source_file_name)&&<span className="small muted">Imported lines remain linked to their 3A source evidence.</span>}
               </div>
 
-              <div className="sku-lines-list wizard-items" style={{marginTop:10}}>
-                {expectedLines.map((line,idx)=>{
-                  const missing=missingLineFields(line);
-                  return <div key={line.id} className="sku-line-card card flat">
-                    <div className="sku-line-head">
-                      <div className="row" style={{gap:8}}>
-                        <span className="tag gray mono">#{String(idx+1).padStart(2,"0")}</span>
-                        <strong className="small">{line.product_name.trim()||`Product Line ${idx+1}`}</strong>
-                        {missing.length>0&&<Tag tone="yellow">{missing.length} required field{missing.length===1?"":"s"} missing</Tag>}
+              {useDenseTable?(
+                <div className="table-wrap wizard-items" style={{marginTop:10}}>
+                  <table className="tbl wizard-dense-table">
+                    <thead>
+                      <tr>
+                        <th style={{width:32}}>
+                          <input type="checkbox" aria-label="Select all product lines" checked={allSelected} onChange={e=>setSelectedLineIds(e.target.checked?expectedLines.map(l=>l.id):[])}/>
+                        </th>
+                        <th>#</th>
+                        <th>SKU / Style</th>
+                        <th>Product Name *</th>
+                        <th>Color *</th>
+                        <th>{isApparelCategory?"Size *":"Spec *"}</th>
+                        <th>Qty *</th>
+                        <th>Supplier</th>
+                        <th>Waybill</th>
+                        <th>Check Note</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {expectedLines.map((line,idx)=>{
+                        const missing=missingLineFields(line);
+                        const isChecked=selectedLineIds.includes(line.id);
+                        return <tr key={line.id}>
+                          <td>
+                            <input type="checkbox" aria-label={`Select line ${idx+1}`} checked={isChecked} onChange={e=>setSelectedLineIds(xs=>e.target.checked?[...new Set([...xs,line.id])]:xs.filter(id=>id!==line.id))}/>
+                          </td>
+                          <td className="mono">{idx+1}</td>
+                          <td><input id={`step3b-line-${idx}-sku_code`} className="input" aria-label={`Line ${idx+1} SKU`} value={line.sku_code} onChange={e=>updateExpectedLine(line.id,{sku_code:e.target.value,edited_by_user:true})} placeholder="HD-BLK-M"/></td>
+                          <td><input id={`step3b-line-${idx}-product_name`} aria-invalid={missing.includes("product_name")||undefined} className={`input ${missing.includes("product_name")?"input-warn":""}`} aria-label={`Line ${idx+1} product name`} value={line.product_name} onChange={e=>updateExpectedLine(line.id,{product_name:e.target.value,edited_by_user:true})} placeholder="Product name"/></td>
+                          <td><input id={`step3b-line-${idx}-color`} aria-invalid={missing.includes("color")||undefined} className={`input ${missing.includes("color")?"input-warn":""}`} aria-label={`Line ${idx+1} color`} value={line.color_declared} onChange={e=>updateExpectedLine(line.id,{color_declared:e.target.value,edited_by_user:true})} placeholder="Color"/></td>
+                          <td><input id={`step3b-line-${idx}-size`} aria-invalid={missing.includes("size")||undefined} className={`input ${missing.includes("size")?"input-warn":""}`} aria-label={`Line ${idx+1} size`} value={line.size_label} onChange={e=>updateExpectedLine(line.id,{size_label:e.target.value,edited_by_user:true})} placeholder="M"/></td>
+                          <td><input id={`step3b-line-${idx}-quantity`} aria-invalid={missing.includes("quantity")||undefined} className={`input ${missing.includes("quantity")?"input-warn":""}`} type="number" min={1} max={300} style={{width:68}} aria-label={`Line ${idx+1} quantity`} value={line.quantity||""} onChange={e=>updateExpectedLine(line.id,{quantity:Math.max(0,Math.floor(Number(e.target.value)||0)),edited_by_user:true})}/></td>
+                          <td><input className="input" aria-label={`Line ${idx+1} supplier`} value={line.supplier_alias} onChange={e=>updateExpectedLine(line.id,{supplier_alias:e.target.value,edited_by_user:true})} placeholder={supplierRef||"Supplier"}/></td>
+                          <td><input className="input" aria-label={`Line ${idx+1} waybill`} value={line.tracking_no??""} onChange={e=>updateExpectedLine(line.id,{tracking_no:e.target.value,edited_by_user:true})} placeholder="Waybill"/></td>
+                          <td><input className="input" aria-label={`Line ${idx+1} note`} value={line.inspection_note??""} onChange={e=>updateExpectedLine(line.id,{inspection_note:e.target.value,edited_by_user:true})} placeholder="Note"/></td>
+                          <td>
+                            <div className="actions" style={{gap:4}}>
+                              <button type="button" className="button sm" title="Copy row" onClick={()=>duplicateExpectedLine(line)}>Copy</button>
+                              <button type="button" className="button sm" title="Remove row" onClick={()=>removeExpectedLine(line.id)}>Del</button>
+                            </div>
+                          </td>
+                        </tr>;
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ):(
+                <div className="sku-lines-list wizard-items" style={{marginTop:10}}>
+                  {expectedLines.map((line,idx)=>{
+                    const missing=missingLineFields(line);
+                    const isChecked=selectedLineIds.includes(line.id);
+                    return <div key={line.id} className="sku-line-card card flat">
+                      <div className="sku-line-head">
+                        <div className="row" style={{gap:8}}>
+                          <input type="checkbox" aria-label={`Select line ${idx+1}`} checked={isChecked} onChange={e=>setSelectedLineIds(xs=>e.target.checked?[...new Set([...xs,line.id])]:xs.filter(id=>id!==line.id))}/>
+                          <span className="tag gray mono">#{String(idx+1).padStart(2,"0")}</span>
+                          <strong className="small">{line.product_name.trim()||`Product Line ${idx+1}`}</strong>
+                          {missing.length>0&&<Tag tone="yellow">{missing.length} required field{missing.length===1?"":"s"} missing</Tag>}
+                        </div>
+                        <div className="row" style={{gap:6}}>
+                          <button type="button" className="button sm" title="Duplicate line" onClick={()=>duplicateExpectedLine(line)}>Copy</button>
+                          <button type="button" className="button sm" title="Remove line" onClick={()=>removeExpectedLine(line.id)}>Remove</button>
+                        </div>
                       </div>
-                      <div className="row" style={{gap:6}}>
-                        <button type="button" className="button sm" title="Duplicate line" onClick={()=>duplicateExpectedLine(line)}>Copy</button>
-                        <button type="button" className="button sm" title="Remove line" onClick={()=>removeExpectedLine(line.id)}>Remove</button>
+                      <div className="sku-line-grid-primary">
+                        <label className="field"><span>SKU / Style</span>
+                          <input id={`step3b-line-${idx}-sku_code`} className="input" aria-label={`Line ${idx+1} SKU`} value={line.sku_code} onChange={e=>updateExpectedLine(line.id,{sku_code:e.target.value,edited_by_user:true})} placeholder="HD-BLK-M"/>
+                        </label>
+                        <label className="field"><span>Product Name *</span>
+                          <input id={`step3b-line-${idx}-product_name`} aria-invalid={missing.includes("product_name")||undefined} className={`input ${missing.includes("product_name")?"input-warn":""}`} aria-label={`Line ${idx+1} product name`} value={line.product_name} onChange={e=>updateExpectedLine(line.id,{product_name:e.target.value,edited_by_user:true})} placeholder="Product name"/>
+                        </label>
+                        <label className="field"><span>Color *</span>
+                          <input id={`step3b-line-${idx}-color`} aria-invalid={missing.includes("color")||undefined} className={`input ${missing.includes("color")?"input-warn":""}`} aria-label={`Line ${idx+1} color`} value={line.color_declared} onChange={e=>updateExpectedLine(line.id,{color_declared:e.target.value,edited_by_user:true})} placeholder="Color"/>
+                        </label>
+                        <label className="field"><span>{isApparelCategory?"Size *":"Spec *"}</span>
+                          <input id={`step3b-line-${idx}-size`} aria-invalid={missing.includes("size")||undefined} className={`input ${missing.includes("size")?"input-warn":""}`} aria-label={`Line ${idx+1} size`} value={line.size_label} onChange={e=>updateExpectedLine(line.id,{size_label:e.target.value,edited_by_user:true})} placeholder="M"/>
+                        </label>
+                        <label className="field"><span>Qty *</span>
+                          <input id={`step3b-line-${idx}-quantity`} aria-invalid={missing.includes("quantity")||undefined} className={`input ${missing.includes("quantity")?"input-warn":""}`} type="number" min={1} max={300} aria-label={`Line ${idx+1} quantity`} value={line.quantity||""} onChange={e=>updateExpectedLine(line.id,{quantity:Math.max(0,Math.floor(Number(e.target.value)||0)),edited_by_user:true})}/>
+                        </label>
                       </div>
-                    </div>
-                    <div className="sku-line-grid-primary">
-                      <label className="field"><span>SKU / Style</span>
-                        <input id={`step3b-line-${idx}-sku_code`} className="input" aria-label={`Line ${idx+1} SKU`} value={line.sku_code} onChange={e=>updateExpectedLine(line.id,{sku_code:e.target.value,edited_by_user:true})} placeholder="HD-BLK-M"/>
-                      </label>
-                      <label className="field"><span>Product Name *</span>
-                        <input id={`step3b-line-${idx}-product_name`} aria-invalid={missing.includes("product_name")||undefined} className={`input ${missing.includes("product_name")?"input-warn":""}`} aria-label={`Line ${idx+1} product name`} value={line.product_name} onChange={e=>updateExpectedLine(line.id,{product_name:e.target.value,edited_by_user:true})} placeholder="Product name"/>
-                      </label>
-                      <label className="field"><span>Color *</span>
-                        <input id={`step3b-line-${idx}-color`} aria-invalid={missing.includes("color")||undefined} className={`input ${missing.includes("color")?"input-warn":""}`} aria-label={`Line ${idx+1} color`} value={line.color_declared} onChange={e=>updateExpectedLine(line.id,{color_declared:e.target.value,edited_by_user:true})} placeholder="Color"/>
-                      </label>
-                      <label className="field"><span>{isApparelCategory?"Size *":"Spec *"}</span>
-                        <input id={`step3b-line-${idx}-size`} aria-invalid={missing.includes("size")||undefined} className={`input ${missing.includes("size")?"input-warn":""}`} aria-label={`Line ${idx+1} size`} value={line.size_label} onChange={e=>updateExpectedLine(line.id,{size_label:e.target.value,edited_by_user:true})} placeholder="M"/>
-                      </label>
-                      <label className="field"><span>Qty *</span>
-                        <input id={`step3b-line-${idx}-quantity`} aria-invalid={missing.includes("quantity")||undefined} className={`input ${missing.includes("quantity")?"input-warn":""}`} type="number" min={1} max={300} aria-label={`Line ${idx+1} quantity`} value={line.quantity||""} onChange={e=>updateExpectedLine(line.id,{quantity:Math.max(0,Math.floor(Number(e.target.value)||0)),edited_by_user:true})}/>
-                      </label>
-                    </div>
-                    <div className="sku-line-grid-secondary">
-                      <label className="field"><span>Supplier</span>
-                        <input className="input" aria-label={`Line ${idx+1} supplier`} value={line.supplier_alias} onChange={e=>updateExpectedLine(line.id,{supplier_alias:e.target.value,edited_by_user:true})} placeholder={supplierRef||"Supplier shop"}/>
-                      </label>
-                      <label className="field"><span>Waybill</span>
-                        <input className="input" aria-label={`Line ${idx+1} waybill`} value={line.tracking_no??""} onChange={e=>updateExpectedLine(line.id,{tracking_no:e.target.value,edited_by_user:true})} placeholder="Optional seller tracking"/>
-                      </label>
-                      <label className="field"><span>Check Note</span>
-                        <input className="input" aria-label={`Line ${idx+1} note`} value={line.inspection_note??""} onChange={e=>updateExpectedLine(line.id,{inspection_note:e.target.value,edited_by_user:true})} placeholder="Focus point for this SKU"/>
-                      </label>
-                    </div>
-                  </div>;
-                })}
-              </div>
+                      <div className="sku-line-grid-secondary">
+                        <label className="field"><span>Supplier</span>
+                          <input className="input" aria-label={`Line ${idx+1} supplier`} value={line.supplier_alias} onChange={e=>updateExpectedLine(line.id,{supplier_alias:e.target.value,edited_by_user:true})} placeholder={supplierRef||"Supplier shop"}/>
+                        </label>
+                        <label className="field"><span>Waybill</span>
+                          <input className="input" aria-label={`Line ${idx+1} waybill`} value={line.tracking_no??""} onChange={e=>updateExpectedLine(line.id,{tracking_no:e.target.value,edited_by_user:true})} placeholder="Optional seller tracking"/>
+                        </label>
+                        <label className="field"><span>Check Note</span>
+                          <input className="input" aria-label={`Line ${idx+1} note`} value={line.inspection_note??""} onChange={e=>updateExpectedLine(line.id,{inspection_note:e.target.value,edited_by_user:true})} placeholder="Focus point for this SKU"/>
+                        </label>
+                      </div>
+                    </div>;
+                  })}
+                </div>
+              )}
 
               {expectedTotalQty!==clampedQty&&(()=>{
                 const canSyncCompare=serviceKind==="compare"&&(expectedTotalQty===2||expectedTotalQty===3)&&Boolean(offerFor(serviceOffers,templateVariant,expectedTotalQty));
@@ -3232,8 +3341,8 @@ export function NewOrder({customerId}:{customerId:string}) {
                   </div>
                 </div>;
               })()}
-            </>
-          )}
+            </>;
+          })()}
 
           {expectedLines.length===0&&(
             <>
@@ -3696,8 +3805,8 @@ export function NewOrder({customerId}:{customerId:string}) {
                 <div className="label" style={{marginBottom:6}}>VISUAL &amp; WORKMANSHIP CHECKS ({visualChecks.length})</div>
                 <ul className="small" style={{margin:0,paddingLeft:18}}>
                   {visualChecks.map((c:Row)=><li key={c.key} style={{marginBottom:6}}>
-                    <strong>{c.label}</strong> <Tag tone="gray">{c.required?"Required":"Template option"}</Tag>
-                    {showFullChecklist&&<div className="muted">{c.method} (Evidence: {c.evidence})</div>}
+                    <strong>{c.label}</strong> <Tag tone="gray">{c.required?"Required":"Optional check"}</Tag>
+                    {showFullChecklist&&<div className="muted">{c.method} (Evidence: {c.evidence===true?"Photo required":c.evidence===false?"Optional":String(c.evidence??"As needed")})</div>}
                   </li>)}
                 </ul>
               </div>
@@ -3705,7 +3814,7 @@ export function NewOrder({customerId}:{customerId:string}) {
                 <div className="label" style={{marginBottom:6}}>MEASUREMENTS ({measurementChecks.length})</div>
                 <ul className="small" style={{margin:0,paddingLeft:18}}>
                   {measurementChecks.map((c:Row)=><li key={c.key} style={{marginBottom:6}}>
-                    <strong>{c.label}</strong> ({c.unit}) <Tag tone="blue">{c.required?"Required":"Template option"}</Tag>
+                    <strong>{c.label}</strong> ({c.unit}) <Tag tone="blue">{c.required?"Required":"Optional check"}</Tag>
                     {showFullChecklist&&<div className="muted">{c.method}</div>}
                   </li>)}
                 </ul>
@@ -3751,11 +3860,20 @@ export function NewOrder({customerId}:{customerId:string}) {
             </div>
             {toleranceMode==="record_only"?(
               <p className="small muted" style={{margin:"8px 0 0"}}>
-                The report shows the recorded measurements. Measurements without a supplied tolerance are not graded against a range.
+                The report shows the recorded measurements. Measurements without a supplied tolerance are not graded against a range. Optional checks remain available in full method view without grading penalty.
               </p>
             ):(
               <div className="table-wrap" style={{marginTop:10}}>
-                <p className="small">Targets apply to every item on this service line. Use separate service lines if sizes need different targets.</p>
+                {(()=>{
+                  const declaredSizeSet=[...new Set(expectedLines.map(l=>l.size_label.trim()).filter(Boolean))];
+                  return declaredSizeSet.length>1?(
+                    <div className="line-note warning" style={{marginBottom:10}}>
+                      <strong>Multi-Size Target Warning:</strong> Your product lines declare multiple sizes ({declaredSizeSet.join(", ")}). Targets entered below apply uniformly to every unit on this service line—add separate service lines if sizes require different measurement ranges.
+                    </div>
+                  ):(
+                    <p className="small">Targets apply to every item on this service line. Use separate service lines if sizes need different targets.</p>
+                  );
+                })()}
                 <table className="tbl">
                   <thead>
                     <tr>
@@ -3994,7 +4112,12 @@ export function NewOrder({customerId}:{customerId:string}) {
 
           <div className="sep"/>
           <div style={{marginBottom:12}}>
-            <div className="label" style={{marginBottom:6}}>APPLICABLE PLATFORM POLICIES &amp; SERVICE BOUNDARIES</div>
+            <div className="row between flexwrap" style={{marginBottom:6}}>
+              <div className="label">APPLICABLE PLATFORM POLICIES &amp; SERVICE BOUNDARIES</div>
+              <Tag tone={allConsentsChecked?"green":"yellow"}>
+                Acknowledgements completed: {(policyAccepted?1:0)+Object.keys(acknowledged).filter(k=>consents[k]).length} / 6 (1 platform policy acceptance + 5 service disclosures)
+              </Tag>
+            </div>
             <div className="actions" style={{margin:0}}>
               <Link className="button sm" href="/legal/terms" target="_blank" rel="noreferrer">Terms of Service ↗</Link>
               <Link className="button sm" href="/legal/privacy" target="_blank" rel="noreferrer">Privacy Policy ↗</Link>
@@ -4009,21 +4132,21 @@ export function NewOrder({customerId}:{customerId:string}) {
             <label className="checkrow">
               <input id="step5-policy-accept-check" type="checkbox" checked={policyAccepted} disabled={!hasValidQuote||policyIds.length!==wizardPolicyKinds.length}
                 onChange={event=>setPolicyAccepted(event.target.checked)}/>
-              <span>I accept the applicable policies linked above.</span>
+              <span>I accept the applicable policies linked above. (1 of 6)</span>
             </label>
-            {Object.entries(acknowledged).map(([k,textLabel])=><label key={k} className="checkrow">
+            {Object.entries(acknowledged).map(([k,textLabel],idx)=><label key={k} className="checkrow">
               <input
                 id={"step5-consent-"+k}
                 type="checkbox"
                 checked={Boolean(consents[k])}
                 onChange={e=>setConsents(prev=>({...prev,[k]:e.target.checked}))}
               />
-              <span>{textLabel}</span>
+              <span>{textLabel} ({idx+2} of 6)</span>
             </label>)}
           </div>
 
           <div className="line-note warning" style={{marginTop:14}}>
-            Once submitted, your order locks the approved template version and price snapshot above. You cannot advance to payment until an active server quote is confirmed and all disclosures are accepted.
+            Once submitted, your order locks the approved template version and price snapshot above. You cannot advance to payment until an active server quote is confirmed and all 6 acknowledgements are accepted.
           </div>
         </Panel>}
 
@@ -4032,13 +4155,22 @@ export function NewOrder({customerId}:{customerId:string}) {
           subtitle="Confirm the valid quote and pay to activate this inspection."
           badge={<Tag tone="blue">{draftOrder?.public_no??"Ready"}</Tag>}
         >
+          {demo&&<div className="demo-address-alert" role="note" style={{marginBottom:12}}>
+            <strong>Sandbox / Demo Checkout Mode</strong>
+            <p className="small" style={{margin:"4px 0 0"}}>This payment step executes against your local sandbox environment. No real credit card charge occurs.</p>
+          </div>}
           {!hasValidQuote || !draftOrder ? (
             <div className="card flat" style={{borderColor:"#f3c68f",background:"#fffaf2"}}>
               <strong>Official quote verification required</strong>
               <p className="small muted" style={{margin:"6px 0 12px"}}>
-                Your quote is missing or expired. Please return to Step 5 to calculate a fresh server quote before submitting payment.
+                {isQuoteExpired?"Your previous official quote expired. Refresh the server quote below (unchanged disclosures stay checked) or return to Step 5.":"Your quote is missing or expired. Please calculate a fresh server quote before submitting payment."}
               </p>
-              <button type="button" className="button primary sm" onClick={()=>setStep(4)}>← Return to Step 5 (Review &amp; Terms)</button>
+              <div className="actions">
+                <button type="button" className="button primary sm" disabled={Boolean(busyMessage)} onClick={()=>void syncDraftAndQuote({preserveStep:true})}>
+                  {busyMessage?"Refreshing quote…":"Refresh Official Quote Now"}
+                </button>
+                <button type="button" className="button sm" onClick={()=>setStep(4)}>← Return to Step 5 (Review &amp; Terms)</button>
+              </div>
             </div>
           ) : (
             <>
@@ -4121,20 +4253,22 @@ export function NewOrder({customerId}:{customerId:string}) {
             <Tag tone={hasValidQuote?"green":"yellow"}>{draftOrder?draftOrder.public_no:"DRAFT"}</Tag>
           </div>
           <div className="sep"/>
-          <div className="mini-kv">
-            {extraLines.length===0?<><div><div className="k">Category</div><div className="v">{selectedCategoryName}</div></div>
-              <div><div className="k">Service</div><div className="v">{serviceLabel}</div></div>
-              <div><div className="k">Template</div><div className="v">{isApparelCategory?templateLabel.split(" (")[0]:"Standard"}</div></div></>:
-              <div><div className="k">Services</div><div className="v">{allLines.length} service lines</div></div>}
-            <div><div className="k">Confirmed lines</div><div className="v" data-testid="summary-confirmed-lines">{totalExpectedLineCount} line(s)</div></div>
-            <div><div className="k">Commissioned qty</div><div className="v">{manualQuoteMode?`${manualBatchQty} (Manual)`:`${totalItems} unit(s)`}</div></div>
-            <div><div className="k">Declared line units</div><div className="v">{expectedTotalQty} unit(s)</div></div>
-            <div><div className="k">Billable units</div><div className="v">{manualQuoteMode?`${manualBatchQty} (Manual)`:`${totalItems} unit(s)`}</div></div>
-            <div><div className="k">Suppliers</div><div className="v">{declaredSuppliers.length||"—"}</div></div>
-            <div><div className="k">Parcels / Waybills</div><div className="v">{parcelMode==="later"?"Add after pay":declaredWaybills.length?`${declaredWaybills.length} waybill(s)`:"Pending"}</div></div>
-            <div><div className="k">Purchase evidence (3A)</div><div className="v">{totalEvidenceCount} file(s)</div></div>
-            <div><div className="k">3B Ref / Size chart</div><div className="v">{attachmentId?(attachmentPurpose==="size_chart"?"Size chart":"Ref photo"):"None"}</div></div>
-          </div>
+          <ul className="summary-list-compact">
+            <li><span>Category &amp; Service</span><strong>{extraLines.length>0?`${allLines.length} service lines`:`${selectedCategoryName} · ${serviceLabel}`}</strong></li>
+            {extraLines.length===0&&<li><span>Template</span><strong>{isApparelCategory?templateLabel.split(" (")[0]:"Standard"}</strong></li>}
+            <li><span>Commissioned / Declared</span><strong>{manualQuoteMode?`${manualBatchQty} (Manual)`:`${totalItems} / ${expectedTotalQty} unit(s)`}</strong></li>
+            <li><span>Confirmed SKU Groups</span><strong data-testid="summary-confirmed-lines">{totalExpectedLineCount} line(s)</strong></li>
+            <li><span>Suppliers / Waybills</span><strong>{declaredSuppliers.length||0} supplier(s) · {parcelMode==="later"?"Add later":`${declaredWaybills.length} waybill(s)`}</strong></li>
+            <li><span>Evidence / Ref Photo</span><strong>{totalEvidenceCount} file(s) · {attachmentId?(attachmentPurpose==="size_chart"?"Size chart":"Ref photo"):"None"}</strong></li>
+          </ul>
+          <details className="small" style={{marginTop:8}}>
+            <summary className="muted" style={{cursor:"pointer"}}>View granular count breakdown</summary>
+            <ul className="summary-list-compact" style={{marginTop:6}}>
+              <li><span>Billable units</span><strong>{manualQuoteMode?`${manualBatchQty} (Manual)`:`${totalItems} unit(s)`}</strong></li>
+              <li><span>Step 3A evidence files</span><strong>{totalEvidenceCount}</strong></li>
+              <li><span>Tolerance mode</span><strong>{toleranceMode==="custom"?"Custom targets":"Measured values"}</strong></li>
+            </ul>
+          </details>
           {(()=>{
             const summaryAlerts=[
               ...(!hasConfirmedLines&&!manualQuoteMode?["0 confirmed product lines in Step 3B — add or confirm at least 1 line."]:[]),
@@ -4310,7 +4444,8 @@ function CustomerBatchDrawer({
   const view=useLoad(batchId?`/dispatch-batches/${batchId}`:null);
   const [removeIds,setRemoveIds]=useState<string[]>([]);
   const [amendNotice,setAmendNotice]=useState<string>();
-  useEffect(()=>{setRemoveIds([]);setAmendNotice(undefined);},[batchId]);
+  const [batchItemPage,setBatchItemPage]=useState(1);
+  useEffect(()=>{setRemoveIds([]);setAmendNotice(undefined);setBatchItemPage(1);},[batchId]);
   if(!batchId) return null;
   const d=view.data;
   const activeItems:Row[]=(d?.items??[]).filter((i:Row)=>!i.released_at);
@@ -4318,8 +4453,14 @@ function CustomerBatchDrawer({
   const hasShipped=activeItems.some((i:Row)=>Boolean(i.shipped));
   const canAmend=Boolean(d&&["draft","confirmed","quoted","paid"].includes(d.state)&&unshippedItems.length>0);
   const dest=d?.destination_snapshot??{};
+  const allBatchItems:Row[]=d?.items??[];
+  const BATCH_PER_PAGE=10;
+  const batchTotalPages=Math.max(1,Math.ceil(allBatchItems.length/BATCH_PER_PAGE));
+  const safeBatchPage=Math.min(batchItemPage,batchTotalPages);
+  const batchItemSlice=allBatchItems.slice((safeBatchPage-1)*BATCH_PER_PAGE,safeBatchPage*BATCH_PER_PAGE);
   return <ModalDrawer
     open={Boolean(batchId)}
+    wide
     onClose={onClose}
     title={`Dispatch Batch · #${batchId.slice(0,8)}`}
     subtitle="Inspect batch items, shipping quotes, carrier handovers, or amend unshipped details"
@@ -4345,12 +4486,17 @@ function CustomerBatchDrawer({
         }}>Confirm batch for warehouse quoting</Action>}
       </div>
       <div className="panel" style={{margin:0}}>
-        <h3>Items in this batch</h3>
-        <Table headers={["Item","Order","Status"]} rows={(d.items??[]).map((i:Row)=>[
+        <h3>Items in this batch ({allBatchItems.length})</h3>
+        <Table headers={["Item","Order","Status"]} rows={batchItemSlice.map((i:Row)=>[
           <span className="code">{i.code}</span>,
           i.order_no?<Link className="code-btn" href={`/orders/${i.order_no}`} onClick={onClose}>{i.order_no}</Link>:"Uncommissioned",
           i.released_at?<Tag tone="outline">Removed</Tag>:i.shipped?<Tag tone="green">Handed over</Tag>:<Tag tone="blue">{label(i.custody_state)}</Tag>,
         ])} empty="No items in this batch."/>
+        {batchTotalPages>1&&<div className="actions" style={{marginTop:8}}>
+          <button type="button" className="button sm" disabled={safeBatchPage<=1} onClick={()=>setBatchItemPage(p=>Math.max(1,p-1))}>Previous</button>
+          <span className="small muted">Page {safeBatchPage} of {batchTotalPages}</span>
+          <button type="button" className="button sm" disabled={safeBatchPage>=batchTotalPages} onClick={()=>setBatchItemPage(p=>Math.min(batchTotalPages,p+1))}>Next</button>
+        </div>}
       </div>
       {(d.quotes??[]).length>0&&<div className="panel" style={{margin:0}}>
         <h3>Shipping quotes</h3>
@@ -4429,7 +4575,12 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
   const [checkoutNotice,setCheckoutNotice]=useState<{text:string;error?:boolean;expired?:boolean}>();
   const [openedCase,setOpenedCase]=useState<string>();
   const [discrepancyNotice,setDiscrepancyNotice]=useState<string>("");
+  const [discrepancyError,setDiscrepancyError]=useState<string>("");
   const [resolvingDiscrepancy,setResolvingDiscrepancy]=useState(false);
+  const [unitSearch,setUnitSearch]=useState("");
+  const [unitFilter,setUnitFilter]=useState<"all"|"identified"|"pending"|"discrepancy">("all");
+  const [unitPage,setUnitPage]=useState(1);
+  const [draftPage,setDraftPage]=useState(1);
   const [trackTarget,setTrackTarget]=useState<CustomerTrackingTarget|null>(null);
   const [itemTarget,setItemTarget]=useState<Row|null>(null);
   const [batchTarget,setBatchTarget]=useState<string|null>(null);
@@ -4480,6 +4631,23 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
     }
   }
   const unlinkedAdvices:Row[]=(desk.data?.advices??[]).filter((a:Row)=>!(a.order_numbers??[]).includes(number));
+  const reconSummary=o?.expected_lines_summary;
+  const orderTasks:Row[]=Array.isArray(o?.tasks)?o.tasks:[];
+  const tasksSummary=o?.tasks_summary;
+  const rawUnits:Row[]=Array.isArray(o?.items)?o.items:[];
+  const uSearch=unitSearch.trim().toLowerCase();
+  const filteredUnits=rawUnits.filter((it:Row)=>{
+    if(unitFilter==="identified" && !it.item_id) return false;
+    if(unitFilter==="pending" && Boolean(it.item_id)) return false;
+    if(unitFilter==="discrepancy" && !["quarantined","mismatch"].includes(String(it.identity_state??""))) return false;
+    if(!uSearch) return true;
+    return [it.code,it.package_code,it.title?.en,it.position,it.declared_fields?.sku_code,it.declared_fields?.name].some(v=>String(v??"").toLowerCase().includes(uSearch));
+  });
+  const UNIT_PER_PAGE=15;
+  const unitTotalPages=Math.max(1,Math.ceil(filteredUnits.length/UNIT_PER_PAGE));
+  const safeUnitPage=Math.min(unitPage,unitTotalPages);
+  const unitSlice=filteredUnits.slice((safeUnitPage-1)*UNIT_PER_PAGE,safeUnitPage*UNIT_PER_PAGE);
+
   return <><div className="page-head row"><div><Link href="/orders">← Inspection orders</Link><h1 className="order-number">{number}</h1></div>
     <div className="actions">
       {o?.state==="draft"&&<Link className="button sm" href={"/orders/new?draft="+encodeURIComponent(number)}>Continue in wizard →</Link>}
@@ -4567,23 +4735,42 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
           {["report_ready","action_pending","cancelled"].includes(o.state)&&<Link className="button primary sm" href={base+"/dispositions"}>Open item instructions</Link>}
         </div>
       </div>}
-      {!section&&<div className="metric-strip" aria-label="Order progress summary">
-        {scopePaymentHref?<Link className="metric" href={scopePaymentHref}><span>Supplemental payment</span><strong>{scopePaymentLabels[scopePayment.state]}</strong><small>{usd(scopePayment.amount_cents)}</small></Link>:
-          <Link className="metric" href={base+"/payment"}><span>Payment</span><strong>{paymentState?label(paymentState):label(o.state)}</strong><small>{payment.data?.charge?usd(payment.data.charge.amount_cents):"Inspection fee"}</small></Link>}
-        <Link className="metric" href={base+"/parcels"}><span>Inbound Parcels</span><strong>{o.parcels.length}</strong><small>{o.parcels.filter((p:Row)=>p.warehouse_state).length} checked in at warehouse</small></Link>
-        <Link className="metric" href={base+"/dispositions"}><span>Warehouse Items</span><strong>{o.items.filter((i:Row)=>i.item_id).length} / {o.expected_lines_summary?.expected_units_total??o.items.length}</strong><small>Identified vs commissioned units</small></Link>
-        <Link className="metric" href={o.report_version?base+"/report":base}><span>Inspection Report</span><strong>{o.report_version?`v${o.report_version}`:"Pending"}</strong><small>{o.report_version?"Published & ready":"Awaiting completion"}</small></Link>
-      </div>}
-      {!section&&<Panel title="Inspection milestones">
-        <ol className="timeline">
-          <li>Order created <small>{stamp(o.created_at)}</small></li>
-          {o.paid_at&&<li>Payment confirmed <small>{stamp(o.paid_at)}</small></li>}
-          {o.samples_ready_at&&<li>Items received and identified <small>{stamp(o.samples_ready_at)}</small></li>}
-          {o.report_published_at&&<li><Link href={base+"/report"}>Report published</Link> <small>{stamp(o.report_published_at)}</small></li>}
-          {o.closed_at&&<li>Order closed <small>{stamp(o.closed_at)}</small></li>}
-        </ol>
-        {o.sla_due_at&&["queued","inspecting","qa_review"].includes(o.state)&&<p>Estimated report by {stamp(o.sla_due_at)}.</p>}
-      </Panel>}
+
+      {/* LAYER 1: Order Overall Progress & Timeline */}
+      {!section&&<>
+        <div className="metric-strip" aria-label="Order progress summary">
+          {scopePaymentHref?<Link className="metric" href={scopePaymentHref}><span>Supplemental payment</span><strong>{scopePaymentLabels[scopePayment.state]}</strong><small>{usd(scopePayment.amount_cents)}</small></Link>:
+            <Link className="metric" href={base+"/payment"}><span>1. Payment</span><strong>{paymentState?label(paymentState):label(o.state)}</strong><small>{payment.data?.charge?usd(payment.data.charge.amount_cents):"Inspection fee"}</small></Link>}
+          <Link className="metric" href={base+"/parcels"}><span>2. Arrival &amp; Logging</span><strong>{reconSummary?.logged_units_total??o.parcels.filter((p:Row)=>p.warehouse_state).length} logged</strong><small>{o.parcels.filter((p:Row)=>p.warehouse_state).length} of {o.parcels.length} parcel(s) checked in</small></Link>
+          <Link className="metric" href={base+"/dispositions"}><span>3. Identification</span><strong>{reconSummary?.identified_units_total??o.items.filter((i:Row)=>i.item_id).length} / {reconSummary?.expected_units_total??o.items.length}</strong><small>{(reconSummary?.unidentified_units_total??0)>0?`${reconSummary.unidentified_units_total} awaiting SKU scan`:"Identified vs commissioned"}</small></Link>
+          <Link className="metric" href={o.report_version?base+"/report":base}><span>4. Report &amp; Handling</span><strong>{o.report_version?`v${o.report_version} Ready`:"Pending"}</strong><small>{o.report_version?"Report published · choose handling":o.sla_due_at?`SLA target ${stamp(o.sla_due_at)}`:"Starts once samples identified"}</small></Link>
+        </div>
+        <Panel title="1. Order progress &amp; timeline">
+          <div className="actions" style={{marginBottom:10,flexWrap:"wrap"}}>
+            <Tag tone={o.paid_at?"green":"yellow"}>Payment: {o.paid_at?"Confirmed":label(paymentState??o.state)}</Tag>
+            <Tag tone={(reconSummary?.logged_units_total??0)>0?"blue":"gray"}>Warehouse Arrival: {reconSummary?.logged_units_total??0}/{reconSummary?.expected_units_total??o.items.length} logged</Tag>
+            <Tag tone={(reconSummary?.identified_units_total??0)>=(reconSummary?.expected_units_total??1)&&reconSummary?.expected_units_total>0?"green":(reconSummary?.unidentified_units_total??0)>0?"yellow":"gray"}>
+              SKU Identification: {reconSummary?.identified_units_total??0}/{reconSummary?.expected_units_total??o.items.length}
+            </Tag>
+            <Tag tone={tasksSummary?.completed>0&&tasksSummary?.completed===tasksSummary?.total?"green":tasksSummary?.in_progress>0?"blue":"gray"}>
+              Inspection: {tasksSummary?.completed??reconSummary?.inspected_units_total??0}/{tasksSummary?.total??reconSummary?.expected_units_total??0} task(s)
+            </Tag>
+            <Tag tone={o.report_version?"green":"gray"}>Report: {o.report_version?`v${o.report_version}`:"Pending"}</Tag>
+            <Tag tone={o.closed_at?"green":["report_ready","action_pending"].includes(o.state)?"yellow":"gray"}>
+              Next: {o.closed_at?"Closed":["report_ready","action_pending"].includes(o.state)?"Disposition instructions":"Follow milestones"}
+            </Tag>
+          </div>
+          <ol className="timeline">
+            <li>Order created <small>{stamp(o.created_at)}</small></li>
+            {o.paid_at&&<li>Payment confirmed <small>{stamp(o.paid_at)}</small></li>}
+            {o.samples_ready_at&&<li>Items received and identified <small>{stamp(o.samples_ready_at)}</small></li>}
+            {o.report_published_at&&<li><Link href={base+"/report"}>Report published</Link> <small>{stamp(o.report_published_at)}</small></li>}
+            {o.closed_at&&<li>Order closed <small>{stamp(o.closed_at)}</small></li>}
+          </ol>
+          {o.sla_due_at&&["queued","inspecting","qa_review"].includes(o.state)&&<p className="small muted">Estimated report by {stamp(o.sla_due_at)}.</p>}
+        </Panel>
+      </>}
+
       {(section==="payment"||!section&&o.state==="awaiting_payment")&&<Panel title="Inspection payment">
         {payment.error?<><ErrorBlock error={payment.error}/><button type="button" onClick={payment.reload}>Retry payment status</button></>:!payment.data?<p role="status">Loading the current charge…</p>:<>
           {payment.data.charge&&<p><strong>{usd(payment.data.charge.amount_cents)}</strong> · Quote {payment.data.charge.quote_revision}</p>}
@@ -4611,7 +4798,9 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
         <div className="actions"><button type="button" onClick={refreshPayment}>Refresh payment status</button>
           <Link href={payment.data?.charge?billingChargePath(payment.data.charge.id):"/account/billing"}>Open billing</Link></div>
       </Panel>}
-      {(!section||section==="payment")&&<Panel title="Inspection scope">
+
+      {/* LAYERS 2, 3, 4, 5, 6: Issues/Reconciliation -> SKU Summary -> Parcel Summary -> Tasks Summary -> Individual Units */}
+      {(!section||section==="payment")&&<Panel title="2–6. Intake Reconciliation, SKU Summary, Parcels, Tasks &amp; Individual Units">
       {o.customer_notes&&<p className="muted">Notes: {o.customer_notes}</p>}
       {o.sla_due_at&&<p className="muted small">Inspection SLA target · {stamp(o.sla_due_at)}</p>}
       {!section&&o.parcels.length>0&&<div className="actions" style={{marginBottom:10}}>
@@ -4633,10 +4822,16 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
           })}
         </div>
       )}
+
       {o.expected_lines_summary&&(()=>{
         const s=o.expected_lines_summary;
         const parcelRecs:Row[]=Array.isArray(s.parcel_reconciliation)?s.parcel_reconciliation:[];
         const recordedCase=s.discrepancy_resolution_record;
+        const confirmedShort=Number(s.confirmed_short_units_total??0);
+        const unverifiedShort=Number(s.unverified_short_units_total??0);
+        const unarrivedUnits=Number(s.unarrived_units_total??0);
+        const unidentifiedUnits=Number(s.unidentified_units_total??0);
+        const reconStatus=String(s.reconciliation_status??"");
         const resLabels:Record<string,string>={
           proceed_with_received:"Proceed inspection with received items only",
           wait_remaining:"Wait for remaining items / parcels before starting inspection",
@@ -4644,8 +4839,9 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
         };
         async function submitDiscrepancyAction(resolution:"proceed_with_received"|"wait_remaining"|"replace_or_dispute",subjectText:string,messageText:string) {
           setResolvingDiscrepancy(true);
+          setDiscrepancyError("");
           try {
-            const firstShortParcel=parcelRecs.find((pr:Row)=>pr.short_qty>0||pr.extra_qty>0);
+            const firstShortParcel=parcelRecs.find((pr:Row)=>pr.short_qty>0||pr.unverified_short_qty>0||pr.confirmed_short_qty>0||pr.extra_qty>0);
             const res=await request("/me/cases","POST",{
               order_id:id,
               category:"receipt_mismatch",
@@ -4656,33 +4852,40 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
             });
             setDiscrepancyNotice(`Instruction recorded (${res.public_no}): ${resLabels[resolution]}.`);
             detail.reload();
+          } catch(err) {
+            setDiscrepancyError(err instanceof Error?err.message:"Unable to record discrepancy instruction. Please retry or open a support case.");
           } finally {
             setResolvingDiscrepancy(false);
           }
         }
         return <div id="intake-reconciliation" data-testid="order-intake-reconciliation" style={{marginBottom:16}}>
+          {/* LAYER 2: Issues / Reconciliation Metrics & Discrepancy Decision */}
           <div className="row between flexwrap" style={{marginBottom:8}}>
-            <strong>Dual Intake Reconciliation (By Parcel &amp; By SKU / Color / Size)</strong>
+            <strong>2. Intake Status &amp; Issues Requiring Input</strong>
             <div className="row flexwrap" style={{gap:6}}>
-              <Tag tone="blue">{s.expected_lines_count} SKU line(s)</Tag>
-              <Tag tone={s.logged_units_total===s.expected_units_total&&s.unidentified_units_total===0?"green":"yellow"}>
+              <Tag tone="blue">{s.expected_lines_count} SKU group(s)</Tag>
+              <Tag tone={reconStatus==="matched"?"green":confirmedShort>0?"red":"yellow"}>
                 Logged {s.logged_units_total??s.arrived_units_total}/{s.expected_units_total} · Identified {s.identified_units_total}/{s.expected_units_total} · Inspected {s.inspected_units_total}
               </Tag>
             </div>
           </div>
 
           <div className="metric-strip" style={{marginBottom:12}}>
-            <div className="metric"><span>Expected</span><strong>{s.expected_units_total}</strong><small>{s.expected_lines_count} SKU lines</small></div>
+            <div className="metric"><span>Expected</span><strong>{s.expected_units_total}</strong><small>{s.expected_lines_count} SKU groups</small></div>
             <div className="metric"><span>Physically Logged</span><strong>{s.logged_units_total??s.arrived_units_total}</strong><small>{s.checked_in_parcels_count??0} parcel(s) checked in</small></div>
-            <div className="metric"><span>SKU-Identified</span><strong>{s.identified_units_total}</strong><small>Linked to expected slots</small></div>
-            <div className="metric"><span>Unidentified</span><strong>{s.unidentified_units_total??0}</strong><small>Logged, pending SKU scan</small></div>
-            <div className="metric"><span>Missing / Short</span><strong>{s.short_units_total??0}</strong><small>Expected minus logged</small></div>
+            <div className="metric"><span>SKU-Identified</span><strong>{s.identified_units_total}</strong><small>Matched to SKU &amp; size</small></div>
+            <div className="metric"><span>Pending SKU Scan</span><strong>{unidentifiedUnits}</strong><small>In warehouse, awaiting bind</small></div>
+            <div className="metric">
+              <span>{confirmedShort>0?"Confirmed Short":unverifiedShort>0?"Unverified Delta":"Awaiting Arrival"}</span>
+              <strong>{confirmedShort>0?confirmedShort:unverifiedShort>0?unverifiedShort:unarrivedUnits}</strong>
+              <small>{confirmedShort>0?"Warehouse confirmed missing":unverifiedShort>0?"Parcel vs declared delta":unarrivedUnits>0?"Remaining parcel(s) in transit":"No shortage"}</small>
+            </div>
             <div className="metric"><span>Extra / Damaged</span><strong>{(s.extra_units_total??0)+(s.damaged_units_total??0)}</strong><small>{s.extra_units_total??0} extra · {s.damaged_units_total??0} damaged</small></div>
           </div>
 
-          {(s.unidentified_units_total??0)>0&&(
+          {unidentifiedUnits>0&&(
             <div className="notice" data-testid="unidentified-physical-items-notice" style={{marginBottom:10}}>
-              <strong>Pending SKU Assignment:</strong> {s.unidentified_units_total} physically logged item(s) have arrived at warehouse intake and are awaiting individual SKU barcode scan/assignment. Per-SKU missing counts remain marked <em>Pending SKU scan</em> until physical SKU assignment finishes (no guesswork SKU attribution).
+              <strong>Physical Items Logged — Pending SKU Identification ({unidentifiedUnits} of {s.logged_units_total} logged unit(s)):</strong> Warehouse staff have physically received and tagged {s.logged_units_total} unit(s). {unidentifiedUnits} unit(s) are awaiting individual SKU/color/size barcode assignment, so per-SKU columns below reflect <em>Pending SKU scan</em> rather than confirmed missing items.
             </div>
           )}
 
@@ -4690,19 +4893,21 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
             <div className="card flat discrepancy-action-panel" data-testid="order-discrepancy-action-card" style={{marginBottom:12}}>
               <div className="row between flexwrap" style={{gap:8}}>
                 <div>
-                  <strong>Action Required: Warehouse Intake Discrepancy ({s.logged_units_total}/{s.expected_units_total} units)</strong>
+                  <strong>Action Required: Warehouse Intake Discrepancy ({s.logged_units_total}/{s.expected_units_total} physically logged)</strong>
                   <div className="small" style={{marginTop:4}}>
-                    {(s.short_units_total??0)>0&&<>Expected {s.expected_units_total} units across declared SKUs, physically logged {s.logged_units_total} units ({s.short_units_total} unit(s) short). </>}
+                    {confirmedShort>0&&<>Warehouse confirmed <strong>{confirmedShort} missing unit(s)</strong> out of {s.expected_units_total} expected. </>}
+                    {confirmedShort===0&&unverifiedShort>0&&<>Parcels logged {s.logged_units_total} unit(s) vs {s.expected_units_total} expected ({unverifiedShort} unit(s) discrepancy under verification). </>}
                     {(s.extra_units_total??0)>0&&<>Logged {s.extra_units_total} extra unit(s) above order expectation. </>}
                     {(s.damaged_units_total??0)>0&&<>{s.damaged_units_total} damaged unit(s) flagged at check-in. </>}
-                    Historical quotes and paid charges are preserved unchanged; choose how the warehouse team should proceed:
+                    {" "}Original order fee and quote remain locked; choosing <strong>Proceed</strong> authorizes scope adjustment for received items, <strong>Wait</strong> pauses SLA until remaining parcels arrive, or <strong>Contact Seller</strong> opens a tracked support case:
                   </div>
                 </div>
-                <Tag tone="yellow">Customer Input Required</Tag>
+                <Tag tone={confirmedShort>0?"red":"yellow"}>{confirmedShort>0?"Confirmed Shortage":"Discrepancy Decision Required"}</Tag>
               </div>
+              {discrepancyError&&<div style={{marginTop:8}}><ErrorBlock error={discrepancyError}/></div>}
               {recordedCase?(
                 <div className="line-note" data-testid="discrepancy-recorded-resolution" style={{marginTop:8}}>
-                  <strong>Customer Resolution Recorded ({recordedCase.public_no}):</strong>{" "}
+                  <strong>Customer Resolution Recorded (<Link className="code-btn" href={"/support/cases/"+recordedCase.id}>{recordedCase.public_no}</Link>):</strong>{" "}
                   {resLabels[recordedCase.discrepancy_resolution]??"Submitted discrepancy instruction"} · <Tag tone="blue">{label(recordedCase.state)}</Tag>
                 </div>
               ):(
@@ -4715,7 +4920,7 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
                     onClick={()=>void submitDiscrepancyAction(
                       "proceed_with_received",
                       `Proceed with ${s.logged_units_total} received unit(s) on ${number}`,
-                      `Customer authorizes proceeding with the ${s.logged_units_total} physically received items while ${s.short_units_total} unit(s) remain short. Preserve original quote/payment record.`
+                      `Customer authorizes proceeding with the ${s.logged_units_total} physically received items while ${confirmedShort||unverifiedShort||s.short_units_total} unit(s) remain short/unreceived. Preserve original quote/payment record.`
                     )}
                   >Proceed with Received Items ({s.logged_units_total})</button>
                   <button
@@ -4725,8 +4930,8 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
                     disabled={resolvingDiscrepancy}
                     onClick={()=>void submitDiscrepancyAction(
                       "wait_remaining",
-                      `Wait for ${s.short_units_total} remaining unit(s) on ${number}`,
-                      `Customer requests holding inspection start until the remaining ${s.short_units_total} short unit(s) arrive from seller.`
+                      `Wait for ${confirmedShort||unverifiedShort||s.short_units_total} remaining unit(s) on ${number}`,
+                      `Customer requests holding inspection start until the remaining ${confirmedShort||unverifiedShort||s.short_units_total} unit(s) arrive from seller.`
                     )}
                   >Wait for Remaining Delivery</button>
                   <button
@@ -4737,7 +4942,7 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
                     onClick={()=>void submitDiscrepancyAction(
                       "replace_or_dispute",
                       `Seller replacement / discrepancy case (${s.logged_units_total}/${s.expected_units_total}) on ${number}`,
-                      `Customer is contacting seller regarding the ${s.short_units_total} missing / ${s.damaged_units_total} damaged unit(s) and opened this tracked discrepancy case.`
+                      `Customer is contacting seller regarding the ${confirmedShort||unverifiedShort||s.short_units_total} missing / ${s.damaged_units_total} damaged unit(s) and opened this tracked discrepancy case.`
                     )}
                   >Contact Seller / Open Discrepancy Case</button>
                 </div>
@@ -4746,21 +4951,58 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
             </div>
           )}
 
-          {parcelRecs.length>0&&(
-            <div style={{marginBottom:12}} data-testid="parcel-level-reconciliation">
-              <div className="label" style={{marginBottom:6}}>PARCEL-BY-PARCEL INTAKE RECONCILIATION</div>
+          {/* LAYER 3: SKU / Color / Size Summary Reconciliation Table (BEFORE parcels & individual units) */}
+          {Array.isArray(s.lines_breakdown)&&s.lines_breakdown.length>0&&(
+            <div data-testid="sku-level-reconciliation" style={{marginBottom:14}}>
+              <div className="label" style={{marginBottom:6}}>3. SKU / COLOR / SIZE SUMMARY RECONCILIATION ({s.lines_breakdown.length} GROUPS)</div>
               <Table
-                headers={["Tracking / Package","Supplier","Expected in Parcel","Logged","Identified / Unidentified","Outer Condition & Time","Logged Item Codes"]}
+                headers={["SKU / Product","Color / Size","Supplier & Waybill","Expected","Identified / Logged","Reconciliation Status","Damaged","Sample Codes"]}
+                rows={s.lines_breakdown.map((b:Row)=>{
+                  const confShort=Number(b.confirmed_short_qty??b.missing_qty??0);
+                  const unvShort=Number(b.unverified_short_qty??0);
+                  const pendingScan=Number(b.unidentified_pending_qty??0);
+                  const awaitQty=Number(b.outstanding_qty??0);
+                  return [
+                    <div className="cell-stack"><strong>{b.product_name||b.sku_code||"—"}</strong>{b.sku_code&&<small className="mono">{b.sku_code}</small>}</div>,
+                    [b.color_declared,b.size_label].filter(Boolean).join(" / ")||"—",
+                    <div className="cell-stack"><span>{b.supplier_alias||"—"}</span>{b.tracking_no&&<small className="mono">{b.tracking_no}</small>}</div>,
+                    <strong>{b.expected_qty}</strong>,
+                    `${b.identified_qty} identified (${b.inspected_qty} inspected)`,
+                    confShort>0
+                      ?<Tag tone="red">{confShort} confirmed short</Tag>
+                      :pendingScan>0
+                        ?<Tag tone="yellow">{pendingScan} pending SKU scan</Tag>
+                        :unvShort>0
+                          ?<Tag tone="yellow">{unvShort} unverified delta</Tag>
+                          :awaitQty>0
+                            ?<Tag tone="gray">{awaitQty} awaiting arrival</Tag>
+                            :<Tag tone="green">Matched (0)</Tag>,
+                    b.damaged_qty>0?<Tag tone="red">{b.damaged_qty}</Tag>:"0",
+                    Array.isArray(b.linked_item_codes)&&b.linked_item_codes.length>0
+                      ?<span className="mono small">{b.linked_item_codes.slice(0,4).join(", ")}{b.linked_item_codes.length>4?` +${b.linked_item_codes.length-4} more`:""}</span>
+                      :"—",
+                  ];
+                })}
+              />
+            </div>
+          )}
+
+          {/* LAYER 4: Parcel-by-Parcel Summary */}
+          {parcelRecs.length>0&&(
+            <div style={{marginBottom:14}} data-testid="parcel-level-reconciliation">
+              <div className="label" style={{marginBottom:6}}>4. PARCEL-BY-PARCEL INTAKE SUMMARY ({parcelRecs.length})</div>
+              <Table
+                headers={["Tracking / Package","Supplier","Expected in Parcel","Logged at Warehouse","Identified / Pending","Outer Condition & Time","Sample Codes"]}
                 rows={parcelRecs.map((pr:Row)=>[
                   <div className="cell-stack">
                     <CodeButton code={pr.tracking_norm} onClick={()=>setTrackTarget({kind:"parcels",id:pr.advice_id,code:pr.tracking_norm})}/>
                     {pr.package_code&&<small className="mono">{pr.package_code} · {label(pr.warehouse_state)}</small>}
                   </div>,
                   pr.supplier_alias||"—",
-                  pr.contents_unknown?<Tag tone="gray">Contents unknown (Reconcile on receipt)</Tag>:pr.declared_qty>0?<strong>{pr.declared_qty}</strong>:"Mixed / Order-level",
-                  pr.warehouse_state?<><strong>{pr.logged_item_count}</strong>{pr.short_qty>0&&<> <Tag tone="red">{pr.short_qty} short</Tag></>}{pr.extra_qty>0&&<> <Tag tone="yellow">+{pr.extra_qty} extra</Tag></>}</>:"Awaiting check-in",
-                  pr.warehouse_state?`${pr.identified_item_count} identified · ${pr.unidentified_item_count} unidentified`:"—",
-                  pr.received_at?<div className="cell-stack"><span>{pr.outer_condition||"Checked in"}</span><small>{stamp(pr.received_at)}</small></div>:"—",
+                  pr.contents_unknown?<Tag tone="gray">Contents unknown</Tag>:pr.declared_qty>0?<strong>{pr.declared_qty}</strong>:"Order-level",
+                  pr.warehouse_state?<><strong>{pr.logged_item_count}</strong>{pr.confirmed_short_qty>0?<> <Tag tone="red">{pr.confirmed_short_qty} confirmed short</Tag></>:pr.unverified_short_qty>0?<> <Tag tone="yellow">{pr.unverified_short_qty} delta unverified</Tag></>:null}{pr.extra_qty>0&&<> <Tag tone="yellow">+{pr.extra_qty} extra</Tag></>}</>:"Awaiting check-in",
+                  pr.warehouse_state?`${pr.identified_item_count} identified · ${pr.unidentified_item_count} pending ID`:"—",
+                  pr.received_at?<div className="cell-stack"><span>{pr.outer_condition||"Intact"}</span><small>{stamp(pr.received_at)}</small></div>:"—",
                   Array.isArray(pr.item_codes)&&pr.item_codes.length>0
                     ?<span className="mono small">{pr.item_codes.slice(0,5).join(", ")}{pr.item_codes.length>5?` +${pr.item_codes.length-5} more`:""}</span>
                     :"—",
@@ -4769,35 +5011,41 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
             </div>
           )}
 
-          {Array.isArray(s.lines_breakdown)&&s.lines_breakdown.length>0&&(
-            <div data-testid="sku-level-reconciliation">
-              <div className="label" style={{marginBottom:6}}>SKU / COLOR / SIZE RECONCILIATION</div>
-              <Table
-                headers={["SKU / Product","Color / Size","Supplier & Waybill","Expected","Identified","Short / Pending Scan","Damaged","Item Codes"]}
-                rows={s.lines_breakdown.map((b:Row)=>[
-                  <div className="cell-stack"><strong>{b.product_name||b.sku_code||"—"}</strong>{b.sku_code&&<small className="mono">{b.sku_code}</small>}</div>,
-                  [b.color_declared,b.size_label].filter(Boolean).join(" / ")||"—",
-                  <div className="cell-stack"><span>{b.supplier_alias||"—"}</span>{b.tracking_no&&<small className="mono">{b.tracking_no}</small>}</div>,
-                  <strong>{b.expected_qty}</strong>,
-                  `${b.identified_qty} (${b.inspected_qty} inspected)`,
-                  b.missing_qty>0
-                    ?<Tag tone="red">{b.missing_qty} missing</Tag>
-                    :b.unidentified_pending_qty>0
-                      ?<Tag tone="yellow">{b.unidentified_pending_qty} pending SKU scan</Tag>
-                      :b.outstanding_qty>0
-                        ?<Tag tone="gray">{b.outstanding_qty} awaiting arrival</Tag>
-                        :<Tag tone="green">Matched (0)</Tag>,
-                  b.damaged_qty>0?<Tag tone="red">{b.damaged_qty}</Tag>:"0",
-                  Array.isArray(b.linked_item_codes)&&b.linked_item_codes.length>0
-                    ?<span className="mono small">{b.linked_item_codes.slice(0,4).join(", ")}{b.linked_item_codes.length>4?` +${b.linked_item_codes.length-4} more`:""}</span>
-                    :"—",
-                ])}
-              />
+          {/* LAYER 5: Inspection Tasks Summary */}
+          {(tasksSummary?.total??orderTasks.length)>0&&(
+            <div style={{marginBottom:14}} data-testid="order-tasks-summary">
+              <div className="row between flexwrap" style={{marginBottom:6}}>
+                <span className="label">5. INSPECTION TASKS SUMMARY</span>
+                <div className="actions" style={{gap:6}}>
+                  <Tag tone="gray">Total {tasksSummary?.total??orderTasks.length}</Tag>
+                  <Tag tone="blue">Ready {tasksSummary?.ready??0}</Tag>
+                  <Tag tone="blue">In Progress {tasksSummary?.in_progress??0}</Tag>
+                  <Tag tone="yellow">Submitted/QA {tasksSummary?.submitted??0}</Tag>
+                  <Tag tone="green">Completed {tasksSummary?.completed??0}</Tag>
+                  {(tasksSummary?.returned??0)>0&&<Tag tone="red">Returned {tasksSummary.returned}</Tag>}
+                </div>
+              </div>
+              {orderTasks.length>0&&<details className="card" open={orderTasks.length<=6}>
+                <summary>Task assignments by item ({orderTasks.length})</summary>
+                <Table
+                  headers={["Item Code","Product / Variant","Service","Task Status","Updated"]}
+                  rows={orderTasks.map((t:Row)=>[
+                    t.item_code?<CodeButton code={t.item_code} onClick={()=>{
+                      const matched=rawUnits.find(u=>u.code===t.item_code);
+                      if(matched) setItemTarget({...matched,order_no:number,order_state:o.state});
+                    }}/>:<span className="muted">Comparison</span>,
+                    [t.product_name??t.sku_code,t.color_declared,t.size_label].filter(Boolean).join(" · ")||"—",
+                    t.service_title??t.service??"—",
+                    <Tag tone={t.state==="APPROVED"||t.state==="COMPLETED"?"green":t.returned?"red":t.state==="SUBMITTED"?"yellow":"blue"}>{label(t.state)}{t.returned?" · Revision":null}</Tag>,
+                    stamp(t.updated_at??t.submitted_at),
+                  ])}
+                />
+              </details>}
             </div>
           )}
 
           {Array.isArray(s.purchase_evidences)&&s.purchase_evidences.length>0&&(
-            <div className="row flexwrap" style={{gap:10,marginTop:8}}>
+            <div className="row flexwrap" style={{gap:10,marginTop:8,marginBottom:12}}>
               {s.purchase_evidences.map((ev:Row,idx:number)=>(
                 <div key={ev.id??idx} className="evidence-chip">
                   {ev.media_id&&<img src={`/api/v1/media/${ev.media_id}`} alt={ev.file_name??"Evidence"} style={{width:36,height:36,objectFit:"cover",borderRadius:6}}/>}
@@ -4811,31 +5059,64 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
           )}
         </div>;
       })()}
-      {(!["draft","awaiting_payment"].includes(o.state)||o.items.some((i:Row)=>i.item_id))&&(
-        <Table headers={["Service","Position","Warehouse item","Package","Custody"]} rows={o.items.map((i:Row)=>[
-          i.title.en,
-          i.position??i.quantity,
-          i.code?<CodeButton code={i.code} onClick={()=>setItemTarget({...i,order_no:number,order_state:o.state})}/>:"Awaiting assignment",
-          i.package_code?<span className="code">{i.package_code}</span>:"—",
-          i.custody_state?label(i.custody_state):"—",
-        ])}/>
+
+      {/* LAYER 6: Individual Physical Units & Draft Declarations (Collapsed by default when >5 units, searchable & paginated 15/page) */}
+      {(!["draft","awaiting_payment"].includes(o.state)||rawUnits.some((i:Row)=>i.item_id))&&(
+        <details className="card" open={rawUnits.length<=5} data-testid="individual-units-section">
+          <summary style={{cursor:"pointer"}}>
+            <strong>6. Individual Physical Units &amp; Declarations ({rawUnits.length} commissioned positions · {rawUnits.filter(i=>i.item_id).length} SKU-identified)</strong>
+          </summary>
+          <div className="row between flexwrap" style={{gap:8,margin:"10px 0"}}>
+            <input type="search" value={unitSearch} onChange={e=>{setUnitSearch(e.target.value);setUnitPage(1);}} placeholder="Filter item code, SKU, or parcel…" style={{maxWidth:260}}/>
+            <div className="actions">
+              {([["all","All"],["identified","Identified"],["pending","Pending SKU ID"],["discrepancy","Discrepancy"]] as const).map(([fId,fLabel])=>(
+                <button key={fId} type="button" className={"button sm"+(unitFilter===fId?" primary":"")} onClick={()=>{setUnitFilter(fId);setUnitPage(1);}}>{fLabel}</button>
+              ))}
+            </div>
+          </div>
+          <Table headers={["Service","Position","Warehouse item","Package","Custody / Status"]} rows={unitSlice.map((i:Row)=>[
+            i.title.en,
+            i.position??i.quantity,
+            i.code
+              ?<CodeButton code={i.code} onClick={()=>setItemTarget({...i,order_no:number,order_state:o.state})}/>
+              :<span className="muted">{(reconSummary?.logged_units_total??0)>0?"Pending SKU assignment":"Awaiting parcel arrival"}</span>,
+            i.package_code?<span className="code">{i.package_code}</span>:"—",
+            i.custody_state?label(i.custody_state):"—",
+          ])} empty="No physical unit rows match this filter."/>
+          {unitTotalPages>1&&<div className="actions" style={{marginTop:8}}>
+            <button type="button" className="button sm" disabled={safeUnitPage<=1} onClick={()=>setUnitPage(p=>Math.max(1,p-1))}>Previous</button>
+            <span className="small muted">Page {safeUnitPage} of {unitTotalPages} ({filteredUnits.length} unit rows)</span>
+            <button type="button" className="button sm" disabled={safeUnitPage>=unitTotalPages} onClick={()=>setUnitPage(p=>Math.min(unitTotalPages,p+1))}>Next</button>
+          </div>}
+        </details>
       )}
       {o.state==="draft"&&Array.isArray(o.lines)&&o.lines.length>0&&(()=>{
-        const declaredTotal=o.expected_lines_summary?.expected_units_total
-          ??o.lines.reduce((n:number,l:Row)=>n+(Array.isArray(l.attributes?.expected_lines)&&l.attributes.expected_lines.length
-            ?l.attributes.expected_lines.reduce((s:number,x:Row)=>s+(Number(x.quantity)||0),0)
-            :(Number(l.quantity)||0)),0);
-        return <details className="card">
+        const allDraftRows=(o.lines as Row[]).flatMap(l=>(Array.isArray(l.draft_items)?l.draft_items:[]).map((item:Row,idx:number)=>({
+          service:l.title?.en??l.sku_code,
+          sample_code:item.sample_code??`P-${idx+1}`,
+          size_label:item.size_label??l.attributes?.size_label??"—",
+          color_declared:item.color_declared??l.attributes?.color_declared??"—",
+          tolerance:Array.isArray(l.attributes?.tolerances)?`${l.attributes.tolerances.length} point-specific ranges`:"Measured values",
+        })));
+        const declaredTotal=o.expected_lines_summary?.expected_units_total??allDraftRows.length;
+        const D_PER_PAGE=15;
+        const dTotalPages=Math.max(1,Math.ceil(allDraftRows.length/D_PER_PAGE));
+        const safeDraftPage=Math.min(draftPage,dTotalPages);
+        const draftSlice=allDraftRows.slice((safeDraftPage-1)*D_PER_PAGE,safeDraftPage*D_PER_PAGE);
+        return <details className="card" open={declaredTotal<=5}>
           <summary>Draft item declarations ({declaredTotal} {declaredTotal===1?"item":"items"})</summary>
-          {o.lines.map((l:Row)=><div key={l.id}>
-            <p><strong>{l.title?.en??l.sku_code}</strong> · {l.quantity} {l.quantity===1?"item":"items"}</p>
-            <Table headers={["Sample code","Size","Color","Tolerance"]} rows={(Array.isArray(l.draft_items)?l.draft_items:[]).map((item:Row,idx:number)=>[
-              <span className="code">{item.sample_code??`P-${idx+1}`}</span>,
-              item.size_label??l.attributes?.size_label??"—",
-              item.color_declared??l.attributes?.color_declared??"—",
-              Array.isArray(l.attributes?.tolerances)?`${l.attributes.tolerances.length} point-specific ranges`:"Measured values",
-            ])}/>
-          </div>)}
+          <Table headers={["Service","Sample code","Size","Color","Tolerance"]} rows={draftSlice.map(row=>[
+            row.service,
+            <span className="code">{row.sample_code}</span>,
+            row.size_label,
+            row.color_declared,
+            row.tolerance,
+          ])}/>
+          {dTotalPages>1&&<div className="actions" style={{marginTop:8}}>
+            <button type="button" className="button sm" disabled={safeDraftPage<=1} onClick={()=>setDraftPage(p=>Math.max(1,p-1))}>Previous</button>
+            <span className="small muted">Page {safeDraftPage} of {dTotalPages}</span>
+            <button type="button" className="button sm" disabled={safeDraftPage>=dTotalPages} onClick={()=>setDraftPage(p=>Math.min(dTotalPages,p+1))}>Next</button>
+          </div>}
         </details>;
       })()}
       {o.report_version&&<Link className="button primary" href={"/orders/"+number+"/report"}>Open inspection report</Link>}
@@ -5138,8 +5419,10 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
   const {data,error,reload}=useLoad(path+id+"/tracking?locale=en");
   const parcelCtx=useLoad(kind==="parcels"?"/me/parcels/"+id+"/context":null);
   const [lightbox,setLightbox]=useState<{ids:string[];labels:string[];index:number}|null>(null);
-  const canVerify=kind==="parcels"&&data?.allowed_actions.includes("verify_tracking");
-  const canCorrect=kind==="parcels"&&Boolean(data&&!data.warehouse_state);
+  const [loggedSearch,setLoggedSearch]=useState("");
+  const [loggedPage,setLoggedPage]=useState(1);
+  const canVerify=kind==="parcels"&&!embedded&&data?.allowed_actions.includes("verify_tracking");
+  const canCorrect=kind==="parcels"&&!embedded&&Boolean(data&&!data.warehouse_state);
   const verificationPath=path+id+"/tracking-verification";
   const verification=useLoad(canVerify||canCorrect?verificationPath:null),carriers=useLoad(canVerify||canCorrect?"/carriers":null);
   const [nextManualRefresh,setNextManualRefresh]=useState<string>();
@@ -5157,25 +5440,121 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
   const rawOuter=receipt?.outer_condition??ctx?.outer_condition;
   const outerCondition=rawOuter&&({intact:"Intact",crushed:"Crushed",torn:"Torn",wet:"Wet"} as Record<string,string>)[rawOuter];
   const isDamagedOuter=Boolean(rawOuter&&["crushed","torn","wet"].includes(String(rawOuter)));
+  const qLogged=loggedSearch.trim().toLowerCase();
+  const filteredLogged=loggedItems.filter((li:Row)=>!qLogged||[li.code,li.order_no,li.declared_fields?.name,li.declared_fields?.sku_code].some(v=>String(v??"").toLowerCase().includes(qLogged)));
+  const LOGGED_PER_PAGE=15;
+  const loggedTotalPages=Math.max(1,Math.ceil(filteredLogged.length/LOGGED_PER_PAGE));
+  const safeLoggedPage=Math.min(loggedPage,loggedTotalPages);
+  const loggedSlice=filteredLogged.slice((safeLoggedPage-1)*LOGGED_PER_PAGE,safeLoggedPage*LOGGED_PER_PAGE);
   useEffect(()=>{const timer=setInterval(()=>{reload();if(kind==="parcels")parcelCtx.reload();},60000);return ()=>clearInterval(timer);},[reload,parcelCtx.reload,kind]);
-  return <>{!embedded&&<div className="page-head"><h1>Tracking details</h1><p className="muted">Follow carrier events and the warehouse’s own handling status.</p></div>}{error&&<><ErrorBlock error={error}/><button type="button" onClick={reload}>Retry tracking</button></>}
+
+  if(embedded) {
+    return <>
+      {error&&<><ErrorBlock error={error}/><button type="button" onClick={reload}>Retry tracking</button></>}
+      {!data&&!error&&<p role="status">Loading parcel preview…</p>}
+      {data&&<Panel title={data.carrier??"Carrier pending"}>
+        <p className="code">{data.tracking_no}</p>
+        <div className="actions" style={{marginBottom:10}}>
+          <Tag>{label(data.transport_state)}</Tag>
+          <Tag>{label(data.sync_state)}</Tag>
+          {data.warehouse_state&&<Tag tone="green">Warehouse · {label(data.warehouse_state)}</Tag>}
+          {outerCondition&&<Tag tone={isDamagedOuter?"red":"green"}>Outer box · {outerCondition}</Tag>}
+        </div>
+        {isDamagedOuter&&<div className="notice warning" role="status" style={{marginBottom:10}}>
+          <strong>Outer Carton Alert ({outerCondition}):</strong> Open the full parcel page to view inspection photos.
+        </div>}
+        {(receipt||ctx)&&<ul className="summary-list-compact" style={{marginBottom:12}}>
+          {ctx?.package_code&&<li><span>Warehouse Parcel</span><strong className="code">{ctx.package_code}</strong></li>}
+          {(receipt?.logged_item_count!=null||loggedItems.length>0)&&<li><span>Logged Items</span><strong>{receipt?.logged_item_count??loggedItems.length}{(ctx?.declared_item_count??0)>0?` / ${ctx?.declared_item_count} expected`:""}</strong></li>}
+          {ctx?.weight_g!=null&&<li><span>Measured Weight</span><strong>{ctx.weight_g} g</strong></li>}
+          {openMediaIds.length>0&&<li><span>Open-Box Photos</span><strong>{openMediaIds.length} photo(s) attached</strong></li>}
+          {linkedOrders.length>0&&<li><span>Linked Order(s)</span><strong className="code">{linkedOrders.join(", ")}</strong></li>}
+        </ul>}
+        <h3 style={{margin:"12px 0 6px",fontSize:14}}>Latest Carrier Events ({data.events.length})</h3>
+        {data.events.length?<ol className="timeline">{data.events.slice(0,5).map((e:Row)=><li key={e.id}><small>{stamp(e.occurred_at)}</small><br/>{e.text}</li>)}</ol>:<Empty>No carrier events yet.</Empty>}
+        {data.events.length>5&&<p className="small muted">Showing latest 5 of {data.events.length} events.</p>}
+        <div className="actions" style={{marginTop:12}}>
+          <Link className="button primary sm" href={`/${kind}/${id}`}>Open full parcel &amp; logged items ({loggedItems.length||receipt?.logged_item_count||0}) →</Link>
+        </div>
+      </Panel>}
+    </>;
+  }
+
+  return <>{<div className="page-head"><h1>Parcel &amp; Tracking Details</h1><p className="muted">Carrier delivery milestones and warehouse physical intake are tracked independently.</p></div>}
+    {error&&<><ErrorBlock error={error}/><button type="button" onClick={reload}>Retry tracking</button></>}
     {!data&&!error&&<p role="status">Loading carrier tracking…</p>}
-    {data&&<Panel title={data.carrier??"Carrier pending"}><p className="code">{data.tracking_no}</p>
-      <div className="actions"><Tag>{label(data.transport_state)}</Tag><Tag>{label(data.sync_state)}</Tag>
-      {data.warehouse_state&&<Tag>Warehouse · {label(data.warehouse_state)}</Tag>}
-      {outerCondition&&<Tag tone={isDamagedOuter?"red":"green"}>Outer box · {outerCondition}</Tag>}
-      {kind==="parcels"&&<Link className="button sm" href={"/support?parcel="+encodeURIComponent(id)}>Get help with this parcel</Link>}
-      <button type="button" onClick={()=>{reload();if(kind==="parcels")parcelCtx.reload();}}>Reload tracking status</button>
-      {manualRefresh&&<Action disabled={!!nextQueryAt&&Date.parse(nextQueryAt)>Date.now()} run={async()=>{
-        const result=await request(path+id+"/tracking/refresh","POST",{});
-        setNextManualRefresh(result.next_allowed_at);
-        reload();
-      }}>Request carrier update</Action>}</div>
-      {isDamagedOuter&&<div className="notice warning" role="status" style={{marginTop:10}}>
-        <strong>Outer Carton Condition Alert ({outerCondition}):</strong> Warehouse intake recorded external carton damage at check-in. Open-box photos and individual item conditions are listed below.
-      </div>}
-      {data.direction==="inbound"&&data.transport_state==="delivered"&&!data.warehouse_state&&<p className="notice" role="status"><strong>Delivered by carrier · Warehouse check-in pending.</strong> Physical receipt is confirmed only after warehouse check-in.</p>}
-      {(receipt||ctx)&&<section aria-label="Warehouse receipt" className="top-gap">
+    {data&&<>
+      <Panel title={`1. Carrier Delivery Status · ${data.carrier??"Carrier pending"}`}>
+        <p className="code">{data.tracking_no}</p>
+        <div className="actions"><Tag>{label(data.transport_state)}</Tag><Tag>{label(data.sync_state)}</Tag>
+        {kind==="parcels"&&<Link className="button sm" href={"/support?parcel="+encodeURIComponent(id)}>Get help with this parcel</Link>}
+        <button type="button" onClick={()=>{reload();if(kind==="parcels")parcelCtx.reload();}}>Reload tracking status</button>
+        {manualRefresh&&<Action disabled={!!nextQueryAt&&Date.parse(nextQueryAt)>Date.now()} run={async()=>{
+          const result=await request(path+id+"/tracking/refresh","POST",{});
+          setNextManualRefresh(result.next_allowed_at);
+          reload();
+        }}>Request carrier update</Action>}</div>
+        {data.direction==="inbound"&&data.transport_state==="delivered"&&!data.warehouse_state&&<p className="notice" role="status"><strong>Delivered by carrier · Warehouse check-in pending.</strong> Physical receipt is confirmed only after warehouse check-in.</p>}
+        {data.direction==="outbound_forward"&&data.transport_state==="delivered"&&<p className="notice" role="status"><strong>Delivered to domestic freight forwarder.</strong> International forwarding is managed by your forwarder.</p>}
+        {data.direction==="outbound_return"&&data.transport_state==="delivered"&&<p className="notice" role="status"><strong>Delivered to seller.</strong> Seller refund depends on your seller platform confirmation.</p>}
+        {(data.translation_status==="updating"||data.translation_status==="pending")&&<p className="muted small" role="status">English details are being updated{data.latest_event_at?` · Latest carrier event ${stamp(data.latest_event_at)}`:""}.</p>}
+        {(data.sync_state==="needs_verification"||data.sync_state==="needs_carrier")&&<p className="notice" role="status">Verification needed — confirm the carrier or shipping label phone number to continue tracking.</p>}
+        {data.sync_state==="no_record"&&<p className="muted small" role="status">No carrier events reported yet — the carrier may not have scanned the parcel yet.</p>}
+        {(data.sync_state==="delayed"||data.sync_state==="provider_error")&&<p className="muted small" role="status">Carrier updates are temporarily delayed — showing the last known snapshot from {stamp(data.last_success_at)}.</p>}
+        {data.sync_state==="unsupported"&&<p className="muted small" role="status">Automatic tracking is not supported for this carrier; warehouse check-in and handover updates will still appear here.</p>}
+        {nextManualRefresh&&<p className="muted small" role="status">Carrier update requested. Tracking will refresh when the warehouse system receives a response.</p>}
+        {manualRefresh&&nextQueryAt&&Date.parse(nextQueryAt)>Date.now()&&<p className="muted small">Next carrier update request available at {stamp(nextQueryAt)}.</p>}
+        {(canVerify||canCorrect)&&<>
+          {verification.error&&<><ErrorBlock error={verification.error}/><button type="button" onClick={verification.reload}>Retry tracking verification</button></>}
+          {!verification.data&&!verification.error&&<p role="status">Loading tracking verification…</p>}
+          {carriers.error&&<><ErrorBlock error={carriers.error}/><button type="button" onClick={carriers.reload}>Retry carriers</button></>}
+          {!carriers.data&&!carriers.error&&<p role="status">Loading carriers…</p>}
+        </>}
+        {canVerify&&verification.data&&!verification.error&&(verification.data.carrier_code||carriers.data&&!carriers.error)&&<Form label="Verify carrier tracking" run={async f=>{
+          const phone=text(f,"phone");
+          await request(verificationPath,"POST",{revision:verification.data?.revision,carrier_code:verification.data?.carrier_code??text(f,"carrier_code"),...(phone?{phone}:{})});
+          verification.reload();reload();
+        }}>
+          {!verification.data.carrier_code&&<Select name="carrier_code" label="Carrier" choices={(carriers.data?.carriers??[]).map((c:Row)=>({id:c.code,label:c.labels.en}))}/>}
+          <Field name="phone" label="Phone used on this shipping label, if required by the carrier" required={false} type="tel"/>
+        </Form>}
+        {canCorrect&&verification.data&&!verification.error&&carriers.data&&!carriers.error&&<details className="top-gap"><summary>Correct tracking number or carrier before check-in</summary>
+          <Form key={data.tracking_id} label="Save corrected tracking" run={async f=>{
+            const phone=text(f,"phone");
+            const corrected=await request(path+id+"/correct","POST",{
+              revision:verification.data?.revision,
+              carrier_code:text(f,"carrier_code"),
+              tracking_no:text(f,"tracking_no"),
+              reason:text(f,"reason"),
+              ...(phone?{phone}:{}),
+            });
+            setCorrectedTracking(corrected.tracking_no);
+            setCorrectionCarrier("");
+            verification.reload();reload();
+          }}>
+            <label>Carrier<select name="carrier_code" value={selectedCarrier} required onChange={e=>setCorrectionCarrier(e.target.value)}>
+              <option value="">Choose a carrier</option>
+              {carriers.data.carriers.map((carrier:Row)=><option key={carrier.code} value={carrier.code}>{carrier.labels.en}</option>)}
+            </select></label>
+            <Field name="tracking_no" label="Corrected tracking number" value={data.tracking_no}/>
+            <Field name="reason" label="Reason for correction"/>
+            {labelPhoneHint&&<Field key={selectedCarrier} name="phone" label={labelPhoneHint} type="tel"/>}
+          </Form>
+          {correctedTracking&&<p className="notice ok" role="status">Tracking updated to <strong className="code">{correctedTracking}</strong>.</p>}
+        </details>}
+        <p className="muted small">Carrier data updated {stamp(data.last_success_at)}</p>
+        {data.events.length?<ol className="timeline">{data.events.map((e:Row)=><li key={e.id}><small>{stamp(e.occurred_at)}</small><br/>{e.text}</li>)}</ol>:<Empty>English carrier events will appear when verified tracking data is available.</Empty>}
+      </Panel>
+      {(receipt||ctx||data.warehouse_state)&&<Panel title={`2. Warehouse Physical Receipt · ${data.warehouse_state?label(data.warehouse_state):"Pending"}`} badge={outerCondition?<Tag tone={isDamagedOuter?"red":"green"}>Outer box · {outerCondition}</Tag>:undefined}>
+        {isDamagedOuter&&<div className="notice warning" role="status" style={{marginBottom:12}}>
+          <strong>Outer Carton Condition Alert ({outerCondition}):</strong> Warehouse intake recorded external carton damage at check-in. Open-box photos and individual item conditions are listed below.
+        </div>}
+        {(ctx?.declared_item_count??0)>0&&(receipt?.logged_item_count??loggedItems.length)!==ctx?.declared_item_count&&(
+          <div className="notice" role="status" style={{marginBottom:12}}>
+            <strong>Parcel Receipt Delta:</strong> Warehouse logged {receipt?.logged_item_count??loggedItems.length} item(s) vs {ctx?.declared_item_count} expected in this parcel.{" "}
+            {linkedOrders[0]&&<Link href={`/orders/${linkedOrders[0]}#intake-reconciliation`}>Review order reconciliation →</Link>}
+          </div>
+        )}
         <dl className="location-facts">
           {receipt?.received_at&&<div><dt>Warehouse check-in</dt><dd>{stamp(receipt.received_at)}</dd></div>}
           {(ctx?.package_code||loggedItems[0]?.package_code)&&<div><dt>Warehouse parcel code</dt><dd className="code">{ctx?.package_code??loggedItems[0]?.package_code}</dd></div>}
@@ -5202,11 +5581,14 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
           <div style={{marginTop:12}}>
             <div className="row between flexwrap" style={{marginBottom:6}}>
               <strong className="small">Physically Logged Warehouse Items ({loggedItems.length})</strong>
-              {linkedOrders[0]&&<Link className="button sm" href={`/orders/${linkedOrders[0]}#intake-reconciliation`}>Open Order Reconciliation →</Link>}
+              <div className="actions">
+                <input type="search" value={loggedSearch} onChange={e=>{setLoggedSearch(e.target.value);setLoggedPage(1);}} placeholder="Filter S-... / SKU / order…" style={{maxWidth:220}}/>
+                {linkedOrders[0]&&<Link className="button sm" href={`/orders/${linkedOrders[0]}#intake-reconciliation`}>Order Reconciliation →</Link>}
+              </div>
             </div>
             <Table
               headers={["Item Code","SKU / Product","Order","Identity","Custody","Inspection"]}
-              rows={loggedItems.map((li:Row)=>[
+              rows={loggedSlice.map((li:Row)=>[
                 <Link className="code-btn" href={"/items?item="+encodeURIComponent(li.code)}>{li.code}</Link>,
                 <div className="cell-stack">
                   <span>{li.declared_fields?.name??li.declared_fields?.product_name??"—"}</span>
@@ -5214,65 +5596,22 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
                     {[li.declared_fields?.sku_code,li.declared_fields?.color_declared,li.declared_fields?.size_label].filter(Boolean).join(" · ")}
                   </small>}
                 </div>,
-                li.order_no?<Link className="code-btn" href={"/orders/"+li.order_no}>{li.order_no}</Link>:"Unassigned",
-                <Tag tone={li.identity_state==="quarantined"?"red":li.identity_state==="identified"?"green":"yellow"}>{label(li.identity_state)}</Tag>,
+                li.order_no?<Link className="code-btn" href={"/orders/"+li.order_no}>{li.order_no}</Link>:"Pending ID",
+                <Tag tone={li.identity_state==="quarantined"?"red":li.identity_state==="identified"?"green":"yellow"}>{li.identity_state==="pending"?"Pending SKU ID":label(li.identity_state)}</Tag>,
                 label(li.custody_state),
-                <Tag tone={li.inspection_stage==="inspected"?"green":li.inspection_stage==="in_inspection"?"blue":"outline"}>{itemInspectionLabel(li)}</Tag>,
+                <Tag tone={li.identity_state!=="identified"?"yellow":li.inspection_stage==="inspected"?"green":li.inspection_stage==="in_inspection"?"blue":"outline"}>{itemInspectionLabel(li)}</Tag>,
               ])}
+              empty="No logged items match your filter."
             />
+            {loggedTotalPages>1&&<div className="actions" style={{marginTop:8}}>
+              <button type="button" className="button sm" disabled={safeLoggedPage<=1} onClick={()=>setLoggedPage(p=>Math.max(1,p-1))}>Previous</button>
+              <span className="small muted">Page {safeLoggedPage} of {loggedTotalPages}</span>
+              <button type="button" className="button sm" disabled={safeLoggedPage>=loggedTotalPages} onClick={()=>setLoggedPage(p=>Math.min(loggedTotalPages,p+1))}>Next</button>
+            </div>}
           </div>
         )}
-      </section>}
-      {data.direction==="outbound_forward"&&data.transport_state==="delivered"&&<p className="notice" role="status"><strong>Delivered to domestic freight forwarder.</strong> International forwarding is managed by your forwarder.</p>}
-      {data.direction==="outbound_return"&&data.transport_state==="delivered"&&<p className="notice" role="status"><strong>Delivered to seller.</strong> Seller refund depends on your seller platform confirmation.</p>}
-      {(data.translation_status==="updating"||data.translation_status==="pending")&&<p className="muted small" role="status">English details are being updated{data.latest_event_at?` · Latest carrier event ${stamp(data.latest_event_at)}`:""}.</p>}
-      {(data.sync_state==="needs_verification"||data.sync_state==="needs_carrier")&&<p className="notice" role="status">Verification needed — confirm the carrier or shipping label phone number to continue tracking.</p>}
-      {data.sync_state==="no_record"&&<p className="muted small" role="status">No carrier events reported yet — the carrier may not have scanned the parcel yet.</p>}
-      {(data.sync_state==="delayed"||data.sync_state==="provider_error")&&<p className="muted small" role="status">Carrier updates are temporarily delayed — showing the last known snapshot from {stamp(data.last_success_at)}.</p>}
-      {data.sync_state==="unsupported"&&<p className="muted small" role="status">Automatic tracking is not supported for this carrier; warehouse check-in and handover updates will still appear here.</p>}
-      {nextManualRefresh&&<p className="muted small" role="status">Carrier update requested. Tracking will refresh when the warehouse system receives a response.</p>}
-      {manualRefresh&&nextQueryAt&&Date.parse(nextQueryAt)>Date.now()&&<p className="muted small">Next carrier update request available at {stamp(nextQueryAt)}.</p>}
-      {(canVerify||canCorrect)&&<>
-        {verification.error&&<><ErrorBlock error={verification.error}/><button type="button" onClick={verification.reload}>Retry tracking verification</button></>}
-        {!verification.data&&!verification.error&&<p role="status">Loading tracking verification…</p>}
-        {carriers.error&&<><ErrorBlock error={carriers.error}/><button type="button" onClick={carriers.reload}>Retry carriers</button></>}
-        {!carriers.data&&!carriers.error&&<p role="status">Loading carriers…</p>}
-      </>}
-      {canVerify&&verification.data&&!verification.error&&(verification.data.carrier_code||carriers.data&&!carriers.error)&&<Form label="Verify carrier tracking" run={async f=>{
-        const phone=text(f,"phone");
-        await request(verificationPath,"POST",{revision:verification.data?.revision,carrier_code:verification.data?.carrier_code??text(f,"carrier_code"),...(phone?{phone}:{})});
-        verification.reload();reload();
-      }}>
-        {!verification.data.carrier_code&&<Select name="carrier_code" label="Carrier" choices={(carriers.data?.carriers??[]).map((c:Row)=>({id:c.code,label:c.labels.en}))}/>}
-        <Field name="phone" label="Phone used on this shipping label, if required by the carrier" required={false} type="tel"/>
-      </Form>}
-      {canCorrect&&verification.data&&!verification.error&&carriers.data&&!carriers.error&&<details className="top-gap"><summary>Correct tracking number or carrier before check-in</summary>
-        <Form key={data.tracking_id} label="Save corrected tracking" run={async f=>{
-          const phone=text(f,"phone");
-          const corrected=await request(path+id+"/correct","POST",{
-            revision:verification.data?.revision,
-            carrier_code:text(f,"carrier_code"),
-            tracking_no:text(f,"tracking_no"),
-            reason:text(f,"reason"),
-            ...(phone?{phone}:{}),
-          });
-          setCorrectedTracking(corrected.tracking_no);
-          setCorrectionCarrier("");
-          verification.reload();reload();
-        }}>
-          <label>Carrier<select name="carrier_code" value={selectedCarrier} required onChange={e=>setCorrectionCarrier(e.target.value)}>
-            <option value="">Choose a carrier</option>
-            {carriers.data.carriers.map((carrier:Row)=><option key={carrier.code} value={carrier.code}>{carrier.labels.en}</option>)}
-          </select></label>
-          <Field name="tracking_no" label="Corrected tracking number" value={data.tracking_no}/>
-          <Field name="reason" label="Reason for correction"/>
-          {labelPhoneHint&&<Field key={selectedCarrier} name="phone" label={labelPhoneHint} type="tel"/>}
-        </Form>
-        {correctedTracking&&<p className="notice ok" role="status">Tracking updated to <strong className="code">{correctedTracking}</strong>.</p>}
-      </details>}
-      <p className="muted small">Carrier data updated {stamp(data.last_success_at)}</p>
-      {data.events.length?<ol className="timeline">{data.events.map((e:Row)=><li key={e.id}><small>{stamp(e.occurred_at)}</small><br/>{e.text}</li>)}</ol>:<Empty>English carrier events will appear when verified tracking data is available.</Empty>}
-    </Panel>}
+      </Panel>}
+    </>}
     {lightbox&&<MediaLightbox ids={lightbox.ids} labels={lightbox.labels} initialIndex={lightbox.index} onClose={()=>setLightbox(null)}/>}
   </>;
 }
@@ -5325,8 +5664,8 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   const focusedItem=useLoad(isItems&&requestedItem?"/me/inventory?code="+encodeURIComponent(requestedItem):null);
   const [handlingItems,setHandlingItems]=useState<Row[]>([]);
   const [handlingNotice,setHandlingNotice]=useState("");
-  const parcelTabs=[["incoming","Incoming"],["received","Received"],["attention","Needs Attention"],["outgoing","Outgoing"]];
-  const parcelTab=parcelTabs.find(([id])=>id===search.get("tab"))?.[0]??"incoming";
+  const parcelTabs=[["all","All"],["incoming","Incoming"],["received","Received"],["attention","Needs Attention"],["outgoing","Outgoing"]];
+  const parcelTab=parcelTabs.find(([id])=>id===search.get("tab"))?.[0]??"all";
   const claimPage=Number(search.get("claim_page")??1);
   const parcelPage=Number(search.get("page")??1);
   const parcelList=useLoad(path==="/parcels"?"/me/parcels?"+new URLSearchParams({tab:parcelTab,page:String(parcelPage)}):null);
@@ -5340,7 +5679,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     const params=new URLSearchParams(search);
     params.delete("claim_page");
     params.delete("page");
-    if(tab==="incoming")params.delete("tab");
+    if(tab==="all")params.delete("tab");
     else params.set("tab",tab);
     router.push("/parcels"+(params.size?"?"+params:""),{scroll:false});
   }
@@ -5458,7 +5797,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     {data.email_delivery?.banner_message&&<div className="notice" role="alert"><strong>{data.email_delivery.banner_message}</strong>{data.email_delivery.masked_email?` (${data.email_delivery.masked_email})`:""}. Important updates remain available in your account notifications and action centre. <Link href="/account/security">Update email in account security →</Link></div>}
     {isHome&&<>
       <div className="page-head row">
-        <div><h1>Workspace Overview</h1><p className="muted">Your active inspections, parcels, items awaiting instructions and permanent China warehouse receiving address.</p></div>
+        <div><h1>Workspace Overview</h1><p className="muted">Priority actions, active inspections, completed reports and your China warehouse receiving address.</p></div>
         <div className="head-actions">
           <Link className="button sm" href="/parcels">Register Parcel</Link>
           <Link className="button sm" href="/reports">Published Reports</Link>
@@ -5483,41 +5822,42 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         <Link className="metric" href="/items"><span>Items Awaiting Instructions</span><strong>{data.summary.awaiting_instructions}</strong><small>{data.summary.in_custody} items in warehouse custody</small></Link>
         <Link className="metric" href="/account/billing"><span>Quotes Awaiting Approval</span><strong>{data.summary.pending_quotes}</strong><small>Inspection, shipping and storage quotes</small></Link>
       </div>
-        <Panel title="China Warehouse Receiving Address" subtitle="Include your permanent receiving code on the seller’s shipping label."
-          badge={demo?<Tag tone="yellow">Test address</Tag>:addr?<Tag tone="green">Current address</Tag>:undefined}>
-          {demo&&<div className="demo-address-alert" role="note">
-            <strong>Sandbox / Test Warehouse Address — Do Not Ship Real Commercial Cargo</strong>
-            <p className="small" style={{margin:"4px 0 0"}}>
-              You are viewing a local/test receiving address for <span className="mono">{data.profile.receiving_code}</span>. Only use a verified production receiving address before dispatching physical inventory.
-            </p>
-          </div>}
-          {data.warehouse_address_changed_at&&<p className="notice" role="status">The warehouse address changed on {stamp(data.warehouse_address_changed_at)}. Use the current address below for new shipments.</p>}
-          <div className="receiving-code"><span className="small muted">Permanent Personal Receiving Code</span><strong className="code">{data.profile.receiving_code}</strong></div>
-          {addr?<>
-            <div className="grid cols2" style={{marginBottom:12}}>
-              <dl className="def"><dt>Recipient &amp; Phone</dt><dd>{addr.recipient} · {addr.phone}</dd></dl>
-              <dl className="def"><dt>Chinese Shipping Address (For Domestic Sellers)</dt><dd>{addr.address_zh}（收件码：{data.profile.receiving_code}）</dd></dl>
-              <dl className="def"><dt>English Reference Address</dt><dd>{addr.address_en}</dd></dl>
-            </div>
-            <div className="actions">
-              <Action primary run={async()=>{
-                await navigator.clipboard.writeText([addr.recipient,addr.phone,`${addr.address_zh}（收件码：${data.profile.receiving_code}）`].join("\n"));
-                setAddressCopied(true);
-              }}>Copy Chinese shipping address</Action>
-              {addressCopied&&<span role="status">Address copied.</span>}
-              <Link className="button sm" href="/parcels">Register seller tracking →</Link>
-              <Link className="button sm" href="/items">Manage warehouse items →</Link>
-            </div>
-          </>:<Empty>The warehouse address is awaiting configuration.</Empty>}
-          {next&&<Link className="button primary" href={next}>Continue to your selected page</Link>}
-        </Panel>
-
     </>}
     {isSecurity&&<AccountSecurity receivingCode={data.profile.receiving_code}/>}
-    {isOrders&&<div className="page-head row"><div><h1>Inspection orders</h1><p className="muted">Review your orders, monitor warehouse intake &amp; inspection progress, or continue an existing draft.</p></div>
+    {isOrders&&<div className="page-head row"><div><h1>Inspection orders</h1><p className="muted">Search by order number, SKU or seller tracking, monitor intake reconciliation, or continue an existing draft.</p></div>
       <Link className="button primary" href="/orders/new">New inspection <span aria-hidden="true">→</span></Link></div>}
-    {(isHome||isOrders)&&<Panel title={isHome?"Recent orders":"Your orders"}>
-      {isOrders&&<>
+    {isHome&&(()=>{
+      const inProgress=orders.filter((o:Row)=>!["closed","cancelled","report_ready","action_pending"].includes(o.state));
+      const completed=orders.filter((o:Row)=>["report_ready","action_pending","closed"].includes(o.state));
+      const renderHomeRow=(o:Row)=>{
+        const nextAction=orderNextAction(o);
+        const lineSummary=[
+          o.item_count!=null?`${o.item_count} units`:null,
+          o.arrived_item_count>0?`${o.arrived_item_count}/${o.item_count} logged`:null,
+          o.identified_item_count>0?`${o.identified_item_count} identified`:null,
+        ].filter(Boolean).join(" · ");
+        return [
+          <Link className="code" href={"/orders/"+o.public_no}>{o.public_no}</Link>,
+          <div className="cell-stack"><span>{o.service_title??"—"}</span>{lineSummary&&<small>{lineSummary}</small>}</div>,
+          <div className="cell-stack">
+            <Tag tone={o.state==="on_hold"?"red":["report_ready","action_pending"].includes(o.state)?"green":o.state==="draft"?"gray":"blue"}>{label(o.state)}</Tag>
+            {o.has_intake_discrepancy&&<small className="bad">Intake discrepancy</small>}
+          </div>,
+          <Link className="small" href={nextAction.href}>{nextAction.label} →</Link>,
+        ];
+      };
+      return <>
+        <Panel title={`In-Progress Orders (${inProgress.length})`}>
+          {inProgress.length?<Table headers={["Order","Service & counts","Inspection status","Next action"]} rows={inProgress.slice(0,5).map(renderHomeRow)}/>:<Empty>No active inspections right now. Start one from New Inspection.</Empty>}
+          <Link href="/orders">View all orders →</Link>
+        </Panel>
+        {completed.length>0&&<Panel title={`Recently Completed (${completed.length})`}>
+          <Table headers={["Order","Service & counts","Status","Next action"]} rows={completed.slice(0,3).map(renderHomeRow)}/>
+        </Panel>}
+      </>;
+    })()}
+    {isOrders&&<Panel title="Your orders">
+      <>
         <div className="actions workspace-filters" style={{marginTop:0,marginBottom:12}} aria-label="Quick order status presets">
           {[
             ["","All orders"],
@@ -5525,6 +5865,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
             ["awaiting_samples","Awaiting items"],
             ["samples_ready","Samples ready"],
             ["inspecting","Inspecting"],
+            ["qa_review","Under review"],
             ["report_ready","Report ready"],
             ["on_hold","On hold"],
           ].map(([st,lbl])=>{
@@ -5545,7 +5886,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
           }
           router.push("/orders"+(params.size?"?"+params:""));
         }}>
-          <label>Order number<input name="q" type="search" maxLength={68} defaultValue={orderParams.get("q")??""} placeholder="Find an order…"/></label>
+          <label>Order, SKU, or tracking<input name="q" type="search" maxLength={68} defaultValue={orderParams.get("q")??""} placeholder="QW-..., SKU, or tracking…"/></label>
           <label>Status<select name="state" defaultValue={orderParams.get("state")??""}><option value="">All statuses</option>
             {Object.keys(orderNext).map(state=><option key={state} value={state}>{label(state)}</option>)}
             <option value="closed">Closed</option>
@@ -5553,40 +5894,72 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
           <button type="submit" className="button">Apply filters</button>
           {orderParams.size>0&&<Link href="/orders">Clear filters</Link>}
         </form>
-      </>}
-      {isOrders&&orderList.error&&<><ErrorBlock error={orderList.error}/><button type="button" onClick={orderList.reload}>Retry orders</button></>}
-      {isOrders&&!orderList.data&&!orderList.error&&<p role="status">Loading orders…</p>}
-      {visibleOrders.length?<Table headers={isHome?["Order","Service","Inspection status","Next action"]:["Order","Service & items","Inspection status","Payment","Report","Updated","Next action"]} rows={visibleOrders.map(o=>{
+      </>
+      {orderList.error&&<><ErrorBlock error={orderList.error}/><button type="button" onClick={orderList.reload}>Retry orders</button></>}
+      {!orderList.data&&!orderList.error&&<p role="status">Loading orders…</p>}
+      {visibleOrders.length?<Table headers={["Order","Service & intake counts","Inspection status","Payment","Report","Updated","Next action"]} rows={visibleOrders.map(o=>{
         const nextAction=orderNextAction(o);
+        const logged=o.arrived_item_count??0;
+        const identified=o.identified_item_count??0;
+        const expected=o.item_count??0;
         const lineSummary=[
           o.expected_lines_count>1?`${o.expected_lines_count} lines`:null,
-          o.item_count!=null?`${o.item_count} ${o.item_count===1?"unit":"units"}`:null,
-          o.supplier_count>1?`${o.supplier_count} suppliers`:null,
+          expected?`Expected ${expected}`:null,
           o.parcel_count>0?`${o.parcel_count} ${o.parcel_count===1?"parcel":"parcels"}`:null,
-          o.arrived_item_count>0?`${o.arrived_item_count}/${o.item_count} arrived`:null,
+          logged>0||identified>0?`${logged} logged · ${identified} identified`:null,
         ].filter(Boolean).join(" · ");
         const service=<div className="cell-stack"><span>{o.service_title??"—"}</span>{lineSummary&&<small>{lineSummary}</small>}</div>;
-        const statusCell=<Tag tone={o.state==="on_hold"?"red":["report_ready","action_pending"].includes(o.state)?"green":o.state==="draft"?"gray":"blue"}>{label(o.state)}</Tag>;
-        const next=<Link className="small" href={nextAction.href}>{nextAction.label} →</Link>;
-        const orderLink=<Link className="code" href={"/orders/"+o.public_no}>{o.public_no}</Link>;
-        return isHome?[orderLink,service,statusCell,next]:[
-          orderLink,service,statusCell,
+        const statusCell=<div className="cell-stack">
+          <Tag tone={o.state==="on_hold"?"red":["report_ready","action_pending"].includes(o.state)?"green":o.state==="draft"?"gray":"blue"}>{label(o.state)}</Tag>
+          {o.has_intake_discrepancy&&<Tag tone="yellow">Discrepancy</Tag>}
+        </div>;
+        return [
+          <Link className="code" href={"/orders/"+o.public_no}>{o.public_no}</Link>,
+          service,
+          statusCell,
           o.scope_payment?<Tag tone="yellow">{scopePaymentLabels[o.scope_payment.state]}</Tag>:
             o.payment_state?<Tag tone={o.payment_state==="paid"?"green":o.payment_state==="processing"?"yellow":"outline"}>{label(o.payment_state)}</Tag>:o.state==="draft"?<span className="muted small">Not submitted</span>:"—",
           o.report_version?<Link className="code-btn" href={`/orders/${o.public_no}/report`}>v{o.report_version}</Link>:<span className="muted small">Pending</span>,
           stamp(o.updated_at??o.created_at),
-          next,
+          <Link className="small" href={nextAction.href}>{nextAction.label} →</Link>,
         ];
-      })}/>:(isHome||orderList.data)&&<Empty>{orderParams.size?"No orders match your filters.":"You haven't created an inspection yet. Start one from New Inspection."}</Empty>}
-      {isHome&&orders.length>0&&<Link href="/orders">View all orders →</Link>}
-      {isOrders&&orderList.data&&(page>1||orderList.data.has_more)&&<nav className="actions" aria-label="Order pages">
+      })}/>:(orderList.data)&&<Empty>{orderParams.size?"No orders match your filters.":"You haven't created an inspection yet. Start one from New Inspection."}</Empty>}
+      {orderList.data&&(page>1||orderList.data.has_more)&&<nav className="actions" aria-label="Order pages">
         {page>1&&<Link className="button" href={ordersHref(page-1)}>Previous page</Link>}
         <span>Page {page}</span>
         {orderList.data.has_more&&<Link className="button" href={ordersHref(page+1)}>Next page</Link>}
       </nav>}
     </Panel>}
+    {isHome&&<Panel title="China Warehouse Receiving Address" subtitle="Include your permanent receiving code on the seller’s shipping label."
+      badge={demo?<Tag tone="yellow">Test address</Tag>:addr?<Tag tone="green">Current address</Tag>:undefined}>
+      {demo&&<div className="demo-address-alert" role="note">
+        <strong>Sandbox / Test Warehouse Address — Do Not Ship Real Commercial Cargo</strong>
+        <p className="small" style={{margin:"4px 0 0"}}>
+          You are viewing a local/test receiving address for <span className="mono">{data.profile.receiving_code}</span>. Only use a verified production receiving address before dispatching physical inventory.
+        </p>
+      </div>}
+      {data.warehouse_address_changed_at&&<p className="notice" role="status">The warehouse address changed on {stamp(data.warehouse_address_changed_at)}. Use the current address below for new shipments.</p>}
+      <div className="receiving-code"><span className="small muted">Permanent Personal Receiving Code</span><strong className="code">{data.profile.receiving_code}</strong></div>
+      {addr?<>
+        <div className="grid cols2" style={{marginBottom:12}}>
+          <dl className="def"><dt>Recipient &amp; Phone</dt><dd>{addr.recipient} · {addr.phone}</dd></dl>
+          <dl className="def"><dt>Chinese Shipping Address (For Domestic Sellers)</dt><dd>{addr.address_zh}（收件码：{data.profile.receiving_code}）</dd></dl>
+          <dl className="def"><dt>English Reference Address</dt><dd>{addr.address_en}</dd></dl>
+        </div>
+        <div className="actions">
+          <Action primary run={async()=>{
+            await navigator.clipboard.writeText([addr.recipient,addr.phone,`${addr.address_zh}（收件码：${data.profile.receiving_code}）`].join("\n"));
+            setAddressCopied(true);
+          }}>Copy Chinese shipping address</Action>
+          {addressCopied&&<span role="status">Address copied.</span>}
+          <Link className="button sm" href="/parcels">Register seller tracking →</Link>
+          <Link className="button sm" href="/items">Manage warehouse items →</Link>
+        </div>
+      </>:<Empty>The warehouse address is awaiting configuration.</Empty>}
+      {next&&<Link className="button primary" href={next}>Continue to your selected page</Link>}
+    </Panel>}
     {isHome&&<RecentUpdates notices={data.notices} onRead={reload}/>}
-    {isParcels&&<><div className="page-head"><h1>Parcels</h1><p className="muted">Register the seller’s tracking number, link parcels to orders, and click any tracking number to inspect live events.</p></div>
+    {isParcels&&<><div className="page-head"><h1>Parcels</h1><p className="muted">Register the seller’s tracking number, link parcels to orders, and inspect carrier events vs warehouse check-in status.</p></div>
     <details className="card" open={Boolean(parcelOrder)||undefined}>
       <summary>Register incoming parcel</summary>
       {parcelOrder&&preferredParcelOrder.error&&<><ErrorBlock error={preferredParcelOrder.error}/><button type="button" onClick={preferredParcelOrder.reload}>Retry requested order</button></>}
@@ -5595,7 +5968,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
       {carriers.error?<><ErrorBlock error={carriers.error}/><button type="button" onClick={carriers.reload}>Retry carriers</button></>:
         !carriers.data?<p role="status">Loading carriers…</p>:
         <InboundParcelForm address={addr} carriers={carriers.data.carriers} orders={linkableOrders} preferredOrder={parcelOrder}
-          onSave={()=>{if(parcelTab!=="incoming"||parcelPage>1)selectParcelTab("incoming");parcelList.reload();reload();}}/>}
+          onSave={()=>{if((parcelTab!=="all"&&parcelTab!=="incoming")||parcelPage>1)selectParcelTab("all");parcelList.reload();reload();}}/>}
     </details>
     <details className="card">
       <summary>Find an older order to link</summary>
@@ -5616,13 +5989,15 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
       </div>
     </details>
     <div className="actions workspace-filters" aria-label="Parcel filters">
-      {parcelTabs.map(([key,title])=>
-        <button type="button" key={key} aria-pressed={parcelTab===key} className={parcelTab===key?"button primary":"button"}
-          onClick={()=>selectParcelTab(key)}>{title}</button>)}
+      {parcelTabs.map(([key,title])=>{
+        const count=parcelList.data?.counts?.[key];
+        return <button type="button" key={key} aria-pressed={parcelTab===key} className={parcelTab===key?"button primary":"button"}
+          onClick={()=>selectParcelTab(key)}>{title}{count!=null?` (${count})`:""}</button>;
+      })}
     </div>
     {parcelList.error&&<><ErrorBlock error={parcelList.error}/><button className="button sm" onClick={parcelList.reload}>Retry parcels</button></>}
     {!parcelList.data&&!parcelList.error&&<p role="status">Loading parcels…</p>}
-    {parcelList.data&&parcelTab!=="outgoing"&&<Panel title={parcelTab==="received"?"Warehouse receipts":parcelTab==="attention"?"Parcels needing attention":"Incoming parcels"}>
+    {parcelList.data&&parcelTab!=="outgoing"&&<Panel title={parcelTab==="received"?"Warehouse receipts":parcelTab==="attention"?"Parcels needing attention":parcelTab==="all"?"All inbound parcels":"Incoming parcels"}>
       <Table headers={["Inbound tracking","Linked orders","Warehouse status","Carrier status"]} rows={parcelRows.map((a:Row)=>{
         const linkedNos:string[]=a.order_numbers??[];
         const candidates=linkableOrders.filter(o=>!linkedNos.includes(o.public_no));
@@ -5692,11 +6067,11 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     {isItems&&<><div className="page-head"><h1>Warehouse items</h1><p className="muted">Click any item code, tracking number or dispatch batch to inspect details, or submit batch handling instructions below.</p></div>
     <div className="metric-strip" aria-label="Items summary">
       {[
-        ["In warehouse custody",inventory.data?.custody_summary?.in_warehouse??itemCounts?.total??"—"],
-        ["Awaiting or in inspection",itemCounts?.inspection??"—"],
-        ["Awaiting instructions",itemCounts?.handling??"—"],
-        ["Active reference samples",itemCounts?.reference??"—"],
-      ].map(([name,value])=><div className="metric" key={name}><span>{name}</span><strong>{value}</strong></div>)}
+        ["In warehouse custody",inventory.data?.custody_summary?.in_warehouse??itemCounts?.total??"—",inventory.data?.custody_summary?.pending_identification?`${inventory.data.custody_summary.pending_identification} pending SKU scan`:"Physically held in warehouse"],
+        ["Awaiting or in inspection",itemCounts?.inspection??"—","SKU-identified & scheduled"],
+        ["Awaiting instructions",itemCounts?.handling??"—","Ready for return / forward / retain"],
+        ["Active reference samples",itemCounts?.reference??"—","Sealed Golden Samples"],
+      ].map(([name,value,hint])=><div className="metric" key={String(name)}><span>{name}</span><strong>{value}</strong><small>{hint}</small></div>)}
     </div>
     {handlingItems.length>0&&<div className="customer-selection-tools" role="region" aria-label="Selected item actions">
       <strong>{handlingItems.length} selected</strong><a className="button primary" href="#item-instructions">Review instructions</a>
@@ -5738,7 +6113,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
       {requestedItem&&!focusedItem.data&&!focusedItem.error&&<p role="status">Loading selected item…</p>}
       {inventory.error&&<><ErrorBlock error={inventory.error}/><button className="button sm" onClick={inventory.reload}>Retry inventory</button></>}
       {!inventory.data&&!inventory.error&&<p role="status">Loading items…</p>}
-      {!!visibleItems.length&&<div className="customer-inventory-table"><Table headers={["Item","Inbound / Package","Order & inspection","Custody","Storage through","Reference / Dispatch","Next action"]} rows={visibleItems.map((w:Row)=>[
+      {!!visibleItems.length&&<div className="customer-inventory-table"><Table headers={["Item","Inbound / Package","Order & inspection","Custody & identity","Storage through","Reference / Dispatch","Next action"]} rows={visibleItems.map((w:Row)=>[
         <div className="row" style={{gap:8,alignItems:"center"}}>
           {w.thumbnail_media_id&&<img src={"/api/v1/media/"+w.thumbnail_media_id} alt={w.code} className="thumb" style={{width:38,height:38,objectFit:"cover",borderRadius:6,flexShrink:0}} loading="lazy"/>}
           <div className="cell-stack">
@@ -5756,9 +6131,12 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
           {w.inbound_advice_id&&w.inbound_tracking_norm&&<small><CodeButton code={w.inbound_tracking_norm} onClick={()=>setTrackTarget({kind:"parcels",id:w.inbound_advice_id,code:w.inbound_tracking_norm})}/></small>}
         </div>,
         <div className="cell-stack">{w.order_no?<Link className="code-btn" href={"/orders/"+w.order_no}>{w.order_no}</Link>:<span>Uncommissioned</span>}
-          <Tag tone={w.inspection_stage==="inspected"?"green":w.inspection_stage==="in_inspection"?"blue":"outline"}>{itemInspectionLabel(w)}</Tag>
+          <Tag tone={w.identity_state==="quarantined"?"red":w.identity_state==="mismatch"||w.identity_state==="pending"?"yellow":w.inspection_stage==="inspected"?"green":w.inspection_stage==="in_inspection"?"blue":"outline"}>{itemInspectionLabel(w)}</Tag>
           {w.order_no&&<small>Order: {label(w.order_state)}</small>}</div>,
-        w.identity_state==="quarantined"?"Quarantined":label(w.custody_state),
+        <div className="cell-stack">
+          <span>{w.identity_state==="quarantined"?"Quarantined":label(w.custody_state)}</span>
+          {w.identity_state&&w.identity_state!=="identified"&&<small className="muted">{w.identity_state==="pending"?"Pending SKU verification":label(w.identity_state)}</small>}
+        </div>,
         w.storage_until?stamp(w.storage_until):<span className="small muted">30d starts after report</span>,
         <div className="cell-stack">
           {w.reference_sample&&<span>{
@@ -5775,7 +6153,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
           w.active_disposition?<Tag tone="outline">{label(w.active_disposition.action)}</Tag>:canChooseHandling(w)?<label className="small">
             <input type="checkbox" aria-label={`Select ${w.code} for handling`} checked={handlingItems.some(row=>row.item_id===w.item_id)}
               onChange={e=>setHandlingItems(rows=>e.target.checked?[...rows,w]:rows.filter(row=>row.item_id!==w.item_id))}/> Select for handling
-          </label>:"—",
+          </label>:w.identity_state==="pending"&&w.order_no?<small className="muted">Pending intake verification</small>:"—",
       ])}/></div>}
       {inventory.data&&!visibleItems.length&&<Empty>{itemCounts?.total?"No items match this view.":"Items will appear after physical warehouse intake and ownership verification."}</Empty>}
       {inventory.data&&(itemPage>1||inventory.data.has_more)&&<nav className="actions" aria-label="Inventory pages">
@@ -5839,6 +6217,10 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
       </>:<Empty>Select eligible items above to request handling.</Empty>}
     </Panel></>}
     {isBills&&<><div className="page-head"><h1>Billing</h1><p className="muted">Review shipping quotes, charges and refunds for your inspections.</p></div>
+      {demo&&<div className="demo-address-alert" role="note" style={{marginBottom:12}}>
+        <strong>Sandbox / Demo Billing &amp; Checkout Mode</strong>
+        <p className="small" style={{margin:"4px 0 0"}}>Checkouts and receipts in this local environment run against sandbox/demo sessions. Zero-dollar authorizations (<code>FREE-AUTH</code>) settle automatically without card debit.</p>
+      </div>}
       {requestedQuote&&<Panel title="Fulfillment quote">
         {focusedQuote.error?<><ErrorBlock error={focusedQuote.error}/><button type="button" onClick={focusedQuote.reload}>Retry</button></>:
           !focusedQuote.data?<p role="status">Loading fulfillment quote…</p>:
@@ -5860,33 +6242,36 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
           reconciliation:"Check previous payment status",expired:"Review expired quote",processing:"Track payment confirmation",
         } as Record<string,string>)[b.inspection_payment_state];
         const inspectionPaymentHref=b.inspection_order_number?"/orders/"+b.inspection_order_number+"/payment":null;
+        const isFreeAuth=b.amount_cents===0||String(b.paid_ref??"").toUpperCase().includes("FREE-AUTH");
+        const isDemoCharge=/^demo_/.test(String(b.paid_ref??""))||demo;
         return [
           <span id={"charge-"+b.charge_item_id} className="billing-charge-anchor" tabIndex={b.charge_item_id===requestedCharge?-1:undefined}>{b.scope_revision_id?"Supplemental inspection":label(b.purpose)}</span>,
           (b.order_numbers??[]).length?b.order_numbers.map((no:string)=><Link key={no} className="code-btn" href={"/orders/"+no}>{no}</Link>):b.batch_id?<CodeButton code={`Batch #${b.batch_id.slice(0,8)}`} onClick={()=>setBatchTarget(b.batch_id)}/>:"—",
-          usd(b.amount_cents),
+          <div className="cell-stack"><span>{usd(b.amount_cents)}</span>{isFreeAuth&&<small className="code muted">FREE-AUTH (No charge)</small>}</div>,
           <div className="cell-stack">
             <span>{b.refunded_cents?usd(b.refunded_cents):"—"}</span>
             {(b.pending_refund_cents??0)>0&&<Tag tone="yellow">Pending approval: {usd(b.pending_refund_cents)}</Tag>}
           </div>,
           <Tag tone={shownState==="paid"?"green":shownState==="open"?"yellow":["void","expired"].includes(shownState)?"gray":"blue"}>{
             b.refunded_cents>0?(b.refunded_cents>=b.amount_cents?"Refunded":"Partially refunded"):
-              /^(demo_|cs_test_)/.test(b.paid_ref??"")?"Test payment confirmed":
+              isFreeAuth&&shownState==="paid"?"Free auth confirmed":
+              /^(demo_|cs_test_)/.test(b.paid_ref??"")?(b.paid_ref?.startsWith("demo_")?"Demo checkout confirmed":"Stripe test confirmed"):
                 shownState==="processing"&&["succeeded","partially_refunded","refunded"].includes(b.latest_attempt_state)?"Payment received · under review":label(shownState)
           }</Tag>,
           stamp(b.posted_at),
           b.receipt_available?<Action run={async()=>{
             const {receipt_url}=await request("/charges/"+b.charge_item_id+"/receipt");
             location.assign(receipt_url);
-          }}>{b.paid_ref?.startsWith("cs_test_")?"View test receipt":"View Stripe receipt"}</Action>:
-            b.paid_ref?.startsWith("demo_")?<small>Test payment</small>:
-            b.paid_ref?<details className="small"><summary className="code" title={b.paid_ref}>…{String(b.paid_ref).slice(-8)}</summary><span className="code" style={{overflowWrap:"anywhere"}}>{b.paid_ref}</span></details>:b.latest_attempt_state?label(b.latest_attempt_state):"—",
+          }}>{b.paid_ref?.startsWith("cs_test_")?"View test receipt":demo?"View demo receipt":"View payment receipt"}</Action>:
+            b.paid_ref?.startsWith("demo_")?<Tag tone="yellow">Demo checkout</Tag>:
+            b.paid_ref?<details className="small"><summary className="code" title={b.paid_ref}>…{String(b.paid_ref).slice(-8)}</summary><span className="code" style={{overflowWrap:"anywhere"}}>{b.paid_ref}</span></details>:b.latest_attempt_state?label(b.latest_attempt_state):isDemoCharge&&shownState==="open"?<Tag tone="yellow">Demo checkout</Tag>:"—",
           b.scope_revision_id&&b.order_numbers?.[0]?<Link href={inspectionScopePath(b.order_numbers[0],b.scope_revision_id)}>Review scope charge</Link>:
           inspectionPaymentHref&&inspectionPaymentLabel?<Link href={inspectionPaymentHref}>{inspectionPaymentLabel}</Link>:
           quoteExpired
             ?(b.unresolved_payment?<span>Payment confirmation pending</span>:
               b.purpose==="dispatch"&&b.batch_id?<CodeButton code="Review dispatch batch" onClick={()=>setBatchTarget(b.batch_id)}/>:
               b.purpose==="storage"&&b.storage_item_code?<Link href={"/items?item="+encodeURIComponent(b.storage_item_code)}>Review stored item</Link>:<span>Quote expired</span>)
-            :shownState==="open"?<Action run={()=>goCheckout(b.charge_item_id,b.quote_revision)}>Pay</Action>:null
+            :shownState==="open"?<Action run={()=>goCheckout(b.charge_item_id,b.quote_revision)}>{demo?"Demo pay":"Pay"}</Action>:null
         ];
       })} empty="No charges yet."/>
       {(chargePage>1||data.has_more_charges)&&<nav className="actions" aria-label="Charge pages">
@@ -5916,12 +6301,29 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         {data.has_more_refunds&&<Link className="button" href={billingPageHref("refund",refundPage+1)}>Next page</Link>}
       </nav>}
     </Panel></div></>}
-    {isHelp&&<><div className="page-head"><h1>Support</h1><p className="muted">Open a case about an order, parcel, report or payment, and follow the warehouse team&apos;s replies.</p></div>
+    {isHelp&&(()=>{
+      const qOrder=search.get("order")?.trim()??"";
+      const qCategory=search.get("category")?.trim()??"";
+      const qItem=search.get("item")?.trim()??"";
+      const qParcel=search.get("parcel")?.trim()??"";
+      const qSubject=search.get("subject")?.trim()??"";
+      const prefilledOrderId=qOrder?(orders.find((o:Row)=>o.id===qOrder||o.public_no===qOrder)?.id??undefined):undefined;
+      const prefilledSubject=qSubject||(qItem?`Question regarding warehouse item ${qItem}`:undefined);
+      const supportCategoryLabels:Record<string,string>={
+        receipt_mismatch:"Received items mismatch",
+        measurement_dispute:"Inspection results dispute",
+        return_info_incomplete:"Return / forwarding details",
+        damage_or_loss:"Item damage or loss",
+        payment_refund:"Payment or refund",
+        non_standard_quote:"General inquiry",
+        identity_unclear:"Parcel ownership review",
+      };
+      return <><div className="page-head"><h1>Support</h1><p className="muted">Open a case about an order, parcel, report or payment, and follow the warehouse team&apos;s replies.</p></div>
       <Panel title="Open a support case">
         <p className="small muted" style={{marginTop:0}}>
           Note: Selecting a specific issue type (receipt mismatch, inspection results, return/forwarding, damage/loss, or payment/refund) requires choosing the related order below. Leave Issue type blank for a general account inquiry.
         </p>
-        <Form key={caseFormVersion+":"+(search.get("parcel")??"")+":"+(search.get("subject")??"")} label="Submit case" idempotent run={async (f,key)=>{
+        <Form key={[caseFormVersion,qParcel,qOrder,qCategory,qItem,qSubject].join(":")} label="Submit case" idempotent run={async (f,key)=>{
           setCreatedCase(undefined);
           const orderId=text(f,"order_id"),category=text(f,"category"),parcelId=text(f,"parcel_id");
           if(category&&!orderId) throw new Error("Select the related order for this issue type.");
@@ -5936,24 +6338,24 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
             setCaseFormVersion(version=>version+1);
           } finally {caseList.reload();}
         }}>
-          <Select name="category" label="Issue type (optional for general inquiry)" required={false} choices={[
+          <Select name="category" label="Issue type (optional for general inquiry)" required={false} value={qCategory||undefined} choices={[
             {id:"receipt_mismatch",label:"Received items do not match"},
             {id:"measurement_dispute",label:"Question about inspection results"},
             {id:"return_info_incomplete",label:"Return or forwarding information"},
             {id:"damage_or_loss",label:"Item damage or loss"},
             {id:"payment_refund",label:"Payment or refund"},
           ]}/>
-          <Select name="order_id" label="Related order (required when an issue type is selected)" required={false} choices={orders.map(o=>({id:o.id,label:`${o.public_no} · ${label(o.state)}`}))}/>
-          <Select name="parcel_id" label="Related inbound parcel (optional)" required={false} value={search.get("parcel")??undefined}
+          <Select name="order_id" label="Related order (required when an issue type is selected)" required={false} value={prefilledOrderId} choices={orders.map(o=>({id:o.id,label:`${o.public_no} · ${label(o.state)}`}))}/>
+          <Select name="parcel_id" label="Related inbound parcel (optional)" required={false} value={qParcel||undefined}
             choices={data.advices.map((parcel:Row)=>({id:parcel.id,label:parcel.tracking_norm}))}/>
-          <Field name="subject" label="Subject" value={search.get("subject")??undefined}/><label>Message<textarea name="message" required maxLength={2000}/></label>
+          <Field name="subject" label="Subject" value={prefilledSubject}/><label>Message<textarea name="message" required maxLength={2000} defaultValue={qItem?`Item reference: ${qItem}\n`:""}/></label>
           <label>Evidence photos (up to 4, optional)<FileInput name="photo" multiple/></label>
         </Form>
         {createdCase&&<p role="status">Case <Link href={"/support/cases/"+createdCase.id}>{createdCase.public_no}</Link> opened.</p>}
       </Panel>
       <Panel title="My support cases">
         <form action="/support" method="get" className="form inline-form" key={caseParams.get("q")+":"+caseParams.get("state")}>
-          {search.get("parcel")&&<input type="hidden" name="parcel" value={search.get("parcel")!}/>}
+          {qParcel&&<input type="hidden" name="parcel" value={qParcel}/>}
           <Field name="q" label="Case or order number" required={false} value={caseParams.get("q")??""}/>
           <label>Case status<select name="state" defaultValue={caseParams.get("state")??""}>
             <option value="">All statuses</option><option value="open">Open</option>
@@ -5964,14 +6366,17 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         </form>
         {caseList.error&&<><ErrorBlock error={caseList.error}/><button type="button" onClick={caseList.reload}>Retry</button></>}
         {!caseList.error&&!caseList.data&&<p role="status">Loading support cases…</p>}
-        {!caseList.error&&caseList.data&&<Table headers={["Case","Subject","Issue type","Order","Status","Last update"]} rows={caseList.data.rows.map((t:Row)=>[
+        {!caseList.error&&caseList.data&&<Table headers={["Case","Subject & team","Issue type","Order","Status & response due","Last update"]} rows={caseList.data.rows.map((t:Row)=>[
           <Link className="code" id={"case-"+t.id} href={"/support/cases/"+t.id}>{t.public_no}</Link>,
-          t.subject,
-          t.category?label(t.category):"General",
+          <div className="cell-stack"><span>{t.subject}</span>{t.handling_team&&<small className="muted">Team: {t.handling_team}</small>}</div>,
+          supportCategoryLabels[t.category]??(t.category?label(t.category):"General inquiry"),
           t.order_no?<Link className="code-btn" href={"/orders/"+t.order_no}>{t.order_no}</Link>:"—",
-          <Tag tone={t.state==="waiting_customer"?"yellow":t.state==="closed"||t.state==="resolved"?"gray":"blue"}>
-            {t.state==="waiting_customer"?"Awaiting your reply":t.state==="waiting_internal"?"With support":label(t.state)}
-          </Tag>,
+          <div className="cell-stack">
+            <Tag tone={t.state==="waiting_customer"?"yellow":t.state==="closed"||t.state==="resolved"?"gray":"blue"}>
+              {t.state==="waiting_customer"?"Awaiting your reply":t.state==="waiting_internal"?"With support":label(t.state)}
+            </Tag>
+            {t.next_action_at&&<small className="muted">Due {stamp(t.next_action_at)}</small>}
+          </div>,
           stamp(t.updated_at??t.created_at),
         ])} empty={caseParams.get("q")||caseParams.get("state")?"No support cases match these filters.":"No support cases yet."}/>}
         {caseList.data&&(caseList.data.page>1||caseList.data.has_more)&&<nav className="actions" aria-label="Support case pages">
@@ -5979,7 +6384,8 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
           <span>Page {caseList.data.page}</span>
           {caseList.data.has_more&&<Link className="button sm" href={supportPage(caseList.data.page+1)}>Next</Link>}
         </nav>}
-      </Panel></>}
+      </Panel></>;
+    })()}
     <CustomerTrackingDrawer target={trackTarget} onClose={()=>setTrackTarget(null)}/>
     <CustomerItemDrawer item={itemTarget} onClose={()=>{
       setItemTarget(null);
@@ -6186,6 +6592,8 @@ function FulfillmentQuote({quote,onUpdate,onOpenBatch,focused=false}:{quote:Row;
 const handlingStates=["report_ready","action_pending","cancelled","closed"];
 const handlingHoldLabel:Record<string,string>={stocktake:"Warehouse inventory check in progress",incident:"Warehouse incident under review"};
 function canChooseHandling(item:Row) {
+  if(item.identity_state==="quarantined") return false;
+  if(item.identity_state==="pending"&&item.order_no&&!handlingStates.includes(item.order_state)) return false;
   return !item.handling_hold&&item.allowed_actions.includes("request_disposition")&&(!item.order_state||handlingStates.includes(item.order_state))&&
     !item.active_disposition&&!item.reference_sample?.in_use&&item.reference_sample?.state!=="pending_safe_storage";
 }
@@ -6224,37 +6632,63 @@ function customerActionHref(row:Row) {
   return "/support/cases/"+row.id+(row.state==="incident_decision"?"#incident-decision":"");
 }
 
+function actionUrgencyBadge(row:Row) {
+  if(row.urgency_rank===1) return <Tag tone="red">Urgent</Tag>;
+  if(row.urgency_rank===2) return <Tag tone="yellow">Action needed</Tag>;
+  return <Tag tone="gray">Upcoming</Tag>;
+}
+
+function formatActionDelta(row:Row) {
+  if(row.amount_cents!=null) return usd(row.amount_cents);
+  if(row.expected_units==null||row.received_units==null) return "—";
+  const shortUnits=Math.max(0,Number(row.short_units??0));
+  const extraUnits=Math.max(0,Number(row.extra_units??0));
+  const unidUnits=Math.max(0,Number(row.unidentified_units??0));
+  const legacyDiff=Number(row.discrepancy_units??0);
+  const absShort=shortUnits>0?shortUnits:(legacyDiff<0?Math.abs(legacyDiff):legacyDiff>0&&row.received_units<row.expected_units?legacyDiff:0);
+  const absExtra=extraUnits>0?extraUnits:(legacyDiff>0&&row.received_units>row.expected_units?legacyDiff:0);
+  const details=[
+    absShort>0?`${absShort} missing`:null,
+    absExtra>0?`+${absExtra} extra`:null,
+    unidUnits>0?`${unidUnits} pending SKU scan`:null,
+    row.outer_condition&&["crushed","torn","wet"].includes(String(row.outer_condition))?`outer box ${row.outer_condition}`:null,
+  ].filter(Boolean);
+  return `${row.received_units}/${row.expected_units} logged${details.length?` · ${details.join(", ")}`:""}`;
+}
+
 export function CustomerActions() {
   const stamp=useWorkspaceStamp();
   const page=Number(useSearchParams().get("page")??1);
   const {data,error,reload}=useLoad("/actions?page="+page);
   return <>
     <div className="page-head row"><div><h1>Action required</h1>
-      <p className="muted">Continue work that needs your input. Quotes with deadlines and warehouse discrepancies are shown first.</p></div>
+      <p className="muted">Prioritized by deadline and impact. Respond to quotes with deadlines and warehouse intake discrepancies first.</p></div>
       <button type="button" onClick={reload}>Refresh actions</button></div>
     {error&&<ErrorBlock error={error}/>}
     {!data&&!error&&<p role="status">Loading actions…</p>}
-    {data&&!error&&<Panel title="Your next actions"><Table headers={["Action","Order / Details","Amount / Units","Reference","Due",""]} rows={data.rows.map((row:Row)=>{
+    {data&&!error&&<Panel title="Your prioritized action queue"><Table headers={["Action","Order & Impact","Amount / Count","Reference","Due / Countdown",""]} rows={data.rows.map((row:Row)=>{
       const href=customerActionHref(row);
-      const amountOrUnits=row.amount_cents!=null
-        ?usd(row.amount_cents)
-        :(row.expected_units!=null&&row.received_units!=null)
-          ?`${row.received_units}/${row.expected_units} received${row.discrepancy_units?` (${row.discrepancy_units} short)`:""}`
-          :"—";
       return [
         <div className="cell-stack">
-          <strong>{actionTitles[row.state]??"Review action"}</strong>
+          <div className="actions" style={{gap:6}}>{actionUrgencyBadge(row)}<strong>{actionTitles[row.state]??"Review action"}</strong></div>
           <small className="muted">{label(row.kind)}</small>
         </div>,
         <div className="cell-stack">
           {row.order_public_no?<Link className="code-btn" href={"/orders/"+row.order_public_no}>{row.order_public_no}</Link>:null}
           {row.summary&&<span className="small">{row.summary}</span>}
+          {row.impact&&<small className="muted">{row.impact}</small>}
           {!row.order_public_no&&!row.summary&&"—"}
         </div>,
-        <span className="small">{amountOrUnits}</span>,
-        row.reference?<span className="code">{row.reference}</span>:"—",
-        stamp(row.due_at),
-        <Link className="button sm primary" href={href}>Open →</Link>,
+        <span className="small">{formatActionDelta(row)}</span>,
+        <div className="cell-stack">
+          {row.reference?<span className="code">{row.reference}</span>:"—"}
+          {row.parcel_code&&row.parcel_code!==row.reference&&<small className="code muted">{row.parcel_code}</small>}
+        </div>,
+        <div className="cell-stack">
+          <span>{row.due_at?stamp(row.due_at):"When ready"}</span>
+          {row.due_at&&Date.parse(row.due_at)>Date.now()&&<QuoteCountdown expiresAt={row.due_at}/>}
+        </div>,
+        <Link className="button sm primary" href={href}>Take action →</Link>,
       ];
     })} empty={page>1?"No more actions on this page.":"You’re all caught up. New actions will appear here when an order, parcel, quote or case needs your input."}/>
       {(page>1||data.has_more)&&<nav className="actions" aria-label="Action pages">

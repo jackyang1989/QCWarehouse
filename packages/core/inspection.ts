@@ -413,7 +413,8 @@ export async function findInspectionTaskByScan(db:DB,actor:Actor,input:{code:str
 
 export async function taskDetail(db:DB,actor:Actor,id:string) {
   role(actor,"inspector","reviewer","warehouse_admin","super_admin","support");
-  const t=await one(db,`select t.id,t.state,t.revision,t.assignee_id,t.group_id,t.template_version_id,v.content,
+  const t=await one(db,`select t.id,t.state,t.revision,t.assignee_id,u.display_name assignee_name,t.group_id,t.template_version_id,v.content,
+    v.version template_version,parsed_key.key template_key,
     o.public_no,o.id order_id,o.revision order_revision,o.state order_state,o.sla_due_at,o.samples_ready_at,o.customer_notes,
     crp.receiving_code,l.options line_options,l.attributes line_attributes,e.declared_fields,e.position expected_position,
     w.id item_id,w.code item_code,sl.code location_code,pkg.code package_code,st.code service,so.title service_title,cat.labels category_labels,
@@ -422,9 +423,11 @@ export async function taskDetail(db:DB,actor:Actor,id:string) {
       join audit_events ae on ae.entity_id=rv.id and ae.entity_type='report_versions' and ae.action='return_report'
       where r.order_id=o.id order by rv.version desc limit 1) end review_feedback
     from inspection_tasks t join template_versions v on v.id=t.template_version_id join order_lines l on l.id=t.order_line_id
+    cross join lateral (select v.content->>'key' as key) parsed_key
     join service_offers so on so.id=l.offer_id join service_types st on st.id=so.service_type_id
     join categories cat on cat.id=l.category_id
     join orders o on o.id=l.order_id
+    left join users u on u.id=t.assignee_id
     left join customer_receiving_profiles crp on crp.org_id=o.org_id
     left join order_line_item_links a on a.id=t.assignment_id
     left join expected_items e on e.id=a.expected_item_id
@@ -456,9 +459,49 @@ export async function taskDetail(db:DB,actor:Actor,id:string) {
     checks:parsedTpl.checks.filter(c=>conditionMatches(c.applies_if,attrs) && conditionMatches(c.required_if,attrs)),
     shots:(parsedTpl.shots??[]).filter(s=>conditionMatches(s.required_if,attrs)),
   };
+  const lineAttr=(typeof t.line_attributes==="object"&&t.line_attributes?t.line_attributes:{}) as Record<string,unknown>;
+  const itemDecl=(typeof t.declared_fields==="object"&&t.declared_fields?t.declared_fields:{}) as Record<string,unknown>;
+  const seenAttIds=new Set<string>();
+  const referenceAttachments:Array<{id:string;purpose:string;name:string|null;source:"item"|"line"}>=[];
+  const pushAttachments=(rawIds:unknown,purposeRaw:unknown,nameRaw:unknown,source:"item"|"line")=>{
+    if(!Array.isArray(rawIds)) return;
+    const purpose=typeof purposeRaw==="string"&&["reference_photo","size_chart","attachment"].includes(purposeRaw)?purposeRaw:"reference_photo";
+    const name=typeof nameRaw==="string"&&nameRaw.trim()?nameRaw.trim():null;
+    for(const entry of rawIds) {
+      const attId=typeof entry==="string"?entry.trim():typeof entry==="object"&&entry&&"id" in entry?String((entry as Record<string,unknown>).id??"").trim():"";
+      if(!attId || seenAttIds.has(attId)) continue;
+      seenAttIds.add(attId);
+      const entryObj=(typeof entry==="object"&&entry?entry:{}) as Record<string,unknown>;
+      referenceAttachments.push({
+        id:attId,
+        purpose:typeof entryObj.purpose==="string"?entryObj.purpose:purpose,
+        name:typeof entryObj.name==="string"?entryObj.name:name,
+        source,
+      });
+    }
+  };
+  pushAttachments(itemDecl.attachment_ids,itemDecl.attachment_purpose,itemDecl.attachment_name,"item");
+  pushAttachments(lineAttr.attachment_ids,lineAttr.attachment_purpose,lineAttr.attachment_name,"line");
+  if(Array.isArray(lineAttr.expected_lines)) {
+    const matchedEl=lineAttr.expected_lines.find((el:unknown)=>Boolean(el&&typeof el==="object"&&(
+      (itemDecl.expected_line_id && String((el as Record<string,unknown>).id)===String(itemDecl.expected_line_id))
+      || (itemDecl.sku_code && String((el as Record<string,unknown>).sku_code??"")===String(itemDecl.sku_code))
+    ))) as Record<string,unknown>|undefined;
+    if(matchedEl) pushAttachments(matchedEl.attachment_ids??matchedEl.evidence_ids,matchedEl.attachment_purpose,matchedEl.attachment_name,"item");
+  }
+  const purchaseEvidences=Array.isArray(lineAttr.purchase_evidences)?lineAttr.purchase_evidences:[];
+  const productUrl=(typeof itemDecl.product_url==="string"&&itemDecl.product_url.trim())
+    ||(typeof lineAttr.product_url==="string"&&lineAttr.product_url.trim())
+    ||null;
+  const toleranceMode=Object.keys(tolerances).length>0?"custom":"record_only";
   return {
     ...t,
     tolerances,
+    tolerance_mode:toleranceMode,
+    attachment_ids:referenceAttachments.map(a=>a.id),
+    reference_attachments:referenceAttachments,
+    purchase_evidences:purchaseEvidences,
+    product_url:productUrl,
     content:filteredContent,
     components:await components(db,t),
     sibling_tasks:siblingTasks,

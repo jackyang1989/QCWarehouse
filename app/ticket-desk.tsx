@@ -107,6 +107,13 @@ export function CustomerCase({id,order}:{id:string;order?:string}) {
     <div className="page-head"><Link href={order?"/orders/"+order:claim?"/parcels?tab=attention":"/support"}>{order?"← Inspection order":claim?"← Parcel ownership reviews":"← Support"}</Link>
       <h1>{data?.subject??"Support case"}</h1>
       {data&&<div className="actions"><span className="code">{data.public_no}</span><Tag>{claim?claimStatus(claim,data.state):incident?.decision_required?"Decision required":status[data.state]?.[0]}</Tag>
+        {data.handling_team&&<Tag tone="outline">{data.handling_team}{data.assigned?" · Assigned":" · Queued"}</Tag>}
+        {data.next_action_at&&<Tag tone="gray">Target {stamp(data.next_action_at)}</Tag>}
+        {data.discrepancy_resolution&&<Tag tone="blue">Instruction: {({
+          proceed_with_received:"Proceed with received items",
+          wait_remaining:"Wait for remaining delivery",
+          replace_or_dispute:"Seller replacement / dispute",
+        } as Record<string,string>)[data.discrepancy_resolution]??data.discrepancy_resolution}</Tag>}
         {data.order_number&&<Link className="code-btn" href={"/orders/"+data.order_number}>{data.order_number}</Link>}
         {data.parcel&&<Link className="code-btn" href={"/parcels/"+data.parcel.id}>Parcel {data.parcel.tracking_norm??"details"}</Link>}
       </div>}</div>
@@ -297,7 +304,7 @@ export function StaffTicket({id,actor}:{id:string;actor:Row}) {
         }}>
           <label>指派负责人<select name="assignee_id" defaultValue={data.assignee_id??""}>
             <option value="">未领取（释放指派）</option>
-            {data.staff_candidates.map((c:Row)=><option key={c.id} value={c.id}>{c.display_name} ({c.email})</option>)}
+            {data.staff_candidates.map((c:Row)=><option key={c.id} value={c.id}>{c.display_name}{c.email?` (${c.email})`:""}</option>)}
           </select></label>
           <Field name="body" label="转派说明（可选）" required={false}/>
         </Form>}
@@ -322,7 +329,7 @@ export function StaffTicket({id,actor}:{id:string;actor:Row}) {
           <div><dt>账号状态</dt><dd>{data.account_recovery.user_status??"—"}</dd></div>
           <div><dt>可最终执行时间</dt><dd>{stamp(data.account_recovery.executable_after)}</dd></div>
         </dl>
-        <p className="muted">客户提交核验说明：{data.account_recovery.evidence_summary}</p>
+        {data.account_recovery.evidence_summary&&<p className="muted">客户提交核验说明：{data.account_recovery.evidence_summary}</p>}
         {["pending_review","awaiting_approval"].includes(data.account_recovery.state)&&<Form label={data.account_recovery.state==="pending_review"?"客服初审通过并提交超管审批":"超管独立复核批准"} run={async f=>{
           const decision=text(f,"decision");
           await request("/staff/account-recoveries/"+data.account_recovery.id+"/"+decision,"POST",{

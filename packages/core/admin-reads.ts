@@ -1449,7 +1449,7 @@ export async function adminDisposalDetail(db: DB, actor: Actor, id: string) {
       requested_by_name: dc.requested_by_name,
       approved_by: dc.approved_by,
       approved_by_name: dc.approved_by_name,
-      can_approve_sod: dc.state === "pending_approval" && dc.requested_by !== actor.id && hasStaffAccess(actor.roles, ["warehouse_admin", "super_admin", "support"]),
+      can_approve_sod: dc.state === "pending_approval" && dc.requested_by !== actor.id && hasStaffAccess(actor.roles, ["reviewer", "warehouse_admin", "super_admin"]),
       production_execution_enabled: prodEnabled,
     },
     customer: dc.org_id ? {

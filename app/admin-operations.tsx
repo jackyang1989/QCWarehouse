@@ -708,7 +708,7 @@ export function AdminInspectionTaskDetail({ id, actor }: { id: string; actor: Ro
         </>
       )}
 
-      <StaffObjectDrawer target={drawer} onClose={() => setDrawer(null)} />
+      <StaffObjectDrawer target={drawer} actor={actor} onClose={() => setDrawer(null)} />
     </>
   );
 }
@@ -740,6 +740,7 @@ export function AdminDispositionsWorkbench({
   const manualQuotes: Row[] = overview.data?.manual_quotes ?? deskData?.manualQuotes ?? [];
   const d = disposals.data;
   const prodEnabled = Boolean(d?.production_execution_switch?.enabled);
+  const canOpenDispatch = Boolean(actor?.roles?.some((r: string) => ["warehouse_admin", "super_admin"].includes(r)));
   const candidates: Row[] = d?.candidate_items ?? [];
   const activeCaseItemIds = new Set<string>(
     (d?.cases ?? []).filter((c: Row) => c.state !== "cancelled").flatMap((c: Row) => c.item_ids ?? [])
@@ -755,7 +756,7 @@ export function AdminDispositionsWorkbench({
           <p className="muted">按业务职责严格拆分三类工作流：正常检后发运/留存批次监控、非标质检人工报价核定，以及逾期/违禁件双人审批特殊处置。</p>
         </div>
         <div className="head-actions">
-          <Link className="button sm" href="/wh/dispatch">仓库称重打包出库队列</Link>
+          {canOpenDispatch && <Link className="button sm" href="/wh/dispatch">仓库称重打包出库队列</Link>}
           <button type="button" className="button sm" onClick={() => { overview.reload(); disposals.reload(); reloadDesk(); }}>刷新数据</button>
         </div>
       </div>
@@ -801,7 +802,9 @@ export function AdminDispositionsWorkbench({
                       ? ships.map(sh => sh.tracking_norm ? <CodeButton key={sh.id} code={sh.tracking_norm} onClick={() => setDrawer({ kind: "tracking", ref: sh.tracking_norm })} /> : <span key={sh.id}>已打包待填单</span>)
                       : <span className="muted">未打包</span>}
                   </div>,
-                  <Link key="go" className="button sm nowrap" href={`/wh/dispatch/${b.id}`}>打开出库详情 →</Link>,
+                  canOpenDispatch
+                    ? <Link key="go" className="button sm nowrap" href={`/wh/dispatch/${b.id}`}>打开出库详情 →</Link>
+                    : <span key="go" className="muted small">仓库出库权限受限</span>,
                 ];
               })}
               empty="暂无客户提交的发运或退回卖家批次。"
@@ -1020,12 +1023,12 @@ export function AdminDispositionsWorkbench({
         </>
       )}
 
-      <StaffObjectDrawer target={drawer} onClose={() => setDrawer(null)} />
+      <StaffObjectDrawer target={drawer} actor={actor} onClose={() => setDrawer(null)} />
     </>
   );
 }
 
-export function AdminDisposalDetail({ id }: { id: string }) {
+export function AdminDisposalDetail({ id, actor }: { id: string; actor?: Row }) {
   const { data, error, reload } = useLoad(`/staff/admin/disposals/${id}`);
   const [drawer, setDrawer] = useState<StaffObjectTarget | null>(null);
   const [notice, setNotice] = useState("");
@@ -1176,7 +1179,7 @@ export function AdminDisposalDetail({ id }: { id: string }) {
         </>
       )}
 
-      <StaffObjectDrawer target={drawer} onClose={() => setDrawer(null)} />
+      <StaffObjectDrawer target={drawer} actor={actor} onClose={() => setDrawer(null)} />
     </>
   );
 }
@@ -1186,10 +1189,13 @@ const stocktakeZones: Record<string, string> = {
   reference: "确认样区", unmatched: "未认领区", quarantine: "隔离区",
 };
 
-export function AdminIncidentsWorkbench() {
+export function AdminIncidentsWorkbench({ actor }: { actor?: Row }) {
   const [tab, setTab] = useState<"incidents" | "create" | "stocktakes">("incidents");
+  const canSeeStocktakes = Boolean(!actor?.roles || actor.roles.some((r: string) => ["receiver", "warehouse_admin", "super_admin"].includes(r)));
+  const canApproveStocktake = Boolean(actor?.roles?.some((r: string) => ["warehouse_admin", "super_admin"].includes(r)));
+  const canCreateIncident = Boolean(!actor?.roles || actor.roles.some((r: string) => ["receiver", "warehouse_admin", "support", "super_admin"].includes(r)));
   const incidents = useLoad("/staff/incidents");
-  const stocktakes = useLoad("/staff/stocktakes");
+  const stocktakes = useLoad(canSeeStocktakes ? "/staff/stocktakes" : null);
   const [reviewSt, setReviewSt] = useState<Row | null>(null);
   const [drawer, setDrawer] = useState<StaffObjectTarget | null>(null);
   const [notice, setNotice] = useState("");
@@ -1206,8 +1212,8 @@ export function AdminIncidentsWorkbench() {
           <p className="muted">集中追踪库内破损、缺失及质检差错事故的调查、双人赔偿审批与打款结案，同时处理盘点提交的库位/数量差异独立复核。</p>
         </div>
         <div className="head-actions">
-          <Link className="button sm" href="/wh/stocktakes">仓库盘点扫码工作台</Link>
-          <button type="button" className="button sm" onClick={() => { incidents.reload(); stocktakes.reload(); }}>刷新队列</button>
+          {canSeeStocktakes && <Link className="button sm" href="/wh/stocktakes">仓库盘点扫码工作台</Link>}
+          <button type="button" className="button sm" onClick={() => { incidents.reload(); if (canSeeStocktakes) stocktakes.reload(); }}>刷新队列</button>
         </div>
       </div>
 
@@ -1216,8 +1222,8 @@ export function AdminIncidentsWorkbench() {
         onChange={next => setTab(next as "incidents" | "create" | "stocktakes")}
         tabs={[
           { id: "incidents", label: "库内事故调查与赔付队列", count: incRows.length },
-          { id: "create", label: "登记新库存事故" },
-          { id: "stocktakes", label: "盘点差异独立复核", count: stRows.filter(s => s.state === "submitted").length },
+          ...(canCreateIncident ? [{ id: "create", label: "登记新库存事故" }] : []),
+          ...(canSeeStocktakes ? [{ id: "stocktakes", label: "盘点差异独立复核", count: stRows.filter(s => s.state === "submitted").length }] : []),
         ]}
       />
 
@@ -1297,23 +1303,30 @@ export function AdminIncidentsWorkbench() {
         </Panel>
       )}
 
-      {tab === "stocktakes" && (
-        <Panel title={`盘点差异独立复核队列 (${stRows.length})`} subtitle="盘点期间发现的缺失/错位实物会自动冻结出库；差异须由非盘点创建人的独立主管或管理员审核调整或要求复盘。">
+      {tab === "stocktakes" && canSeeStocktakes && (
+        <Panel title={`盘点差异独立复核队列 (${stRows.length})`} subtitle="明确区分原始发现差异、已批准调整与当前冻结调查项；缺失调账后实物仍冻结于库内事故流，严禁直接洗白。">
           <Table
-            headers={["盘点编号", "盘点范围", "状态", "总数 / 匹配 / 差异项", "快照时间", "独立主管复核"]}
+            headers={["盘点编号", "盘点范围", "状态", "总数 / 原差异 / 已调账 / 待决", "快照与审批人", "独立主管复核"]}
             rows={stRows.map(st => {
               const items: Row[] = st.items ?? [];
-              const matched = items.filter(i => i.state === "matched" || i.state === "adjusted").length;
-              const disc = items.filter(i => i.state === "investigating").length;
+              const origDisc = st.original_discrepancy_count ?? items.filter(i => i.state === "investigating" || i.state === "adjusted" || Boolean(i.adjustment_id)).length;
+              const adjCount = st.approved_adjustment_count ?? items.filter(i => i.state === "adjusted" || Boolean(i.approved_by)).length;
+              const openDisc = items.filter(i => i.state === "investigating" || i.state === "recount_required").length;
+              const isSelf = Boolean(actor?.id && (st.operator_id === actor.id || items.some(i => i.requested_by === actor.id)));
               return [
                 <strong key="id" className="code">#{String(st.id).slice(0, 8)}</strong>,
                 st.scope?.zone ? `仓区：${stocktakeZones[st.scope.zone] ?? st.scope.zone}` : "全仓范围",
                 <BizTag key="st" dict={STOCKTAKE_STATE_ZH} value={st.state} />,
-                `${items.length} 件 · 相符 ${matched} · 差异 ${disc}`,
-                stamp(st.snapshot_at, true),
+                `${items.length} 件 · 原始差异 ${origDisc} · 已调账 ${adjCount} · 待决 ${openDisc}`,
+                <div key="tm" className="cell-stack">
+                  <span>{stamp(st.snapshot_at, true)}</span>
+                  <small className="muted">发起 {st.operator_name ?? "—"}{st.approved_by_name ? ` / 批 ${st.approved_by_name}` : ""}</small>
+                </div>,
                 st.state === "submitted"
-                  ? <button key="act" type="button" className="button sm primary" onClick={() => setReviewSt(st)}>复核差异 ({disc})</button>
-                  : "已完成 / 作业中",
+                  ? (canApproveStocktake && !isSelf
+                    ? <button key="act" type="button" className="button sm primary" onClick={() => setReviewSt(st)}>复核差异 ({openDisc})</button>
+                    : <span key="act" className="muted small">{isSelf ? "发起人不可自审" : "仅主管/超管可批"}</span>)
+                  : "已结案 / 作业中",
               ];
             })}
             empty="暂无仓库盘点记录。"
@@ -1324,30 +1337,45 @@ export function AdminIncidentsWorkbench() {
       <ModalDrawer
         open={Boolean(reviewSt)}
         onClose={() => setReviewSt(null)}
-        centered
+        wide
         title={reviewSt ? `复核盘点差异 · #${String(reviewSt.id).slice(0, 8)}` : ""}
-        subtitle="核对仓库监控与实物移库轨迹后，决定批准库存调整或退回现场重新盘点（禁止创建人自审）。"
+        subtitle="核对以下全部盘点差异实物及调整前后位置后，决定批准库存调整或退回现场重新盘点（禁止创建人自审）。"
       >
         {reviewSt && (
-          <Form label="提交复核决定" run={async f => {
-            await request(`/staff/stocktakes/${reviewSt.id}/approve`, "POST", {
-              decision: text(f, "decision"),
-              reason: text(f, "reason"),
-            });
-            setReviewSt(null);
-            setNotice("已提交盘点差异独立复核结论。");
-            stocktakes.reload();
-          }}>
-            <Select label="复核决定" name="decision" value="approve" choices={[
-              { id: "approve", label: "批准差异调账并结案 (approve)" },
-              { id: "recount", label: "退回要求现场重新复盘 (recount)" },
-            ]} />
-            <Field label="复核核验依据" name="reason" value="主管核对监控与库位记录后确认盘点结果" />
-          </Form>
+          <>
+            <Panel title="待复核差异实物清单">
+              <Table
+                headers={["实物码", "订单 / 客户", "原快照库位", "实盘库位 / 拟调整", "差异说明"]}
+                rows={(reviewSt.items ?? []).filter((i: Row) => i.state === "investigating" || i.adjustment_id).map((i: Row) => [
+                  <CodeButton key={i.id} code={i.item_code} onClick={() => setDrawer({ kind: "item", ref: i.item_code })} />,
+                  <div key="o" className="cell-stack"><span>{i.receiving_code ?? "—"}</span>{i.order_no && <small className="code">{i.order_no}</small>}</div>,
+                  <span key="ex" className="code">{i.expected_location_code ?? "—"}</span>,
+                  <span key="ac" className="code">{i.actual_location_code ?? "确认缺失（入事故冻结）"}</span>,
+                  i.adjustment_reason || "—",
+                ])}
+                empty="无差异条目。"
+              />
+            </Panel>
+            <Form label="提交复核决定" run={async f => {
+              await request(`/staff/stocktakes/${reviewSt.id}/approve`, "POST", {
+                decision: text(f, "decision"),
+                reason: text(f, "reason"),
+              });
+              setReviewSt(null);
+              setNotice("已提交盘点差异独立复核结论。");
+              stocktakes.reload();
+            }}>
+              <Select label="复核决定" name="decision" value="approve" choices={[
+                { id: "approve", label: "批准差异调账并结案 (approve)" },
+                { id: "recount", label: "退回要求现场重新复盘 (recount)" },
+              ]} />
+              <Field label="复核核验依据" name="reason" value="主管核对监控与库位记录后确认盘点结果" />
+            </Form>
+          </>
         )}
       </ModalDrawer>
 
-      <StaffObjectDrawer target={drawer} onClose={() => setDrawer(null)} />
+      <StaffObjectDrawer target={drawer} actor={actor} onClose={() => setDrawer(null)} />
     </>
   );
 }
@@ -1574,7 +1602,7 @@ export function AdminIncidentDetail({ id, actor }: { id: string; actor: Row }) {
         </>
       )}
 
-      <StaffObjectDrawer target={drawer} onClose={() => setDrawer(null)} />
+      <StaffObjectDrawer target={drawer} actor={actor} onClose={() => setDrawer(null)} />
     </>
   );
 }

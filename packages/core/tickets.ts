@@ -116,9 +116,12 @@ export async function caseDetail(db:DB,actor:Actor,id:string,orderNumber:string|
     where p.org_id=$1 limit 1`,[k.org_id])).rows[0]??null:null;
   const linkedPaymentId=actor.kind==="staff"&&typeof k.details?.payment_id==="string"?k.details.payment_id:null;
   const linkedChargeItemId=actor.kind==="staff"&&typeof k.details?.charge_item_id==="string"?k.details.charge_item_id:null;
+  const teamOf=(cat:string)=>["receipt_mismatch","damage_or_loss","identity_unclear"].includes(cat)?"Warehouse & Ops":cat==="return_info_incomplete"?"Logistics & Billing":"Customer Support";
   return {id:k.id,public_no:k.public_no,subject:k.subject,category:k.category,state:k.state,revision:k.revision,
     created_at:k.created_at,resolved_at:k.resolved_at,
     next_action_at:k.next_action_at,order_number:k.order_number,
+    handling_team:teamOf(k.category),assigned:Boolean(k.assignee_id),
+    discrepancy_resolution:typeof k.details?.discrepancy_resolution==="string"?k.details.discrepancy_resolution:null,
     ...(actor.kind==="staff"?{order_state:k.order_state,customer,linked_payment_id:linkedPaymentId,linked_charge_item_id:linkedChargeItemId}:{}),
     incident,...(parcel?{parcel}:{}),
     ...(ownershipReview?{ownership_review:ownershipReview}:{}),
@@ -137,7 +140,12 @@ export async function canReadCasePhoto(db:DB,actor:Actor,id:string) {
 
 export async function customerCaseHistory(db:DB,actor:Actor,{q,state,page}:z.infer<typeof customerCaseQuery>) {
   const pageSize=20;
-  const {rows}=await db.query(`select k.id,k.public_no,k.subject,k.category,k.state,k.created_at,o.public_no order_no,
+  const {rows}=await db.query(`select k.id,k.public_no,k.subject,k.category,k.state,k.created_at,k.next_action_at,
+      (k.assignee_id is not null) assigned,
+      case when k.category in ('receipt_mismatch','damage_or_loss','identity_unclear') then 'Warehouse & Ops'
+           when k.category='return_info_incomplete' then 'Logistics & Billing'
+           else 'Customer Support' end handling_team,
+      o.public_no order_no,
       greatest(k.created_at,k.resolved_at,(select max(e.created_at) from ticket_events e
         where e.ticket_id=k.id and e.kind='message')) updated_at
     from tickets k left join orders o on o.id=k.order_id and o.org_id=k.org_id

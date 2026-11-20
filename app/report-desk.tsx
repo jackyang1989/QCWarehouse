@@ -6,34 +6,59 @@ import { useSearchParams } from "next/navigation";
 import { Action, checked, CodeButton, Empty, ErrorBlock, Field, Form, MediaButton, Panel, request, Select, StaffObjectDrawer, type StaffObjectTarget, stamp, Table, Tag, text, useLoad, type Row } from "./ui";
 
 const states:Record<string,string>={draft:"修订草稿",submitted:"待独立复核",qa_approved:"待生成 PDF",published:"已发布",superseded:"历史版本"};
-export function ReportDesk() {
+export function ReportDesk({actor}:{actor?:Row}={}) {
   const query=useSearchParams().get("order")?.trim().toUpperCase()??"";
+  const [stateFilter,setStateFilter]=useState<"all"|"submitted"|"qa_approved"|"published"|"draft">("all");
   const {data,error,reload}=useLoad("/staff/reports"+(query?"?"+new URLSearchParams({order:query}):""));
+  const allRows:Row[]=data?.rows??[];
+  const filteredRows=allRows.filter((v:Row)=>stateFilter==="all"?true:v.state===stateFilter);
+  const canReviewRole=Boolean(actor?.roles?.some((r:string)=>r==="reviewer"||r==="super_admin"));
   return <>
-    <div className="page-head"><p className="eyebrow">WAREHOUSE / REPORTS</p><h1>报告与修订</h1>
-      <p className="muted">核对报告证据，为已发布报告建立修订并提交独立复核。</p></div>
-    <Panel title="报告版本">
+    <div className="page-head row">
+      <div><h1>报告复核与修订工作台</h1>
+        <p className="muted">按复核状态分组核对实测数据、中英文译文及图片证据；严禁检验员自审，发布版本不可被后续草稿覆盖。</p></div>
+      <div className="head-actions">
+        <button type="button" className="button sm" onClick={reload}>刷新报告队列</button>
+      </div>
+    </div>
+    {actor&&!canReviewRole&&<div className="notice" style={{marginBottom:12}}><strong>只读监督视图：</strong>当前账号角色仅可查阅报告版本与复核进度；批准或退回重检仅限独立复核员（reviewer）。</div>}
+    <Panel title="报告版本队列">
+      <div className="actions" style={{marginBottom:10,flexWrap:"wrap"}}>
+        {([
+          ["all",`全部 (${allRows.length})`],
+          ["submitted",`待独立复核 (${allRows.filter(r=>r.state==="submitted").length})`],
+          ["qa_approved",`已批待发 (${allRows.filter(r=>r.state==="qa_approved").length})`],
+          ["published",`已发布 (${allRows.filter(r=>r.state==="published").length})`],
+          ["draft",`草稿/已退回 (${allRows.filter(r=>r.state==="draft").length})`],
+        ] as const).map(([key,txt])=><button key={key} type="button" className={"button sm"+(stateFilter===key?" primary":"")} onClick={()=>setStateFilter(key)}>{txt}</button>)}
+      </div>
       <form className="form inline-form" action="/wh/review" method="get" key={query}>
         <label>原质检订单号<input name="order" defaultValue={query} required maxLength={64}/></label>
         <button type="submit" className="primary">查报告</button><Link href="/wh/review">全部近期版本</Link>
       </form>
       {error&&<ErrorBlock error={error}/>}
       {!data&&!error&&<p role="status">正在读取报告…</p>}
-      {data&&!error&&<Table headers={["订单 / 客户","服务类型","版本","状态","提交人 / 修订原因","建立时间"]} rows={data.rows.map((v:Row)=>[
-        <div key="o" className="cell-stack">
-          <Link className="code" href={"/wh/review/"+v.id}>{v.public_no}</Link>
-          {v.receiving_code&&<small className="code muted">{v.receiving_code}</small>}
-        </div>,
-        v.service_title??"—",
-        `v${v.version}`,
-        <Tag key="st">{states[v.state]??v.state}</Tag>,
-        <div key="r" className="cell-stack">
-          <span>{v.created_by_name??"—"}</span>
-          {v.amend_reason&&<small className="muted">{v.amend_reason}</small>}
-        </div>,
-        stamp(v.created_at),
-      ])} empty="没有符合条件的报告。"/>}
-      <button type="button" onClick={reload}>刷新报告队列</button>
+      {data&&!error&&<Table headers={["订单 / 客户","服务类型","版本","状态 / SoD","提交人 / 修订说明","建立时间","操作"]} rows={filteredRows.map((v:Row)=>{
+        const isSelf=Boolean(actor?.id&&v.created_by===actor.id);
+        return [
+          <div key="o" className="cell-stack">
+            <Link className="code" href={"/wh/review/"+v.id}>{v.public_no}</Link>
+            {v.receiving_code&&<small className="code muted">{v.receiving_code}</small>}
+          </div>,
+          v.service_title??"—",
+          `v${v.version}`,
+          <div key="st" className="actions">
+            <Tag tone={v.state==="submitted"?"yellow":v.state==="published"?"green":"outline"}>{states[v.state]??v.state}</Tag>
+            {isSelf&&v.state==="submitted"&&<Tag tone="red">本人提交不可自审</Tag>}
+          </div>,
+          <div key="r" className="cell-stack">
+            <span>{v.created_by_name??"—"}</span>
+            {v.amend_reason&&<small className="muted">{v.amend_reason}</small>}
+          </div>,
+          stamp(v.created_at),
+          <Link key="go" className="button sm" href={"/wh/review/"+v.id}>{v.state==="submitted"&&canReviewRole&&!isSelf?"进入复核 →":"查看详情 →"}</Link>,
+        ];
+      })} empty="没有符合条件的报告。"/>}
     </Panel>
   </>;
 }
@@ -137,6 +162,7 @@ export function StaffReport({id,actor}:{id:string;actor:Row}) {
       </Panel>}
       {data.amend_reason&&<Panel title="本次修订原因"><p>{data.amend_reason}</p>
         {data.review_feedback&&<p className="notice">复核意见 · {data.review_feedback}</p>}</Panel>}
+      {data.state==="submitted"&&!hasReviewRole&&<div className="notice" style={{marginBottom:12}}><strong>只读查看模式：</strong>仅独立复核员（reviewer）或超级管理员（super_admin）可执行报告英文校对、批准发布或退回重检。</div>}
       {data.state==="submitted"&&hasReviewRole&&isSelfReview&&<Panel title="独立复核限制">
         <p className="notice">当前账号为该报告版本的提交人或执行检查员。按职责分离规则，须由另一名独立复核员（reviewer）执行英文校对与批准。</p>
       </Panel>}
@@ -354,6 +380,6 @@ export function StaffReport({id,actor}:{id:string;actor:Row}) {
       {data.state==="qa_approved"&&<Empty>等待后台生成并校验 PDF。生成成功后客户可以查看新版本。</Empty>}
     </>}
     <button type="button" onClick={reload}>刷新报告状态</button>
-    <StaffObjectDrawer target={drawer} onClose={()=>setDrawer(null)}/>
+    <StaffObjectDrawer target={drawer} actor={actor} onClose={()=>setDrawer(null)}/>
   </>;
 }
