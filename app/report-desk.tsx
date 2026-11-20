@@ -19,9 +19,19 @@ export function ReportDesk() {
       </form>
       {error&&<ErrorBlock error={error}/>}
       {!data&&!error&&<p role="status">正在读取报告…</p>}
-      {data&&!error&&<Table headers={["订单","版本","状态","修订原因","建立时间"]} rows={data.rows.map((v:Row)=>[
-        <Link className="code" href={"/wh/review/"+v.id}>{v.public_no}</Link>,v.version,<Tag>{states[v.state]}</Tag>,
-        v.amend_reason??"—",stamp(v.created_at),
+      {data&&!error&&<Table headers={["订单 / 客户","服务类型","版本","状态","提交人 / 修订原因","建立时间"]} rows={data.rows.map((v:Row)=>[
+        <div key="o" className="cell-stack">
+          <Link className="code" href={"/wh/review/"+v.id}>{v.public_no}</Link>
+          {v.receiving_code&&<small className="code muted">{v.receiving_code}</small>}
+        </div>,
+        v.service_title??"—",
+        `v${v.version}`,
+        <Tag key="st">{states[v.state]??v.state}</Tag>,
+        <div key="r" className="cell-stack">
+          <span>{v.created_by_name??"—"}</span>
+          {v.amend_reason&&<small className="muted">{v.amend_reason}</small>}
+        </div>,
+        stamp(v.created_at),
       ])} empty="没有符合条件的报告。"/>}
       <button type="button" onClick={reload}>刷新报告队列</button>
     </Panel>
@@ -49,6 +59,8 @@ export function StaffReport({id,actor}:{id:string;actor:Row}) {
   const hasReviewRole=actor.roles.some((r:string)=>r==="reviewer"||r==="super_admin");
   const isSelfReview=Boolean(data&&(data.created_by===actor.id||data.snapshot.sections.some((s:Row)=>s.inspector_id===actor.id)));
   const canReview=data?.state==="submitted"&&hasReviewRole&&!isSelfReview;
+  const canReject=data?.state==="submitted"&&actor.roles.includes("reviewer")&&!isSelfReview;
+  const canAmend=data?.state==="published"&&actor.roles.some((r:string)=>["reviewer","warehouse_admin","super_admin"].includes(r));
   const hasChinese=(val:unknown)=>/\p{Script=Han}/u.test(String(val??""));
 
   useEffect(()=>{
@@ -105,6 +117,24 @@ export function StaffReport({id,actor}:{id:string;actor:Row}) {
     {error&&<ErrorBlock error={error}/>}
     {!data&&!error&&<p role="status">正在读取报告内容…</p>}
     {data&&!error&&<>
+      {(data.customer_notes||data.order_lines?.length>0)&&<Panel title="客户委托核对上下文">
+        <p><strong>客户编号：</strong><span className="code">{data.receiving_code??"—"}</span> · <strong>订单：</strong><span className="code">{data.public_no}</span></p>
+        {data.customer_notes&&<p className="notice"><strong>客户特别要求与备注：</strong>{data.customer_notes}</p>}
+        {(data.order_lines??[]).map((ol:Row)=>(
+          <div key={ol.id} className="small" style={{marginTop:6}}>
+            <strong>{ol.title?.["zh-CN"]??ol.title?.en??"委托行"}</strong>
+            {Array.isArray(ol.expected_items)&&ol.expected_items.length>0&&<ul style={{margin:"4px 0 0 18px"}}>
+              {ol.expected_items.map((ei:Row,idx:number)=><li key={idx}>
+                #{ei.position} {ei.item_code?<span className="code">{ei.item_code} </span>:null}
+                {ei.declared_fields?.name||ei.declared_fields?.sku_code||ei.declared_fields?.sample_code||"样品"}
+                {ei.declared_fields?.color_declared?` · ${ei.declared_fields.color_declared}`:""}
+                {ei.declared_fields?.size_label?` · 尺码 ${ei.declared_fields.size_label}`:""}
+                {ei.declared_fields?.notes?` · 备注：${ei.declared_fields.notes}`:""}
+              </li>)}
+            </ul>}
+          </div>
+        ))}
+      </Panel>}
       {data.amend_reason&&<Panel title="本次修订原因"><p>{data.amend_reason}</p>
         {data.review_feedback&&<p className="notice">复核意见 · {data.review_feedback}</p>}</Panel>}
       {data.state==="submitted"&&hasReviewRole&&isSelfReview&&<Panel title="独立复核限制">
@@ -153,8 +183,10 @@ export function StaffReport({id,actor}:{id:string;actor:Row}) {
         </div>}
         {batchSavedNotice&&<p className="notice" role="status" style={{marginTop:10}}>{batchSavedNotice}</p>}
       </Panel>}
-      {data.snapshot.sections.map((section:Row,s:number)=><Panel key={section.task_id} title={section.title}>
-        <Table headers={["实物","检查项","原发布值","当前值 / 英文说明","中文现场原记（保留）","状态","证据"]} rows={section.results.map((result:Row,r:number)=>{
+      {data.snapshot.sections.map((section:Row,s:number)=>{
+        const reqShotMap=new Map<string,string>((data.required_shots?.[section.template_version_id]??[]).map((sh:Row)=>[sh.code,sh.zh||sh.name||sh.code]));
+        return <Panel key={section.task_id} title={section.title}>
+        <Table headers={["实物","检查项","原发布值","当前值 / 公差与英文说明","中文现场原记（保留）","状态","证据"]} rows={section.results.map((result:Row,r:number)=>{
           const original=data.base_snapshot?.sections[s]?.results[r];
           const annHasZh=Array.isArray(result.annotations)&&result.annotations.some((a:Row)=>hasChinese(a.label));
           const needsEn=hasChinese(result.reason)||(typeof result.typed_value==="string"&&hasChinese(result.typed_value))||annHasZh;
@@ -168,12 +200,17 @@ export function StaffReport({id,actor}:{id:string;actor:Row}) {
           if(Array.isArray(result.annotations)&&result.annotations.some((a:Row)=>a.label_zh||hasChinese(a.label))) {
             zhParts.push(`框选: ${result.annotations.map((a:Row)=>a.label_zh??a.label).filter(Boolean).join(" / ")}`);
           }
+          const hasBounds=result.tolerance_min!==undefined||result.tolerance_max!==undefined||result.target!==undefined;
           return [
             result.item?<CodeButton code={result.item} onClick={()=>setDrawer({kind:"item",ref:result.item})}/>:"—",
             result.label,
             original?valueOf(original):"—",
             <div>
               {valueOf(result)}
+              {hasBounds&&<div className="small muted">
+                目标 {result.target??"—"} · 允许 [{result.tolerance_min??"—"} ~ {result.tolerance_max??"—"}] {result.unit??""}
+                {result.deviation!==undefined&&<> · 偏差 <Tag tone={result.within_tolerance===false?"red":"green"}>{result.deviation>0?`+${result.deviation}`:result.deviation}</Tag></>}
+              </div>}
               {result.reason&&result.typed_value!==null&&result.typed_value!==undefined&&<div className="small muted">{result.reason}</div>}
               {Array.isArray(result.annotations)&&result.annotations.length>0&&<div className="small muted">非破坏性瑕疵框选：{result.annotations.map((a:Row,ai:number)=>`#${ai+1} ${a.label||"Defect"}`).join("；")}</div>}
               {needsEn&&<div><a href={`#tr-${s}-${r}`}><Tag tone="yellow">待译英文</Tag></a></div>}
@@ -188,7 +225,7 @@ export function StaffReport({id,actor}:{id:string;actor:Row}) {
           <div className="actions" style={{marginTop:6}}>
             <MediaButton
               ids={section.shots.map((sh:Row)=>sh.media_id)}
-              labels={section.shots.map((sh:Row)=>`${sh.item??""} · ${sh.label??sh.shot_code}`)}
+              labels={section.shots.map((sh:Row)=>`${sh.item??""} · ${sh.label??reqShotMap.get(sh.shot_code)??sh.shot_code}`)}
               label={`查看必拍机位照 (${section.shots.length})`}
             />
           </div>
@@ -287,7 +324,8 @@ export function StaffReport({id,actor}:{id:string;actor:Row}) {
             <label>客户可见英文说明<textarea name="reason" defaultValue={result.reason??""} maxLength={2000}/></label>
           </Form>
         </details>)}
-      </Panel>)}
+      </Panel>;
+      })}
       {editing&&<Panel title="提交独立复核"><Action primary run={async()=>{
         if(!window.confirm("确认提交本次修订供独立复核？"))return;
         await request("/staff/reports/"+id+"/submit-revision","POST",{revision:data.revision});reload();
@@ -300,11 +338,13 @@ export function StaffReport({id,actor}:{id:string;actor:Row}) {
           <label className="check"><input name="language" type="checkbox" required/>已核对客户可见英文、单位和修订差异</label>
           <label className="check"><input name="evidence" type="checkbox" required/>已核对证据和委托范围</label>
         </Form>
-        <Form label="记录原因并退回" run={async fields=>{
-          await request("/staff/reports/"+id+"/reject","POST",{revision:data.revision,reason:text(fields,"reason")});reload();
-        }}><label>修改要求<textarea name="reason" required minLength={4} maxLength={1200}/></label></Form>
+        {canReject?(
+          <Form label="记录原因并退回" run={async fields=>{
+            await request("/staff/reports/"+id+"/reject","POST",{revision:data.revision,reason:text(fields,"reason")});reload();
+          }}><label>修改要求<textarea name="reason" required minLength={4} maxLength={1200}/></label></Form>
+        ):<p className="muted small" style={{marginTop:8}}>退回重检操作按契约仅限独立复核员（reviewer）执行。</p>}
       </Panel>}
-      {data.state==="published"&&<Panel title="建立修订草稿">
+      {canAmend&&<Panel title="建立修订草稿">
         <p>修订经独立审核并生成 PDF 后发布，客户可以查看历史版本。</p>
         <Form label="建立修订" run={async fields=>{
           const draft=await request("/staff/reports/"+data.report_id+"/amend","POST",{base_version:data.version,reason:text(fields,"reason")});

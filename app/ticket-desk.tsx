@@ -105,7 +105,7 @@ export function CustomerCase({id,order}:{id:string;order?:string}) {
   },[id,incident?.decision_required]);
   return <>
     <div className="page-head"><Link href={order?"/orders/"+order:claim?"/parcels?tab=attention":"/support"}>{order?"← Inspection order":claim?"← Parcel ownership reviews":"← Support"}</Link>
-      <p className="eyebrow report-eyebrow">CLIENT WORKSPACE / SUPPORT</p><h1>{data?.subject??"Support case"}</h1>
+      <h1>{data?.subject??"Support case"}</h1>
       {data&&<div className="actions"><span className="code">{data.public_no}</span><Tag>{claim?claimStatus(claim,data.state):incident?.decision_required?"Decision required":status[data.state]?.[0]}</Tag>
         {data.order_number&&<Link className="code-btn" href={"/orders/"+data.order_number}>{data.order_number}</Link>}
         {data.parcel&&<Link className="code-btn" href={"/parcels/"+data.parcel.id}>Parcel {data.parcel.tracking_norm??"details"}</Link>}
@@ -149,14 +149,15 @@ export function CustomerCase({id,order}:{id:string;order?:string}) {
       </Panel></div>}
       {isOpen(data.state)&&<Panel title="Reply to support">
         <Form key={sent} label="Send reply" idempotent run={async (fields,key)=>{
-          const photo=fields.get("photo");
+          const photos=fields.getAll("photo").filter((entry):entry is File=>entry instanceof File&&entry.size>0);
+          if(photos.length>4) throw new Error("Attach up to 4 evidence photos per reply.");
           const message={revision:data.revision,body:text(fields,"body")};
-          const payload=photo instanceof File&&photo.size?fields:message;
+          const payload=photos.length?fields:message;
           if(payload instanceof FormData)payload.set("revision",String(message.revision));
           const result=await request(api+"/messages","POST",payload,key);
           setSent(result.revision);reload();
         }}><label>Reply<textarea name="body" required minLength={2} maxLength={2000}/></label>
-          <label>Evidence photo (optional)<FileInput name="photo"/></label>
+          <label>Evidence photos (up to 4, optional)<FileInput name="photo" multiple/></label>
         </Form>
         {sent&&<p role="status">Your reply was sent.</p>}
       </Panel>}

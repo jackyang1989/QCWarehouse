@@ -10,7 +10,7 @@ import { eligibleManualQuoteOrderSql } from "./orders";
 import { pendingDispatchQuote, pendingStorageQuote } from "./dispatch";
 import type { DB } from "../db";
 
-const businessEvents=["payment.checkout_expire","account.registered","report.render","refund.approved","package.received","order.ready","order.identity_mismatch","order.cancelled","dispatch.quoted","storage.quoted","quote.offered","shipment.handed_over","shipment.return_received","payment.confirmed","report.published","report.amended","ticket.reply","tracking.exception_opened"];
+const businessEvents=["payment.checkout_expire","account.registered","report.render","refund.approved","package.received","order.ready","order.identity_mismatch","order.cancelled","order.held","order.resumed","dispatch.quoted","storage.quoted","quote.offered","shipment.handed_over","shipment.return_received","payment.confirmed","report.published","report.amended","ticket.reply","tracking.exception_opened","reference.sealed","incident.resolved"];
 const maxJobAttempts=10;
 
 function eventDedupeKey(j:{id:string;type:string;payload:Record<string,unknown>}):string {
@@ -97,7 +97,7 @@ export async function workOnce() {
           [j.payload.order_id,j.payload.quote_id??null])).rows[0];
           j.payload={...j.payload,quote_id:current?.id};
         }
-        let deliver=j.type!=="quote.offered"||Boolean(j.payload.quote_id);
+        let deliver=j.type!=="reference.sealed"&&(j.type!=="quote.offered"||Boolean(j.payload.quote_id));
         if(j.payload.quote_id&&(j.type==="dispatch.quoted"||j.type==="storage.quoted")) {
           const source=j.type==="dispatch.quoted"?`dispatch_quote_versions q join dispatch_batches b on b.id=q.batch_id where ${pendingDispatchQuote}`:
             `storage_quotes q join disposition_requests d on d.id=q.disposition_id where ${pendingStorageQuote}`;
@@ -106,8 +106,9 @@ export async function workOnce() {
         const recipient=!deliver?null:(await db.query(`select p.user_id from customer_receiving_profiles p where org_id=coalesce(
           (select org_id from orders where id=$1),(select org_id from packages where id=$2),
           (select org_id from dispatch_batches where id=$3),(select b.org_id from shipments s join dispatch_batches b on b.id=s.batch_id where s.id=$4),
-          (select org_id from charge_items where id=$5),(select org_id from tracking_records where id=$6),$7::uuid)`,[j.payload.order_id??null,j.payload.package_id??null,
-          j.payload.batch_id??null,j.payload.shipment_id??null,j.payload.charge_id??null,j.payload.tracker_id??null,j.payload.org_id??null])).rows[0];
+          (select org_id from charge_items where id=$5),(select org_id from tracking_records where id=$6),
+          (select org_id from tickets where id=$8),$7::uuid)`,[j.payload.order_id??null,j.payload.package_id??null,
+          j.payload.batch_id??null,j.payload.shipment_id??null,j.payload.charge_id??null,j.payload.tracker_id??null,j.payload.org_id??null,j.payload.ticket_id??null])).rows[0];
         if(recipient) {
           const dedupeKey=eventDedupeKey(j);
           const inserted=(await db.query<{id:string}>(`insert into notifications(user_id,order_id,template,locale,payload,dedupe_key)

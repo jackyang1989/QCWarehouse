@@ -70,8 +70,8 @@ function hasUntranslatedChinese(text:string|null|undefined):boolean {
   return /[\u4e00-\u9fff]/.test(text);
 }
 
-type ToleranceRule={point_code:string;min?:number;max?:number;unit?:string};
-function extractTolerances(options:unknown,attributes:unknown):ToleranceRule[] {
+export type ToleranceRule={point_code:string;min?:number;max?:number;target?:number;unit?:string};
+export function extractTolerances(options:unknown,attributes:unknown):ToleranceRule[] {
   const rules:ToleranceRule[]=[];
   for(const src of [options,attributes]) {
     if(!src || typeof src!=="object") continue;
@@ -79,11 +79,16 @@ function extractTolerances(options:unknown,attributes:unknown):ToleranceRule[] {
     if(Array.isArray(raw)) {
       for(const item of raw) {
         if(item && typeof item==="object" && typeof (item as Record<string,unknown>).point_code==="string") {
+          const rec=item as Record<string,unknown>;
+          const minVal=typeof rec.min==="number"?Number(rec.min):undefined;
+          const maxVal=typeof rec.max==="number"?Number(rec.max):undefined;
+          const targetVal=typeof rec.target==="number"?Number(rec.target):(minVal!==undefined && maxVal!==undefined?Math.round(((minVal+maxVal)/2)*1000)/1000:undefined);
           rules.push({
-            point_code:String((item as Record<string,unknown>).point_code),
-            ...(typeof (item as Record<string,unknown>).min==="number"?{min:Number((item as Record<string,unknown>).min)}:{}),
-            ...(typeof (item as Record<string,unknown>).max==="number"?{max:Number((item as Record<string,unknown>).max)}:{}),
-            ...(typeof (item as Record<string,unknown>).unit==="string"?{unit:String((item as Record<string,unknown>).unit)}:{}),
+            point_code:String(rec.point_code),
+            ...(minVal!==undefined?{min:minVal}:{}),
+            ...(maxVal!==undefined?{max:maxVal}:{}),
+            ...(targetVal!==undefined?{target:targetVal}:{}),
+            ...(typeof rec.unit==="string"?{unit:String(rec.unit)}:{}),
           });
         }
       }
@@ -149,12 +154,23 @@ async function components(db:DB,t:{group_id?:string|null;content?:unknown}) {
     return [{id:"main",code:"Item"}];
   }
   const group=await one(db,"select * from inspection_groups where id=$1",[t.group_id]);
-  const members=(await db.query<{id:string;code:string}>(`select w.id,w.code from group_members m
-    join order_line_item_links a on a.id=m.assignment_id join warehouse_items w on w.id=a.item_id
-    where m.group_id=$1 order by w.code`,[t.group_id])).rows;
+  const members=(await db.query<{id:string;code:string;location_code:string|null;declared_fields:Record<string,unknown>|null;is_reference?:boolean;seal_code?:string|null}>(
+    `select w.id,w.code,sl.code location_code,e.declared_fields,false is_reference,null::text seal_code
+     from group_members m
+     join order_line_item_links a on a.id=m.assignment_id join warehouse_items w on w.id=a.item_id
+     left join expected_items e on e.id=a.expected_item_id
+     left join storage_locations sl on sl.id=w.location_id
+     where m.group_id=$1 order by w.code`,[t.group_id])).rows;
   if(group.reference_id) {
-    const r=await one<{id:string;code:string}>(db,`select w.id,w.code from reference_samples r join warehouse_items w on w.id=r.item_id where r.id=$1`,[group.reference_id]);
-    members.push(r);
+    const r=await one<{id:string;code:string;location_code:string|null;declared_fields:Record<string,unknown>|null;seal_code:string|null}>(
+      db,
+      `select w.id,w.code,sl.code location_code,e.declared_fields,r.authorization_snapshot->>'seal_code' seal_code
+       from reference_samples r join warehouse_items w on w.id=r.item_id
+       left join storage_locations sl on sl.id=w.location_id
+       left join order_line_item_links a on a.item_id=w.id and a.unlinked_at is null
+       left join expected_items e on e.id=a.expected_item_id
+       where r.id=$1`,[group.reference_id]);
+    members.push({...r,is_reference:true});
   }
   return members;
 }
@@ -398,25 +414,32 @@ export async function findInspectionTaskByScan(db:DB,actor:Actor,input:{code:str
 export async function taskDetail(db:DB,actor:Actor,id:string) {
   role(actor,"inspector","reviewer","warehouse_admin","super_admin","support");
   const t=await one(db,`select t.id,t.state,t.revision,t.assignee_id,t.group_id,t.template_version_id,v.content,
-    o.public_no,o.id order_id,o.revision order_revision,o.state order_state,o.sla_due_at,o.samples_ready_at,
-    l.attributes line_attributes,e.declared_fields,e.position expected_position,
-    w.id item_id,w.code item_code,st.code service,
+    o.public_no,o.id order_id,o.revision order_revision,o.state order_state,o.sla_due_at,o.samples_ready_at,o.customer_notes,
+    crp.receiving_code,l.options line_options,l.attributes line_attributes,e.declared_fields,e.position expected_position,
+    w.id item_id,w.code item_code,sl.code location_code,pkg.code package_code,st.code service,so.title service_title,cat.labels category_labels,
     case when o.state='inspecting' then (select ae.after->>'reason' from reports r
       join report_versions rv on rv.report_id=r.id and rv.state='draft'
       join audit_events ae on ae.entity_id=rv.id and ae.entity_type='report_versions' and ae.action='return_report'
       where r.order_id=o.id order by rv.version desc limit 1) end review_feedback
     from inspection_tasks t join template_versions v on v.id=t.template_version_id join order_lines l on l.id=t.order_line_id
     join service_offers so on so.id=l.offer_id join service_types st on st.id=so.service_type_id
-    join orders o on o.id=l.order_id left join order_line_item_links a on a.id=t.assignment_id
+    join categories cat on cat.id=l.category_id
+    join orders o on o.id=l.order_id
+    left join customer_receiving_profiles crp on crp.org_id=o.org_id
+    left join order_line_item_links a on a.id=t.assignment_id
     left join expected_items e on e.id=a.expected_item_id
-    left join warehouse_items w on w.id=a.item_id where t.id=$1`,[id]);
-  const siblingTasks=(await db.query(`select t2.id,t2.state,t2.revision,t2.assignee_id,w2.id item_id,w2.code item_code,e2.position
+    left join warehouse_items w on w.id=a.item_id
+    left join packages pkg on pkg.id=w.package_id
+    left join storage_locations sl on sl.id=w.location_id
+    where t.id=$1`,[id]);
+  const siblingTasks=(await db.query(`select t2.id,t2.state,t2.revision,t2.assignee_id,w2.id item_id,w2.code item_code,e2.position,e2.declared_fields
     from inspection_tasks t2 join order_lines l2 on l2.id=t2.order_line_id
     left join order_line_item_links a2 on a2.id=t2.assignment_id
     left join warehouse_items w2 on w2.id=a2.item_id
     left join expected_items e2 on e2.id=a2.expected_item_id
     where l2.order_id=$1 and t2.state<>'VOID'
     order by l2.id,e2.position nulls last,w2.code nulls last,t2.id`,[t.order_id])).rows;
+  const tolerances=extractTolerances(t.line_options,t.line_attributes);
   const shots=(await db.query(`select id,component,shot_code,point_code,sha256,created_at
     from media_assets where task_id=$1 and status='ready' and (shot_code is not null or point_code is not null)
     order by created_at,id`,[id])).rows;
@@ -435,6 +458,7 @@ export async function taskDetail(db:DB,actor:Actor,id:string) {
   };
   return {
     ...t,
+    tolerances,
     content:filteredContent,
     components:await components(db,t),
     sibling_tasks:siblingTasks,
@@ -521,7 +545,7 @@ export async function recordResults(db:DB,actor:Actor,id:string,rev:number,resul
     }
     const detailsObj:Record<string,unknown>={...(value.details??{})};
     if(value.status==="RECORDED" && check.type==="number" && typeof value.typed_value==="number") {
-      if(check.derived?.circumference_cm==="value*2" || (check.key.endsWith("_flat") && check.unit==="cm")) {
+      if(["value*2","2x"].includes(String(check.derived?.circumference_cm??"")) || ((check.key.endsWith("_flat") || check.key.endsWith("_flat_cm")) && check.unit==="cm")) {
         detailsObj.derived_circumference=Math.round(value.typed_value*2*100)/100;
       }
     }
@@ -764,6 +788,10 @@ export async function submitReport(db:DB,actor:Actor,id:string,rev:number,ids:st
       const withinTolerance=hasTolerance
         ?((typeof tol!.min!=="number" || Number(r.typed_value)>=tol!.min) && (typeof tol!.max!=="number" || Number(r.typed_value)<=tol!.max))
         :undefined;
+      const targetVal=hasTolerance && typeof tol!.target==="number"?tol!.target:undefined;
+      const toleranceMin=hasTolerance && typeof tol!.min==="number"?tol!.min:undefined;
+      const toleranceMax=hasTolerance && typeof tol!.max==="number"?tol!.max:undefined;
+      const deviation=hasTolerance && typeof targetVal==="number"?roundMetric(Number(r.typed_value)-targetVal):undefined;
       const derivedCircumference=typeof r.details?.derived_circumference==="number"?r.details.derived_circumference:undefined;
       const englishReason=(typeof r.details?.note_en==="string" && r.details.note_en.trim())?r.details.note_en.trim():r.reason;
       const reasonZh=typeof r.reason==="string" && hasUntranslatedChinese(r.reason)?r.reason:(typeof r.details?.note_zh==="string"?r.details.note_zh:undefined);
@@ -813,6 +841,10 @@ export async function submitReport(db:DB,actor:Actor,id:string,rev:number,ids:st
         item:single?.code??members.find(m=>m.id===r.component)?.code??r.component,
         ...(derivedCircumference!==undefined?{derived_circumference:derivedCircumference}:{}),
         ...(withinTolerance!==undefined?{within_tolerance:withinTolerance}:{}),
+        ...(targetVal!==undefined?{target:targetVal}:{}),
+        ...(toleranceMin!==undefined?{tolerance_min:toleranceMin}:{}),
+        ...(toleranceMax!==undefined?{tolerance_max:toleranceMax}:{}),
+        ...(deviation!==undefined?{deviation}:{}),
         ...(r.details?.severity?{severity:r.details.severity}:{}),
         ...(r.details?.part_code?{part_code:r.details.part_code}:{}),
         ...(r.details?.uncertain?{uncertain:true}:{}),
@@ -1022,9 +1054,13 @@ async function revisionTarget(db:DB,actor:Actor,id:string) {
 export async function reportDesk(db:DB,actor:Actor,order:string|null) {
   role(actor,...staffAccess.reportEditing);
   const {rows}=await db.query(`select v.id,v.report_id,v.version,v.state,v.revision,v.amend_reason,v.created_by,
-    v.created_at,o.public_no,r.published_version,v.snapshot->>'amends_version' amends_version
+    v.created_at,o.public_no,r.published_version,v.snapshot->>'amends_version' amends_version,
+    cu.display_name created_by_name,
+    (select crp.receiving_code from customer_receiving_profiles crp where crp.org_id=o.org_id limit 1) receiving_code,
+    (select so.title->>'zh-CN' from order_lines l join service_offers so on so.id=l.offer_id where l.order_id=o.id order by l.id limit 1) service_title
     from report_versions v join reports r on r.id=v.report_id join orders o on o.id=r.order_id
-    where ($1::text is null or o.public_no=$1) and (v.state in ('submitted','qa_approved','published')
+    left join users cu on cu.id=v.created_by
+    where ($1::text is null or strpos(upper(o.public_no),upper($1))>0) and (v.state in ('submitted','qa_approved','published')
       or v.state='draft' and v.snapshot ? 'amends_version')
     order by v.created_at desc,v.id limit 100`,[order]);
   return {rows};
@@ -1032,16 +1068,28 @@ export async function reportDesk(db:DB,actor:Actor,order:string|null) {
 export async function staffReport(db:DB,actor:Actor,id:string) {
   role(actor,...staffAccess.reportEditing,"support","inspector");
   const version=await one(db,`select v.id,v.report_id,v.version,v.state,v.revision,v.snapshot,v.amend_reason,v.created_by,v.published_at,
-    r.published_version,o.public_no,
+    r.published_version,o.id order_id,o.public_no,o.customer_notes,crp.receiving_code,
     (select ae.after->>'reason' from audit_events ae where ae.entity_id=v.id and ae.entity_type='report_versions'
       and ae.action='return_report' order by ae.at desc,ae.id desc limit 1) review_feedback,
     base.snapshot base_snapshot
     from report_versions v join reports r on r.id=v.report_id join orders o on o.id=r.order_id
+    left join customer_receiving_profiles crp on crp.org_id=o.org_id
     left join report_versions base on base.report_id=r.id and base.version=(v.snapshot->>'amends_version')::int
     where v.id=$1`,[id]);
   const templates=(await db.query("select id,content from template_versions where id=any($1::uuid[])",
     [version.snapshot.sections.map((section:{template_version_id:string})=>section.template_version_id)])).rows;
-  return {...version,field_types:Object.fromEntries(templates.map(t=>[t.id,
+  const orderLines=(await db.query(`select l.id,l.options,l.attributes,so.title,
+    (select coalesce(jsonb_agg(jsonb_build_object('position',e.position,'declared_fields',e.declared_fields,'item_code',w.code) order by e.position),'[]'::jsonb)
+     from expected_items e left join order_line_item_links a on a.expected_item_id=e.id and a.unlinked_at is null
+     left join warehouse_items w on w.id=a.item_id
+     where e.order_line_id=l.id and e.in_scope) expected_items
+    from order_lines l join service_offers so on so.id=l.offer_id where l.order_id=$1 order by l.id`,[version.order_id])).rows;
+  const requiredShots:Record<string,{code:string;name?:string;zh?:string;component?:string}[]>={};
+  for(const t of templates) {
+    const parsed=templateSchema.safeParse(t.content);
+    if(parsed.success) requiredShots[t.id]=parsed.data.shots??[];
+  }
+  return {...version,order_lines:orderLines,required_shots:requiredShots,field_types:Object.fromEntries(templates.map(t=>[t.id,
     Object.fromEntries(templateSchema.parse(t.content).checks.map(c=>[c.key,c.type]))]))};
 }
 export async function amendReport(db:DB,actor:Actor,id:string,input:z.infer<typeof amendReportInput>) {
@@ -1148,6 +1196,7 @@ type ReportResult={
   recorded_by?:string|null;recorded_by_name?:string|null;recorded_at?:string|null;
   attempts?:{attempt:number;status:string;typed_value:unknown;unit:string|null;method:string;recorded_by?:string|null;recorded_by_name?:string|null;recorded_at?:string|null}[];
   evidence_ids:string[];derived_circumference?:number;within_tolerance?:boolean;
+  target?:number;tolerance_min?:number;tolerance_max?:number;deviation?:number;
   severity?:string;part_code?:string;uncertain?:boolean;
   annotations?:{x:number;y:number;w?:number;h?:number;label?:string;label_zh?:string}[];
 };
@@ -1268,7 +1317,10 @@ async function renderPDF(db:DB,org:string,snapshot:Snapshot,version:number,amend
     }
     for(const r of s.results) {
       const circ=typeof r.derived_circumference==="number"?` (Circumference: ${r.derived_circumference} cm)`:"";
-      const tol=typeof r.within_tolerance==="boolean"?` [${r.within_tolerance?"Within stated tolerance":"Outside stated tolerance"}]`:"";
+      const tolRange=(typeof r.tolerance_min==="number" || typeof r.tolerance_max==="number")
+        ?` [Target ${r.target??"-"} | Range ${r.tolerance_min??"-"}-${r.tolerance_max??"-"} ${r.unit??""}${typeof r.deviation==="number"?` | Dev ${r.deviation>0?"+":""}${r.deviation}`:""}]`
+        :"";
+      const tol=typeof r.within_tolerance==="boolean"?`${tolRange} [${r.within_tolerance?"Within stated tolerance":"Outside stated tolerance"}]`:"";
       const sev=r.severity?` [Severity: ${r.severity}]`:"";
       const part=r.part_code?` [Part: ${r.part_code}]`:"";
       const unc=r.uncertain?" [Uncertain - requires verification]":"";
@@ -1468,6 +1520,15 @@ export async function publishReport(db:DB,id:string) {
     await db.query(`update reference_reservations r set released_at=now() from inspection_groups g,order_lines l
       where r.group_id=g.id and g.order_line_id=l.id and l.order_id=$1 and r.released_at is null`,[v.order_id]);
     await db.query("update orders set state='report_ready',report_published_at=now(),revision=revision+1 where id=$1",[v.order_id]);
+    const freeDaysCfg=(await db.query<{value:unknown}>("select value from app_config where key='storage.free_days'")).rows[0]?.value;
+    const freeDays=typeof freeDaysCfg==="number" && Number.isInteger(freeDaysCfg) && freeDaysCfg>=1 && freeDaysCfg<=365 ? freeDaysCfg : 30;
+    await db.query(
+      `update warehouse_items w
+       set storage_until=coalesce(w.storage_until, now() + make_interval(days => $2))
+       from order_line_item_links a join order_lines l on l.id=a.order_line_id
+       where w.id=a.item_id and l.order_id=$1 and a.unlinked_at is null and w.custody_state in ('received','stored') and w.storage_until is null`,
+      [v.order_id,freeDays]
+    );
   }
   await audit(db,null,"publish_report","report_versions",id);
   await event(db,amendment?"report.amended":"report.published",{order_id:v.order_id,version:v.version});

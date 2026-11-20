@@ -145,6 +145,69 @@ export async function tracking(db:DB,actor:Actor,id:string,kind:"advice"|"shipme
     ...(t.last_success_at?{last_success_at:t.last_success_at}:{}),...(t.latest_event_at?{latest_event_at:t.latest_event_at}:{}),
     ...(snapshot?{localized_snapshot_at:snapshot.fetched_at}:{}),...(nextAllowed?{next_allowed_at:nextAllowed}:{})};
 }
+export async function customerParcelContext(db:DB,actor:Actor,id:string) {
+  const org=organization(actor);
+  await one(db,"select id from package_advices where id=$1 and org_id=$2",[id,org]);
+  const t=await one(db,`select t.tracking_norm,p.id matched_package_id,p.code package_code,
+    substring(p.condition_note from '^\\[outer:(intact|crushed|torn|wet)\\]') outer_condition,p.weight_g
+    from tracking_records t left join packages p on p.id=t.package_id and p.org_id=t.org_id
+    where t.advice_id=$1 and t.org_id=$2 and t.closed_at is null order by t.generation desc limit 1`,[id,org]);
+  const orderNumbers=(await db.query<{public_no:string}>(
+    `select o.public_no from advice_orders ao join orders o on o.id=ao.order_id and o.org_id=ao.org_id
+     where ao.advice_id=$1 and ao.org_id=$2 order by o.public_no`,
+    [id,org]
+  )).rows.map(r=>r.public_no);
+  const planned=await one<{item_count:number;suppliers:string[]|null}>(
+    db,
+    `select count(*)::int item_count,
+      array_agg(distinct nullif(e.declared_fields->>'supplier_alias','')) filter (where nullif(e.declared_fields->>'supplier_alias','') is not null) suppliers
+     from advice_orders ao join orders o on o.id=ao.order_id and o.org_id=ao.org_id
+     join order_lines l on l.order_id=o.id and l.org_id=o.org_id
+     join expected_items e on e.order_line_id=l.id and e.in_scope
+     where ao.advice_id=$1 and ao.org_id=$2
+       and (upper(regexp_replace(coalesce(e.declared_fields->>'declared_tracking_no',e.declared_fields->>'tracking_no',e.declared_fields->>'waybill',e.declared_fields->>'source_tracking_no',''),'[[:space:]]+','','g'))=$3
+         or (coalesce(e.declared_fields->>'declared_tracking_no',e.declared_fields->>'tracking_no',e.declared_fields->>'waybill',e.declared_fields->>'source_tracking_no','')=''
+           and (select count(*) from advice_orders ao2 where ao2.order_id=o.id and ao2.org_id=o.org_id)=1))`,
+    [id,org,t.tracking_norm]
+  );
+  let openMediaIds:string[]=[];
+  let loggedItems:unknown[]=[];
+  if(t.matched_package_id) {
+    openMediaIds=(await db.query<{id:string}>(
+      "select id from media_assets where package_id=$1 and org_id=$2 and kind='intake_open' and status='ready' order by captured_at asc nulls last,id asc limit 12",
+      [t.matched_package_id,org]
+    )).rows.map(r=>r.id);
+    loggedItems=(await db.query(
+      `select w.id,w.code,w.identity_state,w.condition_state,w.custody_state,
+        (select case when it.state='IN_PROGRESS' then 'in_inspection' when it.state in ('SUBMITTED','QA_APPROVED') then 'inspected' else 'pending' end
+         from order_line_item_links a2 join inspection_tasks it on it.order_line_id=a2.order_line_id
+           and (it.assignment_id=a2.id or exists(select 1 from group_members gm where gm.group_id=it.group_id and gm.assignment_id=a2.id and gm.order_line_id=a2.order_line_id))
+         where a2.item_id=w.id and a2.unlinked_at is null and it.state<>'VOID'
+         order by case when it.state='IN_PROGRESS' then 0 when it.state in ('SUBMITTED','QA_APPROVED') then 1 else 2 end limit 1) inspection_stage,
+        o.public_no order_no,e.declared_fields
+       from warehouse_items w
+       left join order_line_item_links a on a.item_id=w.id and a.unlinked_at is null
+       left join expected_items e on e.id=a.expected_item_id
+       left join order_lines ol on ol.id=a.order_line_id
+       left join orders o on o.id=ol.order_id and o.org_id=w.org_id
+       where w.package_id=$1 and w.org_id=$2 and w.parent_item_id is null
+       order by w.received_at asc,w.code asc`,
+      [t.matched_package_id,org]
+    )).rows;
+  }
+  return {
+    advice_id:id,
+    tracking_norm:t.tracking_norm,
+    package_code:t.package_code??null,
+    outer_condition:t.outer_condition??null,
+    weight_g:t.weight_g??null,
+    open_media_ids:openMediaIds,
+    order_numbers:orderNumbers,
+    declared_item_count:planned.item_count??0,
+    declared_suppliers:planned.suppliers??[],
+    logged_items:loggedItems,
+  };
+}
 export async function verificationState(db:DB,actor:Actor,id:string) {
   const org=organization(actor);
   return one(db,`select t.revision,t.carrier_code,t.sync_state from tracking_records t
@@ -165,18 +228,19 @@ export async function verifyTracking(db:DB,actor:Actor,id:string,input:{revision
   await lock(db,"waybill:"+initial.tracking_norm);
   const t=await one(db,"select * from tracking_records where advice_id=$1 and org_id=$2 and closed_at is null for update",[id,org]);
   revision(t.revision,input.revision);
-  guard(["needs_carrier","needs_verification"].includes(t.sync_state) && (!t.carrier_code || t.carrier_code===input.carrier_code),
+  const carrierCode=await validCarrier(db,input.carrier_code);
+  guard(["needs_carrier","needs_verification"].includes(t.sync_state) && (!t.carrier_code || t.carrier_code===carrierCode),
     "TRACKING_VERIFICATION_UNAVAILABLE","This tracking record cannot be changed here.");
-  const phone=await shippingLabelPhone(db,input.carrier_code,input.phone);
+  const phone=await shippingLabelPhone(db,carrierCode,input.phone);
   const conflicts=await db.query(`select 1 from tracking_records where closed_at is null and tracking_norm=$1
-    and (carrier_code is null or carrier_code=$2) and id<>$3`,[t.tracking_norm,input.carrier_code,t.id]);
+    and (carrier_code is null or carrier_code=$2) and id<>$3`,[t.tracking_norm,carrierCode,t.id]);
   guard(!conflicts.rowCount,"TRACKING_REVIEW_REQUIRED","This tracking number requires staff verification.");
   await db.query(`update tracking_records set carrier_code=$2,source_phone_ciphertext=$3,
     sync_state='pending',next_query_at=now(),revision=revision+1 where id=$1`,
-    [t.id,input.carrier_code,phone]);
+    [t.id,carrierCode,phone]);
   await db.query(`update tracking_subscriptions set next_retry_at=now(),attempt_count=0
     where tracker_id=$1 and status in ('failed','unknown')`,[t.id]);
-  await audit(db,actor,"verify_tracking","tracking_records",t.id,{carrier:input.carrier_code});
+  await audit(db,actor,"verify_tracking","tracking_records",t.id,{carrier:carrierCode});
   return {revision:t.revision+1,sync_state:"pending"};
 }
 export async function providerCallback(db:DB,token:string,raw:string) {
@@ -249,18 +313,19 @@ export async function correctCustomerParcelTracking(
   const t=await one(db,"select * from tracking_records where advice_id=$1 and org_id=$2 and closed_at is null for update",[adviceId,org]);
   revision(t.revision,input.revision);
   guard(!t.package_id,"PARCEL_ALREADY_RECEIVED","Checked-in parcels require warehouse staff verification to amend.");
-  const phone=await shippingLabelPhone(db,input.carrier_code,input.phone);
+  const carrierCode=await validCarrier(db,input.carrier_code);
+  const phone=await shippingLabelPhone(db,carrierCode,input.phone);
   const conflicts=await db.query(`select 1 from tracking_records where closed_at is null and tracking_norm=$1
-    and (carrier_code is null or carrier_code=$2) and id<>$3`,[norm,input.carrier_code,t.id]);
+    and (carrier_code is null or carrier_code=$2) and id<>$3`,[norm,carrierCode,t.id]);
   guard(!conflicts.rowCount,"TRACKING_REVIEW_REQUIRED","This tracking number requires staff verification.");
   await db.query("update tracking_records set closed_at=now(),sync_state='superseded',revision=revision+1 where id=$1",[t.id]);
   const next=await one<{id:string;generation:number;revision:number}>(db,`insert into tracking_records(
     org_id,direction,advice_id,carrier_code,tracking_norm,generation,supersedes_id,source_phone_ciphertext,transport_state,sync_state,next_query_at,revision
   ) values($1,'inbound',$2,$3,$4,$5,$6,$7,'unknown','pending',now(),1) returning id,generation,revision`,
-  [org,adviceId,input.carrier_code,norm,t.generation+1,t.id,phone]);
+  [org,adviceId,carrierCode,norm,t.generation+1,t.id,phone]);
   await event(db,"tracking.corrected",{tracker_id:next.id,supersedes_id:t.id,advice_id:adviceId});
-  await audit(db,actor,"correct_parcel_tracking","tracking_records",next.id,{supersedes_id:t.id,tracking_norm:norm,carrier_code:input.carrier_code});
-  return {tracking_id:next.id,generation:next.generation,revision:next.revision,tracking_no:norm,carrier_code:input.carrier_code,sync_state:"pending"};
+  await audit(db,actor,"correct_parcel_tracking","tracking_records",next.id,{supersedes_id:t.id,tracking_norm:norm,carrier_code:carrierCode});
+  return {tracking_id:next.id,generation:next.generation,revision:next.revision,tracking_no:norm,carrier_code:carrierCode,sync_state:"pending"};
 }
 export async function correctStaffTracking(
   db:DB,actor:Actor,trackerId:string,input:{revision:number;carrier_code:string;tracking_no:string;reason:string;evidence_ids?:string[]},sessionHash:string
@@ -268,7 +333,7 @@ export async function correctStaffTracking(
   role(actor,"warehouse_admin","super_admin");
   await requireStaffMfa(db,actor,sessionHash,15);
   const norm=waybill(input.tracking_no);
-  await validCarrier(db,input.carrier_code);
+  const carrierCode=await validCarrier(db,input.carrier_code);
   await lock(db,"waybill:"+norm);
   const t=await one(db,"select * from tracking_records where id=$1 and closed_at is null for update",[trackerId]);
   revision(t.revision,input.revision);
@@ -276,16 +341,16 @@ export async function correctStaffTracking(
     guard(input.evidence_ids && input.evidence_ids.length>=1,"EVIDENCE_REQUIRED","Outbound waybill correction after handover requires label photo evidence.",422);
   }
   const conflicts=await db.query(`select 1 from tracking_records where closed_at is null and tracking_norm=$1
-    and (carrier_code is null or carrier_code=$2) and id<>$3`,[norm,input.carrier_code,t.id]);
+    and (carrier_code is null or carrier_code=$2) and id<>$3`,[norm,carrierCode,t.id]);
   guard(!conflicts.rowCount,"TRACKING_REVIEW_REQUIRED","This tracking number conflicts with another active record.");
   await db.query("update tracking_records set closed_at=now(),sync_state='superseded',revision=revision+1 where id=$1",[t.id]);
   const next=await one<{id:string;generation:number;revision:number}>(db,`insert into tracking_records(
     org_id,direction,advice_id,package_id,shipment_id,carrier_code,tracking_norm,generation,supersedes_id,source_phone_ciphertext,transport_state,sync_state,next_query_at,revision
   ) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'unknown','pending',now(),1) returning id,generation,revision`,
-  [t.org_id,t.direction,t.advice_id,t.package_id,t.shipment_id,input.carrier_code,norm,t.generation+1,t.id,t.source_phone_ciphertext]);
+  [t.org_id,t.direction,t.advice_id,t.package_id,t.shipment_id,carrierCode,norm,t.generation+1,t.id,t.source_phone_ciphertext]);
   await event(db,"tracking.corrected",{tracker_id:next.id,supersedes_id:t.id,reason:input.reason});
-  await audit(db,actor,"staff_correct_tracking","tracking_records",next.id,{supersedes_id:t.id,tracking_norm:norm,carrier_code:input.carrier_code,reason:input.reason,evidence_ids:input.evidence_ids??[]});
-  return {tracking_id:next.id,generation:next.generation,revision:next.revision,tracking_no:norm,carrier_code:input.carrier_code};
+  await audit(db,actor,"staff_correct_tracking","tracking_records",next.id,{supersedes_id:t.id,tracking_norm:norm,carrier_code:carrierCode,reason:input.reason,evidence_ids:input.evidence_ids??[]});
+  return {tracking_id:next.id,generation:next.generation,revision:next.revision,tracking_no:norm,carrier_code:carrierCode};
 }
 export async function submitTrackingTranslation(
   db:DB,actor:Actor,trackerId:string,input:{event_id?:string;tracking_event_id?:string;source_hash?:string;text?:string;text_en?:string}

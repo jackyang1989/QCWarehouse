@@ -141,19 +141,30 @@ export async function listStocktakes(db:DB,actor:Actor) {
      from stocktakes s join users u on u.id=s.operator_id
      order by s.snapshot_at desc limit 30`
   );
-  const {rows:items}=await db.query(
+  const stocktakeIds=stocktakes.map(s=>s.id);
+  const {rows:items}=stocktakeIds.length?(await db.query(
     `select si.id,si.stocktake_id,si.item_id,w.code item_code,w.custody_state,
             si.expected_location,el.code expected_location_code,
             si.actual_location,al.code actual_location_code,
             si.revision,si.evidence,si.state,
-            ia.id adjustment_id,ia.reason adjustment_reason,ia.requested_by,ia.approved_by
+            ia.id adjustment_id,ia.reason adjustment_reason,ia.requested_by,ia.approved_by,
+            (select crp.receiving_code from customer_receiving_profiles crp where crp.org_id=w.org_id limit 1) receiving_code,
+            o.public_no order_no,
+            coalesce(e.declared_fields->>'name',l.attributes->>'name') product_name,
+            e.declared_fields->>'sample_code' sample_code
      from stocktake_items si
      join warehouse_items w on w.id=si.item_id
      left join storage_locations el on el.id=si.expected_location
      left join storage_locations al on al.id=si.actual_location
      left join inventory_adjustments ia on ia.stocktake_item_id=si.id
-     order by w.code`
-  );
+     left join order_line_item_links a on a.item_id=w.id and a.unlinked_at is null
+     left join expected_items e on e.id=a.expected_item_id
+     left join order_lines l on l.id=a.order_line_id
+     left join orders o on o.id=l.order_id
+     where si.stocktake_id=any($1::uuid[])
+     order by w.code`,
+    [stocktakeIds]
+  )):{rows:[]};
   return {
     rows:stocktakes.map(s=>({
       ...s,
@@ -225,6 +236,17 @@ export async function scanStocktakeItem(
   role(actor,"receiver","warehouse_admin","super_admin");
   const st=await one(db,"select * from stocktakes where id=$1 for update",[stocktakeId]);
   guard(["in_progress","submitted"].includes(st.state),"STOCKTAKE_CLOSED","This stocktake is already closed.");
+  let resolvedActualLocation:string|null=null;
+  if(input.actual_location && input.actual_location.trim()) {
+    const rawLoc=input.actual_location.trim();
+    if(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawLoc)) {
+      resolvedActualLocation=(await one<{id:string}>(db,"select id from storage_locations where id=$1",[rawLoc])).id;
+    } else {
+      const matchedLoc=(await db.query<{id:string}>("select id from storage_locations where upper(code)=upper($1)",[rawLoc])).rows[0];
+      guard(matchedLoc,"LOCATION_NOT_FOUND",`未找到库位编码 ${rawLoc}，请扫码确认。`,422);
+      resolvedActualLocation=matchedLoc.id;
+    }
+  }
   const item=input.item_id
     ?await one(db,"select * from warehouse_items where id=$1 for update",[input.item_id])
     :await one(db,"select * from warehouse_items where upper(code)=upper($1) for update",[input.item_code??""]);
@@ -262,14 +284,14 @@ export async function scanStocktakeItem(
     at:new Date().toISOString(),
     actor_id:actor.id,
     status:input.status,
-    actual_location:input.actual_location??null,
+    actual_location:resolvedActualLocation,
     note:input.note??null,
     evidence_ids:input.evidence_ids??[],
   };
   const nextEvidence=[...(Array.isArray(si.evidence)?si.evidence:[]),entry];
 
   if(input.status==="matched") {
-    const loc=input.actual_location??si.expected_location;
+    const loc=resolvedActualLocation??si.expected_location;
     await db.query(
       "update stocktake_items set actual_location=$2,state='matched',revision=$3,evidence=$4 where id=$1",
       [si.id,loc,item.revision,JSON.stringify(nextEvidence)]
@@ -278,7 +300,7 @@ export async function scanStocktakeItem(
   }
 
   if(input.status==="found") {
-    const loc=input.actual_location??si.expected_location??item.location_id;
+    const loc=resolvedActualLocation??si.expected_location??item.location_id;
     guard(loc,"LOCATION_REQUIRED","Specify the storage location where the recovered item was found.",422);
     if(item.location_id!==loc) {
       await requireSpace(db,loc,1);
@@ -294,7 +316,7 @@ export async function scanStocktakeItem(
   }
 
   // status is 'missing' or 'relocated' -> mark 'investigating' to freeze the item (T102)
-  const actualLoc=input.status==="missing"?null:(input.actual_location??null);
+  const actualLoc=input.status==="missing"?null:resolvedActualLocation;
   if(input.status==="relocated") {
     guard(actualLoc && actualLoc!==si.expected_location,"LOCATION_REQUIRED","Provide the actual storage location for a relocated item.",422);
   }

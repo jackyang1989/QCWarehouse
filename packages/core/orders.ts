@@ -179,8 +179,30 @@ export async function saveOrder(db:DB,actor:Actor,input:{lines:LineInput[];custo
         "INCOMPATIBLE_SAMPLES","Choose the checklist that matches the declared garment type.",422);
     }
     await validateLineSamples(db,org,line,offer.service);
+    const rawExpected=Array.isArray((line.attributes as Record<string,unknown>|undefined)?.expected_lines)
+      ?((line.attributes as Record<string,unknown>).expected_lines as Record<string,unknown>[])
+      :[];
+    const expandedFromExpected:Record<string,unknown>[]=[];
+    if(!line.items?.length && rawExpected.length>0) {
+      for(let elIdx=0;elIdx<rawExpected.length;elIdx++) {
+        const el=rawExpected[elIdx]??{};
+        const count=Math.max(0,Math.floor(Number(el.quantity??0)||0));
+        for(let q=0;q<count&&expandedFromExpected.length<line.quantity;q++) {
+          expandedFromExpected.push({
+            expected_line_id:String(el.id??`EL-${elIdx+1}`),
+            sku_code:typeof el.sku_code==="string"?el.sku_code.trim():undefined,
+            name:typeof el.product_name==="string"&&el.product_name.trim()?el.product_name.trim():((line.attributes as Record<string,unknown>|undefined)?.name??undefined),
+            color_declared:typeof el.color_declared==="string"?el.color_declared.trim():undefined,
+            size_label:typeof el.size_label==="string"?el.size_label.trim():undefined,
+            supplier_alias:typeof el.supplier_alias==="string"?el.supplier_alias.trim():undefined,
+            declared_tracking_no:typeof el.tracking_no==="string"?el.tracking_no.trim():undefined,
+            garment_type:(line.attributes as Record<string,unknown>|undefined)?.garment_type,
+          });
+        }
+      }
+    }
     const normalizedItems=Array.from({length:line.quantity},(_,idx)=>{
-      const raw=(line.items?.[idx]??{}) as Record<string,unknown>;
+      const raw=(line.items?.[idx]??expandedFromExpected[idx]??{}) as Record<string,unknown>;
       const defaultCode=`L${lineIndex+1}-P${String(idx+1).padStart(2,"0")}`;
       return {
         position:idx+1,
@@ -474,7 +496,6 @@ export type ParcelReconciliationRow={
   warehouse_state:string|null;
   received_at:Date|string|null;
   outer_condition:string|null;
-  condition_note:string|null;
   supplier_alias:string;
   contents_unknown:boolean;
   declared_qty:number;
@@ -511,7 +532,6 @@ export function summarizeExpectedLines(
     warehouse_state?:string|null;
     received_at?:Date|string|null;
     outer_condition?:string|null;
-    condition_note?:string|null;
     received_quantity?:number|null;
     logged_item_count?:number|null;
     identified_item_count?:number|null;
@@ -551,6 +571,12 @@ export function summarizeExpectedLines(
 
     if(declaredExpected.length>0) {
       const assignedRowIds=new Set<string>();
+      const matchedByIdx:(typeof lineRows)[]=[];
+      const bucketMeta:Array<{
+        el:Record<string,unknown>;elId:string;skuCode:string;productName:string;colorDeclared:string;
+        sizeLabel:string;supplierAlias:string;trackingNo:string;carrierCode:string;poRef:string;
+        unitPriceNote:string;declaredQty:number;
+      }>=[];
       for(let idx=0;idx<declaredExpected.length;idx++) {
         const el=declaredExpected[idx]??{};
         const elId=String(el.id??`EL-${idx+1}`);
@@ -575,11 +601,27 @@ export function summarizeExpectedLines(
           const rSku=String(df.sku_code??df.sample_code??"").trim();
           const rColor=String(df.color_declared??df.color??"").trim();
           const rSize=String(df.size_label??df.size??"").trim();
-          return !df.expected_line_id && (rSku===skuCode || (!skuCode && rColor===colorDeclared && rSize===sizeLabel));
+          return !df.expected_line_id && (
+            (skuCode && rSku===skuCode)
+            || (!skuCode && colorDeclared && sizeLabel && rColor===colorDeclared && rSize===sizeLabel)
+          );
         });
         const boundedMatched=matched.slice(0,declaredQty||matched.length);
         for(const m of boundedMatched) assignedRowIds.add(String(m.expected_item_id??m.id));
-
+        matchedByIdx.push(boundedMatched);
+        bucketMeta.push({el,elId,skuCode,productName,colorDeclared,sizeLabel,supplierAlias,trackingNo,carrierCode,poRef,unitPriceNote,declaredQty});
+      }
+      const leftoverRows=lineRows.filter(r=>!assignedRowIds.has(String(r.expected_item_id??r.id)));
+      for(let idx=0;idx<bucketMeta.length&&leftoverRows.length>0;idx++) {
+        const cap=bucketMeta[idx].declaredQty;
+        const cur=matchedByIdx[idx];
+        while((cap===0||cur.length<cap)&&leftoverRows.length>0) {
+          cur.push(leftoverRows.shift()!);
+        }
+      }
+      for(let idx=0;idx<bucketMeta.length;idx++) {
+        const {el,elId,skuCode,productName,colorDeclared,sizeLabel,supplierAlias,trackingNo,carrierCode,poRef,unitPriceNote,declaredQty}=bucketMeta[idx];
+        const boundedMatched=matchedByIdx[idx];
         const arrivedQty=boundedMatched.filter(r=>Boolean(r.item_id||r.linked_item_id)).length;
         const identifiedQty=boundedMatched.filter(r=>r.identity_state==="identified").length;
         const mismatchQty=boundedMatched.filter(r=>r.identity_state==="mismatch").length;
@@ -735,7 +777,6 @@ export function summarizeExpectedLines(
       warehouse_state:p.warehouse_state??null,
       received_at:p.received_at??null,
       outer_condition:p.outer_condition??null,
-      condition_note:p.condition_note??null,
       supplier_alias:String(matchingPlanned?.supplier_alias??"").trim()||matchingLines.map(m=>m.supplier_alias).filter(Boolean).join(", ")||"—",
       contents_unknown:contentsUnknown,
       declared_qty:declaredQty,
@@ -834,7 +875,7 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
     where r.order_id=$1 and r.revision=$2`,[id,order.revision])).rows[0]:null;
   const parcels=(await db.query(`select ao.advice_id id,t.tracking_norm,t.carrier_code,c.labels->>'en' carrier_name,
     t.transport_state,t.sync_state,p.id package_id,p.code package_code,p.state warehouse_state,p.received_quantity,
-    p.received_at,p.condition_note,
+    p.received_at,
     substring(p.condition_note from '^\\[outer:(intact|crushed|torn|wet)\\]') outer_condition,
     (select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null) logged_item_count,
     (select count(*)::int from warehouse_items wi join order_line_item_links olil on olil.item_id=wi.id and olil.unlinked_at is null

@@ -306,21 +306,25 @@ export function DateInput({
   </div>;
 }
 
-export function FileInput({name="photo",accept="image/jpeg,image/png,image/webp,image/heic",required=false,capture}:{
-  name?:string;accept?:string;required?:boolean;capture?:"user"|"environment";
+export function FileInput({name="photo",accept="image/jpeg,image/png,image/webp,image/heic",required=false,capture,multiple=false}:{
+  name?:string;accept?:string;required?:boolean;capture?:"user"|"environment";multiple?:boolean;
 }) {
   const zh=useIsStaffLocale();
   const [fileName,setFileName]=useState("");
   return <span className="file-picker">
-    <span className="file-picker-btn">{zh?"选择文件":"Choose file"}</span>
+    <span className="file-picker-btn">{zh?(multiple?"选择多张照片":"选择文件"):(multiple?"Choose photos":"Choose file")}</span>
     <span className="file-picker-name">{fileName||(zh?"未选择文件":"No file chosen")}</span>
     <input
       type="file"
       name={name}
       accept={accept}
       capture={capture}
+      multiple={multiple}
       required={required}
-      onChange={e=>setFileName(e.target.files?.[0]?.name??"")}
+      onChange={e=>{
+        const files=Array.from(e.target.files??[]);
+        setFileName(files.length>1?(zh?`已选 ${files.length} 张照片 (${files.map(f=>f.name).join(", ")})`:`${files.length} files: ${files.map(f=>f.name).join(", ")}`):(files[0]?.name??""));
+      }}
     />
   </span>;
 }
@@ -419,7 +423,7 @@ export function Tag({children,tone}:{children:ReactNode;tone?:"green"|"yellow"|"
 }
 export function ErrorBlock({error}:{error:string}) {
   const zh=useIsStaffLocale();
-  const display = zh && error === "This action requires staff permission."
+  const display = zh && (error === "This action requires staff permission." || error === "This action requires a different role.")
     ? "当前员工账号未分配执行该操作的岗位角色权限（按职责分离与最小权限控制拦截）。"
     : error;
   return <div className="notice error" role="alert">{display}</div>;

@@ -97,14 +97,14 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
   else if(route.view==="logistics") content=<LogisticsDesk actor={a}/>;
   else if(route.view==="logistics-configuration") content=<LogisticsConfiguration/>;
   else if(route.view==="warehouse-scan") content=<WarehouseScan/>;
-  else if(route.view==="warehouse-item") content=<WarehouseItemView code={route.id}/>;
-  else if(route.view==="warehouse-package") content=<WarehousePackageView code={route.id}/>;
-  else if(route.view==="dispatch-batch") content=<WarehouseDispatchBatch key={route.id} id={route.id}/>;
+  else if(route.view==="warehouse-item") content=<WarehouseItemView code={route.id} actor={a}/>;
+  else if(route.view==="warehouse-package") content=<WarehousePackageView code={route.id} actor={a}/>;
+  else if(route.view==="dispatch-batch") content=<WarehouseDispatchBatch key={route.id} id={route.id} actor={a}/>;
   else if(route.view==="report-desk") content=<ReportDesk/>;
   else if(route.view==="staff-report") content=<StaffReport key={route.id} id={route.id} actor={a}/>;
   else if(route.view==="operations") content=<OperationsDesk/>;
   else if(path==="/admin/audit") content=<AuditDesk/>;
-  else if(route.view==="storage-move") content=<StorageMove path={path}/>;
+  else if(route.view==="storage-move") content=<StorageMove path={path} actor={a}/>;
   else if(route.view==="storage-locations") content=<StorageLocations warehouseLinks={warehouseLinks}/>;
   else if(route.view==="admin") content=<AdminDesk path={path} actor={a} demo={demo}/>;
   else if(route.view==="admin-customers") content=<AdminCustomersDirectory/>;
@@ -141,7 +141,7 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
   else if(route.view==="shipment") content=<OrderFulfillment key={route.id} id={route.id} kind="shipments"/>;
   else content=<CustomerDesk path={path==="/billing"?"/account/billing":path} demo={demo}/>;
   const locale=isStaff?"zh-CN":"en";
-  const signOut=a?<Action run={async()=>{await request("/auth/logout","POST",{});if(a.kind==="customer") clearCustomerDraftRecovery(a.id);location.assign(a.kind==="staff"?"/staff/login":"/login");}}>{a.kind==="staff"?"退出登录":"Sign out"}</Action>:undefined;
+  const signOut=a?<Action run={async()=>{await request("/auth/logout","POST",{});if(a.kind==="customer") clearCustomerDraftRecovery(a.id);else{try{for(const k of Object.keys(window.localStorage)){if(k.startsWith("qcw_task_draft_"))window.localStorage.removeItem(k);}}catch{}}location.assign(a.kind==="staff"?"/staff/login":"/login");}}>{a.kind==="staff"?"退出登录":"Sign out"}</Action>:undefined;
   const homeLink=a?.kind==="customer"?"/account":undefined;
   if(publicPage||!a||links.length===0) return <>
     <PublicHeader path={path} accountHref={homeLink} staff={a?.kind==="staff"} accountAction={a?.kind==="customer"?signOut:undefined} actor={a} demo={demo}/>
@@ -155,9 +155,6 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
   const parentLink =
     links.filter(([href])=>href!=="/wh"&&href!=="/admin"&&normPath.startsWith(href+"/")).sort(([left],[right])=>right.length-left.length)[0]
     ?? (normPath.startsWith("/admin/disposals/") ? links.find(([href])=>href==="/admin/dispositions") : normPath.startsWith("/admin/inspections/") ? links.find(([href])=>href==="/admin/inspections") : undefined);
-  const customerTopLinks:[string,string][]=[
-    ["/catalog","Services"],["/categories","Product Categories"],["/how-it-works","How It Works"],["/report-guide","Sample Reports"],["/pricing","Pricing"],
-  ];
   const staffRoleSummary = a?.kind==="staff"
     ? a.roles.slice(0,2).map(r=>ROLE_ZH[r]??r).join(" / ") + (a.roles.length>2?` +${a.roles.length-2}`:"")
     : "";
@@ -183,11 +180,6 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
         <span className="workspace-context">{route.area==="admin"?"运营管理后台":route.area==="warehouse"?"仓库作业中心":"CLIENT WORKSPACE"}</span>
       </div>
       <span className="topspacer"/>
-      {!isStaff && (
-        <nav className="topnav" aria-label="Platform navigation">
-          {customerTopLinks.map(([href,label])=><Link key={href} href={href} aria-current={normPath===href?"page":undefined}>{label}</Link>)}
-        </nav>
-      )}
       <div className="header-right">
         {isStaff && staffRoleSummary && <Tag tone="blue">岗位：{staffRoleSummary}</Tag>}
         {isStaff && <QuickSwitch active={route.area as "customer"|"warehouse"|"admin"} actor={a} demo={demo}/>}

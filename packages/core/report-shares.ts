@@ -6,17 +6,44 @@ export const shareTokenPattern="[A-Za-z0-9_-]{43}";
 export const shareInput=z.object({days:z.union([z.literal(1),z.literal(7),z.literal(30)])}).strict();
 export const reportSharingEnabled=()=>process.env.REPORT_SHARING_ENABLED==="1";
 
-export async function listPublishedReports(db:DB,actor:Actor,reference:string|null,version:number|null,latest=false,page?:number) {
+export async function listPublishedReports(db:DB,actor:Actor,reference:string|null,version:number|null,latest=false,page?:number,includeProgress=false) {
+  const org=organization(actor);
   const size=page===undefined?100:20;
+  const searchSql=`($2::text is null or strpos(lower(o.public_no),lower($2))>0 or strpos(lower(r.public_no),lower($2))>0 or exists(
+    select 1 from order_lines l join service_offers so on so.id=l.offer_id
+    left join expected_items e on e.order_line_id=l.id and e.in_scope
+    where l.order_id=o.id and (
+      strpos(lower(coalesce(so.title->>'en','')),lower($2))>0
+      or strpos(lower(coalesce(e.declared_fields->>'name','')),lower($2))>0
+      or strpos(lower(coalesce(e.declared_fields->>'sku_code','')),lower($2))>0
+      or strpos(lower(coalesce(e.declared_fields->>'sample_code','')),lower($2))>0
+    )
+  ))`;
   const {rows}=await db.query(`select o.id order_id,o.public_no order_number,r.public_no report_number,
-    v.version,v.published_at,v.amend_reason,v.version=r.published_version is_current
+    v.version,v.published_at,v.amend_reason,v.version=r.published_version is_current,
+    (select so.title->>'en' from order_lines l join service_offers so on so.id=l.offer_id where l.order_id=o.id order by l.id limit 1) service_title,
+    (select coalesce(sum(coalesce((sec->'summary'->>'checked_count')::int,1)),0)::int from jsonb_array_elements(coalesce(v.snapshot->'sections','[]'::jsonb)) sec) unit_count,
+    (select coalesce(sum(coalesce((sec->'summary'->>'issue_count')::int,0)),0)::int from jsonb_array_elements(coalesce(v.snapshot->'sections','[]'::jsonb)) sec) issue_count
     from reports r join orders o on o.id=r.order_id join report_versions v on v.report_id=r.id
     where o.org_id=$1 and v.state in ('published','superseded')
-    and ($2::text is null or o.public_no=$2 or r.public_no=$2)
+    and ${searchSql}
     and ($3::int is null or v.version=$3) and (not $4::boolean or v.version=r.published_version)
-    order by v.published_at desc nulls last,v.id limit $5 offset $6`,[organization(actor),reference,version,latest,
+    order by v.published_at desc nulls last,v.id limit $5 offset $6`,[org,reference,version,latest,
     page===undefined?size:size+1,((page??1)-1)*size]);
-  return {rows:rows.slice(0,size),...(page===undefined?{}:{page,has_more:rows.length>size})};
+  const in_progress_orders=includeProgress?(await db.query(`select o.id order_id,o.public_no order_number,o.state,
+    coalesce(o.sla_due_at,o.samples_ready_at,o.updated_at) eta_at,
+    (select so.title->>'en' from order_lines l join service_offers so on so.id=l.offer_id where l.order_id=o.id order by l.id limit 1) service_title,
+    (select coalesce(sum(l.quantity),0)::int from order_lines l where l.order_id=o.id) unit_count
+    from orders o left join reports r on r.order_id=o.id
+    where o.org_id=$1 and o.state in ('samples_ready','queued','inspecting','qa_review')
+    and r.published_version is null
+    and ${searchSql.replace(" or strpos(lower(r.public_no),lower($2))>0","")}
+    order by o.updated_at desc nulls last,o.id desc limit 20`,[org,reference])).rows:undefined;
+  return {
+    rows:rows.slice(0,size),
+    ...(includeProgress?{in_progress_orders}:{}),
+    ...(page===undefined?{}:{page,has_more:rows.length>size}),
+  };
 }
 
 async function ownedVersion(db:DB,actor:Actor,orderId:string,version:number) {

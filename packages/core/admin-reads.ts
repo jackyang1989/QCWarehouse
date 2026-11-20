@@ -1123,7 +1123,7 @@ export async function adminInspectionTaskDetail(db: DB, actor: Actor, id: string
   const meta = await one(
     db,
     `select t.id, t.assignee_id, u.display_name assignee_name,
-            o.id order_id, o.public_no order_no,
+            o.id order_id, o.public_no order_no, o.customer_notes,
             tv.template_key, tv.version template_version, tv.state template_state, tv.published_at template_published_at,
             array(select c.code from template_capabilities tc join capabilities c on c.id = tc.capability_id
               where tc.template_version_id = tv.id order by c.code) capability_codes,
@@ -1131,7 +1131,8 @@ export async function adminInspectionTaskDetail(db: DB, actor: Actor, id: string
             cat.slug category_slug, cat.labels->>'zh-CN' category_label,
             so.sku_code offer_sku_code, so.title->>'zh-CN' offer_title,
             crp.user_id customer_user_id, crp.receiving_code, cu.display_name customer_name, ce.original_email customer_email,
-            w.code item_code, w.identity_state, w.condition_state, w.custody_state, sl.code location_code, p.code package_code
+            w.code item_code, w.identity_state, w.condition_state, w.custody_state, sl.code location_code, p.code package_code,
+            e.declared_fields
      from inspection_tasks t
      join order_lines l on l.id = t.order_line_id
      join orders o on o.id = l.order_id
@@ -1144,6 +1145,7 @@ export async function adminInspectionTaskDetail(db: DB, actor: Actor, id: string
      left join users cu on cu.id = crp.user_id
      left join user_emails ce on ce.user_id = cu.id and ce.is_primary
      left join order_line_item_links a on a.id = t.assignment_id
+     left join expected_items e on e.id = a.expected_item_id
      left join warehouse_items w on w.id = a.item_id
      left join packages p on p.id = w.package_id
      left join storage_locations sl on sl.id = w.location_id

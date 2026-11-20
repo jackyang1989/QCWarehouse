@@ -20,18 +20,30 @@ export function PublishedReports() {
   if(!history&&!params.has("version")) apiParams.set("latest","1");
   const page=Number(search.get("page")??1);
   apiParams.set("page",String(page));
+  apiParams.set("include_progress","1");
   const {data,error,reload}=useLoad("/me/reports?"+apiParams);
   function pageHref(target:number) {
     const next=new URLSearchParams(params);
     if(target>1)next.set("page",String(target));
     return "/reports"+(next.size?"?"+next:"");
   }
+  const inProgress:Row[]=data?.in_progress_orders??[];
   return <>
-    <div className="page-head"><p className="eyebrow">CLIENT WORKSPACE / INSPECTION RECORDS</p><h1>Reports</h1>
-      <p className="muted">Find a published report or open a specific historical version.</p></div>
+    <div className="page-head"><h1>Reports</h1>
+      <p className="muted">Find a published report, search by SKU or product name, or track active inspections in progress.</p></div>
+    {inProgress.length>0&&<Panel title={`Inspections In Progress (${inProgress.length})`} subtitle="Reports are published automatically after inspection and independent QA approval.">
+      <Table headers={["Order","Service","Stage","Units","Estimated / SLA",""]} rows={inProgress.map((o:Row)=>[
+        <Link key="o" className="code" href={"/orders/"+o.order_number}>{o.order_number}</Link>,
+        o.service_title??"Inspection",
+        o.state.replace(/_/g," "),
+        `${o.unit_count} unit(s)`,
+        stamp(o.eta_at),
+        <Link key="go" className="button sm" href={"/orders/"+o.order_number}>View order →</Link>,
+      ])}/>
+    </Panel>}
     <Panel title="Published inspections">
       <form action="/reports" method="get" className="form inline-form" key={query}>
-        <label>Order or report number<input name="reference" defaultValue={params.get("reference")??""} maxLength={68}/></label>
+        <label>Order, report, SKU, or product name<input name="reference" defaultValue={params.get("reference")??""} maxLength={120}/></label>
         <label>Version<input name="version" type="number" min={1} step={1} max={2147483647} defaultValue={params.get("version")??""}/></label>
         <label className="check"><input type="checkbox" name="history" value="1" defaultChecked={history}/>Include historical versions</label>
         <button className="primary" type="submit">Find reports</button>
@@ -39,9 +51,12 @@ export function PublishedReports() {
       </form>
       {error&&<><ErrorBlock error={error}/><button type="button" onClick={reload}>Try again</button></>}
       {!data&&!error&&<p role="status">Loading published reports…</p>}
-      {data&&!error&&<Table headers={["Report","Order","Version","Published",""]} rows={data.rows.map((row:Row)=>[
+      {data&&!error&&<Table headers={["Report","Order","Service","Units / Issues","Version","Published",""]} rows={data.rows.map((row:Row)=>[
         <Link className="code" href={"/orders/"+row.order_number+"/report/versions/"+row.version}>{row.report_number}</Link>,
-        <Link href={"/orders/"+row.order_number}>{row.order_number}</Link>,<><span>v{row.version} </span><Tag>{row.is_current?"Current":"Historical"}</Tag></>,
+        <Link href={"/orders/"+row.order_number}>{row.order_number}</Link>,
+        row.service_title??"Inspection",
+        `${row.unit_count??1} unit(s)${Number(row.issue_count??0)>0?` · ${row.issue_count} issue(s)`:""}`,
+        <><span>v{row.version} </span><Tag>{row.is_current?"Current":"Historical"}</Tag></>,
         stamp(row.published_at),<div className="actions">
           <Action sm run={async()=>{
             const {url}=await request("/orders/"+row.order_id+"/report/versions/"+row.version+"/pdf");

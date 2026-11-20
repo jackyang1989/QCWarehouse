@@ -17,8 +17,8 @@ import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, cr
 import { acceptQuote, amendDispatchBatch, calculateShippingPreview, cancelDisposition, checkStorageReminders, closeCompletedOrder, confirmBatch, handover, instruct, packShipment, planBatch, publishShippingRate, quoteBatch, readDispatchBatch, receiveReturn, releaseReferenceSample, storageQuote } from "./dispatch";
 import { chargeReceipt, checkout, demoPay, orderPayment, orderRefundPayments, refundApprove, refundReject, refundRequest, resolvePaymentDispute, stripeEvent, verifyStripe } from "./payments";
 import { adminCustomerDetail, adminCustomerFilters, adminCustomersList, adminDisposalDetail, adminDispositionsOverview, adminIncidentDetail, adminInspectionTaskDetail, adminInspectionsOverview, adminPaymentDetail, adminPaymentListFilters, adminPaymentsList, adminRefundDetail, adminRefundListFilters, adminRefundsList, adminStorageLocationDetail } from "./admin-reads";
-import { approveTrackingTranslation, correctCustomerParcelTracking, correctStaffTracking, providerCallback, refreshTracking, submitTrackingTranslation, tracking, trackingAdmin, trackingMonitor, updateTrackingAlert, verificationState, verifyTracking } from "./logistics";
-import { adminDesk, bills, customerActions, customerDesk, customerInventory, customerNotifications, customerParcelTab, dispatchQueueStates, items, listCustomerOrders, listCustomerParcels, markNotificationRead, orderLedger, orderLedgerCsv, readOrderByPublicNumber, readStaffObjectSummary, reconcileFinance, referenceSamples, searchStaffOrders, staffOrderDetail, staffOrderFilters, warehouseDesk, warehouseDispatchBatch, warehouseDispatchQueue, warehouseItem, warehousePackage } from "./reads";
+import { approveTrackingTranslation, correctCustomerParcelTracking, correctStaffTracking, customerParcelContext, providerCallback, refreshTracking, submitTrackingTranslation, tracking, trackingAdmin, trackingMonitor, updateTrackingAlert, verificationState, verifyTracking } from "./logistics";
+import { adminDesk, bills, customerActions, customerDesk, customerInventory, customerNotifications, customerParcelTab, dispatchQueueStates, items, listCustomerOrders, listCustomerParcels, markAllNotificationsRead, markNotificationRead, orderLedger, orderLedgerCsv, readOrderByPublicNumber, readStaffObjectSummary, reconcileFinance, referenceSamples, searchStaffOrders, staffOrderDetail, staffOrderFilters, warehouseDesk, warehouseDispatchBatch, warehouseDispatchQueue, warehouseItem, warehousePackage } from "./reads";
 import { staffAccess } from "./staff-access";
 import { customerDestination, withDestination } from "./portal-routes";
 import { customerFulfillmentQuote, customerShipment, orderFulfillmentRecord } from "./fulfillment-reads";
@@ -110,6 +110,18 @@ async function supportPhotoForm(req:Request) {
   guard(file instanceof File&&file.size>0&&file.size<=8_000_000,"FILE_INVALID","Choose a photo up to 8 MB.",422);
   return {form,bytes:Buffer.from(await file.arrayBuffer())};
 }
+async function supportPhotosForm(req:Request) {
+  guard(Number(req.headers.get("content-length")??0)<=25_000_000,"BODY_TOO_LARGE","Uploaded photos exceed the 25 MB request limit.",413);
+  const form=await req.formData();
+  const files=form.getAll("photo").filter((entry):entry is File=>entry instanceof File&&entry.size>0);
+  guard(files.length>=1&&files.length<=4,"FILE_INVALID","Attach 1 to 4 evidence photos.",422);
+  const photos:Buffer[]=[];
+  for(const file of files) {
+    guard(file.size<=8_000_000,"FILE_INVALID","Each evidence photo must be 8 MB or smaller.",422);
+    photos.push(Buffer.from(await file.arrayBuffer()));
+  }
+  return {form,photos};
+}
 async function submitIntakeClaim(req:Request,actor:Actor,key:string) {
   guard(req.headers.get("content-type")?.startsWith("multipart/form-data"),"INVALID_REQUEST","Attach the seller’s shipment photo.",422);
   const {form,bytes}=await supportPhotoForm(req);
@@ -154,8 +166,8 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   }
   if(method==="GET"&&path==="/me/inventory") {
     const page=z.coerce.number().int().min(1).max(10000).parse(url.searchParams.get("page")??"1");
-    const filter=z.enum(["all","inspection","inspected","handling","reference"]).parse(url.searchParams.get("filter")??"all");
-    const code=z.string().regex(/^S-[a-zA-Z0-9-]{1,64}$/).optional().parse(url.searchParams.get("code")??undefined);
+    const filter=z.enum(["all","in_warehouse","inspection","inspected","handling","reference"]).parse(url.searchParams.get("filter")??"all");
+    const code=z.string().regex(/^(?:S|DSP)-[a-zA-Z0-9-]{1,64}$/).optional().parse(url.searchParams.get("code")??undefined);
     return json(await transaction(db=>customerInventory(db,actorRequired(actor),page,filter,code)));
   }
   if(method==="GET"&&path==="/me/parcels") {
@@ -163,12 +175,17 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const page=z.coerce.number().int().min(1).max(10000).parse(url.searchParams.get("page")??"1");
     return json(await transaction(db=>listCustomerParcels(db,actorRequired(actor),tab,page)));
   }
+  const parcelContext=path.match(/^\/me\/parcels\/([a-f0-9-]{36})\/context$/i);
+  if(method==="GET"&&parcelContext) {
+    return json(await transaction(db=>customerParcelContext(db,actorRequired(actor),idSchema.parse(parcelContext[1]))));
+  }
   if(method==="GET"&&path==="/me/reports") {
-    const reference=z.string().trim().toUpperCase().pipe(z.string().regex(/^(QW|R)-[A-F0-9]{1,64}$/)).optional()
+    const reference=z.string().trim().min(1).max(120).optional()
       .parse(url.searchParams.get("reference")||undefined)??null;
     const version=z.coerce.number().int().min(1).max(2147483647).optional().parse(url.searchParams.get("version")||undefined)??null;
     const page=z.coerce.number().int().min(1).max(10000).optional().parse(url.searchParams.get("page")??undefined);
-    return json(await transaction(db=>listPublishedReports(db,actorRequired(actor),reference,version,url.searchParams.get("latest")==="1",page)));
+    const includeProgress=url.searchParams.get("include_progress")==="1";
+    return json(await transaction(db=>listPublishedReports(db,actorRequired(actor),reference,version,url.searchParams.get("latest")==="1",page,includeProgress)));
   }
   if(method==="GET" && path==="/health") {
     await pool.query("select 1");
@@ -404,6 +421,8 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   const readNotice=path.match(/^\/me\/notifications\/([a-f0-9-]{36})\/read$/i);
   if(method==="POST"&&readNotice)return extraWrite(req,path,actor,z.object({}).strict(),
     (db,a)=>markNotificationRead(db,a,idSchema.parse(readNotice[1])));
+  if(method==="POST"&&path==="/me/notifications/read-all")return extraWrite(req,path,actor,z.object({}).strict(),
+    (db,a)=>markAllNotificationsRead(db,a));
   if(method==="GET" && path==="/actions") {
     const page=z.coerce.number().int().min(1).max(10000).optional().parse(url.searchParams.get("page")??undefined);
     return json(await transaction(db=>customerActions(db,actorRequired(actor),page)));
@@ -418,10 +437,10 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     csrf(req);
     const customer=actorRequired(actor);organization(customer);
     const id=idSchema.parse(caseRoute[1]),key=idSchema.parse(req.headers.get("idempotency-key"));
-    const {form,bytes}=await supportPhotoForm(req);
+    const {form,photos}=await supportPhotosForm(req);
     const input=customerTicketMessage.parse({revision:Number(form.get("revision")),body:form.get("body")});
-    return json(await transaction(db=>idempotent(db,customer.id+":"+path,key,{...input,photo:hash(bytes)},
-      ()=>replyToCase(db,customer,id,input,bytes))));
+    return json(await transaction(db=>idempotent(db,customer.id+":"+path,key,{...input,photo:hash(Buffer.concat(photos))},
+      ()=>replyToCase(db,customer,id,input,photos))));
   }
   if(caseRoute&&method==="POST"&&caseRoute[2]) return extraWrite(req,path,actor,customerTicketMessage,
     (db,a,b)=>replyToCase(db,a,idSchema.parse(caseRoute[1]),b));
@@ -897,12 +916,12 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
       csrf(req);
       const customer=actorRequired(actor);organization(customer);
       const key=idSchema.parse(req.headers.get("idempotency-key"));
-      const {form,bytes}=await supportPhotoForm(req);
+      const {form,photos}=await supportPhotosForm(req);
       const v=schema.parse({subject:form.get("subject"),message:form.get("message"),
         order_id:form.get("order_id")||undefined,category:form.get("category")||undefined,parcel_id:form.get("parcel_id")||undefined,
         discrepancy_resolution:form.get("discrepancy_resolution")||undefined});
-      return json(await transaction(db=>idempotent(db,customer.id+":"+path,key,{...v,photo:hash(bytes)},
-        ()=>reportIssue(db,customer,v.subject,v.message,v.order_id,v.category,v.parcel_id,bytes,v.discrepancy_resolution))));
+      return json(await transaction(db=>idempotent(db,customer.id+":"+path,key,{...v,photo:hash(Buffer.concat(photos))},
+        ()=>reportIssue(db,customer,v.subject,v.message,v.order_id,v.category,v.parcel_id,photos,v.discrepancy_resolution))));
     }
     return extraWrite(req,path,actor,schema,(db,a,v)=>reportIssue(db,a,v.subject,v.message,v.order_id,v.category,v.parcel_id,undefined,v.discrepancy_resolution));
   }
@@ -1036,7 +1055,7 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     return extraWrite(req,path,actor,z.object({
       item_id:idSchema.optional(),
       item_code:z.string().trim().min(2).max(100).optional(),
-      actual_location:idSchema.nullable().optional(),
+      actual_location:z.string().trim().min(1).max(64).nullable().optional(),
       status:z.enum(["matched","relocated","missing","found"]),
       note:z.string().trim().max(1000).optional(),
       evidence_ids:z.array(idSchema).optional(),

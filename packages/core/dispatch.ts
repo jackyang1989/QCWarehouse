@@ -3,7 +3,7 @@ import { pool, type DB } from "../db";
 import { currentTerms, requireCustomerActive } from "./auth";
 import { audit, code, event, guard, lock, one, organization, revision, role, uuid, type Actor } from "./common";
 import { validCarrier, waybill } from "./intake";
-import { assertItemNotFrozen, requireSpace } from "./storage";
+import { assertItemNotFrozen, assertZonePurpose, requireSpace } from "./storage";
 import { newQuoteValidity } from "./quote-policy";
 
 type Destination={recipient:string;phone:string;address:string;member_code?:string};
@@ -739,6 +739,7 @@ export async function receiveReturn(db:DB,actor:Actor,id:string,input:{revision:
   if(fresh.length) {
     revision(sh.revision,input.revision);
     guard(fresh.every(r=>r.custody_state==="outbound"),"ITEM_UNAVAILABLE","An item already has a different custody record.");
+    await assertZonePurpose(db,input.location_id,{hasOwner:Boolean(b.org_id),quarantined:false,allowReferenceZone:false});
     await requireSpace(db,input.location_id,fresh.length);
     await shipEvidence(db,actor,id,b.org_id,input.evidence_ids);
     for(const item of fresh) {

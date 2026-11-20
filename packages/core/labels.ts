@@ -842,7 +842,7 @@ function drawQrAndBarcodeOnPdfPage(
 }
 
 export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, carrierCode?: string | null) {
-  role(actor, "receiver", "warehouse_admin", "inspector", "reviewer");
+  role(actor, "receiver", "warehouse_admin", "inspector", "reviewer", "super_admin");
   const code = rawCode.trim();
   guard(code.length >= 3 && code.length <= 80, "SCAN_CODE_INVALID", "Enter a valid package, item, location, or tracking code.", 422);
 
@@ -857,9 +857,11 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
         received_at: Date;
         location: string | null;
         tracking_norm: string | null;
+        receiving_code: string | null;
       }>(
         `select p.id, p.code, p.state, p.received_quantity, p.received_at,
-                sl.code as location, t.tracking_norm
+                sl.code as location, t.tracking_norm,
+                (select crp.receiving_code from customer_receiving_profiles crp where crp.org_id=p.org_id limit 1) receiving_code
          from packages p
          left join storage_locations sl on sl.id = p.location_id
          left join tracking_records t on t.package_id = p.id and t.direction = 'inbound' and t.closed_at is null
@@ -878,13 +880,14 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
       received_quantity: pkg.received_quantity,
       location: pkg.location,
       tracking_norm: pkg.tracking_norm,
-      summary: `仓库已实收 · 已登记 ${pkg.received_quantity} 件${pkg.location ? " · 库位 " + pkg.location : ""}`,
+      receiving_code: pkg.receiving_code,
+      summary: `仓库已实收 · 已登记 ${pkg.received_quantity} 件${pkg.location ? " · 库位 " + pkg.location : ""}${pkg.receiving_code ? " · 客户 " + pkg.receiving_code : ""}`,
       link: "/wh/packages/" + pkg.code,
       allowed_actions,
     };
   }
 
-  if (/^S-[A-Za-z0-9-]{1,64}$/i.test(code)) {
+  if (/^(?:S|DSP)-[A-Za-z0-9-]{1,64}$/i.test(code)) {
     const item = (
       await db.query<{
         id: string;
@@ -892,19 +895,30 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
         org_id: string | null;
         custody_state: string;
         identity_state: string;
+        condition_state: string;
         package_code: string;
         location: string | null;
         order_number: string | null;
+        receiving_code: string | null;
+        declared_fields: Record<string, unknown> | null;
         task_id: string | null;
         task_state: string | null;
+        hold_reason: string | null;
       }>(
-        `select w.id, w.code, w.org_id, w.custody_state, w.identity_state,
+        `select w.id, w.code, w.org_id, w.custody_state, w.identity_state, w.condition_state,
                 p.code as package_code, sl.code as location, o.public_no as order_number,
-                it.id as task_id, it.state as task_state
+                (select crp.receiving_code from customer_receiving_profiles crp where crp.org_id=w.org_id limit 1) receiving_code,
+                e.declared_fields,
+                it.id as task_id, it.state as task_state,
+                case
+                  when exists(select 1 from stocktake_items si join stocktakes st on st.id=si.stocktake_id where si.item_id=w.id and si.state='investigating' and st.state in ('in_progress','submitted')) then '盘点冻结'
+                  when exists(select 1 from incident_cases ic where ic.item_id=w.id and ic.state not in ('resolved','closed')) then '事故冻结'
+                end hold_reason
          from warehouse_items w
          join packages p on p.id = w.package_id
          left join storage_locations sl on sl.id = w.location_id
          left join order_line_item_links a on a.item_id = w.id and a.unlinked_at is null
+         left join expected_items e on e.id = a.expected_item_id
          left join order_lines l on l.id = a.order_line_id
          left join orders o on o.id = l.order_id
          left join lateral (
@@ -919,21 +933,24 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
     guard(item, "NOT_FOUND", "Warehouse item code not found.", 404);
     const canIntake = actor.roles.some(r => ["receiver", "warehouse_admin"].includes(r));
     const canInspect = actor.roles.includes("inspector");
+    const isInStorage = ["received", "stored"].includes(item.custody_state);
     const allowed_actions: string[] = ["open_item"];
-    if (canIntake) {
-      if (["received", "stored"].includes(item.custody_state)) allowed_actions.push("move_storage");
+    if (canIntake && isInStorage && !item.hold_reason && item.identity_state !== "quarantined") {
+      allowed_actions.push("move_storage");
       if (item.org_id && !item.order_number) allowed_actions.push("assign_order_position");
       allowed_actions.push("print_label");
     }
-    if (canInspect && item.task_id) {
+    if (canInspect && item.task_id && isInStorage) {
       allowed_actions.push("open_inspection_task");
     }
     const inspectionStage =
       item.task_state === "IN_PROGRESS"
         ? "in_inspection"
-        : item.task_state === "SUBMITTED"
+        : item.task_state === "SUBMITTED" || item.task_state === "QA_APPROVED"
           ? "inspected"
           : null;
+    const custodyZh = item.custody_state === "disposed" ? "已处置" : item.custody_state === "outbound" ? "已出库" : item.custody_state === "stored" ? "在库保管" : "已实收";
+    const productName = typeof item.declared_fields?.name === "string" ? item.declared_fields.name : null;
     return {
       kind: "item" as const,
       code: item.code,
@@ -941,16 +958,102 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
       custody_state: item.custody_state,
       inspection_stage: inspectionStage,
       identity_state: item.identity_state,
+      hold_reason: item.hold_reason,
       location: item.location,
       package_code: item.package_code,
       order_number: item.order_number,
+      receiving_code: item.receiving_code,
+      product_name: productName,
       task_id: item.task_id,
-      summary: `${item.custody_state}${inspectionStage ? ` (${inspectionStage})` : ""} · 库位 ${item.location ?? "未登记"}${item.order_number ? " · 委托 " + item.order_number : ""}`,
+      summary: `${custodyZh}${item.identity_state === "quarantined" ? " · 异常隔离" : ""}${item.hold_reason ? " · " + item.hold_reason : ""}${inspectionStage ? ` (${inspectionStage})` : ""} · 库位 ${item.location ?? "已离库/未登记"}${productName ? " · " + productName : ""}${item.order_number ? " · 委托 " + item.order_number : ""}`,
       link:
-        canInspect && !canIntake && item.task_id
+        canInspect && !canIntake && item.task_id && isInStorage
           ? "/wh/task/" + item.task_id
           : "/wh/samples/" + encodeURIComponent(item.code),
       allowed_actions,
+    };
+  }
+
+  if (/^QW-[A-F0-9]+$/i.test(code)) {
+    const order = (
+      await db.query<{
+        id: string;
+        public_no: string;
+        state: string;
+        receiving_code: string | null;
+        first_task_id: string | null;
+      }>(
+        `select o.id, o.public_no, o.state,
+                (select crp.receiving_code from customer_receiving_profiles crp where crp.org_id=o.org_id limit 1) receiving_code,
+                (select t.id from inspection_tasks t join order_lines l on l.id=t.order_line_id where l.order_id=o.id and t.state<>'VOID' order by t.state='READY' desc, t.state='IN_PROGRESS' desc, t.id limit 1) first_task_id
+         from orders o where upper(o.public_no) = upper($1)`,
+        [code]
+      )
+    ).rows[0];
+    guard(order, "NOT_FOUND", "Order number not found.", 404);
+    const canAdminOrders = actor.roles.some(r => ["super_admin", "support"].includes(r));
+    const link = order.first_task_id && actor.roles.some(r => ["inspector", "reviewer", "warehouse_admin", "super_admin"].includes(r))
+      ? `/wh/task/${order.first_task_id}`
+      : canAdminOrders
+        ? `/admin/orders/${order.public_no}`
+        : `/wh/intake`;
+    return {
+      kind: "order" as const,
+      code: order.public_no,
+      order_id: order.id,
+      state: order.state,
+      receiving_code: order.receiving_code,
+      task_id: order.first_task_id,
+      summary: `订单 ${order.public_no} · 状态 ${order.state}${order.receiving_code ? " · 客户 " + order.receiving_code : ""}`,
+      link,
+      allowed_actions: order.first_task_id ? ["open_inspection_task"] : ["open_order"],
+    };
+  }
+
+  if (/^QCW-[A-Z0-9-]+$/i.test(code)) {
+    const cust = (
+      await db.query<{ user_id: string; receiving_code: string; display_name: string | null }>(
+        `select crp.user_id, crp.receiving_code, u.display_name
+         from customer_receiving_profiles crp join users u on u.id = crp.user_id
+         where upper(crp.receiving_code) = upper($1)`,
+        [code]
+      )
+    ).rows[0];
+    guard(cust, "NOT_FOUND", "Customer receiving code not found.", 404);
+    const canAdminCustomer = actor.roles.some(r => ["super_admin", "support", "finance"].includes(r));
+    return {
+      kind: "customer" as const,
+      code: cust.receiving_code,
+      receiving_code: cust.receiving_code,
+      summary: `客户专属收件码 ${cust.receiving_code}${cust.display_name ? " (" + cust.display_name + ")" : ""}`,
+      link: canAdminCustomer ? `/admin/customers/${cust.user_id}` : "/wh/packages",
+      allowed_actions: ["open_customer"],
+    };
+  }
+
+  if (/^GS-[A-Z0-9-]+$/i.test(code)) {
+    const refSample = (
+      await db.query<{ item_code: string; seal_code: string; state: string; location: string | null; receiving_code: string | null }>(
+        `select w.code item_code, r.authorization_snapshot->>'seal_code' seal_code, r.state, sl.code location,
+                (select crp.receiving_code from customer_receiving_profiles crp where crp.org_id=r.org_id limit 1) receiving_code
+         from reference_samples r join warehouse_items w on w.id = r.item_id
+         left join storage_locations sl on sl.id = w.location_id
+         where upper(coalesce(r.authorization_snapshot->>'seal_code','')) = upper($1)
+         order by r.revision desc limit 1`,
+        [code]
+      )
+    ).rows[0];
+    guard(refSample, "NOT_FOUND", "Golden Sample seal code not found.", 404);
+    return {
+      kind: "reference_seal" as const,
+      code: refSample.seal_code,
+      item_code: refSample.item_code,
+      state: refSample.state,
+      location: refSample.location,
+      receiving_code: refSample.receiving_code,
+      summary: `确认样铅封 ${refSample.seal_code} · 对应实物 ${refSample.item_code} · 库位 ${refSample.location ?? "未入专柜"}`,
+      link: `/wh/samples/${encodeURIComponent(refSample.item_code)}`,
+      allowed_actions: ["open_item"],
     };
   }
 
@@ -960,7 +1063,7 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
       id: string;
       code: string;
       zone: string;
-      capacity: number;
+      capacity: number | null;
       active: boolean;
     }>(
       `select id, code, zone, capacity, active
@@ -1002,6 +1105,7 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
         [loc.id]
       )
     ).rows;
+    const canIntake = actor.roles.some(r => ["receiver", "warehouse_admin", "super_admin"].includes(r));
     return {
       kind: "location" as const,
       code: loc.code,
@@ -1012,14 +1116,42 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
       occupied: locItems.length,
       items: locItems,
       packages: locPackages,
-      summary: `库位 ${loc.code} (${loc.zone}) · 在库实物 ${locItems.length}/${loc.capacity} 件 · 包裹 ${locPackages.length} 个`,
-      link: "/wh/storage?location=" + encodeURIComponent(loc.code),
-      allowed_actions: ["open_storage", "print_label", "start_stocktake"],
+      summary: `库位 ${loc.code} (${loc.zone}) · 在库实物 ${locItems.length}/${loc.capacity ?? "不限"} 件 · 包裹 ${locPackages.length} 个`,
+      link: canIntake ? "/wh/storage?location=" + encodeURIComponent(loc.code) : "/wh/samples",
+      allowed_actions: canIntake ? ["open_storage", "print_label", "start_stocktake"] : ["view_location"],
     };
   }
 
-  role(actor, "receiver", "warehouse_admin");
-  const normalizedWaybill = waybill(code);
+  // Check if scanned code matches an outbound shipment waybill before treating as inbound
+  const normRaw = waybill(code);
+  const outboundMatch = (
+    await db.query<{ shipment_id: string; batch_id: string; carrier_code: string; state: string; direction: string }>(
+      `select s.id shipment_id, s.batch_id, t.carrier_code, s.state, t.direction
+       from tracking_records t join shipments s on s.id = t.shipment_id
+       where t.tracking_norm = $1 and t.direction <> 'inbound' and t.closed_at is null
+       order by t.generation desc limit 1`,
+      [normRaw]
+    )
+  ).rows[0];
+  if (outboundMatch) {
+    const canShip = actor.roles.some(r => ["warehouse_admin", "super_admin"].includes(r));
+    return {
+      kind: "outbound_waybill" as const,
+      code: normRaw,
+      shipment_id: outboundMatch.shipment_id,
+      batch_id: outboundMatch.batch_id,
+      carrier_code: outboundMatch.carrier_code,
+      state: outboundMatch.state,
+      direction: outboundMatch.direction,
+      summary: `出库发运单 ${normRaw} (${outboundMatch.carrier_code}) · 状态 ${outboundMatch.state}`,
+      link: canShip ? `/wh/dispatch/${outboundMatch.batch_id}` : "/wh/logistics",
+      allowed_actions: canShip ? ["open_dispatch_batch"] : ["open_logistics"],
+    };
+  }
+
+  const canReceive = actor.roles.some(r => ["receiver", "warehouse_admin"].includes(r));
+  role(actor, "receiver", "warehouse_admin", "super_admin");
+  const normalizedWaybill = normRaw;
   const res = await lookup(db, actor, {
     tracking_no: normalizedWaybill,
     ...(carrierCode ? { carrier_code: carrierCode } : {}),
@@ -1035,6 +1167,7 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
     };
   }
   const pkgId = "package_id" in res ? (res.package_id as string | undefined) : undefined;
+  const pkgCode = "package_code" in res ? (res.package_code as string | undefined) : undefined;
   const recCode = "receiving_code" in res ? (res.receiving_code as string | undefined) : undefined;
   const hasPackage = Boolean(pkgId);
   return {
@@ -1042,12 +1175,12 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
     code: normalizedWaybill,
     ...res,
     summary: hasPackage
-      ? "仓库已有实收记录"
+      ? `仓库已有实收记录${pkgCode ? " (" + pkgCode + ")" : ""}`
       : recCode
-        ? `已匹配收件码 ${recCode}`
-        : "待核验包裹归属（可先无预报隔离实收）",
-    link: "/wh/intake?" + new URLSearchParams(pkgId ? { package: pkgId } : { tracking: normalizedWaybill }),
-    allowed_actions: hasPackage ? ["open_package", "unpack_items"] : ["check_in"],
+        ? `已匹配客户收件码 ${recCode}，可登记实收入库`
+        : "未检索到客户预报（如确认为仓库新到物理包裹，请在收货入库台登记隔离）",
+    link: canReceive ? "/wh/intake?" + new URLSearchParams(pkgId ? { package: pkgId } : { tracking: normalizedWaybill }) : "/wh/logistics",
+    allowed_actions: hasPackage ? ["open_package", ...(canReceive ? ["unpack_items"] : [])] : (canReceive ? ["check_in"] : []),
   };
 }
 

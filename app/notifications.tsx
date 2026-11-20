@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { billingChargePath, billingQuotePath } from "../packages/core/portal-routes";
@@ -14,6 +15,9 @@ const noticeTitles:Record<string,string>={
   "payment.confirmed":"Payment confirmed",
   "package.received":"The warehouse received your parcel",
   "order.ready":"Your items are ready for inspection",
+  "order.held":"Order placed on hold for confirmation",
+  "order.resumed":"Inspection order resumed",
+  "incident.resolved":"Warehouse incident resolved",
   "order.identity_mismatch":"Action required: Sample identity mismatch detected",
   "order.cancelled":"Inspection cancelled",
   "dispatch.quoted":"Your shipping quote is ready",
@@ -61,6 +65,7 @@ export function RecentUpdates({notices,onRead}:{notices:Row[];onRead:()=>void}) 
 }
 export function NotificationInbox() {
   const search=useSearchParams(),params=new URLSearchParams();
+  const [cat,setCat]=useState<"all"|"orders"|"reports"|"parcels"|"billing"|"support">("all");
   const unread=search.get("unread")==="1",before=search.get("before");
   if(unread)params.set("unread","1");
   if(before)params.set("before",before);
@@ -68,16 +73,41 @@ export function NotificationInbox() {
   const first=unread?"/account/notifications?unread=1":"/account/notifications";
   const next=new URLSearchParams(params);
   if(data?.next_before)next.set("before",data.next_before);
+  const visibleRows=(data?.rows??[]).filter((n:Row)=>{
+    if(cat==="all") return true;
+    const t=String(n.template??"");
+    if(cat==="orders") return t.startsWith("order.");
+    if(cat==="reports") return t.startsWith("report.");
+    if(cat==="parcels") return t.startsWith("package.")||t.startsWith("shipment.")||t.startsWith("tracking.")||t==="reference.sealed";
+    if(cat==="billing") return t.startsWith("payment.")||t.endsWith(".quoted")||t==="quote.offered";
+    if(cat==="support") return t.startsWith("ticket.")||t.startsWith("incident.")||t==="email.delivery_failed";
+    return true;
+  });
   return <>
-    <div className="page-head"><Link href="/account">← Account</Link><p className="eyebrow report-eyebrow">CLIENT WORKSPACE</p>
+    <div className="page-head"><Link href="/account">← Account</Link>
       <h1>Notifications</h1><p className="muted">Find updates about reports, payments, parcels, and support cases.</p></div>
     <Panel title={unread?"Unread updates":"All updates"}>
-      <div className="actions"><Link href="/account/notifications" aria-current={!unread?"page":undefined}>All</Link>
-        <Link href="/account/notifications?unread=1" aria-current={unread?"page":undefined}>Unread{data?` (${data.unread_count})`:""}</Link>
-        <button type="button" onClick={reload}>Refresh</button></div>
+      <div className="actions" style={{flexWrap:"wrap"}}>
+        <Link className="button sm" href="/account/notifications" aria-current={!unread?"page":undefined}>All</Link>
+        <Link className="button sm" href="/account/notifications?unread=1" aria-current={unread?"page":undefined}>Unread{data?` (${data.unread_count})`:""}</Link>
+        {(data?.unread_count??0)>0&&<Action sm primary run={async()=>{await request("/me/notifications/read-all","POST",{});reload();}}>Mark all read</Action>}
+        <button className="button sm" type="button" onClick={reload}>Refresh</button>
+      </div>
+      <div className="actions" style={{marginTop:8,flexWrap:"wrap"}}>
+        {([
+          ["all","All Categories"],
+          ["orders","Orders"],
+          ["reports","Reports"],
+          ["parcels","Parcels & Tracking"],
+          ["billing","Billing & Quotes"],
+          ["support","Support & Notices"],
+        ] as const).map(([cid,clabel])=>(
+          <button key={cid} type="button" className={"button sm"+(cat===cid?" primary":"")} onClick={()=>setCat(cid)}>{clabel}</button>
+        ))}
+      </div>
       {error&&<ErrorBlock error={error}/>}
       {!data&&!error&&<p role="status">Loading updates…</p>}
-      {data&&!error&&<UpdatesTable notices={data.rows} onRead={reload}/>}
+      {data&&!error&&<UpdatesTable notices={visibleRows} onRead={reload}/>}
       <div className="actions">{before&&<Link href={first}>Back to first page</Link>}
         {!error&&data?.next_before&&<Link href={"/account/notifications?"+next}>Older updates →</Link>}</div>
     </Panel>

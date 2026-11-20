@@ -554,16 +554,47 @@ export function AdminInspectionTaskDetail({ id, actor }: { id: string; actor: Ro
                       <dd>{data.content.measure_conditions}</dd>
                     </div>
                   )}
+                  {(meta.customer_notes || data.customer_notes) && (
+                    <div className="admin-kv-item" style={{ gridColumn: "1 / -1" }}>
+                      <dt>客户订单特别说明</dt>
+                      <dd>{meta.customer_notes ?? data.customer_notes}</dd>
+                    </div>
+                  )}
+                  {(meta.declared_fields || data.declared_fields) && (
+                    <div className="admin-kv-item" style={{ gridColumn: "1 / -1" }}>
+                      <dt>委托商品申报与参考附件</dt>
+                      <dd className="stack" style={{ gap: 4 }}>
+                        <span>
+                          品名：{(meta.declared_fields ?? data.declared_fields).name ?? "—"} · 款号：{(meta.declared_fields ?? data.declared_fields).sku_code ?? (meta.declared_fields ?? data.declared_fields).sample_code ?? "—"} · 颜色：{(meta.declared_fields ?? data.declared_fields).color_declared ?? (meta.declared_fields ?? data.declared_fields).color ?? "—"} · 尺码：{(meta.declared_fields ?? data.declared_fields).size_label ?? (meta.declared_fields ?? data.declared_fields).size ?? "—"}
+                        </span>
+                        {(meta.declared_fields ?? data.declared_fields).notes && <small className="muted">单品备注：{(meta.declared_fields ?? data.declared_fields).notes}</small>}
+                        {(data.attachment_ids?.length ?? 0) > 0 && <MediaButton ids={data.attachment_ids} label={`查看客户参考附件 (${data.attachment_ids.length})`} />}
+                      </dd>
+                    </div>
+                  )}
+                  {(data.tolerances?.length ?? 0) > 0 && (
+                    <div className="admin-kv-item" style={{ gridColumn: "1 / -1" }}>
+                      <dt>客户设定测量目标与公差范围 ({data.tolerances.length} 项)</dt>
+                      <dd className="actions" style={{ flexWrap: "wrap" }}>
+                        {data.tolerances.map((t: Row) => (
+                          <Tag key={t.point_code} tone="blue">
+                            {t.point_code}: 目标 {t.target ?? "—"} · 允许 [{t.min ?? "—"} ~ {t.max ?? "—"}] {t.unit ?? ""}
+                          </Tag>
+                        ))}
+                      </dd>
+                    </div>
+                  )}
                 </dl>
               </Panel>
 
-              <Panel title={`2. 逐项检验标准与实测记录 (${checks.length} 项标准 × ${componentsList.length} 个对象)`} subtitle="展示该任务锁定的全部检查项、测量方法、多次复测尝试及现场证据照片。">
+              <Panel title={`2. 逐项检验标准与实测记录 (${checks.length} 项标准 × ${componentsList.length} 个对象)`} subtitle="展示该任务锁定的全部检查项、测量方法、公差比对、多次复测尝试及现场证据照片。">
                 <Table
-                  headers={["对象/部位", "检查项名称", "方法与单位", "要求", "当前结论", "实测值 / 多次复测", "客观说明", "证据照片"]}
+                  headers={["对象/部位", "检查项名称", "方法与单位", "要求 / 客户公差", "当前结论", "实测值 / 多次复测", "客观说明", "证据照片"]}
                   rows={componentsList.flatMap(comp =>
                     checks.map(chk => {
                       const attempts = results.filter(r => r.component === comp.id && r.item_key === chk.key);
                       const finalRes = attempts.find(r => r.is_final) ?? attempts.at(-1);
+                      const tol = (data.tolerances ?? []).find((x: Row) => x.point_code === chk.key);
                       const allEvidenceIds = [...new Set(attempts.flatMap(a => a.evidence_ids ?? []))];
                       return [
                         <span key="c" className="code nowrap">{comp.code}</span>,
@@ -575,9 +606,12 @@ export function AdminInspectionTaskDetail({ id, actor }: { id: string; actor: Ro
                           <span>{chk.method}</span>
                           {chk.unit && <small className="code">单位: {chk.unit}</small>}
                         </div>,
-                        <div key="req" className="actions">
-                          {chk.required ? <Tag tone="blue">必检</Tag> : <Tag tone="gray">选检</Tag>}
-                          {chk.evidence && <Tag tone="yellow">必拍图</Tag>}
+                        <div key="req" className="cell-stack">
+                          <div className="actions">
+                            {chk.required ? <Tag tone="blue">必检</Tag> : <Tag tone="gray">选检</Tag>}
+                            {chk.evidence && <Tag tone="yellow">必拍图</Tag>}
+                          </div>
+                          {tol && <small className="muted">公差 [{tol.min ?? "—"}~{tol.max ?? "—"}] {tol.unit ?? chk.unit ?? ""}</small>}
                         </div>,
                         finalRes ? <BizTag key="st" dict={RESULT_STATUS_ZH} value={finalRes.status} /> : <Tag key="st" tone="gray">尚未录入</Tag>,
                         finalRes ? (

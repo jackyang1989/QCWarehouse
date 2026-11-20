@@ -536,21 +536,22 @@ export function StocktakeReviewAndIncidentPanel() {
   </div>;
 }
 
-export function StorageMove({path="/wh/storage"}:{path?:string}) {
+export function StorageMove({path="/wh/storage",actor}:{path?:string;actor?:Row}) {
   const {data,error,reload}=useLoad(path==="/wh/stocktakes"?null:"/staff/storage");
   const [code,setCode]=useState("");
   const [receipt,setReceipt]=useState("");
   useEffect(()=>setCode(new URLSearchParams(location.search).get("item")??""),[]);
   const found=useLoad(code?"/staff/items/by-code?"+new URLSearchParams({code}):null);
   const item=found.data?.item;
+  const canMove=Boolean(!actor?.roles || actor.roles.some((r:string)=>["receiver","warehouse_admin"].includes(r)));
   if(path==="/wh/stocktakes") {
     return <>
       <div className="page-head row">
         <div><p className="eyebrow">WAREHOUSE / STOCKTAKES</p><h1>库存盘点</h1>
-          <p className="muted">按仓区创建盘点任务，不用人工直接修改库存事实。</p></div>
+          <p className="muted">按仓区创建盘点任务，支持扫码实盘与主管独立复核审批。</p></div>
         <Link className="button" href="/wh/storage">库位移转</Link>
       </div>
-      <StocktakeWorkspace/>
+      <StocktakeWorkspace actor={actor}/>
     </>;
   }
   const refLocations=(data?.locations??[]).filter((row:Row)=>row.zone==="reference");
@@ -614,10 +615,11 @@ export function StorageMove({path="/wh/storage"}:{path?:string}) {
           {item.reference_sample_state==="pending_safe_storage"&&<div><dt>确认样待办</dt><dd><Tag tone="yellow">待铅封存入确认样区 · {item.reference_seal_code??""}</Tag></dd></div>}
         </dl>}
       </Panel>
+      {!canMove&&<div className="notice" style={{marginBottom:12}}><strong>只读查看模式：</strong>库位移动写操作仅限收货员（receiver）或仓库主管（warehouse_admin）执行。</div>}
       <Panel title="02 / 目标库位与确认">
         {!item&&!found.error&&<Empty>请先查询实物编号。</Empty>}
         {item&&!item.movable&&<Empty>此实物当前不处于可移位的在库状态。</Empty>}
-        {item?.movable&&data&&!found.error&&<Form key={item.id+"-"+item.revision} label="确认移位" run={async f=>{
+        {item?.movable&&data&&!found.error&&canMove&&<Form key={item.id+"-"+item.revision} label="确认移位" run={async f=>{
           const target=data.locations.find((row:Row)=>row.code===text(f,"target")&&row.code!==item.location);
           if(!target)throw new Error("请输入不同于原位置的已启用库位码。");
           if(!checked(f,"confirmed"))throw new Error("请核对实际位置。");
@@ -652,18 +654,21 @@ export function StorageMove({path="/wh/storage"}:{path?:string}) {
   </>;
 }
 
-function StocktakeWorkspace() {
+function StocktakeWorkspace({actor}:{actor?:Row}) {
   const {data,error,reload}=useLoad("/staff/stocktakes");
   const [selectedId,setSelectedId]=useState("");
   const rows:Row[]=data?.rows??[];
   const active=rows.find(r=>r.id===selectedId)??rows[0];
   const activeItems:Row[]=active?.items??[];
+  const canCreateOrScan=Boolean(!actor?.roles || actor.roles.some((r:string)=>["receiver","warehouse_admin","super_admin"].includes(r)));
+  const canApproveStocktake=Boolean(actor?.roles?.some((r:string)=>["warehouse_admin","super_admin"].includes(r)));
+  const isSelfOperator=Boolean(active&&actor?.id&&(active.operator_id===actor.id||activeItems.some((i:Row)=>i.requested_by===actor.id)));
   return <Panel title="盘点任务列表与扫码作业">
     <p className="muted">按仓区或全仓创建盘点快照；盘点期间并发移库/出库自动提示重盘，缺失/错位实物冻结出库直至寻回或事故结案。</p>
     {error&&<ErrorBlock error={error}/>}
     <div className="ops-columns">
       <div>
-        <Form label="创建盘点任务" run={async f=>{
+        {canCreateOrScan?<Form label="创建盘点任务" run={async f=>{
           const zoneVal=text(f,"zone");
           const res=await request("/staff/stocktakes","POST",{
             ...(zoneVal?{zone:zoneVal}:{}),
@@ -674,20 +679,20 @@ function StocktakeWorkspace() {
         }}>
           <Select label="仓区范围（留空为全仓在库实物）" name="zone" required={false} choices={zoneChoices}/>
           <Field label="盘点备注" name="note" required={false}/>
-        </Form>
+        </Form>:<Empty>当前角色无盘点创建权限。</Empty>}
       </div>
       <div>
         {active?<div className="stack">
           <div className="row" style={{justifyContent:"space-between"}}>
             <div>
-              <strong className="code">{active.id.slice(0,8)}</strong> · <Tag>{active.state}</Tag>
-              <p className="muted">快照时间：{stamp(active.snapshot_at)} · 总数 {activeItems.length} / 匹配 {activeItems.filter(i=>i.state==="matched"||i.state==="adjusted").length} / 差异 {activeItems.filter(i=>i.state==="investigating").length}</p>
+              <strong className="code">盘点 #{active.id.slice(0,8)}</strong> · <Tag>{active.state==="in_progress"?"盘点中":active.state==="submitted"?"待主管复核":active.state==="approved"?"已完成归档":active.state}</Tag> · 发起人 {active.operator_name??"—"}
+              <p className="muted">快照时间：{stamp(active.snapshot_at)} · 总数 {activeItems.length} / 匹配 {activeItems.filter(i=>i.state==="matched"||i.state==="adjusted").length} / 差异 {activeItems.filter(i=>i.state==="investigating"||i.state==="recount_required").length}</p>
             </div>
             {rows.length>1&&<select value={active.id} onChange={e=>setSelectedId(e.target.value)}>
-              {rows.map(r=><option key={r.id} value={r.id}>{r.id.slice(0,8)} ({r.state})</option>)}
+              {rows.map(r=><option key={r.id} value={r.id}>盘点 #{r.id.slice(0,8)} ({r.state})</option>)}
             </select>}
           </div>
-          {active.state==="in_progress"&&<Form label="录入盘点结果" run={async f=>{
+          {active.state==="in_progress"&&canCreateOrScan&&<Form label="录入盘点结果" run={async f=>{
             const raw=text(f,"item_code");
             const loc=text(f,"actual_location");
             await request(`/staff/stocktakes/${active.id}/scan`,"POST",{
@@ -708,16 +713,46 @@ function StocktakeWorkspace() {
               ]}/>
             </div>
             <div className="grid two">
-              <Field label="实盘库位 ID（错位/寻回时填写）" name="actual_location" required={false}/>
+              <Field label="实盘库位码（如 A-01-01 或库位 UUID，错位/寻回时填写）" name="actual_location" required={false}/>
               <Field label="差异说明" name="note" required={false}/>
             </div>
           </Form>}
-          {active.state==="in_progress"&&<Action run={async()=>{
-            await request(`/staff/stocktakes/${active.id}/submit`,"POST",{reason:"Submitted from H14"});
+          {active.state==="in_progress"&&canCreateOrScan&&<Action run={async()=>{
+            await request(`/staff/stocktakes/${active.id}/submit`,"POST",{reason:"Submitted from stocktake workspace"});
             reload();
           }}>提交盘点结果（有差异自动转主管复核）</Action>}
-          <Table headers={["实物编号","快照库位","实盘库位","盘点状态","备注"]} rows={activeItems.map((it:Row)=>[
+          {active.state==="submitted"&&(
+            canApproveStocktake?(
+              isSelfOperator
+                ?<div className="notice">该盘点由当前账号发起/提交，按职责分离须由另一名仓库主管（warehouse_admin / super_admin）复核批准。</div>
+                :<div className="card">
+                  <strong>主管盘点差异独立复核（T102）</strong>
+                  <Form label="提交复核结论" run={async f=>{
+                    await request(`/staff/stocktakes/${active.id}/approve`,"POST",{
+                      decision:text(f,"decision"),
+                      reason:text(f,"reason"),
+                    });
+                    reload();
+                  }}>
+                    <Select label="复核决定" name="decision" value="approve" choices={[
+                      {id:"approve",label:"批准库存位置/盘点调整"},
+                      {id:"recount",label:"退回重新复盘 (recount)"},
+                    ]}/>
+                    <Field label="复核结论与处理说明" name="reason" value="Approved stocktake discrepancy"/>
+                  </Form>
+                </div>
+            ):<div className="notice">盘点已提交，等待仓库主管独立复核批准。</div>
+          )}
+          <Table headers={["实物编号","客户 / 订单","品名 / 款号","快照库位","实盘库位","盘点状态","备注"]} rows={activeItems.map((it:Row)=>[
             <span className="code">{it.item_code}</span>,
+            <div className="cell-stack">
+              <span className="code">{it.receiving_code??"—"}</span>
+              {it.order_no&&<small className="code">{it.order_no}</small>}
+            </div>,
+            <div className="cell-stack">
+              <span>{it.product_name??"—"}</span>
+              {it.sample_code&&<small className="code">{it.sample_code}</small>}
+            </div>,
             <span className="code">{it.expected_location_code??"—"}</span>,
             <span className="code">{it.actual_location_code??"—"}</span>,
             <Tag>{it.state}</Tag>,

@@ -6,19 +6,21 @@ export const customerTabs:[string,string][]=[
   ["/actions","Action Required"],["/account/notifications","Notifications"],
 ];
 const warehouseOverview=["receiver","warehouse_admin","inspector","reviewer","super_admin"] as const;
+const warehouseInspectionQueue=["inspector","reviewer","warehouse_admin","super_admin"] as const;
+const warehouseSyncQueue=["inspector","warehouse_admin","super_admin"] as const;
 const warehouseTabs=[
   ["/wh","仓库总览",warehouseOverview],
   ["/wh/scan","扫码查询",warehouseOverview],
-  ["/wh/intake","收货入库",warehouseOverview],
-  ["/wh/packages","包裹详情",warehouseOverview],
-  ["/wh/samples","样品建档",warehouseOverview],
-  ["/wh/storage","库位移转",warehouseOverview],
-  ["/wh/inspection","检查队列",warehouseOverview],
-  ["/wh/execute","执行检查",warehouseOverview],
-  ["/wh/sync","同步队列",warehouseOverview],
-  ["/wh/review","报告复核",warehouseOverview],
-  ["/wh/dispatch","出库待办",warehouseOverview],
-  ["/wh/stocktakes","库存盘点",warehouseOverview],
+  ["/wh/intake","收货入库",staffAccess.intake],
+  ["/wh/packages","包裹详情",staffAccess.intake],
+  ["/wh/samples","样品建档",staffAccess.intake],
+  ["/wh/storage","库位移转",staffAccess.intake],
+  ["/wh/inspection","检查队列",warehouseInspectionQueue],
+  ["/wh/execute","执行检查",warehouseInspectionQueue],
+  ["/wh/sync","同步队列",warehouseSyncQueue],
+  ["/wh/review","报告复核",staffAccess.reportEditing],
+  ["/wh/dispatch","出库待办",staffAccess.dispatch],
+  ["/wh/stocktakes","库存盘点",staffAccess.intake],
   ["/wh/logistics","物流监控",staffAccess.tracking],
 ] as const;
 const adminTabs=[
@@ -53,7 +55,7 @@ export function staffTabs(area:"admin"|"warehouse",roles:readonly string[]):[str
 
 export function canOpenStaffPage(path:string,route:PortalRoute,roles:readonly string[]) {
   if(route.area!=="admin"&&route.area!=="warehouse") return false;
-  if(route.view==="task") return hasStaffAccess(roles,staffAccess.inspection);
+  if(route.view==="task") return hasStaffAccess(roles,["inspector","reviewer","warehouse_admin","super_admin"]);
   if(route.view==="dispatch-batch") return hasStaffAccess(roles,staffAccess.dispatch);
   if(route.view==="staff-report") return hasStaffAccess(roles,[...staffAccess.reportEditing,"support","inspector"]);
   if(route.view==="staff-ticket"||route.view==="staff-order") return hasStaffAccess(roles,staffAccess.orders);
@@ -150,7 +152,7 @@ const details:{pattern:RegExp;area:Area;view:DetailView}[]=[
   {pattern:new RegExp("^/wh/dispatch/"+uuid+"$"),area:"warehouse",view:"dispatch-batch"},
   {pattern:new RegExp("^/wh/review/"+uuid+"$"),area:"warehouse",view:"staff-report"},
   {pattern:/^\/wh\/packages\/(P-[A-Z0-9-]{1,64})$/,area:"warehouse",view:"warehouse-package"},
-  {pattern:/^\/wh\/samples\/(S-[A-Za-z0-9-]{1,64})$/,area:"warehouse",view:"warehouse-item"},
+  {pattern:/^\/wh\/samples\/((?:S|DSP)-[A-Za-z0-9-]{1,64})$/,area:"warehouse",view:"warehouse-item"},
   {pattern:new RegExp("^/checkout/demo/"+uuid+"$"),area:"customer",view:"demo"},
 ];
 

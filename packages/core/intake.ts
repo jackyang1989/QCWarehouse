@@ -69,7 +69,8 @@ export async function candidates(db:DB,tracking:string,carrier?:string) {
 }
 export async function lookup(db:DB,actor:Actor,input:{tracking_no:string;carrier_code?:string}) {
   role(actor,"receiver","warehouse_admin");
-  const rows=await candidates(db,waybill(input.tracking_no),input.carrier_code);
+  const carrier=input.carrier_code?.trim().toLowerCase()||undefined;
+  const rows=await candidates(db,waybill(input.tracking_no),carrier);
   if(rows.length!==1) return {match_state:rows.length?"ambiguous":"unmatched",order_ids:[],candidate_count:rows.length};
   const t=rows[0];
   const order_ids=(await db.query("select order_id from advice_orders where advice_id=$1 order by order_id",[t.advice_id])).rows.map(x=>x.order_id);
@@ -383,7 +384,11 @@ export async function identifyItem(
     [link.expected_item_id]
   );
   const order=await one(db,"select * from orders where id=$1 for update",[line.order_id]);
-  guard(["awaiting_samples","on_hold"].includes(order.state),
+  const startedTasks=await db.query(
+    "select 1 from inspection_tasks it join order_lines ol on ol.id=it.order_line_id where ol.order_id=$1 and it.state in ('IN_PROGRESS','SUBMITTED','QA_APPROVED') limit 1",
+    [order.id]
+  );
+  guard(["awaiting_samples","on_hold","samples_ready","queued"].includes(order.state) && !startedTasks.rowCount,
     "ORDER_NOT_EDITABLE","Sample identity can only be verified before inspection begins.");
   if(input.matches_advice) {
     await db.query("update warehouse_items set identity_state='identified',custody_state='stored',revision=revision+1 where id=$1",[itemId]);
@@ -663,20 +668,20 @@ export async function customerIntakeClaims(db:DB,actor:Actor,page:number) {
 export async function requestIntakeClaim(db:DB,actor:Actor,input:{tracking_no:string;carrier_code:string;advice_id?:string},bytes:Buffer) {
   const org=organization(actor),tracking=waybill(input.tracking_no);
   await lock(db,"org:"+org);
-  await validCarrier(db,input.carrier_code);
+  const carrierCode=await validCarrier(db,input.carrier_code);
   if(input.advice_id) await one(db,`select a.id from package_advices a join tracking_records t on t.advice_id=a.id
     where a.id=$1 and a.org_id=$2 and t.closed_at is null and t.tracking_norm=$3 and coalesce(t.carrier_code,$4)=$4`,
-    [input.advice_id,org,tracking,input.carrier_code]);
+    [input.advice_id,org,tracking,carrierCode]);
   const current=(await db.query(`select id,public_no,state from tickets k where org_id=$1 and category='identity_unclear'
     and details ? 'proof_id' and details->>'tracking_no'=$2 and details->>'carrier_code'=$3 and ${pendingIntakeClaimSql}
     order by created_at desc,id desc limit 1`,
-    [org,tracking,input.carrier_code])).rows[0];
+    [org,tracking,carrierCode])).rows[0];
   if(current) return current;
   const proof=await savePhoto(db,actor,bytes,"attachment");
   const id=uuid();
   const ticket=await one(db,`insert into tickets(id,public_no,org_id,category,subject,details)
     values($1,$2,$3,'identity_unclear','Inbound parcel ownership review',$4) returning id,public_no,state`,
-    [id,code("CLAIM-"),org,{tracking_no:tracking,carrier_code:input.carrier_code,applicant_id:actor.id,proof_id:proof.id,advice_id:input.advice_id}]);
+    [id,code("CLAIM-"),org,{tracking_no:tracking,carrier_code:carrierCode,applicant_id:actor.id,proof_id:proof.id,advice_id:input.advice_id}]);
   await audit(db,actor,"request_intake_claim","tickets",id);
   return ticket;
 }

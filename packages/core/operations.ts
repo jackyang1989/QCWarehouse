@@ -558,7 +558,7 @@ export async function reportIssue(
   orderId?:string,
   category?:z.infer<typeof orderCaseCategory>,
   parcelId?:string,
-  photo?:Buffer,
+  photo?:Buffer|Buffer[],
   discrepancyResolution?:z.infer<typeof discrepancyResolutionKind>
 ) {
   const org=organization(actor);
@@ -573,7 +573,9 @@ export async function reportIssue(
   const ticket=await one(db,`insert into tickets(id,public_no,org_id,order_id,category,subject,next_action_at,details)
     values($1,$2,$3,$4,$5,$6,now()+interval '24 hours',$7) returning id,public_no,state`,
     [id,code("C-"),org,orderId??null,category??"non_standard_quote",subject,details]);
-  const mediaIds=photo?[(await savePhoto(db,actor,photo,"attachment")).id]:[];
+  const photos=Array.isArray(photo)?photo:photo?[photo]:[];
+  const mediaIds:string[]=[];
+  for(const bytes of photos) mediaIds.push((await savePhoto(db,actor,bytes,"attachment")).id);
   await db.query("insert into ticket_events(id,ticket_id,actor_type,actor_id,kind,body,media_ids) values($1,$2,'customer',$3,'message',$4,$5)",
     [uuid(),id,actor.id,message,mediaIds]);
   await audit(db,actor,"create_ticket","tickets",id,discrepancyResolution?{discrepancy_resolution:discrepancyResolution}:undefined);
@@ -688,7 +690,7 @@ export async function moveItem(
       }
     }
     const notifyUserId=dispRow?.created_by ?? (
-      w.org_id?(await db.query<{user_id:string}>("select user_id from org_memberships where org_id=$1 order by created_at limit 1",[w.org_id])).rows[0]?.user_id:null
+      w.org_id?(await db.query<{user_id:string}>("select user_id from memberships where org_id=$1 limit 1",[w.org_id])).rows[0]?.user_id:null
     );
     if(notifyUserId) {
       await db.query(

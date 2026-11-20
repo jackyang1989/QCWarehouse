@@ -184,12 +184,14 @@ async function append(db:DB,actor:Actor|null,id:string,kind:string,message:strin
 function ensureOpen(state:string) {
   guard(!["resolved","closed"].includes(state),"CASE_CLOSED","This support case is closed.");
 }
-export async function replyToCase(db:DB,actor:Actor,id:string,input:z.infer<typeof customerTicketMessage>,photo?:Buffer) {
+export async function replyToCase(db:DB,actor:Actor,id:string,input:z.infer<typeof customerTicketMessage>,photo?:Buffer|Buffer[]) {
   organization(actor);
   const k=await ticket(db,actor,id,null,true);
   revision(k.revision,input.revision);
   ensureOpen(k.state);
-  const media=photo?[ (await savePhoto(db,actor,photo,"attachment")).id ]:[];
+  const photos=Array.isArray(photo)?photo:photo?[photo]:[];
+  const media:string[]=[];
+  for(const bytes of photos) media.push((await savePhoto(db,actor,bytes,"attachment")).id);
   await append(db,actor,id,"message",input.body,media);
   await db.query(`update tickets set state='waiting_internal',next_action_at=now()+interval '24 hours',revision=revision+1 where id=$1`,[id]);
   return {id,state:"waiting_internal",revision:k.revision+1};

@@ -364,7 +364,8 @@ export function WorkspaceNavigation({
   area:keyof typeof navigationSections;title:string;links:[string,string][];path:string;demo?:boolean;mobileOpen?:boolean;onCloseMobile?:()=>void;collapsed?:boolean;onToggleCollapse?:()=>void;
 }) {
   const normPath = path==="/billing"?"/account/billing":path==="/notifications"?"/account/notifications":path;
-  const current=links.find(([href])=>href===normPath)?.[0]
+  const current=(/^\/orders\/[^/]+\/report(\/|$)/.test(normPath)?"/reports":undefined)
+    ?? links.find(([href])=>href===normPath)?.[0]
     ?? links.filter(([href])=>href!=="/wh"&&href!=="/admin"&&normPath.startsWith(href+"/")).sort(([left],[right])=>right.length-left.length)[0]?.[0]
     ?? (normPath.startsWith("/wh/task/")?"/wh/execute":normPath.startsWith("/shipments/")?"/parcels":normPath.startsWith("/support/cases/")?"/support":normPath.startsWith("/admin/disposals/")?"/admin/dispositions":normPath.startsWith("/admin/inspections/")?"/admin/inspections":undefined);
   const grouped = navigationSections[area].map(([name,paths])=>[name,paths.flatMap(href=>links.filter(([url])=>url===href))] as const);

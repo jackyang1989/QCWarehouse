@@ -379,6 +379,7 @@ export async function authorizeMediaRead(db: DB, actor: Actor, id: string) {
     id: string;
     org_id: string | null;
     package_id: string | null;
+    shipment_id: string | null;
     task_id: string | null;
     result_id: string | null;
     shot_code: string | null;
@@ -417,6 +418,12 @@ export async function authorizeMediaRead(db: DB, actor: Actor, id: string) {
       if (orgOrderAttachment) {
         return m;
       }
+    }
+    if (m.kind === "intake_open" && m.org_id === org && m.package_id) {
+      return m;
+    }
+    if (m.kind === "dispatch" && m.org_id === org && m.shipment_id) {
+      return m;
     }
     guard(m.org_id === org && Boolean(m.result_id || m.shot_code || m.point_code), "NOT_FOUND", "Photo not found.", 404);
     await one(
@@ -488,7 +495,9 @@ export async function authorizeMediaRead(db: DB, actor: Actor, id: string) {
         m.uploaded_by === actor.id ||
         (actor.roles.includes("super_admin") && m.kind !== "attachment") ||
         (actor.roles.includes("warehouse_admin") && m.kind !== "attachment") ||
-        (actor.roles.includes("reviewer") && m.task_id),
+        (actor.roles.includes("receiver") && ["intake_outer", "intake_open", "label_photo"].includes(m.kind)) ||
+        (actor.roles.includes("inspector") && ["intake_outer", "intake_open", "label_photo", "shot", "defect"].includes(m.kind)) ||
+        (actor.roles.includes("reviewer") && (Boolean(m.task_id) || ["intake_outer", "intake_open", "label_photo"].includes(m.kind))),
       "NOT_FOUND",
       "Photo not found.",
       404
