@@ -240,9 +240,9 @@ export function requireTerms(actual: {id:string}[], submitted: string[], count: 
 }
 export async function receiving(db: DB, userId: string) {
   const profile = await one<{org_id:string;receiving_code:string}>(db,"select org_id,receiving_code from customer_receiving_profiles where user_id=$1",[userId]);
-  const address = (await db.query(`select id,contact_name || ' ' || $1 as recipient,contact_phone as phone,address_zh,address_en
-    from warehouse_addresses where is_default and active and ${usableWarehouseAddressSql("$2","$3")}`,
-    [profile.receiving_code,isDemo(),demoWarehouseAddressZh])).rows[0] ?? null;
+  const address = (await db.query(`select id,contact_name as recipient,contact_phone as phone,address_zh,address_en
+    from warehouse_addresses where is_default and active and ${usableWarehouseAddressSql("$1","$2")}`,
+    [isDemo(),demoWarehouseAddressZh])).rows[0] ?? null;
   return {user_id:userId,...profile,warehouse_address_status:address ? "available" : "pending",warehouse_address:address};
 }
 type CustomerPreferences={display_name:string|null;timezone:string|null};

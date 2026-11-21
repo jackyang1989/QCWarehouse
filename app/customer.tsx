@@ -6200,22 +6200,28 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
       </div>}
       {data.warehouse_address_changed_at&&<p className="notice" role="status">The warehouse address changed on {stamp(data.warehouse_address_changed_at)}. Use the current address below for new shipments.</p>}
       <div className="receiving-code"><span className="small muted">Permanent Personal Receiving Code</span><strong className="code">{data.profile.receiving_code}</strong></div>
-      {addr?<>
-        <div className="grid cols2" style={{marginBottom:12}}>
-          <dl className="def"><dt>Recipient &amp; Phone</dt><dd>{addr.recipient} · {addr.phone}</dd></dl>
-          <dl className="def"><dt>Chinese Shipping Address (For Domestic Sellers)</dt><dd>{addr.address_zh}@{data.profile.receiving_code}@【QCW质检仓·勿删】</dd></dl>
-          <dl className="def"><dt>English Reference Address</dt><dd>{addr.address_en}</dd></dl>
-        </div>
+      {addr?(()=>{
+        const fullAddrZh=`${addr.address_zh}@${data.profile.receiving_code}@【QCW质检仓·勿删】`;
+        const fullCopyLine=`${addr.recipient}，${addr.phone}，${fullAddrZh}`;
+        return <>
+        <dl className="def" style={{marginBottom:12}}>
+          <dt>Chinese Shipping Address (Paste Directly into 1688 / Taobao / Seller Order)</dt>
+          <dd style={{fontSize:"1rem",lineHeight:1.6}}>{fullCopyLine}</dd>
+          <dd className="small muted" style={{marginTop:6,fontWeight:400}}>
+            收件人 (Recipient)：<strong style={{color:"var(--ink)"}}>{addr.recipient}</strong> &nbsp;·&nbsp; 电话 (Phone)：<strong style={{color:"var(--ink)"}}>{addr.phone}</strong> &nbsp;·&nbsp; 地址 (Address)：<strong style={{color:"var(--ink)"}}>{fullAddrZh}</strong>
+          </dd>
+        </dl>
         <div className="actions">
           <Action primary run={async()=>{
-            await navigator.clipboard.writeText([addr.recipient,addr.phone,`${addr.address_zh}@${data.profile.receiving_code}@【QCW质检仓·勿删】`].join("\n"));
+            await navigator.clipboard.writeText(fullCopyLine);
             setAddressCopied(true);
           }}>Copy Chinese shipping address</Action>
           {addressCopied&&<span role="status">Address copied.</span>}
           <Link className="button sm" href="/parcels">Register seller tracking →</Link>
           <Link className="button sm" href="/items">Manage warehouse items →</Link>
         </div>
-      </>:<Empty>The warehouse address is awaiting configuration.</Empty>}
+      </>;
+      })():<Empty>The warehouse address is awaiting configuration.</Empty>}
       {next&&<Link className="button primary" href={next}>Continue to your selected page</Link>}
     </Panel>}
     {isHome&&<RecentUpdates notices={data.notices} onRead={reload}/>}
