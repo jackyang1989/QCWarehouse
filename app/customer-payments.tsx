@@ -36,6 +36,7 @@ export function CustomerMultiChannelPaymentPanel({
     (resolvedAttempt && resolvedAttempt.provider === "paypal_manual" && resolvedAttempt.state !== "canceled"
       ? resolvedAttempt
       : null);
+  const showPaypalCard = Boolean(paypalChannel?.available || activeManual);
 
   async function requestPaypal() {
     setErr("");
@@ -60,7 +61,11 @@ export function CustomerMultiChannelPaymentPanel({
     <div className="payment-channel-box" style={{ marginTop: 12 }}>
       <div className="row between flexwrap" style={{ marginBottom: 8 }}>
         <strong>Payment Methods ({usd(amountCents)})</strong>
-        <span className="small muted">Server-verified settlement only · HK Stripe primary · PayPal Manual Invoice backup</span>
+        <span className="small muted">
+          {showPaypalCard
+            ? "Server-verified settlement only · HK Stripe primary · PayPal Manual Invoice backup"
+            : "Server-verified settlement only · Card / Apple Pay / Google Pay via Stripe"}
+        </span>
       </div>
 
       {err && <ErrorBlock error={err} />}
@@ -93,7 +98,7 @@ export function CustomerMultiChannelPaymentPanel({
           </Action>
         </div>
 
-        <div className="card" style={{ padding: 14 }}>
+        {showPaypalCard && <div className="card" style={{ padding: 14 }}>
           <div className="row between flexwrap" style={{ marginBottom: 6, gap: 6 }}>
             <strong>{paypalChannel?.label ?? "PayPal Manual Invoice"}</strong>
             <Tag tone={paypalChannel?.available === false ? "gray" : "blue"}>
@@ -193,7 +198,7 @@ export function CustomerMultiChannelPaymentPanel({
               )}
             </div>
           )}
-        </div>
+        </div>}
       </div>
     </div>
   );

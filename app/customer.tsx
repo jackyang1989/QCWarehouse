@@ -505,6 +505,8 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
   const refs=useLoad("/me/reference-samples");
   const desk=useLoad("/me/desk?include_activity=0");
   const receiving=useLoad("/me/receiving-address");
+  const paymentChannels=useLoad("/me/payment-channels");
+  const paypalManualAvailable=Boolean((paymentChannels.data?.channels??[]).find((c:Row)=>c.provider_key==="paypal_manual")?.available);
   const terms=useLoad("/public/terms");
   const carriers=useLoad("/carriers");
   const carrierOptions:{code:string;label:string}[]=Array.isArray(carriers.data?.carriers)&&carriers.data.carriers.length
@@ -4444,9 +4446,11 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
                   <button type="button" className="button primary" disabled={Boolean(busyMessage)} onClick={()=>startPayment("stripe")}>
                     {busyMessage?"Opening checkout…":"Confirm quote & pay with Stripe "+usd(serverQuote!.amount_cents)}
                   </button>
-                  <button type="button" className="button" disabled={Boolean(busyMessage)} onClick={()=>startPayment("paypal_manual")}>
-                    Confirm quote &amp; request PayPal Invoice
-                  </button>
+                  {paypalManualAvailable&&(
+                    <button type="button" className="button" disabled={Boolean(busyMessage)} onClick={()=>startPayment("paypal_manual")}>
+                      Confirm quote &amp; request PayPal Invoice
+                    </button>
+                  )}
                 </div>
               )}
             </>
@@ -5953,6 +5957,8 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     return "/account/billing"+(params.size?"?"+params:"")+"#"+(section==="charge"?"billing-charges":"billing-refunds");
   }
   const focusedQuote=useLoad(requestedQuote?"/quotes/"+encodeURIComponent(requestedQuote):null);
+  const billingChannels=useLoad(isBills?"/me/payment-channels":null);
+  const billingPaypalAvailable=Boolean((billingChannels.data?.channels??[]).find((c:Row)=>c.provider_key==="paypal_manual")?.available);
   const {data,error,reload}=useLoad("/me/desk?include_items=0"+(path==="/account"?"":"&include_activity=0")+
     (isBills?"&"+new URLSearchParams({charge_page:String(chargePage),refund_page:String(refundPage)}):"")+
     (requestedCharge?"&charge="+encodeURIComponent(requestedCharge):"")),carriers=useLoad("/carriers");
@@ -6532,7 +6538,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
               b.purpose==="storage"&&b.storage_item_code?<Link href={"/items?item="+encodeURIComponent(b.storage_item_code)}>Review stored item</Link>:<span>Quote expired</span>)
             :shownState==="open"?<div className="actions" style={{gap:6,flexWrap:"wrap"}}>
               <Action run={()=>goCheckout(b.charge_item_id,b.quote_revision)}>{demo?"Demo pay":"Pay (Stripe)"}</Action>
-              {b.latest_attempt_provider!=="paypal_manual"&&<Action sm run={async()=>{await request("/charges/"+b.charge_item_id+"/paypal-invoice","POST",{});reload();}}>PayPal Invoice</Action>}
+              {billingPaypalAvailable&&b.latest_attempt_provider!=="paypal_manual"&&<Action sm run={async()=>{await request("/charges/"+b.charge_item_id+"/paypal-invoice","POST",{});reload();}}>PayPal Invoice</Action>}
             </div>:b.latest_attempt_provider==="paypal_manual"&&b.order_numbers?.[0]?<Link href={"/orders/"+b.order_numbers[0]+"/payment"}>Track PayPal Invoice</Link>:null
         ];
       })} empty="No charges yet."/>

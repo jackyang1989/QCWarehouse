@@ -207,6 +207,10 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
     assert.equal(stripe.config.payout_bank, "ZA Bank (HK)");
     assert.equal(stripe.config.live_checkout_verified, false);
     assert.equal(stripe.config.live_webhook_verified, false);
+
+    const ppManual = hub.providers.find((p: any) => p.provider_key === "paypal_manual");
+    assert.equal(ppManual.enabled, false);
+    assert.equal(ppManual.lifecycle_state, "disabled");
   });
 
   await t.test("P02: Vault stores AES-256-GCM encrypted secrets, masks API responses, and never leaks plaintext", async () => {
@@ -274,7 +278,7 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
     }, "POST", 409);
   });
 
-  await t.test("P06: Disabling Stripe blocks checkout initiation while PayPal manual remains selectable", async () => {
+  await t.test("P06: Disabling Stripe blocks checkout; PayPal manual stays disabled by default until admin enables it", async () => {
     const ord = await createSubmittedOpenOrder(customer, "P06");
     await admin.fetch("/staff/admin/integrations/stripe", {
       lifecycle_state: "disabled",
@@ -282,12 +286,22 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
     });
     await customer.fetch(`/charges/${ord.chargeId}/checkout`, { quote_revision: ord.quoteRevision }, "POST", 409);
 
-    const channels = await customer.fetch("/me/payment-channels");
-    const stripeCh = channels.channels.find((c: any) => c.provider_key === "stripe");
-    const ppCh = channels.channels.find((c: any) => c.provider_key === "paypal_manual");
-    assert.equal(stripeCh.available, false);
-    assert.equal(ppCh.available, true);
+    const channelsDefault = await customer.fetch("/me/payment-channels");
+    assert.equal(channelsDefault.channels.find((c: any) => c.provider_key === "stripe").available, false);
+    assert.equal(channelsDefault.channels.find((c: any) => c.provider_key === "paypal_manual").available, false);
+    await customer.fetch(`/charges/${ord.chargeId}/paypal-invoice`, {}, "POST", 409);
 
+    await admin.fetch("/staff/admin/integrations/paypal_manual", {
+      lifecycle_state: "enabled",
+      enabled: true,
+    });
+    const channelsOptIn = await customer.fetch("/me/payment-channels");
+    assert.equal(channelsOptIn.channels.find((c: any) => c.provider_key === "paypal_manual").available, true);
+
+    await admin.fetch("/staff/admin/integrations/paypal_manual", {
+      lifecycle_state: "disabled",
+      enabled: false,
+    });
     await admin.fetch("/staff/admin/integrations/stripe", {
       lifecycle_state: "enabled",
       enabled: true,
@@ -356,19 +370,25 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
     assert.ok(v.missing_fields.length >= 1);
   });
 
-  await t.test("P12: Customer GET /me/payment-channels returns accurate live availability flags", async () => {
+  await t.test("P12: Customer GET /me/payment-channels returns accurate live availability flags (PayPal manual disabled by default)", async () => {
     const ch = await customer.fetch("/me/payment-channels");
-    const keys = new Set(ch.channels.map((c: any) => c.provider_key));
-    assert.equal(keys.has("stripe"), true);
-    assert.equal(keys.has("paypal_manual"), true);
-    assert.equal(keys.has("paypal_auto"), true);
-    assert.equal(keys.has("creem"), false);
+    const stripeCh = ch.channels.find((c: any) => c.provider_key === "stripe");
+    const ppManualCh = ch.channels.find((c: any) => c.provider_key === "paypal_manual");
+    const ppAutoCh = ch.channels.find((c: any) => c.provider_key === "paypal_auto");
+    assert.equal(stripeCh.available, true);
+    assert.equal(ppManualCh.available, false);
+    assert.equal(ppAutoCh.available, false);
+    assert.equal(ch.channels.some((c: any) => c.provider_key === "creem"), false);
   });
 
   const ordPayPal = await createSubmittedOpenOrder(customer, "P13");
   let ppPaymentId = "";
 
-  await t.test("P13: Customer requests PayPal Manual Invoice idempotently without auto-activating order", async () => {
+  await t.test("P13: When opt-in enabled, customer requests PayPal Manual Invoice idempotently without auto-activating order", async () => {
+    await admin.fetch("/staff/admin/integrations/paypal_manual", {
+      lifecycle_state: "enabled",
+      enabled: true,
+    });
     const k = randomUUID();
     const first = await customer.fetch(`/charges/${ordPayPal.chargeId}/paypal-invoice`, { payer_email: "buyer@example.com" }, "POST", 200, k);
     const second = await customer.fetch(`/charges/${ordPayPal.chargeId}/paypal-invoice`, { payer_email: "buyer@example.com" }, "POST", 200, k);
@@ -547,6 +567,12 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
     });
     assert.equal(execRes.state, "succeeded");
     assert.equal(execRes.payment_state, "refunded");
+
+    // Restore paypal_manual default disabled state
+    await admin.fetch("/staff/admin/integrations/paypal_manual", {
+      lifecycle_state: "disabled",
+      enabled: false,
+    });
   });
 
   await t.test("P20: Stripe active reconcile gracefully reports unconfigured without faking success", async () => {

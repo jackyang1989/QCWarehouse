@@ -309,7 +309,7 @@ export function AdminPaymentsWorkbench({ demo = false, actor }: { demo?: boolean
         )}
       </Panel>
 
-      <Panel
+      {paypalRows.length > 0 && <Panel
         title={`PayPal 人工开票与双人核销队列 (${paypalRows.length})`}
         subtitle="所有待处理与历史 PayPal Manual Invoice 直接展开可见：客户申请后不可自激活，必须由财务开票录实收并由另一位财务/超管 MFA 独立核销。"
       >
@@ -524,7 +524,7 @@ export function AdminPaymentsWorkbench({ demo = false, actor }: { demo?: boolean
             </div>
           </div>
         )}
-      </Panel>
+      </Panel>}
 
       {disputeRows.length > 0 && (
         <Panel title={`渠道争议与拒付冻结队列 (${disputeRows.length})`} subtitle="涉及支付争议的订单会自动进入暂停（on_hold）并冻结关联出库批次，需在外部争议完结后人工核销解冻。">

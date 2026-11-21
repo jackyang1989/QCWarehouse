@@ -102,6 +102,8 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
   const visibleProviders = providers.filter((p) => !HIDDEN_UNINTEGRATED_PROVIDERS.has(p.provider_key));
   const events: Row[] = data?.events ?? [];
   const selected: Row | undefined = visibleProviders.find((p) => p.provider_key === selectedKey) ?? visibleProviders[0];
+  const paypalManualRow = providers.find((p) => p.provider_key === "paypal_manual");
+  const paypalManualEnabled = Boolean(paypalManualRow?.enabled && paypalManualRow?.lifecycle_state !== "disabled");
 
   function handleActionError(e: unknown) {
     if (e instanceof RequestError && e.code === "STAFF_REAUTH_REQUIRED") setReauthNeeded(true);
@@ -223,16 +225,25 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
             </div>
           </Panel>
 
-          <Panel title="人工备用 · PayPal Manual Invoice" subtitle="2026-06-30 前注册中国大陆个人账户可用">
-            <ul className="plain-list">
-              <li>✅ <strong>业务可用状态</strong>：客户选择 PayPal Invoice 申请付款 → 财务线下开票记录 INV2 编号。</li>
-              <li>✅ <strong>双人职责分离 (SoD)</strong>：财务录入交易号/实收净额与凭证，需另一位财务/超管 MFA 独立核销后方可激活订单。</li>
-              <li>✅ <strong>安全不强迫升级</strong>：未升级企业前不开启 PayPal 自动 Orders v2 Checkout。</li>
-            </ul>
-            <div className="actions" style={{ marginTop: 10 }}>
-              <Link className="button sm primary" href="/admin/payments">打开 PayPal 人工开票/核销工作台 →</Link>
-            </div>
-          </Panel>
+          {paypalManualEnabled ? (
+            <Panel title="人工备用 · PayPal Manual Invoice" subtitle="2026-06-30 前注册中国大陆个人账户可用">
+              <ul className="plain-list">
+                <li>✅ <strong>业务可用状态</strong>：客户选择 PayPal Invoice 申请付款 → 财务线下开票记录 INV2 编号。</li>
+                <li>✅ <strong>双人职责分离 (SoD)</strong>：财务录入交易号/实收净额与凭证，需另一位财务/超管 MFA 独立核销后方可激活订单。</li>
+                <li>✅ <strong>安全不强迫升级</strong>：未升级企业前不开启 PayPal 自动 Orders v2 Checkout。</li>
+              </ul>
+              <div className="actions" style={{ marginTop: 10 }}>
+                <Link className="button sm primary" href="/admin/payments">打开 PayPal 人工开票/核销工作台 →</Link>
+              </div>
+            </Panel>
+          ) : (
+            <Panel title="备用渠道 · PayPal（当前已停用）" subtitle="个人账户暂不支持 Live 自动 API，人工开票默认关闭">
+              <ul className="plain-list">
+                <li>⏸️ <strong>PayPal 人工开票（`paypal_manual`）默认已停用</strong>：客户结账页当前仅展示 Stripe，不再显示人工发票选项；若日后确需应急人工收款，可在下方列表重新启用。</li>
+                <li>🔒 <strong>PayPal Orders v2 自动结账（`paypal_auto`）</strong>：因个人账户无法在 Live 模式获取 REST API 凭证，保持门禁锁定，待升级 PayPal Business 企业账户后解锁启用。</li>
+              </ul>
+            </Panel>
+          )}
         </div>
       )}
 
