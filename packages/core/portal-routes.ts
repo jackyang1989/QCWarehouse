@@ -135,7 +135,7 @@ for(const [paths,route] of [
   for(const path of paths) fixed.set(path,route);
 }
 
-const publicNo = "(QW-[A-F0-9]+)";
+const publicNo = "(QW-[A-Z0-9]{4,16})";
 const uuid = "([a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})";
 const details:{pattern:RegExp;area:Area;view:DetailView}[]=[
   {pattern:new RegExp("^/orders/"+publicNo+"(?:/("+Object.keys(orderSections).join("|")+"))?$"),area:"customer",view:"order"},

@@ -3,7 +3,7 @@ import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import sharp from "sharp";
 import { z } from "zod";
 import type { DB } from "../db";
-import { audit, code, event, guard, hash, lock, one, organization, revision, role, uuid, type Actor } from "./common";
+import { audit, code, event, guard, hash, lock, one, organization, reportCode, revision, role, uuid, type Actor } from "./common";
 import { attachEvidence } from "./intake";
 import { templateSchema } from "./orders";
 import { staffAccess } from "./staff-access";
@@ -955,8 +955,20 @@ export async function submitReport(db:DB,actor:Actor,id:string,rev:number,ids:st
       results:mappedResults,
     });
   }
-  const report=(await db.query("select * from reports where order_id=$1 for update",[id])).rows[0] ??
-    await one(db,"insert into reports(id,order_id,public_no) values($1,$2,$3) returning *",[uuid(),id,code("R-")]);
+  let report=(await db.query("select * from reports where order_id=$1 for update",[id])).rows[0];
+  if(!report) {
+    for(let attempt=0; attempt<10; attempt++) {
+      const inserted=await db.query(
+        "insert into reports(id,order_id,public_no) values($1,$2,$3) on conflict (public_no) do nothing returning *",
+        [uuid(),id,reportCode()]
+      );
+      if(inserted.rows[0]) {
+        report=inserted.rows[0];
+        break;
+      }
+    }
+    guard(report,"REPORT_CODE_EXHAUSTED","Could not allocate a unique report code. Try again.",503);
+  }
   const version=await one<{n:number}>(db,"select coalesce(max(version),0)::int+1 n from report_versions where report_id=$1",[report.id]);
   const snapshot={
     order_no:o.public_no,

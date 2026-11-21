@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { DB } from "../db";
 import { currentTerms, requireCustomerActive, requireTerms } from "./auth";
-import { audit, code, event, guard, isDemo, lock, one, organization, revision, role, uuid, type Actor } from "./common";
+import { audit, code, event, guard, isDemo, lock, one, orderCode, organization, revision, role, uuid, type Actor } from "./common";
 import { orderInboundRegistration, orderQuotes, orderShipments } from "./fulfillment-reads";
 import { scopeSupplementForOrder } from "./scope-payment";
 import { itemHandlingHoldSql } from "./storage";
@@ -166,8 +166,22 @@ export async function saveOrder(db:DB,actor:Actor,input:{lines:LineInput[];custo
     await db.query("delete from order_lines where order_id=$1",[id]);
     order=await one(db,"update orders set customer_notes=coalesce($2,customer_notes),revision=revision+1,updated_at=now() where id=$1 returning *",[id,input.customer_notes??null]);
   } else {
-    order=await one(db,`insert into orders(id,public_no,org_id,created_by,customer_notes,is_test)
-      values($1,$2,$3,$4,$5,$6) returning *`,[uuid(),code("QW-"),org,actor.id,input.customer_notes??null,isDemo()]);
+    let createdOrder = null;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const inserted = await db.query(
+        `insert into orders(id,public_no,org_id,created_by,customer_notes,is_test)
+         values($1,$2,$3,$4,$5,$6)
+         on conflict (public_no) do nothing
+         returning *`,
+        [uuid(), orderCode(), org, actor.id, input.customer_notes ?? null, isDemo()],
+      );
+      if (inserted.rows[0]) {
+        createdOrder = inserted.rows[0];
+        break;
+      }
+    }
+    guard(createdOrder, "ORDER_CODE_EXHAUSTED", "Could not allocate a unique order number. Try again.", 503);
+    order = createdOrder;
   }
   for(const [lineIndex,line] of input.lines.entries()) {
     const {offer}=await eligible(db,line,true);

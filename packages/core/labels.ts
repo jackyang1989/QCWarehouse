@@ -1003,7 +1003,7 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
     };
   }
 
-  if (/^QW-[A-F0-9]+$/i.test(code)) {
+  if (/^QW-[A-Z0-9]{4,16}$/i.test(code)) {
     const order = (
       await db.query<{
         id: string;

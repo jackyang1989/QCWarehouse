@@ -22,12 +22,18 @@ import { AdminFinanceAnalytics, AdminPaymentsWorkbench, AdminRefundsWorkbench } 
 import { AdminOrdersWorkbench } from "./admin-orders";
 import { AdminDispositionsWorkbench, AdminIncidentsWorkbench, AdminOverviewDashboard } from "./admin-operations";
 
-const SAMPLE_CODE_ALPHABET="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const SAMPLE_CODE_ALPHABET="23456789ABCDEFGHJKMNPQRSTUVWXYZ"; // 31 unambiguous chars (no 0/O/1/I/L)
 function generateRandomSampleCode():string {
-  const bytes=new Uint8Array(6);
-  crypto.getRandomValues(bytes);
   let out="S-";
-  for(let i=0;i<6;i++) out+=SAMPLE_CODE_ALPHABET[bytes[i]!%SAMPLE_CODE_ALPHABET.length];
+  const buf=new Uint8Array(16);
+  while(out.length<8) {
+    crypto.getRandomValues(buf);
+    for(const b of buf) {
+      if(b>=248) continue; // rejection sampling for uniform 31-char distribution (248 = 31 * 8)
+      out+=SAMPLE_CODE_ALPHABET[b%SAMPLE_CODE_ALPHABET.length];
+      if(out.length===8) break;
+    }
+  }
   return out;
 }
 

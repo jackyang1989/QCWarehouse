@@ -29,6 +29,7 @@ const {workOnce}=await import("../packages/core/worker");
 const {syncTrackingOnce}=await import("../packages/core/logistics");
 const {encryptSecret,decryptSecret,passwordHash}=await import("../packages/core/auth");
 const {businessDeadline}=await import("../packages/core/orders");
+const {sampleCode:newSampleCode}=await import("../packages/core/common");
 
 before(async()=>{
   const actual=await pool.query<{name:string}>("select current_database() name");
@@ -112,6 +113,7 @@ async function signCustomer() {
 }
 async function createAndPay(c:Client,lines:object[],terms:{id:string}[]) {
   const draft=await c.fetch("/orders",{lines},"POST",201);
+  assert.match(draft.public_no,/^QW-[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{8}$/);
   const quote=await c.fetch("/orders/"+draft.id+"/quotes",{revision:draft.revision},"POST",201);
   const consent={scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true};
   const body={revision:draft.revision,quote_id:quote.id,terms_version_ids:terms.map(t=>t.id),acknowledgements:consent};
@@ -365,13 +367,16 @@ test(category+": customer to warehouse to PDF to dispatch on the same records",a
   assert.equal(replay.id,pkg.id);
   const desk=await staff.fetch("/staff/desk");
   const origin=desk.locations.find((location:{code:string})=>location.code==="R-01"),loc=origin.id;
-  const items=await staff.fetch("/staff/packages/"+pkg.id+"/items",{revision:pkg.revision,items:[{code:"S-"+randomUUID(),location_id:loc}]},"POST",201);
+  const badUuidSample=await staff.fetch("/staff/packages/"+pkg.id+"/items",{revision:pkg.revision,items:[{code:"S-" + randomUUID(),location_id:loc}]},"POST",422);
+  assert.equal(badUuidSample.error.code,"SAMPLE_CODE_INVALID");
+  const items=await staff.fetch("/staff/packages/"+pkg.id+"/items",{revision:pkg.revision,items:[{code:newSampleCode(),location_id:loc}]},"POST",201);
   const itemId=items.item_ids[0];
   const packagePath="/staff/packages/"+pkg.id;
   const found=await staff.fetch("/staff/intake/lookup",{tracking_no:tracking});
   assert.equal(found.package_id,pkg.id);
   await staff.fetch("/staff/intake/lookup",{tracking_no:"!"},"POST",422);
   const detail=await staff.fetch(packagePath);
+  assert.match(detail.parcel.code,/^P-[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{6}$/);
   const byCode="/staff/packages/by-code/"+detail.parcel.code;
   assert.equal((await staff.fetch(byCode)).parcel.id,pkg.id);
   await c.fetch(byCode,undefined,"GET",403);
@@ -589,7 +594,7 @@ test("33 physical items from three parcels share one order, report and selective
     assert.deepEqual(match.order_ids,[draft.id]);
     const pkg=await staff.fetch("/staff/intake/check-in",{tracking_no:tracking,advice_id:advice.id,carrier_code:"zto",outer_media_ids:[await staff.photo("intake_outer")]},"POST",201);
     const positions=[...individual.slice(batch*10,batch*10+10),comparison[batch]];
-    const listed=positions.map(()=>({code:"S-"+randomUUID(),location_id:location}));
+    const listed=positions.map(()=>({code:newSampleCode(),location_id:location}));
     const {item_ids}=await staff.fetch("/staff/packages/"+pkg.id+"/items",{revision:pkg.revision,items:listed},"POST",201);
     assert.equal(item_ids.length,11);
     itemIds.push(...item_ids);
@@ -743,6 +748,7 @@ test("33 physical items from three parcels share one order, report and selective
   const versions=(await c.fetch(reportList)).rows;
   assert.deepEqual(versions.map((v:{version:number;is_current:boolean})=>[v.version,v.is_current]),[[2,true],[1,false]]);
   assert.deepEqual((await c.fetch(reportList+"&version=1")).rows.map((v:{version:number})=>v.version),[1]);
+  assert.match(published.snapshot.report_no,/^RP-[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{8}$/);
   assert.equal((await c.fetch("/me/reports?reference="+published.snapshot.report_no)).rows.length,2);
   assert.deepEqual((await other.fetch(reportList)).rows,[]);
   await c.fetch(reportList+"&version=0",undefined,"GET",422);
@@ -1057,7 +1063,7 @@ test("unmatched intake remains private until a staff evidence decision",async()=
   assert.equal(pkg.state,"unmatched");
   const desk=await staff.fetch("/staff/desk");
   const quarantine=desk.locations.find((location:{code:string})=>location.code==="Q-01");
-  const saved=await staff.fetch("/staff/packages/"+pkg.id+"/items",{revision:pkg.revision,items:[{code:"S-"+randomUUID(),location_id:quarantine.id}]},"POST",201);
+  const saved=await staff.fetch("/staff/packages/"+pkg.id+"/items",{revision:pkg.revision,items:[{code:newSampleCode(),location_id:quarantine.id}]},"POST",201);
   async function claim(client:Client) {
     const photo=await sharp({create:{width:100,height:80,channels:3,background:"#11736d"}}).png().toBuffer();
     const form=new FormData();
@@ -2008,7 +2014,7 @@ test("location master reserves capacity across organizations and preserves movem
     const advice=await c.fetch("/me/parcels",{tracking_no:tracking,carrier_code:"zto",address_id:registration.warehouse_address.id},"POST",201);
     const parcel=await staff.fetch("/staff/intake/check-in",{tracking_no:tracking,carrier_code:"zto",advice_id:advice.id,
       outer_media_ids:[await staff.photo("intake_outer")]},"POST",201);
-    const itemCode="S-"+randomUUID();
+    const itemCode=newSampleCode();
     const res=await staff.fetch("/staff/packages/"+parcel.id+"/items",{revision:parcel.revision,items:[{code:itemCode,location_id:origin.id}]},"POST",201);
     items.push({id:res.item_ids[0],code:itemCode,parcelId:parcel.id,parcelRevision:res.revision});
   }
@@ -2029,7 +2035,7 @@ test("location master reserves capacity across organizations and preserves movem
   await staff.fetch(move,{item_id:moved.id,revision:2,location_id:origin.id});
   await admin.fetch(statePath,{active:false});
   const disabled=await staff.fetch("/staff/packages/"+moved.parcelId+"/items",{
-    revision:moved.parcelRevision,items:[{code:"S-"+randomUUID(),location_id:target.id}],
+    revision:moved.parcelRevision,items:[{code:newSampleCode(),location_id:target.id}],
   },"POST",409);
   assert.equal(disabled.error.code,"LOCATION_INACTIVE");
   await admin.fetch(statePath,{active:true});
@@ -2660,7 +2666,7 @@ test("reference sample reservation, active comparison lock, outbound shipping co
     const tracking="ZT"+randomUUID().slice(0,8).toUpperCase();
     const advice=await c.fetch("/me/parcels",{address_id:addr,carrier_code:"zto",tracking_no:tracking},"POST",201);
     const pkg=await receiver.fetch("/staff/intake/check-in",{tracking_no:tracking,advice_id:advice.id,carrier_code:"zto",outer_media_ids:[await receiver.photo("intake_outer")]},"POST",201);
-    const items=await receiver.fetch("/staff/packages/"+pkg.id+"/items",{revision:pkg.revision,items:[{code:"S-"+randomUUID(),location_id:loc}]},"POST",201);
+    const items=await receiver.fetch("/staff/packages/"+pkg.id+"/items",{revision:pkg.revision,items:[{code:newSampleCode(),location_id:loc}]},"POST",201);
     const itemId=items.item_ids[0];
     const order=await c.fetch("/orders/"+orderId);
     const expected=order.items[0];
@@ -2890,7 +2896,7 @@ test("order drafts preserve per-item declarations, attachments, compare size mis
   const pkg=await receiver.fetch("/staff/intake/check-in",{tracking_no:tracking,advice_id:advice.id,carrier_code:"zto",outer_media_ids:[await receiver.photo("intake_outer")]},"POST",201);
   const createdItems=await receiver.fetch(`/staff/packages/${pkg.id}/items`,{
     revision:pkg.revision,
-    items:[{code:"S-"+randomUUID(),location_id:loc},{code:"S-"+randomUUID(),location_id:loc}],
+    items:[{code:newSampleCode(),location_id:loc},{code:newSampleCode(),location_id:loc}],
   },"POST",201);
   const orderAfterPay=await c.fetch("/orders/"+confirmedCompare.id);
   assert.equal(orderAfterPay.items.length,2);
@@ -3512,7 +3518,7 @@ test("presigned media upload, sha256 verification, 800px thumbnails, 24h stale c
   },"POST",201);
   const {locations}=await receiving.fetch("/staff/desk");
   const r01=locations.find((l:{code:string})=>l.code==="R-01")??locations[0];
-  const sampleCode="S-"+randomUUID().slice(0,8).toUpperCase();
+  const sampleCode=newSampleCode();
   const unpacked=await receiving.fetch(`/staff/packages/${pkg.id}/items`,{
     revision:pkg.revision,items:[{code:sampleCode,location_id:r01.id}],
   },"POST",201);
@@ -3618,15 +3624,15 @@ test("intake quarantine, half-unpacking, suit components, post-pay & cross-order
   assert.equal((await pool.query("select count(*)::int n from outbox_events where payload->>'dedupe_key'=$1",["intake-claim.decision:"+claim.id])).rows[0].n,1);
 
   // 2. TASK-058 & TASK-170 & T101: Half-unpacking (2 batches) + suit sub-component (component_of does not inflate received_quantity)
-  const mainCode1="S-"+randomUUID().slice(0,8).toUpperCase();
+  const mainCode1=newSampleCode();
   const batch1=await receiving.fetch(`/staff/packages/${unmPkg1.id}/items`,{
     revision:bound.revision,
     items:[{code:mainCode1,location_id:r01.id}],
   },"POST",201);
   const mainItem1Id=batch1.item_ids[0];
 
-  const compCode1="S-"+randomUUID().slice(0,8).toUpperCase();
-  const mainCode2="S-"+randomUUID().slice(0,8).toUpperCase();
+  const compCode1=newSampleCode();
+  const mainCode2=newSampleCode();
   const batch2=await receiving.fetch(`/staff/packages/${unmPkg1.id}/items`,{
     revision:batch1.revision,
     items:[
@@ -3711,7 +3717,7 @@ test("intake quarantine, half-unpacking, suit components, post-pay & cross-order
   assert.equal(quarResult.state,"quarantined");
   assert(quarResult.ticket_id);
   const unpackQuarErr=await receiving.fetch(`/staff/packages/${quarPkg.id}/items`,{
-    revision:quarResult.revision,items:[{code:"S-"+randomUUID().slice(0,8).toUpperCase(),location_id:r01.id}],
+    revision:quarResult.revision,items:[{code:newSampleCode(),location_id:r01.id}],
   },"POST",409);
   assert.equal(unpackQuarErr.error.code,"PACKAGE_QUARANTINED");
 });
@@ -3751,8 +3757,8 @@ test("item identity mismatch, customer discrepancy response, 3-to-2 conversion, 
   const pkgA=await receiving.fetch("/staff/intake/check-in",{
     tracking_no:waybillA,advice_id:adviceA.id,carrier_code:"zto",outer_media_ids:[await receiving.photo("intake_outer")],
   },"POST",201);
-  const codeWrong="S-"+randomUUID().slice(0,8).toUpperCase();
-  const codeReplacement="S-"+randomUUID().slice(0,8).toUpperCase();
+  const codeWrong=newSampleCode();
+  const codeReplacement=newSampleCode();
   const unpackedA=await receiving.fetch(`/staff/packages/${pkgA.id}/items`,{
     revision:pkgA.revision,
     items:[{code:codeWrong,location_id:r01.id},{code:codeReplacement,location_id:r01.id}],
@@ -3860,8 +3866,8 @@ test("item identity mismatch, customer discrepancy response, 3-to-2 conversion, 
   const cmpPkg=await receiving.fetch("/staff/intake/check-in",{
     tracking_no:cmpWaybill,advice_id:cmpAdvice.id,carrier_code:"yto",outer_media_ids:[await receiving.photo("intake_outer")],
   },"POST",201);
-  const cmpCode1="S-"+randomUUID().slice(0,8).toUpperCase();
-  const cmpCode2="S-"+randomUUID().slice(0,8).toUpperCase();
+  const cmpCode1=newSampleCode();
+  const cmpCode2=newSampleCode();
   const cmpUnpacked=await receiving.fetch(`/staff/packages/${cmpPkg.id}/items`,{
     revision:cmpPkg.revision,
     items:[{code:cmpCode1,location_id:r01.id},{code:cmpCode2,location_id:r01.id}],
@@ -4044,8 +4050,8 @@ test("inspection workbench: SLA queue, scan switching, multi-component suit, ret
   const suitPkg=await receiving.fetch("/staff/intake/check-in",{
     tracking_no:suitTrk,carrier_code:"sf",advice_id:suitAdv.id,weight_g:920,outer_media_ids:[await receiving.photo("intake_outer")],
   },"POST",201);
-  const suitCode1="S-"+randomUUID().replaceAll("-","").slice(0,10).toUpperCase();
-  const suitCode2="S-"+randomUUID().replaceAll("-","").slice(0,10).toUpperCase();
+  const suitCode1=newSampleCode();
+  const suitCode2=newSampleCode();
   const suitItems=await receiving.fetch(`/staff/packages/${suitPkg.id}/items`,{
     revision:suitPkg.revision,
     items:[
@@ -4242,8 +4248,8 @@ test("report review, wording guard, English translation review, comparison diffs
   const pkg=await receiving.fetch("/staff/intake/check-in",{
     tracking_no:trk,carrier_code:"sf",advice_id:adv.id,weight_g:900,outer_media_ids:[await receiving.photo("intake_outer")],
   },"POST",201);
-  const code1="S-"+randomUUID().replaceAll("-","").slice(0,10).toUpperCase();
-  const code2="S-"+randomUUID().replaceAll("-","").slice(0,10).toUpperCase();
+  const code1=newSampleCode();
+  const code2=newSampleCode();
   const intake=await receiving.fetch(`/staff/packages/${pkg.id}/items`,{
     revision:pkg.revision,
     items:[
@@ -4441,7 +4447,7 @@ test("TASK-086..100 & TASK-160: per-item dispositions, shipping rates & calculat
     const pkg=await receiving.fetch("/staff/intake/check-in",{
       tracking_no:trk,carrier_code:"sf",advice_id:adv.id,weight_g:900,outer_media_ids:[await receiving.photo("intake_outer")],
     },"POST",201);
-    const codes=Array.from({length:count},()=>"S-"+randomUUID().replaceAll("-","").slice(0,10).toUpperCase());
+    const codes=Array.from({length:count},()=>newSampleCode());
     const unpacked=await receiving.fetch(`/staff/packages/${pkg.id}/items`,{
       revision:pkg.revision,
       items:codes.map(code=>({code,location_id:locId})),
@@ -4467,7 +4473,7 @@ test("TASK-086..100 & TASK-160: per-item dispositions, shipping rates & calculat
   const zeroPkg=await receiving.fetch("/staff/intake/check-in",{
     tracking_no:zeroTrk,carrier_code:"sf",advice_id:zeroAdv.id,weight_g:500,outer_media_ids:[await receiving.photo("intake_outer")],
   },"POST",201);
-  const zeroCode="S-"+randomUUID().replaceAll("-","").slice(0,10).toUpperCase();
+  const zeroCode=newSampleCode();
   const zeroUnpacked=await receiving.fetch(`/staff/packages/${zeroPkg.id}/items`,{
     revision:zeroPkg.revision,
     items:[{code:zeroCode,location_id:locId}],
@@ -4681,8 +4687,8 @@ test("Stocktake, warehouse incident compensation, stage refunds, dispute freezes
   const pkg=await receiving.fetch("/staff/intake/check-in",{
     tracking_no:trk,carrier_code:"sf",advice_id:adv.id,weight_g:950,outer_media_ids:[await receiving.photo("intake_outer")],
   },"POST",201);
-  const codeA="S-"+randomUUID().replaceAll("-","").slice(0,10).toUpperCase();
-  const codeB="S-"+randomUUID().replaceAll("-","").slice(0,10).toUpperCase();
+  const codeA=newSampleCode();
+  const codeB=newSampleCode();
   const unpacked=await receiving.fetch(`/staff/packages/${pkg.id}/items`,{
     revision:pkg.revision,
     items:[{code:codeA,location_id:locId},{code:codeB,location_id:locId}],
@@ -5125,7 +5131,7 @@ test("tickets queue assignment, linked incidents, work-hours contribution, and 3
   const pkg=await receiving.fetch("/staff/intake/check-in",{
     tracking_no:trk,carrier_code:"sf",advice_id:adv.id,weight_g:500,outer_media_ids:[await receiving.photo("intake_outer")]
   },"POST",201);
-  const itemCode="S-"+randomUUID().replaceAll("-","").slice(0,10).toUpperCase();
+  const itemCode=newSampleCode();
   const unp=await receiving.fetch(`/staff/packages/${pkg.id}/items`,{
     revision:pkg.revision,items:[{code:itemCode,location_id:locId}]
   },"POST",201);
@@ -5661,7 +5667,7 @@ test("Week 28 full-chain regression: 1/5-item standard & 3-item compare, 3-to-2 
   },"POST",201);
   const fiveIntake=await receiving.fetch(`/staff/packages/${fivePkg.id}/items`,{
     revision:fivePkg.revision,
-    items:Array.from({length:5},()=>({code:"S-"+randomUUID(),location_id:locId})),
+    items:Array.from({length:5},()=>({code:newSampleCode(),location_id:locId})),
   },"POST",201);
   assert.equal(fiveIntake.item_ids.length,5);
 
@@ -5714,7 +5720,7 @@ test("Week 28 full-chain regression: 1/5-item standard & 3-item compare, 3-to-2 
   },"POST",201);
   const earlyItems=await receiving.fetch(`/staff/packages/${earlyPkg.id}/items`,{
     revision:earlyPkg.revision,
-    items:[{code:"S-"+randomUUID(),location_id:locId},{code:"S-"+randomUUID(),location_id:locId}],
+    items:[{code:newSampleCode(),location_id:locId},{code:newSampleCode(),location_id:locId}],
   },"POST",201);
 
   for(let i=0;i<2;i++) {
@@ -5780,7 +5786,7 @@ test("Week 28 full-chain regression: 1/5-item standard & 3-item compare, 3-to-2 
   },"POST",201);
   const lateIntake=await receiving.fetch(`/staff/packages/${latePkg.id}/items`,{
     revision:latePkg.revision,
-    items:[{code:"S-LATE-"+randomUUID().slice(0,8).toUpperCase(),location_id:locId}],
+    items:[{code:newSampleCode(),location_id:locId}],
   },"POST",201);
   const lateItemId=lateIntake.item_ids[0] as string;
 
@@ -6006,8 +6012,8 @@ test("parcel post-linking, staff object quick-summary RBAC, item_code incident f
   },"POST",201);
   const {locations}=await receiving.fetch("/staff/desk");
   const loc=locations.find((l:{code:string})=>l.code==="R-01")??locations[0];
-  const sampleOne="S-"+randomUUID().slice(0,8).toUpperCase();
-  const sampleTwo="S-"+randomUUID().slice(0,8).toUpperCase();
+  const sampleOne=newSampleCode();
+  const sampleTwo=newSampleCode();
   const unpacked=await receiving.fetch(`/staff/packages/${pkg.id}/items`,{
     revision:pkg.revision,
     items:[{code:sampleOne,location_id:loc.id},{code:sampleTwo,location_id:loc.id}],
@@ -6175,7 +6181,7 @@ test("warehouse expert audit remediations (AUD-001 to AUD-015) and 12 warehouse 
   assert.equal(pkgTenView0.parcel.outer_condition,"crushed");
   assert.equal(pkgTenView0.intake_context.total_declared_qty,10);
 
-  const alphabet="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const alphabet="23456789ABCDEFGHJKMNPQRSTUVWXYZ";
   const makeSampleCode=(seed:number)=>{
     let n=seed*2654435761>>>0;
     let s="S-";
@@ -7199,7 +7205,7 @@ test("a ten-item shortage stays frozen until the case is resolved and all ten it
     const pkg=await receiver.fetch("/staff/intake/check-in",{tracking_no:advice.tracking_no,advice_id:advice.id,
       carrier_code:"sf",outer_media_ids:[await receiver.photo("intake_outer")]},"POST",201);
     const intake=await receiver.fetch("/staff/packages/"+pkg.id+"/items",{revision:pkg.revision,
-      items:positions.map(()=>({code:"S-"+randomUUID(),location_id:receiving.id}))},"POST",201);
+      items:positions.map(()=>({code:newSampleCode(),location_id:receiving.id}))},"POST",201);
     for(const [index,position] of positions.entries()) {
       const itemPath="/staff/items/"+intake.item_ids[index];
       const evidence=await receiver.photo("label_photo");
@@ -7298,7 +7304,7 @@ test("a standalone 30-item inspection splits a documented defect, a reference sa
     assert.equal(registered.carrier_name,catalogCarrier.labels.en);
     const pkg=await receiver.fetch("/staff/intake/check-in",{tracking_no,advice_id:advice.id,carrier_code,
       outer_media_ids:[await receiver.photo("intake_outer")]},"POST",201);
-    const batch=Array.from({length:10},()=>({code:"S-"+randomUUID(),location_id:receiving.id}));
+    const batch=Array.from({length:10},()=>({code:newSampleCode(),location_id:receiving.id}));
     const intake=await receiver.fetch("/staff/packages/"+pkg.id+"/items",{revision:pkg.revision,items:batch},"POST",201);
     for(const [offset,id] of (intake.item_ids as string[]).entries()) {
       const position=positions[index*10+offset];
@@ -7595,7 +7601,7 @@ test("Quote validity settings require admin MFA, preserve historical quotes and 
     const media=await receiver.fetch("/staff/media",photo,"POST",201);
     const parcel=await receiver.fetch("/staff/intake/check-in",{tracking_no:tracking,carrier_code:"sf",advice_id:advice.id,outer_media_ids:[media.id]},"POST",201);
     const desk=await receiver.fetch("/staff/desk"),location=desk.locations.find(row=>row.code==="R-01");
-    const unpacked=await receiver.fetch(`/staff/packages/${parcel.id}/items`,{revision:parcel.revision,items:[1,2].map(()=>({code:"S-"+randomUUID(),location_id:location.id}))},"POST",201);
+    const unpacked=await receiver.fetch(`/staff/packages/${parcel.id}/items`,{revision:parcel.revision,items:[1,2].map(()=>({code:newSampleCode(),location_id:location.id}))},"POST",201);
     const termsId=terms.find(row=>row.kind==="terms")!.id;
     const retained=await c.fetch(`/me/items/${unpacked.item_ids[0]}/dispositions`,{action:"retain",days:30,terms_version_id:termsId},"POST",201);
     const storage=await admin.fetch(`/staff/dispositions/${retained.id}/storage-quote`,{});
@@ -7852,7 +7858,7 @@ test("expected product lines batch (50 units / 6 SKUs), unconfirmed evidence gua
   const receiving=(await receiver.fetch("/staff/desk")).locations.find((row:{code:string})=>row.code==="R-01");
   await receiver.fetch(`/staff/packages/${pkg.id}/items`,{
     revision:pkg.revision,
-    items:Array.from({length:47},()=>({code:"S-"+randomUUID(),location_id:receiving.id})),
+    items:Array.from({length:47},()=>({code:newSampleCode(),location_id:receiving.id})),
   },"POST",201);
 
   const receivedParcels=(await c.fetch("/me/parcels?tab=received")).rows;

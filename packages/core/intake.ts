@@ -1,5 +1,5 @@
 import type { DB } from "../db";
-import { audit, code, event, guard, hash, isDemo, lock, one, organization, revision, role, uuid, type Actor } from "./common";
+import { audit, code, event, guard, hash, isDemo, lock, one, organization, packageCode, revision, role, uuid, type Actor } from "./common";
 import { requireCustomerActive } from "./auth";
 import { demoWarehouseAddressZh, usableWarehouseAddressSql } from "./demo-fixtures";
 import { isPdfBytes, processImageBytes, validatePdfBytes } from "./media";
@@ -161,9 +161,21 @@ export async function checkIn(
     const loc=(await db.query<{id:string}>("select id from storage_locations where zone='receiving' and active order by code limit 1")).rows[0];
     targetLocId=loc?.id??null;
   }
-  const pkg=await one<{id:string;state:string;revision:number}>(db,`insert into packages(code,org_id,advice_id,received_by,received_at,received_quantity,weight_g,state,location_id,condition_note)
-    values($1,$2,$3,$4,now(),0,$5,$6,$7,$8) returning id,state,revision`,
-    [code("P-"),t?.org_id??null,t?.advice_id??null,actor.id,input.weight_g??null,t?.org_id?"checked_in":"unmatched",targetLocId,formattedConditionNote]);
+  let pkg: { id: string; state: string; revision: number } | undefined;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const inserted = await db.query<{ id: string; state: string; revision: number }>(
+      `insert into packages(code,org_id,advice_id,received_by,received_at,received_quantity,weight_g,state,location_id,condition_note)
+       values($1,$2,$3,$4,now(),0,$5,$6,$7,$8)
+       on conflict (code) do nothing
+       returning id,state,revision`,
+      [packageCode(),t?.org_id??null,t?.advice_id??null,actor.id,input.weight_g??null,t?.org_id?"checked_in":"unmatched",targetLocId,formattedConditionNote],
+    );
+    if (inserted.rows[0]) {
+      pkg = inserted.rows[0];
+      break;
+    }
+  }
+  guard(pkg, "PACKAGE_CODE_EXHAUSTED", "Could not allocate a unique package code. Try again.", 503);
   if(targetLocId) {
     await db.query("insert into storage_events(package_id,to_location_id,action,operator_id) values($1,$2,$3,$4)",
       [pkg.id,targetLocId,t?.org_id?"intake_receiving":"intake_unmatched",actor.id]);
@@ -194,10 +206,10 @@ export async function intakeItems(db:DB,actor:Actor,id:string,input:{revision:nu
   for(const item of input.items) {
     const trimmedCode=item.code.trim();
     const normalizedCode=trimmedCode.toUpperCase();
-    guard(/^(?:S|DSP)-[A-Z0-9-]{4,48}$/.test(normalizedCode),"SAMPLE_CODE_INVALID","Sample code must start with S- followed by 4 to 48 alphanumeric characters.",422);
+    guard(/^(?:S|DSP)-[A-Z0-9]{6,8}$/.test(normalizedCode),"SAMPLE_CODE_INVALID","Sample code must start with S- followed by 6 to 8 uppercase letters or digits (e.g. S-4K9M2P).",422);
     guard(!seenCodes.has(normalizedCode),"SAMPLE_CODE_DUPLICATE",`Duplicate sample code ${normalizedCode} in unpack request.`,422);
     seenCodes.add(normalizedCode);
-    item.code=trimmedCode;
+    item.code=normalizedCode;
   }
   const existingCode=(await db.query<{code:string}>("select code from warehouse_items where upper(code)=any($1::text[]) limit 1",[[...seenCodes]])).rows[0];
   guard(!existingCode,"SAMPLE_CODE_ALREADY_EXISTS",`Sample code ${existingCode?.code} has already been issued and cannot be reused.`,409);

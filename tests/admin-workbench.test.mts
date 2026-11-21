@@ -26,6 +26,7 @@ const { handle } = await import("../packages/core/http");
 const { pool, transaction } = await import("../packages/db");
 const { workOnce } = await import("../packages/core/worker");
 const { addEmailOtpIdentity } = await import("../packages/core/auth");
+const { sampleCode } = await import("../packages/core/common");
 
 before(async () => {
   const actual = await pool.query<{ name: string }>("select current_database() name");
@@ -329,7 +330,7 @@ test("admin workbench: payment refund state sync (partially_refunded -> refunded
 
   const postLoc = locs.rows.find((l: { zone: string }) => l.zone === "post_inspection");
   assert(postLoc, "Expected post_inspection storage location");
-  const itemCode = "S-ADM" + randomUUID().slice(0, 6).toUpperCase();
+  const itemCode = sampleCode();
   const itemIntake = await receiver.fetch(
     `/staff/packages/${pkgId}/items`,
     { revision: boundRes.revision ?? targetUnmatched.revision + 1, items: [{ code: itemCode, location_id: postLoc.id }] },
@@ -400,7 +401,7 @@ test("admin workbench: payment refund state sync (partially_refunded -> refunded
   const payTaskOrd = await c.fetch(`/charges/${subTaskOrd.charge.charge_item_id}/checkout`, { quote_revision: qTaskOrd.revision });
   await c.fetch(`/checkout/demo/${payTaskOrd.attempt_id}`, {});
   const qLoc = locs.rows.find((l: { zone: string }) => l.zone === "queue") ?? postLoc;
-  const taskItemCode = "S-TSK" + randomUUID().slice(0, 6).toUpperCase();
+  const taskItemCode = sampleCode();
   const pkgCurrRev = (await pool.query<{ revision: number }>("select revision from packages where id=$1", [pkgId])).rows[0].revision;
   const taskItemIntake = await receiver.fetch(
     `/staff/packages/${pkgId}/items`,

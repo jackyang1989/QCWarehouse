@@ -247,7 +247,7 @@ export function AdminOverviewDashboard({
         onSubmit={e => {
           e.preventDefault();
           const clean = jumpNo.trim().toUpperCase();
-          if (/^QW-[A-F0-9]+$/.test(clean)) location.assign(`/admin/orders/${clean}`);
+          if (/^QW-[A-Z0-9]{4,16}$/.test(clean)) location.assign(`/admin/orders/${clean}`);
         }}
       >
         <label>
@@ -259,7 +259,7 @@ export function AdminOverviewDashboard({
           />
         </label>
         <div className="actions">
-          <button type="submit" className="button primary sm" disabled={!/^QW-[A-F0-9]+$/i.test(jumpNo.trim())}>打开订单详情</button>
+          <button type="submit" className="button primary sm" disabled={!/^QW-[A-Z0-9]{4,16}$/i.test(jumpNo.trim())}>打开订单详情</button>
           {isOrders && <Link className="button sm" href="/admin/customers">客户档案 ({m?.active_customers ?? "—"})</Link>}
           {isFinance && <Link className="button sm" href="/admin/payments">支付流水与对账</Link>}
           {isFinance && <Link className="button sm" href="/admin/refunds">退款审批台</Link>}

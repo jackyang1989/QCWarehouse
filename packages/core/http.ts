@@ -433,7 +433,7 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   const caseRoute=path.match(/^\/cases\/([a-f0-9-]{36})(\/messages)?$/i);
   if(caseRoute&&method==="GET"&&!caseRoute[2]) {
     const customer=actorRequired(actor);organization(customer);
-    const order=z.string().regex(/^QW-[A-F0-9]+$/).nullable().parse(url.searchParams.get("order"));
+    const order=z.string().regex(/^QW-[A-Z0-9]{4,16}$/).nullable().parse(url.searchParams.get("order"));
     return json(await transaction(db=>caseDetail(db,customer,idSchema.parse(caseRoute[1]),order)));
   }
   if(caseRoute&&method==="POST"&&caseRoute[2]&&req.headers.get("content-type")?.startsWith("multipart/form-data")) {
@@ -468,7 +468,7 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   }
   if(method==="GET" && path==="/staff/desk") return json(await transaction(db=>warehouseDesk(db,actorRequired(actor))));
   if(method==="GET"&&path==="/staff/reports") {
-    const order=z.string().regex(/^QW-[A-F0-9]+$/).nullable().parse(url.searchParams.get("order"));
+    const order=z.string().regex(/^QW-[A-Z0-9]{4,16}$/).nullable().parse(url.searchParams.get("order"));
     return json(await transaction(db=>reportDesk(db,actorRequired(actor),order)));
   }
   const revisionRoute=path.match(/^\/staff\/reports\/([a-f0-9-]{36})(?:\/(amend|submit-revision))?$/i);
@@ -583,14 +583,14 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const filters=staffOrderFilters.parse(Object.fromEntries([...url.searchParams].filter(([,value])=>value!=="")));
     return json(await transaction(db=>searchStaffOrders(db,actorRequired(actor),filters)));
   }
-  const staffOrder=path.match(/^\/staff\/orders\/by-number\/(QW-[A-F0-9]+)$/);
+  const staffOrder=path.match(/^\/staff\/orders\/by-number\/(QW-[A-Z0-9]{4,16})$/);
   if(method==="GET"&&staffOrder) return json(await transaction(db=>staffOrderDetail(db,actorRequired(actor),staffOrder[1])));
-  const refundOptions=path.match(/^\/staff\/orders\/by-number\/(QW-[A-F0-9]+)\/refund-options$/);
+  const refundOptions=path.match(/^\/staff\/orders\/by-number\/(QW-[A-Z0-9]{4,16})\/refund-options$/);
   if(method==="GET"&&refundOptions) return json(await transaction(db=>orderRefundPayments(db,actorRequired(actor),refundOptions[1])));
   if(method==="GET" && path==="/staff/tracking") return json({rows:await transaction(db=>trackingAdmin(db,actorRequired(actor)))});
   if(method==="GET" && path==="/staff/tracking/monitor") return json(await transaction(db=>trackingMonitor(db,actorRequired(actor))));
   if(method==="GET" && path==="/staff/disposals") return json(await transaction(db=>listOverdueAndRestrictedQueue(db,actorRequired(actor))));
-  const byNo=path.match(/^\/orders\/by-number\/(QW-[A-F0-9]+)$/);
+  const byNo=path.match(/^\/orders\/by-number\/(QW-[A-Z0-9]{4,16})$/);
   if(method==="GET" && byNo) return json(await transaction(db=>readOrderByPublicNumber(db,actorRequired(actor),byNo[1])));
   const order=path.match(/^\/orders\/([a-f0-9-]{36})$/i);
   if(method==="GET" && order) return json(await transaction(db=>orderDetail(db,actorRequired(actor),idSchema.parse(order[1]))));

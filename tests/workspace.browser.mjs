@@ -6,6 +6,12 @@ import { setTimeout as delay } from "node:timers/promises";
 import sharp from "sharp";
 
 sharp.cache(false);
+const SAMPLE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+function sampleCode() {
+  let out = "S-";
+  for (let i = 0; i < 6; i++) out += SAMPLE_ALPHABET[Math.floor(Math.random() * SAMPLE_ALPHABET.length)];
+  return out;
+}
 const { chromium } = await import(process.env.QCW_PLAYWRIGHT_MODULE ?? "playwright");
 const baseURL = process.env.QCW_BROWSER_URL ?? "http://localhost:3411";
 const origin = new URL(baseURL).origin;
@@ -511,7 +517,7 @@ async function verifyReferenceCatalogAndComparison(other) {
   const dbURL=new URL(process.env.QCW_BROWSER_DATABASE_URL);
   assert.equal(dbURL.hostname,"127.0.0.1");assert.match(dbURL.pathname,/^\/qcw_test-[a-z0-9-]+$/);
   const {default:pg}=await import("pg");const db=new pg.Client({connectionString:dbURL.href});await db.connect();
-  const itemId=randomUUID(),referenceId=randomUUID(),code="S-"+randomUUID();
+  const itemId=randomUUID(),referenceId=randomUUID(),code=sampleCode();
   try {
     await db.query(`insert into warehouse_items(id,code,org_id,package_id,intake_batch_id,identity_state,condition_state,custody_state,location_id,received_at,storage_until)
       select $1,$2,w.org_id,w.package_id,w.intake_batch_id,w.identity_state,w.condition_state,w.custody_state,w.location_id,w.received_at,w.storage_until
@@ -759,7 +765,7 @@ async function verifySecondaryReads(customer,other) {
   const offer=(await customer.call("/catalog")).offers.find(row=>row.sku_code==="apparel-inspection-1");
   assert(offer);
   const draft=await customer.call("/orders",{status:201,body:{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,
-    quantity:1,items:[{sample_code:"S-"+randomUUID(),supplier_alias:"Fixture supplier"}]}]}});
+    quantity:1,items:[{sample_code:sampleCode(),supplier_alias:"Fixture supplier"}]}]}});
   const address=(await customer.call("/me/receiving-address")).warehouse_address;
   const advice=await customer.call("/me/parcels",{status:201,body:{address_id:address.id,tracking_no:"ZTO"+randomUUID().slice(0,8).toUpperCase(),carrier_code:"zto"}});
   const phoneAdvice=await customer.call("/me/parcels",{status:201,body:{address_id:address.id,tracking_no:"SF"+randomUUID().replaceAll("-","").slice(0,12).toUpperCase(),carrier_code:"sf"}});
@@ -1854,7 +1860,7 @@ async function verifySellerReturn({page,call,errors},other) {
     return (await upload.json()).id;
   }
   async function prepareItem() {
-    const tracking_no="ZTO"+randomUUID().slice(0,8).toUpperCase(),code="S-"+randomUUID();
+    const tracking_no="ZTO"+randomUUID().slice(0,8).toUpperCase(),code=sampleCode();
     const draft=await call("/orders",{status:201,body:{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,
       quantity:1,items:[{sample_code:code,supplier_alias:"Fixture supplier",tracking_no}]}]}});
     const orderPath="/orders/"+draft.id;
@@ -1974,7 +1980,7 @@ async function verifyIncidentDecision({page,call,errors},other) {
   const parcel=await receiver.call("/staff/intake/check-in",{body:{tracking_no,carrier_code:"zto",advice_id:advice.id,
     outer_media_ids:[(await upload.json()).id]},status:201});
   const {locations}=await receiver.call("/staff/desk");
-  const itemCode="S-"+randomUUID();
+  const itemCode=sampleCode();
   const item=await receiver.call(`/staff/packages/${parcel.id}/items`,{body:{revision:parcel.revision,
     items:[{code:itemCode,location_id:locations.find(location=>location.code==="R-01").id}]},status:201});
   const subject="Warehouse found a torn sample seam";
