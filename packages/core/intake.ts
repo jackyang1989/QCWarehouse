@@ -1,5 +1,5 @@
 import type { DB } from "../db";
-import { audit, code, event, guard, hash, isDemo, lock, one, organization, packageCode, revision, role, uuid, type Actor } from "./common";
+import { audit, code, event, extractReceivingCode, guard, hash, isDemo, lock, one, organization, packageCode, revision, role, uuid, type Actor } from "./common";
 import { requireCustomerActive } from "./auth";
 import { demoWarehouseAddressZh, usableWarehouseAddressSql } from "./demo-fixtures";
 import { isPdfBytes, processImageBytes, validatePdfBytes } from "./media";
@@ -168,7 +168,7 @@ export async function checkIn(
        values($1,$2,$3,$4,now(),0,$5,$6,$7,$8)
        on conflict (code) do nothing
        returning id,state,revision`,
-      [packageCode(),t?.org_id??null,t?.advice_id??null,actor.id,input.weight_g??null,t?.org_id?"checked_in":"unmatched",targetLocId,formattedConditionNote],
+      [packageCode(attempt >= 5 ? 6 : 5),t?.org_id??null,t?.advice_id??null,actor.id,input.weight_g??null,t?.org_id?"checked_in":"unmatched",targetLocId,formattedConditionNote],
     );
     if (inserted.rows[0]) {
       pkg = inserted.rows[0];
@@ -203,15 +203,18 @@ export async function intakeItems(db:DB,actor:Actor,id:string,input:{revision:nu
   revision(pkg.revision,input.revision);
   guard(pkg.state!=="quarantined","PACKAGE_QUARANTINED","Quarantined parcels cannot be unpacked into regular inventory.");
   const seenCodes=new Set<string>();
+  const seenNormalized=new Set<string>();
   for(const item of input.items) {
     const trimmedCode=item.code.trim();
     const normalizedCode=trimmedCode.toUpperCase();
-    guard(/^(?:S|DSP)-[A-Z0-9]{6,8}$/.test(normalizedCode),"SAMPLE_CODE_INVALID","Sample code must start with S- followed by 6 to 8 uppercase letters or digits (e.g. S-4K9M2P).",422);
-    guard(!seenCodes.has(normalizedCode),"SAMPLE_CODE_DUPLICATE",`Duplicate sample code ${normalizedCode} in unpack request.`,422);
+    const stripped=normalizedCode.replace(/-/g,"");
+    guard(/^(?:S|DSP)-?[A-Z0-9]{5,8}$/.test(normalizedCode),"SAMPLE_CODE_INVALID","Sample code must start with S (or DSP) followed by 5 to 8 digits or characters (e.g. S39204).",422);
+    guard(!seenNormalized.has(stripped),"SAMPLE_CODE_DUPLICATE",`Duplicate sample code ${normalizedCode} in unpack request.`,422);
     seenCodes.add(normalizedCode);
+    seenNormalized.add(stripped);
     item.code=normalizedCode;
   }
-  const existingCode=(await db.query<{code:string}>("select code from warehouse_items where upper(code)=any($1::text[]) limit 1",[[...seenCodes]])).rows[0];
+  const existingCode=(await db.query<{code:string}>("select code from warehouse_items where replace(upper(code),'-','')=any($1::text[]) limit 1",[[...seenNormalized]])).rows[0];
   guard(!existingCode,"SAMPLE_CODE_ALREADY_EXISTS",`Sample code ${existingCode?.code} has already been issued and cannot be reused.`,409);
   const counts=new Map<string,number>();
   for(const item of input.items) counts.set(item.location_id,(counts.get(item.location_id)??0)+1);
@@ -622,10 +625,11 @@ export async function bindUnmatchedPackageOwner(
   input:{revision:number;receiving_code:string;evidence_ids:string[];reason:string}
 ) {
   role(actor,"receiver","warehouse_admin","support","super_admin");
+  const extractedRec=extractReceivingCode(input.receiving_code);
   const profile=await one<{user_id:string;org_id:string;receiving_code:string}>(
     db,
-    "select user_id,org_id,receiving_code from customer_receiving_profiles where upper(receiving_code)=upper($1)",
-    [input.receiving_code.trim()]
+    "select user_id,org_id,receiving_code from customer_receiving_profiles where replace(upper(receiving_code),'-','')=replace(upper($1),'-','')",
+    [extractedRec]
   );
   await lock(db,"org:"+profile.org_id);
   const pkg=await one(db,"select * from packages where id=$1 for update",[packageId]);

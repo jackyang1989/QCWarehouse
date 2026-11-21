@@ -78,9 +78,9 @@ function entityHref(
   if(entityType==="disposal_cases") return `/admin/disposals/${entityId}`;
   if(entityType==="incident_cases") return `/admin/incidents/${entityId}`;
   if(entityType==="storage_locations") return `/admin/storage/locations`;
-  if(entityType==="users"&&entityLabel&&entityLabel.startsWith("QCW-")) return `/admin/customers/${entityId}`;
-  if(entityType==="packages"&&entityLabel&&entityLabel.startsWith("P-")) return `/wh/packages/${encodeURIComponent(entityLabel)}`;
-  if(entityType==="warehouse_items"&&entityLabel&&entityLabel.startsWith("S-")) return `/wh/samples/${encodeURIComponent(entityLabel)}`;
+  if(entityType==="users"&&entityLabel&&/^QCW-?[A-Z0-9]/i.test(entityLabel)) return `/admin/customers/${entityId}`;
+  if(entityType==="packages"&&entityLabel&&/^P(?:\d{5,8}|-[A-Z0-9])/i.test(entityLabel)) return `/wh/packages/${encodeURIComponent(entityLabel)}`;
+  if(entityType==="warehouse_items"&&entityLabel&&/^(?:S\d{5,8}|S-[A-Z0-9]|DSP-?[A-Z0-9])/i.test(entityLabel)) return `/wh/samples/${encodeURIComponent(entityLabel)}`;
   if(entityType==="inspection_tasks") return `/admin/inspections/tasks/${entityId}`;
   return null;
 }

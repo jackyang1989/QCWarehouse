@@ -77,7 +77,7 @@ export function AdminCustomersDirectory() {
             type="search"
             value={searchInput}
             onChange={e => setSearchInput(e.target.value)}
-            placeholder="例如 QCW-... / @ / QW-..."
+            placeholder="例如 QCW56084 / @ / QW261121835"
           />
         </label>
         <label>
@@ -102,7 +102,7 @@ export function AdminCustomersDirectory() {
           <EmptyState
             kind={q || statusFilter !== "all" ? "filtered" : "empty"}
             title="未匹配到符合条件的客户"
-            description="请确认收件码（QCW-）或邮箱拼写，或清除过滤条件查看全部客户。"
+            description="请确认收件码（QCW56084）或邮箱拼写，或清除过滤条件查看全部客户。"
             actionLabel="查看全部客户"
             onAction={() => { setSearchInput(""); setQ(""); setStatusFilter("all"); setPage(1); }}
           />

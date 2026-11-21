@@ -396,13 +396,13 @@ export async function findInspectionTaskByScan(db:DB,actor:Actor,input:{code:str
     where t.state<>'VOID'
       and ($2::uuid is null or o.id=$2)
       and (
-        upper(w.code)=$1
-        or o.public_no=$1
+        replace(upper(w.code),'-','')=replace($1,'-','')
+        or replace(upper(o.public_no),'-','')=replace($1,'-','')
         or exists(
           select 1 from group_members gm
           join order_line_item_links ga on ga.id=gm.assignment_id
           join warehouse_items gw on gw.id=ga.item_id
-          where gm.group_id=t.group_id and upper(gw.code)=$1
+          where gm.group_id=t.group_id and replace(upper(gw.code),'-','')=replace($1,'-','')
         )
       )
     order by case when t.state='IN_PROGRESS' then 0 when t.state='READY' then 1 else 2 end, t.id limit 1`,
@@ -958,9 +958,10 @@ export async function submitReport(db:DB,actor:Actor,id:string,rev:number,ids:st
   let report=(await db.query("select * from reports where order_id=$1 for update",[id])).rows[0];
   if(!report) {
     for(let attempt=0; attempt<10; attempt++) {
+      const candidateNo=attempt===0?reportCode(o.public_no):reportCode(undefined,attempt>=5?1:0);
       const inserted=await db.query(
         "insert into reports(id,order_id,public_no) values($1,$2,$3) on conflict (public_no) do nothing returning *",
-        [uuid(),id,reportCode()]
+        [uuid(),id,candidateNo]
       );
       if(inserted.rows[0]) {
         report=inserted.rows[0];

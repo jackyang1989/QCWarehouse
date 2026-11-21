@@ -5559,7 +5559,7 @@ export function ReportView({number,version}:{number:string;version?:number}) {
       </Panel>
       {id&&<ReportShares key={report.version} orderId={id} version={report.version}/>}
       {report.snapshot.sections.map((s:Row)=><Panel key={s.task_id} title={s.title}>
-        <div className="actions">{[...new Set<string>((s.results??[]).map((result:Row)=>result.item).filter((code:string)=>code?.startsWith("S-")))]
+        <div className="actions">{[...new Set<string>((s.results??[]).map((result:Row)=>result.item).filter((code:string)=>/^S(?:\d{5,8}|-[A-Z0-9])/i.test(code??"")))]
           .map(code=><Link className="code-btn" key={code} href={"/items?item="+encodeURIComponent(code)}>{code}</Link>)}</div>
         {s.summary&&<p className="muted small">Expected items: {s.summary.expected_count} · Inspected: {s.summary.checked_count} · Observed issues: {s.summary.issue_count}</p>}
         <ReportSection section={s} results={s.results} grouped={["compare","reference_match"].includes(s.service)} showPhoto={showPhoto}/>
@@ -5988,7 +5988,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
   const [batchIds,setBatchIds]=useState<string[]>([]);
   useEffect(()=>{
     if(!isItems) return;
-    function readHash() {setLegacyItem(location.hash.match(/^#item-(S-[a-zA-Z0-9-]+)$/)?.[1]??null);}
+    function readHash() {setLegacyItem(location.hash.match(/^#item-(S-?[a-zA-Z0-9-]+)$/)?.[1]??null);}
     readHash();
     window.addEventListener("hashchange",readHash);
     return ()=>window.removeEventListener("hashchange",readHash);
@@ -6203,12 +6203,12 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
       {addr?<>
         <div className="grid cols2" style={{marginBottom:12}}>
           <dl className="def"><dt>Recipient &amp; Phone</dt><dd>{addr.recipient} · {addr.phone}</dd></dl>
-          <dl className="def"><dt>Chinese Shipping Address (For Domestic Sellers)</dt><dd>{addr.address_zh}（收件码：{data.profile.receiving_code}）</dd></dl>
+          <dl className="def"><dt>Chinese Shipping Address (For Domestic Sellers)</dt><dd>{addr.address_zh}@{data.profile.receiving_code}@【QCW质检仓·勿删】</dd></dl>
           <dl className="def"><dt>English Reference Address</dt><dd>{addr.address_en}</dd></dl>
         </div>
         <div className="actions">
           <Action primary run={async()=>{
-            await navigator.clipboard.writeText([addr.recipient,addr.phone,`${addr.address_zh}（收件码：${data.profile.receiving_code}）`].join("\n"));
+            await navigator.clipboard.writeText([addr.recipient,addr.phone,`${addr.address_zh}@${data.profile.receiving_code}@【QCW质检仓·勿删】`].join("\n"));
             setAddressCopied(true);
           }}>Copy Chinese shipping address</Action>
           {addressCopied&&<span role="status">Address copied.</span>}

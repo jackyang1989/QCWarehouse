@@ -224,7 +224,7 @@ CREATE TABLE sku_prices (
 
 CREATE TABLE orders (
   id uuid PRIMARY KEY,
-  public_no text NOT NULL UNIQUE,                    -- QW-XXXXXXXX
+  public_no text NOT NULL UNIQUE,                    -- QW261121835 (QW + YYMMDD + 3/4 digits)
   org_id uuid NOT NULL REFERENCES organizations(id),
   created_by uuid NOT NULL REFERENCES users(id),
   state text NOT NULL DEFAULT 'draft' CHECK (state IN ('draft','awaiting_payment','awaiting_samples','samples_ready','queued','inspecting','qa_review','report_ready','action_pending','closed','on_hold','cancelled')),
@@ -476,7 +476,7 @@ CREATE TABLE order_costs (
 CREATE TABLE reports (
   id uuid PRIMARY KEY,
   order_id uuid NOT NULL UNIQUE REFERENCES orders(id),
-  public_no text NOT NULL UNIQUE,                    -- RP-XXXXXXXX
+  public_no text NOT NULL UNIQUE,                    -- RP261121835 (RP + order date/number suffix)
   current_version int NOT NULL DEFAULT 1,
   published_version int,
   created_at timestamptz NOT NULL DEFAULT now()

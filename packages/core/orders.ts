@@ -173,7 +173,7 @@ export async function saveOrder(db:DB,actor:Actor,input:{lines:LineInput[];custo
          values($1,$2,$3,$4,$5,$6)
          on conflict (public_no) do nothing
          returning *`,
-        [uuid(), orderCode(), org, actor.id, input.customer_notes ?? null, isDemo()],
+        [uuid(), orderCode(attempt >= 5 ? 1 : 0), org, actor.id, input.customer_notes ?? null, isDemo()],
       );
       if (inserted.rows[0]) {
         createdOrder = inserted.rows[0];

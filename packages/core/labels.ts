@@ -3,7 +3,7 @@ import sharp from "sharp";
 import { z } from "zod";
 import type { DB } from "../db";
 import { appOrigin } from "./auth";
-import { audit, guard, one, role, uuid, type Actor } from "./common";
+import { audit, extractReceivingCode, guard, one, role, uuid, type Actor } from "./common";
 import { lookup, waybill } from "./intake";
 
 export const labelSizeEnum = z.enum(["standard_80x50", "compact_50x30", "shelf_100x60"]);
@@ -846,7 +846,7 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
   const code = rawCode.trim();
   guard(code.length >= 3 && code.length <= 80, "SCAN_CODE_INVALID", "Enter a valid package, item, location, or tracking code.", 422);
 
-  if (/^P-[A-Z0-9-]{1,64}$/i.test(code)) {
+  if (/^P(?:\d{5,8}|-[A-Z0-9-]{3,64})$/i.test(code)) {
     const normalized = code.toUpperCase();
     const pkg = (
       await db.query<{
@@ -865,7 +865,7 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
          from packages p
          left join storage_locations sl on sl.id = p.location_id
          left join tracking_records t on t.package_id = p.id and t.direction = 'inbound' and t.closed_at is null
-         where p.code = $1`,
+         where replace(upper(p.code),'-','') = replace($1,'-','')`,
         [normalized]
       )
     ).rows[0];
@@ -908,7 +908,7 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
     };
   }
 
-  if (/^(?:S|DSP)-[A-Za-z0-9-]{1,64}$/i.test(code)) {
+  if (/^(?:S\d{5,8}|S-[A-Za-z0-9-]{3,64}|DSP-?[A-Za-z0-9-]{3,64})$/i.test(code)) {
     const item = (
       await db.query<{
         id: string;
@@ -947,7 +947,7 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
            where assignment_id = a.id and state <> 'VOID'
            order by id limit 1
          ) it on true
-         where upper(w.code) = upper($1)`,
+         where replace(upper(w.code),'-','') = replace(upper($1),'-','')`,
         [code]
       )
     ).rows[0];
@@ -1003,7 +1003,7 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
     };
   }
 
-  if (/^QW-[A-Z0-9]{4,16}$/i.test(code)) {
+  if (/^QW-?[A-Z0-9]{4,16}$/i.test(code)) {
     const order = (
       await db.query<{
         id: string;
@@ -1015,7 +1015,7 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
         `select o.id, o.public_no, o.state,
                 (select crp.receiving_code from customer_receiving_profiles crp where crp.org_id=o.org_id limit 1) receiving_code,
                 (select t.id from inspection_tasks t join order_lines l on l.id=t.order_line_id where l.order_id=o.id and t.state<>'VOID' order by t.state='READY' desc, t.state='IN_PROGRESS' desc, t.id limit 1) first_task_id
-         from orders o where upper(o.public_no) = upper($1)`,
+         from orders o where replace(upper(o.public_no),'-','') = replace(upper($1),'-','')`,
         [code]
       )
     ).rows[0];
@@ -1052,13 +1052,14 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
     };
   }
 
-  if (/^QCW-[A-Z0-9-]+$/i.test(code)) {
+  const extractedRec = extractReceivingCode(code);
+  if (/^QCW-?[A-Z0-9-]{4,16}$/i.test(extractedRec)) {
     const cust = (
       await db.query<{ user_id: string; receiving_code: string; display_name: string | null }>(
         `select crp.user_id, crp.receiving_code, u.display_name
          from customer_receiving_profiles crp join users u on u.id = crp.user_id
-         where upper(crp.receiving_code) = upper($1)`,
-        [code]
+         where replace(upper(crp.receiving_code),'-','') = replace(upper($1),'-','')`,
+        [extractedRec]
       )
     ).rows[0];
     guard(cust, "NOT_FOUND", "Customer receiving code not found.", 404);
@@ -1440,13 +1441,13 @@ export async function verifyLabelReadback(
 }
 
 async function verifySingleReadback(db: DB, actor: Actor, expected: string) {
-  if (expected.startsWith("P-")) {
-    const pkg = await one<{ id: string; code: string }>(db, "select id, code from packages where upper(code)=$1", [expected]);
+  if (/^P(?:\d{5,8}|-[A-Z0-9-]{3,64})$/i.test(expected)) {
+    const pkg = await one<{ id: string; code: string }>(db, "select id, code from packages where replace(upper(code),'-','')=replace(upper($1),'-','')", [expected]);
     await audit(db, actor, "verify_label_readback", "packages", pkg.id, { code: pkg.code });
     return { target_type: "package" as const, target_id: pkg.id, code: pkg.code };
   }
-  if (expected.startsWith("S-") || expected.startsWith("DSP-")) {
-    const item = await one<{ id: string; code: string }>(db, "select id, code from warehouse_items where upper(code)=$1", [expected]);
+  if (/^(?:S\d{5,8}|S-[A-Z0-9-]{3,64}|DSP-?[A-Z0-9-]{3,64})$/i.test(expected)) {
+    const item = await one<{ id: string; code: string }>(db, "select id, code from warehouse_items where replace(upper(code),'-','')=replace(upper($1),'-','')", [expected]);
     await audit(db, actor, "verify_label_readback", "warehouse_items", item.id, { code: item.code });
     return { target_type: "item" as const, target_id: item.id, code: item.code };
   }
@@ -1455,5 +1456,5 @@ async function verifySingleReadback(db: DB, actor: Actor, expected: string) {
     await audit(db, actor, "verify_label_readback", "storage_locations", loc.id, { code: loc.code });
     return { target_type: "location" as const, target_id: loc.id, code: loc.code };
   }
-  guard(false, "SCAN_CODE_INVALID", "Label verification requires a valid P-, S-, DSP-, or storage location code.", 422);
+  guard(false, "SCAN_CODE_INVALID", "Label verification requires a valid P, S, DSP, or storage location code.", 422);
 }

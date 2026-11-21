@@ -107,13 +107,13 @@ async function signCustomer() {
   assert.equal(result.state,"onboarding");
   const {terms}=await c.fetch("/public/terms");
   const registration=await c.fetch("/auth/registration/complete",{terms_version_ids:terms.filter((t:{kind:string})=>["terms","privacy"].includes(t.kind)).map((t:{id:string})=>t.id)});
-  assert.match(registration.receiving_code,/^QCW-[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{5}$/);
+  assert.match(registration.receiving_code,/^QCW\d{5}$/);
   assert.equal(registration.warehouse_address_status,"available");
   return {c,registration,terms,email};
 }
 async function createAndPay(c:Client,lines:object[],terms:{id:string}[]) {
   const draft=await c.fetch("/orders",{lines},"POST",201);
-  assert.match(draft.public_no,/^QW-[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{8}$/);
+  assert.match(draft.public_no,/^QW\d{6}\d{3,4}$/);
   const quote=await c.fetch("/orders/"+draft.id+"/quotes",{revision:draft.revision},"POST",201);
   const consent={scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true};
   const body={revision:draft.revision,quote_id:quote.id,terms_version_ids:terms.map(t=>t.id),acknowledgements:consent};
@@ -376,7 +376,7 @@ test(category+": customer to warehouse to PDF to dispatch on the same records",a
   assert.equal(found.package_id,pkg.id);
   await staff.fetch("/staff/intake/lookup",{tracking_no:"!"},"POST",422);
   const detail=await staff.fetch(packagePath);
-  assert.match(detail.parcel.code,/^P-[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{6}$/);
+  assert.match(detail.parcel.code,/^P\d{5,6}$/);
   const byCode="/staff/packages/by-code/"+detail.parcel.code;
   assert.equal((await staff.fetch(byCode)).parcel.id,pkg.id);
   await c.fetch(byCode,undefined,"GET",403);
@@ -748,7 +748,8 @@ test("33 physical items from three parcels share one order, report and selective
   const versions=(await c.fetch(reportList)).rows;
   assert.deepEqual(versions.map((v:{version:number;is_current:boolean})=>[v.version,v.is_current]),[[2,true],[1,false]]);
   assert.deepEqual((await c.fetch(reportList+"&version=1")).rows.map((v:{version:number})=>v.version),[1]);
-  assert.match(published.snapshot.report_no,/^RP-[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{8}$/);
+  assert.match(published.snapshot.report_no,/^RP\d{6}\d{3,4}$/);
+  assert.equal(published.snapshot.report_no,"RP"+draft.public_no.slice(2));
   assert.equal((await c.fetch("/me/reports?reference="+published.snapshot.report_no)).rows.length,2);
   assert.deepEqual((await other.fetch(reportList)).rows,[]);
   await c.fetch(reportList+"&version=0",undefined,"GET",422);
@@ -6181,16 +6182,7 @@ test("warehouse expert audit remediations (AUD-001 to AUD-015) and 12 warehouse 
   assert.equal(pkgTenView0.parcel.outer_condition,"crushed");
   assert.equal(pkgTenView0.intake_context.total_declared_qty,10);
 
-  const alphabet="23456789ABCDEFGHJKMNPQRSTUVWXYZ";
-  const makeSampleCode=(seed:number)=>{
-    let n=seed*2654435761>>>0;
-    let s="S-";
-    for(let i=0;i<6;i++) {
-      s+=alphabet[n%alphabet.length];
-      n=Math.floor(n/alphabet.length);
-    }
-    return s;
-  };
+  const makeSampleCode=(seed:number)=>`S${10000+((seed*2654435761>>>0)%90000)}`;
   const tenCodes=Array.from({length:10},(_,i)=>makeSampleCode(i+101));
   const unpackedTen=await receiving.fetch(`/staff/packages/${pkgTen.id}/items`,{
     revision:pkgTen.revision,
@@ -6568,7 +6560,7 @@ test("independent review remediation (NEW-001 to NEW-011) and 4-step Golden Samp
   }
 
   // Perturbation decoding: rotation, tilt, low-contrast, damaged 1D (QR fallback), low-res, dark border
-  const baseLabel=await renderLabelPng("S-8K4M2P","item","standard_80x50");
+  const baseLabel=await renderLabelPng("S39204","item","standard_80x50");
   const baseM=await sharp(baseLabel).metadata();
   const damaged1dSvg=Buffer.from(`<svg width="${baseM.width}" height="${baseM.height}" xmlns="http://www.w3.org/2000/svg"><rect x="10" y="${(baseM.height??262)-85}" width="${(baseM.width??420)-20}" height="55" fill="#ffffff"/></svg>`);
   const perturbations:[string,Buffer][]= [
@@ -6583,7 +6575,7 @@ test("independent review remediation (NEW-001 to NEW-011) and 4-step Golden Samp
   for(const [pName,pBuf] of perturbations) {
     const res=await decodeLabelImage(pBuf);
     assert.equal(res.decoded,true,`Perturbation ${pName} must decode`);
-    assert.equal(res.code,"S-8K4M2P",`Perturbation ${pName} payload exact match`);
+    assert.equal(res.code,"S39204",`Perturbation ${pName} payload exact match`);
   }
 
   // Negative barcode bounds: empty, >48 chars, and control characters

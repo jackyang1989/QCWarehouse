@@ -15,12 +15,45 @@ export function shortCode(prefix: string, length: number) {
   for (let i = 0; i < length; i++) out += CODE_ALPHABET[randomInt(0, CODE_ALPHABET.length)];
   return out;
 }
-export const receivingCode = (length = 5) => shortCode("QCW-", length);
-export const orderCode = () => shortCode("QW-", 8);
-export const packageCode = () => shortCode("P-", 6);
-export const sampleCode = () => shortCode("S-", 6);
-export const reportCode = () => shortCode("RP-", 8);
-export const code = (prefix: string, length = 6) => shortCode(prefix, length);
+export function numericCode(prefix: string, digits: number) {
+  const min = 10 ** (digits - 1);
+  const max = 10 ** digits;
+  return `${prefix}${randomInt(min, max)}`;
+}
+export function shanghaiYYMMDD(date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "2-digit",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const y = parts.find((p) => p.type === "year")?.value ?? "26";
+  const m = parts.find((p) => p.type === "month")?.value ?? "01";
+  const d = parts.find((p) => p.type === "day")?.value ?? "01";
+  return `${y}${m}${d}`;
+}
+export function extractReceivingCode(raw: string): string {
+  const trimmed = raw.trim();
+  const tagged = trimmed.match(/@(QCW-?[A-Z0-9]{4,12}|\d{5,8})@/i);
+  if (tagged) {
+    const val = tagged[1]!.toUpperCase().replace(/-/g, "");
+    return /^\d+$/.test(val) ? `QCW${val}` : val;
+  }
+  return trimmed.toUpperCase();
+}
+export const receivingCode = (digits = 5) => numericCode("QCW", digits);
+export const orderCode = (extraDigits = 0) =>
+  `QW${shanghaiYYMMDD()}${randomInt(10 ** (2 + extraDigits), 10 ** (3 + extraDigits))}`;
+export const packageCode = (digits = 5) => numericCode("P", digits);
+export const sampleCode = (digits = 5) => numericCode("S", digits);
+export const reportCode = (orderPublicNo?: string, extraDigits = 0) => {
+  if (orderPublicNo && extraDigits === 0) {
+    const suffix = orderPublicNo.trim().toUpperCase().replace(/^QW-?/, "");
+    if (suffix.length >= 4) return `RP${suffix}`;
+  }
+  return `RP${shanghaiYYMMDD()}${randomInt(10 ** (2 + extraDigits), 10 ** (3 + extraDigits))}`;
+};
+export const code = (prefix: string, digits = 5) => numericCode(prefix, digits);
 export const isDemo = () => process.env.QCW_DEMO === "1" && process.env.NODE_ENV !== "production";
 export async function one<T extends QueryResultRow>(db: Pick<DB, "query">, sql: string, values: unknown[] = []): Promise<T> {
   const row = (await db.query<T>(sql, values)).rows[0];

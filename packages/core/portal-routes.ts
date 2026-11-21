@@ -135,7 +135,7 @@ for(const [paths,route] of [
   for(const path of paths) fixed.set(path,route);
 }
 
-const publicNo = "(QW-[A-Z0-9]{4,16})";
+const publicNo = "(QW-?[A-Z0-9]{4,16})";
 const uuid = "([a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})";
 const details:{pattern:RegExp;area:Area;view:DetailView}[]=[
   {pattern:new RegExp("^/orders/"+publicNo+"(?:/("+Object.keys(orderSections).join("|")+"))?$"),area:"customer",view:"order"},
@@ -157,8 +157,8 @@ const details:{pattern:RegExp;area:Area;view:DetailView}[]=[
   {pattern:new RegExp("^/wh/task/"+uuid+"$"),area:"warehouse",view:"task"},
   {pattern:new RegExp("^/wh/dispatch/"+uuid+"$"),area:"warehouse",view:"dispatch-batch"},
   {pattern:new RegExp("^/wh/review/"+uuid+"$"),area:"warehouse",view:"staff-report"},
-  {pattern:/^\/wh\/packages\/(P-[A-Z0-9-]{1,64})$/,area:"warehouse",view:"warehouse-package"},
-  {pattern:/^\/wh\/samples\/((?:S|DSP)-[A-Za-z0-9-]{1,64})$/,area:"warehouse",view:"warehouse-item"},
+  {pattern:/^\/wh\/packages\/(P(?:\d{5,8}|-[A-Z0-9-]{1,64}))$/,area:"warehouse",view:"warehouse-package"},
+  {pattern:/^\/wh\/samples\/((?:S\d{5,8}|S-[A-Za-z0-9-]{1,64}|DSP-?[A-Za-z0-9-]{1,64}))$/,area:"warehouse",view:"warehouse-item"},
   {pattern:new RegExp("^/checkout/demo/"+uuid+"$"),area:"customer",view:"demo"},
 ];
 

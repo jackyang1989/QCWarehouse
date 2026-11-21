@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { DB } from "../db";
-import { guard, one, role, type Actor } from "./common";
+import { extractReceivingCode, guard, one, role, type Actor } from "./common";
 import { taskDetail } from "./inspection";
 import { computeOrderRefundStage } from "./operations";
 import { hasStaffAccess, staffAccess } from "./staff-access";
@@ -831,7 +831,7 @@ export async function adminCustomersList(db: DB, actor: Actor, filters: z.infer<
   role(actor, "support", "finance", "super_admin");
   const { q, status, page, limit } = filters;
   const search = q.trim().toLowerCase();
-  const rawUpper = q.trim().toUpperCase();
+  const rawUpper = extractReceivingCode(q);
   const financeVisible = canSeeFinanceAmounts(actor);
 
   const { rows } = await db.query(
@@ -853,11 +853,11 @@ export async function adminCustomersList(db: DB, actor: Actor, filters: z.infer<
      left join user_emails ue on ue.user_id = u.id and ue.is_primary
      where ($1 = 'all' or u.status = $1)
        and ($2 = '' or
-         strpos(upper(crp.receiving_code), $3) > 0 or
+         strpos(replace(upper(crp.receiving_code),'-',''), replace($3,'-','')) > 0 or
          strpos(lower(coalesce(ue.original_email, ue.normalized_email::text, '')), $2) > 0 or
          strpos(lower(coalesce(u.display_name, '')), $2) > 0 or
          strpos(lower(u.id::text), $2) > 0 or
-         exists(select 1 from orders o where o.org_id = crp.org_id and strpos(upper(o.public_no), $3) > 0)
+         exists(select 1 from orders o where o.org_id = crp.org_id and strpos(replace(upper(o.public_no),'-',''), replace($3,'-','')) > 0)
        )
      order by last_order_at desc nulls last, u.created_at desc`,
     [status, search, rawUpper]

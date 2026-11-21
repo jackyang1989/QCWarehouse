@@ -6,11 +6,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import sharp from "sharp";
 
 sharp.cache(false);
-const SAMPLE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 function sampleCode() {
-  let out = "S-";
-  for (let i = 0; i < 6; i++) out += SAMPLE_ALPHABET[Math.floor(Math.random() * SAMPLE_ALPHABET.length)];
-  return out;
+  return `S${10000 + Math.floor(Math.random() * 90000)}`;
 }
 const { chromium } = await import(process.env.QCW_PLAYWRIGHT_MODULE ?? "playwright");
 const baseURL = process.env.QCW_BROWSER_URL ?? "http://localhost:3411";
@@ -513,7 +510,7 @@ async function verifyReferenceCatalogAndComparison(other) {
   assert(matching&&foreign);
   const references=(await call("/me/reference-samples")).items;
   const current=references.find(reference=>reference.category_id===matching.category_id&&reference.state==="active"&&!reference.in_use&&Date.parse(reference.expires_at)>Date.now());
-  assert(current?.code.startsWith("S-"));
+  assert(/^S-?[A-Z0-9]{5,8}$/.test(current?.code??""));
   const dbURL=new URL(process.env.QCW_BROWSER_DATABASE_URL);
   assert.equal(dbURL.hostname,"127.0.0.1");assert.match(dbURL.pathname,/^\/qcw_test-[a-z0-9-]+$/);
   const {default:pg}=await import("pg");const db=new pg.Client({connectionString:dbURL.href});await db.connect();

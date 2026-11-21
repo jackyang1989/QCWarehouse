@@ -1,6 +1,6 @@
 import type { DB } from "../db";
 import { z } from "zod";
-import { guard, hash, one, organization, role, type Actor } from "./common";
+import { extractReceivingCode, guard, hash, one, organization, role, type Actor } from "./common";
 import { receiving } from "./auth";
 import { customerEmailDeliveryStatus } from "./email";
 import { eligibleManualQuoteOrderSql, expiredManualInspectionPaymentSql, orderAcceptsSampleAssignmentSql, orderDTO, referenceCategorySql, summarizeExpectedLines } from "./orders";
@@ -71,7 +71,7 @@ export async function items(db:DB,actor:Actor,options?:{page:number;filter:keyof
     ${inventoryJoins} join packages p on p.id=w.package_id
     left join expected_items e on e.id=a.expected_item_id
     left join storage_locations sl on sl.id=w.location_id
-    where w.org_id=$1 and w.parent_item_id is null and ($2::text is null or w.code=$2)
+    where w.org_id=$1 and w.parent_item_id is null and ($2::text is null or replace(upper(w.code),'-','')=replace(upper($2),'-',''))
       and (${itemFilters[options?.filter??"all"]})
     order by w.received_at desc,w.id desc limit $3 offset $4`,[
       organization(actor),options?.code??null,options?21:400,options?(options.page-1)*20:0,
@@ -432,7 +432,7 @@ const customerOrderSelect=`select o.id,o.public_no,o.state,o.revision,o.price_ce
 export async function listCustomerOrders(db:DB,actor:Actor,query:string,state:string,page:number) {
   const pageSize=20;
   const {rows}=await db.query(customerOrderSelect+` where o.org_id=$1
-    and ($2='' or strpos(upper(o.public_no),upper($2))>0
+    and ($2='' or strpos(replace(upper(o.public_no),'-',''),replace(upper($2),'-',''))>0
       or exists(select 1 from advice_orders ao join tracking_records tr on tr.advice_id=ao.advice_id and tr.closed_at is null where ao.order_id=o.id and strpos(upper(tr.tracking_norm),upper($2))>0)
       or exists(select 1 from order_lines l where l.order_id=o.id and (strpos(upper(coalesce(l.attributes::text,'')),upper($2))>0))
       or exists(select 1 from order_lines l join expected_items e on e.order_line_id=l.id where l.order_id=o.id and strpos(upper(coalesce(e.declared_fields::text,'')),upper($2))>0))
@@ -673,7 +673,7 @@ export async function warehousePackage(db:DB,actor:Actor,value:string,byCode=fal
     from packages p
     left join storage_locations sl on sl.id=p.location_id
     left join tracking_records t on t.package_id=p.id and t.direction='inbound' and t.closed_at is null
-    where ${byCode?"p.code":"p.id"}=$1`,[value]);
+    where ${byCode?"replace(upper(p.code),'-','')=replace(upper($1),'-','')":"p.id=$1"}`,[value]);
   const items=(await db.query(`select w.id,w.code,w.revision,w.parent_item_id,w.intake_batch_id,w.identity_state,w.condition_state,w.custody_state,
     l.code location,l.zone location_zone,o.public_no order_number,e.position expected_position,e.declared_fields,
     exists(select 1 from reference_samples r where r.item_id=w.id and r.state='active') is_reference_sample,
@@ -729,7 +729,7 @@ export async function warehouseItem(db:DB,actor:Actor,code:string) {
     left join expected_items e on e.id=a.expected_item_id
     left join order_lines l on l.id=a.order_line_id left join orders o on o.id=l.order_id
     left join service_offers so on so.id=l.offer_id left join categories cat on cat.id=l.category_id
-    where upper(w.code)=upper($1)`,[code]);
+    where replace(upper(w.code),'-','')=replace(upper($1),'-','')`,[code]);
   const storageEvents=(await db.query(`select se.id,se.action,se.created_at,fl.code from_location,tl.code to_location,u.display_name operator_name
     from storage_events se left join storage_locations fl on fl.id=se.from_location_id
     left join storage_locations tl on tl.id=se.to_location_id left join users u on u.id=se.operator_id
@@ -1221,7 +1221,7 @@ export async function adminDesk(db:DB,actor:Actor) {
   };
 }
 export async function readOrderByPublicNumber(db:DB,actor:Actor,publicNo:string) {
-  const row=await one<{id:string;public_no:string;revision:number;state:string}>(db,"select id,public_no,revision,state from orders where public_no=$1 and org_id=$2",[publicNo,organization(actor)]);
+  const row=await one<{id:string;public_no:string;revision:number;state:string}>(db,"select id,public_no,revision,state from orders where replace(upper(public_no),'-','')=replace(upper($1),'-','') and org_id=$2",[publicNo,organization(actor)]);
   return orderDTO(row);
 }
 const inboundBelongsToOrder=`t.org_id=o.org_id and (exists(
@@ -1247,7 +1247,8 @@ export async function searchStaffOrders(db:DB,actor:Actor,filters:z.infer<typeof
   role(actor,...staffAccess.orders);
   const {query,state,exception,from,to,test,limit,cursor}=filters;
   const trimmed=query.trim();
-  const key=trimmed?trimmed.includes("@")?z.email().parse(trimmed.toLowerCase()):waybill(trimmed):"";
+  const isTaggedCode=/@(QCW-?[A-Z0-9]{4,12}|\d{5,8})@/i.test(trimmed);
+  const key=trimmed?(isTaggedCode?extractReceivingCode(trimmed):trimmed.includes("@")?z.email().parse(trimmed.toLowerCase()):waybill(trimmed)):"";
   const filter=hash(JSON.stringify({key,state,exception,from,to,test,limit}));
   let after:z.infer<typeof staffOrderCursor>|undefined;
   if(cursor) {
@@ -1287,13 +1288,13 @@ export async function searchStaffOrders(db:DB,actor:Actor,filters:z.infer<typeof
     left join customer_receiving_profiles crp on crp.org_id=o.org_id
     left join users u on u.id=crp.user_id
     ${inspectionPaymentForOrder}
-    where ($1='' or o.public_no=$1 or upper(coalesce(crp.receiving_code,''))=$1 or exists(
+    where ($1='' or o.public_no=$1 or replace(upper(o.public_no),'-','')=replace($1,'-','') or upper(coalesce(crp.receiving_code,''))=$1 or replace(upper(coalesce(crp.receiving_code,'')),'-','')=replace($1,'-','') or exists(
       select 1 from tracking_records t where t.tracking_norm=$1 and t.direction='inbound'
       and t.closed_at is null and ${inboundBelongsToOrder}
     ) or exists(
       select 1 from order_lines l join order_line_item_links a on a.order_line_id=l.id and a.org_id=o.org_id
       join warehouse_items w on w.id=a.item_id and w.org_id=a.org_id
-      where l.order_id=o.id and upper(w.code)=$1 and a.unlinked_at is null
+      where l.order_id=o.id and (upper(w.code)=$1 or replace(upper(w.code),'-','')=replace($1,'-','')) and a.unlinked_at is null
     ) or exists(select 1 from memberships m join user_emails e on e.user_id=m.user_id
       where m.org_id=o.org_id and e.normalized_email=$1 and e.verified_at is not null))
     and ($2::text is null or o.state=$2)
@@ -1320,7 +1321,7 @@ export async function staffOrderDetail(db:DB,actor:Actor,publicNo:string) {
     db,
     `select id,org_id,public_no,state,revision,created_at,updated_at,paid_at,samples_ready_at,sla_due_at,
             report_published_at,closed_at,held_at,held_from_state,hold_reason,price_cents,currency,customer_notes,coalesce(is_test,false) is_test
-     from orders where public_no=$1`,
+     from orders where replace(upper(public_no),'-','')=replace(upper($1),'-','')`,
     [publicNo]
   );
   const {id,org_id}=order;
@@ -1863,7 +1864,7 @@ export async function readStaffObjectSummary(
        from packages p
        left join storage_locations sl on sl.id=p.location_id
        left join tracking_records t on t.package_id=p.id and t.direction='inbound' and t.closed_at is null
-       where ${isUuid?"p.id=$1":"upper(p.code)=upper($1)"} limit 1`,
+       where ${isUuid?"p.id=$1":"replace(upper(p.code),'-','')=replace(upper($1),'-','')"} limit 1`,
       [clean]
     )).rows[0];
     guard(parcel,"NOT_FOUND","Parcel not found.",404);
@@ -1902,7 +1903,7 @@ export async function readStaffObjectSummary(
        left join expected_items e on e.id=a.expected_item_id
        left join order_lines l on l.id=a.order_line_id
        left join orders o on o.id=l.order_id
-       where ${isUuid?"w.id=$1":"upper(w.code)=upper($1)"} limit 1`,
+       where ${isUuid?"w.id=$1":"replace(upper(w.code),'-','')=replace(upper($1),'-','')"} limit 1`,
       [clean]
     )).rows[0];
     guard(item,"NOT_FOUND","Warehouse item not found.",404);

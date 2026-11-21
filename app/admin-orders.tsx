@@ -451,7 +451,7 @@ export function AdminOrdersWorkbench({
                 reloadDesk();
               }}
             >
-              <Field name="receiving_code" label="客户收件码 (例如 QCW-8F2K5)" />
+              <Field name="receiving_code" label="客户收件码 (例如 QCW56084 或 @QCW56084@)" />
               <Field name="reason" label="核实依据说明（审计必填）" value="人工核验客户凭证及卖家订单确认" />
               <label>面单收件码核对照（必填）<FileInput name="photo" accept="image/*" required /></label>
             </Form>

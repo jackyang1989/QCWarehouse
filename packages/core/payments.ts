@@ -569,7 +569,7 @@ const committedRefunds=`select coalesce(sum(r.amount_cents),0)::int from refunds
   where r.payment_id=p.id and r.state in ('approved','succeeded')`;
 export async function orderRefundPayments(db:DB,actor:Actor,number:string) {
   role(actor,"support","super_admin");
-  const order=await one(db,"select id,public_no from orders where public_no=$1",[number]);
+  const order=await one(db,"select id,public_no from orders where replace(upper(public_no),'-','')=replace(upper($1),'-','')",[number]);
   const rows=(await db.query(`select p.id,p.amount_cents,p.state,p.created_at,p.amount_cents-(${committedRefunds}) refundable_cents
     from inspection_quotes q join charge_items c on c.inspection_quote_id=q.id join payments p on p.charge_item_id=c.id
     where q.order_id=$1 and p.state=any($2::text[]) order by p.created_at desc`,[order.id,refundableStates])).rows;

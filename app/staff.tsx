@@ -22,19 +22,10 @@ import { AdminFinanceAnalytics, AdminPaymentsWorkbench, AdminRefundsWorkbench } 
 import { AdminOrdersWorkbench } from "./admin-orders";
 import { AdminDispositionsWorkbench, AdminIncidentsWorkbench, AdminOverviewDashboard } from "./admin-operations";
 
-const SAMPLE_CODE_ALPHABET="23456789ABCDEFGHJKMNPQRSTUVWXYZ"; // 31 unambiguous chars (no 0/O/1/I/L)
 function generateRandomSampleCode():string {
-  let out="S-";
-  const buf=new Uint8Array(16);
-  while(out.length<8) {
-    crypto.getRandomValues(buf);
-    for(const b of buf) {
-      if(b>=248) continue; // rejection sampling for uniform 31-char distribution (248 = 31 * 8)
-      out+=SAMPLE_CODE_ALPHABET[b%SAMPLE_CODE_ALPHABET.length];
-      if(out.length===8) break;
-    }
-  }
-  return out;
+  const buf=new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  return `S${10000+(buf[0]!%90000)}`;
 }
 
 const label=(s:string)=>({
@@ -659,7 +650,7 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
       <Panel title={`外箱及实收包裹列表 (${filteredPackages.length})`} subtitle="支持按包裹号/运单号/专属收件码/订单号搜索，按拆包与认领状态筛选。">
         <div className="admin-toolbar">
           <label>检索包裹 / 运单 / 客户码 / 订单号
-            <input type="search" value={pkgSearch} onChange={e=>{setPkgSearch(e.target.value);setPkgPage(1);}} placeholder="P-... / SF... / QCW-... / QW-..."/>
+            <input type="search" value={pkgSearch} onChange={e=>{setPkgSearch(e.target.value);setPkgPage(1);}} placeholder="P86425 / SF... / QCW56084 / QW261121835"/>
           </label>
           <div className="actions" aria-label="包裹状态筛选">
             {([
@@ -702,7 +693,7 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
       <Panel title={`在库样品与实物清单 (${filteredSamples.length})`} subtitle="支持按样品码/客户码/订单/品名/SKU检索与核身状态筛选，并支持下方扫码快速核身。">
         <div className="admin-toolbar">
           <label>检索样品码 / 包裹 / 订单 / 品名 / SKU
-            <input type="search" value={sampleSearch} onChange={e=>{setSampleSearch(e.target.value);setSamplePage(1);}} placeholder="S-... / P-... / QW-... / 款号"/>
+            <input type="search" value={sampleSearch} onChange={e=>{setSampleSearch(e.target.value);setSamplePage(1);}} placeholder="S39204 / P86425 / QW261121835 / 款号"/>
           </label>
           <div className="actions" aria-label="样品核身筛选">
             {([
@@ -756,10 +747,10 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
         <Form inline label="扫码定位任务" run={async f=>{
           const hit=await request("/staff/inspection-tasks/lookup?"+new URLSearchParams({code:text(f,"scan_code")}));
           location.assign("/wh/task/"+hit.task_id);
-        }}><Field name="scan_code" label="扫描或输入样品码 S-... / 订单号 QW-..."/></Form>
+        }}><Field name="scan_code" label="扫描或输入样品码 S39204 / 订单号 QW261121835"/></Form>
         <div className="admin-toolbar" style={{marginTop:10}}>
           <label>检索订单 / 样品码 / 客户码 / 执行人 / 品名
-            <input type="search" value={queueSearch} onChange={e=>setQueueSearch(e.target.value)} placeholder="QW-... / S-... / QCW-... / 款号"/>
+            <input type="search" value={queueSearch} onChange={e=>setQueueSearch(e.target.value)} placeholder="QW261121835 / S39204 / QCW56084 / 款号"/>
           </label>
           <div className="actions" aria-label="任务状态快速筛选">
             {([
@@ -817,10 +808,10 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
         <Form inline label="打开检查工作台" run={async f=>{
           const hit=await request("/staff/inspection-tasks/lookup?"+new URLSearchParams({code:text(f,"scan_code")}));
           location.assign("/wh/task/"+hit.task_id);
-        }}><Field name="scan_code" label="扫描或输入样品码 S-... / 订单号 QW-..."/></Form>
+        }}><Field name="scan_code" label="扫描或输入样品码 S39204 / 订单号 QW261121835"/></Form>
         <div className="admin-toolbar" style={{marginTop:10}}>
           <label>检索订单 / 样品码 / 客户码 / 执行人 / 品名
-            <input type="search" value={queueSearch} onChange={e=>setQueueSearch(e.target.value)} placeholder="QW-... / S-... / QCW-..."/>
+            <input type="search" value={queueSearch} onChange={e=>setQueueSearch(e.target.value)} placeholder="QW261121835 / S39204 / QCW56084"/>
           </label>
         </div>
         <Table headers={["关联订单 / 客户","样品码 / 库位","品名 / 规格","服务类型","执行人 / 状态","操作"]} rows={filteredTasks.map((t:Row)=>[
@@ -1403,7 +1394,7 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
       <Form inline label="扫码切换样品" run={async f=>{
         const hit=await request("/staff/inspection-tasks/lookup?"+new URLSearchParams({code:text(f,"item_scan"),order_id:data.order_id}));
         location.assign("/wh/task/"+hit.task_id);
-      }}><Field name="item_scan" label="扫描同单样品码 S-..."/></Form>
+      }}><Field name="item_scan" label="扫描同单样品码 S39204"/></Form>
       <div className="actions" style={{flexWrap:"wrap",marginTop:8}}>
         {data.sibling_tasks.map((st:Row)=><Link key={st.id} className={st.id===id?"button primary sm":"button sm"} href={"/wh/task/"+st.id}>
           {st.item_code??("位置 #"+(st.position??""))}{st.declared_fields?.size_label?` (${st.declared_fields.size_label})`:""} · {label(st.state)}
@@ -3089,7 +3080,7 @@ export function WarehouseScan({actor}:{actor?:Row}={}) {
   return <>
     <div className="page-head row">
       <div><h1>扫码查询与对象工作台</h1>
-        <p className="muted">支持扫码枪连续回车扫描（卖家运单、出库运单、订单 QW-、客户码 QCW-、包裹 P-、实物 S-/DSP-、铅封 GS-、库位码），扫后直达对应作业上下文。</p></div>
+        <p className="muted">支持扫码枪连续回车扫描（卖家运单、出库运单、订单 QW、客户码 QCW/@QCW...@、包裹 P、实物 S/DSP、铅封 GS-、库位码），扫后直达对应作业上下文。</p></div>
       <div className="head-actions">
         {canIntakeWrite&&<Link className="button primary sm" href="/wh/intake">收货入库台</Link>}
       </div>
@@ -3121,7 +3112,7 @@ export function WarehouseScan({actor}:{actor?:Row}={}) {
         scanInputRef.current?.focus();
       }}>
         <label>扫描或输入编码（自动清空以便连扫）
-          <input ref={scanInputRef} autoFocus name="scan_code" value={scanText} onChange={e=>setScanText(e.target.value)} placeholder="QW- / QCW- / P- / S- / DSP- / GS- / 库位 / 运单" required/>
+          <input ref={scanInputRef} autoFocus name="scan_code" value={scanText} onChange={e=>setScanText(e.target.value)} placeholder="QW261121835 / QCW56084 / P86425 / S39204 / DSP / GS- / 库位 / 运单" required/>
         </label>
         <label>承运商（运单歧义时选填）
           <select value={scanCarrier} onChange={e=>setScanCarrier(e.target.value)}>
@@ -3335,7 +3326,7 @@ export function WarehousePackageView({code,actor}:{code:string;actor?:Row}) {
         </details>}
       </Panel>}
       {canBindOwner&&parcel.state==="unmatched"&&<Panel title="无预报包裹归属核验">
-        <p className="muted">若外箱面单写有客户专属收件码（QCW-），上传面单标签照并核验绑定归属。</p>
+        <p className="muted">若外箱面单写有客户专属收件码（如 QCW56084 或 @QCW56084@），上传面单标签照并核验绑定归属。</p>
         <Form label="核验面单并绑定客户" run={async f=>{
           const proof=await upload(f.get("photo"),"label_photo");
           await request("/staff/packages/"+parcel.id+"/bind-owner","POST",{

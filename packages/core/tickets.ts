@@ -174,7 +174,7 @@ export async function staffTicketQueue(
     left join customer_receiving_profiles crp on crp.org_id=k.org_id
     left join users cu on cu.id=crp.user_id
     where ($1::text is null or k.state=$1)
-      and ($2::text is null or k.public_no=$2 or o.public_no=$2 or upper(coalesce(crp.receiving_code,''))=$2)
+      and ($2::text is null or k.public_no=$2 or replace(upper(k.public_no),'-','')=replace(upper($2),'-','') or o.public_no=$2 or replace(upper(coalesce(o.public_no,'')),'-','')=replace(upper($2),'-','') or upper(coalesce(crp.receiving_code,''))=$2 or replace(upper(coalesce(crp.receiving_code,'')),'-','')=replace(upper($2),'-',''))
       and ($3::text is null or k.category=$3)
       and ($4::text is null
         or ($4='unassigned' and k.assignee_id is null)

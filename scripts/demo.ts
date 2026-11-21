@@ -40,7 +40,7 @@ async function seed() {
     await db.query("insert into users(id,display_name,locale) values($1,'Demo Customer','en')",[custId]);
     await db.query("insert into organizations(id,name) values($1,'Personal workspace')",[custOrgId]);
     await db.query("insert into memberships(user_id,org_id) values($1,$2)",[custId,custOrgId]);
-    await db.query("insert into customer_receiving_profiles(user_id,org_id,receiving_code) values($1,$2,'QCW-8F2K5')",[custId,custOrgId]);
+    await db.query("insert into customer_receiving_profiles(user_id,org_id,receiving_code) values($1,$2,'QCW56084')",[custId,custOrgId]);
     const custEmail=await one<{id:string}>(db,`insert into user_emails(user_id,original_email,normalized_email,verified_at,is_primary,login_enabled)
       values($1,$2::text,($2::text)::citext,now(),true,true) returning id`,[custId,"customer@qcw.test"]);
     await addEmailOtpIdentity(db,custId,custEmail.id);
