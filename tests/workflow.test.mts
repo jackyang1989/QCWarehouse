@@ -106,7 +106,7 @@ async function signCustomer() {
   assert.equal(result.state,"onboarding");
   const {terms}=await c.fetch("/public/terms");
   const registration=await c.fetch("/auth/registration/complete",{terms_version_ids:terms.filter((t:{kind:string})=>["terms","privacy"].includes(t.kind)).map((t:{id:string})=>t.id)});
-  assert.match(registration.receiving_code,/^QCW-/);
+  assert.match(registration.receiving_code,/^QCW-[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{5}$/);
   assert.equal(registration.warehouse_address_status,"available");
   return {c,registration,terms,email};
 }

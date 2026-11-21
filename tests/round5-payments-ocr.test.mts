@@ -32,6 +32,7 @@ const { assertSafeExternalUrl } = await import("../packages/core/integrations-ad
 const { paypalAutoAdapter } = await import("../packages/core/payment-providers");
 const { parseOcrDocument } = await import("../packages/core/ocr-parser");
 const { addEmailOtpIdentity } = await import("../packages/core/auth");
+const { receivingCode } = await import("../packages/core/common");
 
 before(async () => {
   const actual = await pool.query<{ name: string }>("select current_database() name");
@@ -107,7 +108,7 @@ async function createIsolatedCustomer(email: string) {
     await db.query("insert into customer_receiving_profiles(user_id, org_id, receiving_code) values($1, $2, $3)", [
       userId,
       orgId,
-      "QCW-" + randomUUID().slice(0, 5).toUpperCase(),
+      receivingCode(),
     ]);
     const em = (
       await db.query<{ id: string }>(

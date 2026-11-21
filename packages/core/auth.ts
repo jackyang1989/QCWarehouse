@@ -3,7 +3,7 @@ import * as oidc from "openid-client";
 import { pepper, seal, unseal } from "./crypto";
 import { oidcSettings, postmarkSettings, type OidcProvider } from "./integrations";
 import { pool, transaction, type DB } from "../db";
-import { Problem, audit, code, event, guard, hash, isDemo, lock, one, organization, role, uuid, type Actor } from "./common";
+import { Problem, audit, code, event, guard, hash, isDemo, lock, one, organization, receivingCode, role, uuid, type Actor } from "./common";
 import { demoTermsVersion, demoWarehouseAddressZh, usableWarehouseAddressSql } from "./demo-fixtures";
 
 const token = () => randomBytes(32).toString("base64url");
@@ -293,7 +293,19 @@ export async function completeRegistration(secret:string,browser:string,termsIds
     await db.query("insert into users(id,display_name) values($1,$2)",[userId,pending.email.split("@")[0]]);
     await db.query("insert into organizations(id,name) values($1,$2)",[orgId,"Personal workspace"]);
     await db.query("insert into memberships(user_id,org_id) values($1,$2)",[userId,orgId]);
-    await db.query("insert into customer_receiving_profiles(user_id,org_id,receiving_code) values($1,$2,$3)",[userId,orgId,code("QCW-")]);
+    let assignedCode = "";
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const candidate = receivingCode();
+      const inserted = await db.query(
+        "insert into customer_receiving_profiles(user_id,org_id,receiving_code) values($1,$2,$3) on conflict (receiving_code) do nothing returning receiving_code",
+        [userId, orgId, candidate],
+      );
+      if (inserted.rowCount) {
+        assignedCode = candidate;
+        break;
+      }
+    }
+    guard(assignedCode, "RECEIVING_CODE_EXHAUSTED", "Could not allocate a unique receiving code. Try again.", 503);
     const email=await one<{id:string}>(db,`insert into user_emails(user_id,original_email,normalized_email,verified_at,is_primary,login_enabled)
       values($1,$2::text,($2::text)::citext,now(),true,true) returning id`,[userId,pending.email]);
     await addEmailOtpIdentity(db,userId,email.id);

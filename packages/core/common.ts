@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomInt, randomUUID } from "node:crypto";
 import type { DB } from "../db";
 import type { QueryResultRow } from "pg";
 
@@ -10,6 +10,12 @@ export function guard(condition: unknown, code: string, message: string, status?
 }
 export const hash = (v: string | Uint8Array) => createHash("sha256").update(v).digest("hex");
 export const code = (prefix: string) => prefix + randomBytes(6).toString("hex").toUpperCase();
+const RECEIVING_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"; // 31 unambiguous chars (no 0/O/1/I/L)
+export function receivingCode(length = 5) {
+  let out = "QCW-";
+  for (let i = 0; i < length; i++) out += RECEIVING_CODE_ALPHABET[randomInt(0, RECEIVING_CODE_ALPHABET.length)];
+  return out;
+}
 export const isDemo = () => process.env.QCW_DEMO === "1" && process.env.NODE_ENV !== "production";
 export async function one<T extends QueryResultRow>(db: Pick<DB, "query">, sql: string, values: unknown[] = []): Promise<T> {
   const row = (await db.query<T>(sql, values)).rows[0];
