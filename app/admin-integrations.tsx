@@ -48,32 +48,15 @@ const HEALTH_TONE: Record<string, { label: string; tone: "green" | "yellow" | "r
 };
 
 const COMPLIANCE_ZH: Record<string, string> = {
-  approved: "合规可用（免 ICP 备案）",
+  approved: "可用",
   manual_only: "人工开票/人工核验可用",
   requires_review: "需升级商户或补充审核",
-  prohibited_aup: "AUP 限制实体质检服务",
-  disabled_future: "企业主体扩展预留",
+  prohibited_aup: "暂未启用",
+  disabled_future: "暂未启用",
   pending: "待评估",
 };
 
-function IntegrationsSubNav({ path }: { path: string }) {
-  return (
-    <div className="actions" style={{ marginBottom: 14, flexWrap: "wrap" }}>
-      <Link className={`button sm${path === "/admin/integrations" ? " primary" : ""}`} href="/admin/integrations">
-        第三方集成总览
-      </Link>
-      <Link className={`button sm${path === "/admin/integrations/payments" ? " primary" : ""}`} href="/admin/integrations/payments">
-        支付渠道管理
-      </Link>
-      <Link className={`button sm${path === "/admin/integrations/ocr" ? " primary" : ""}`} href="/admin/integrations/ocr">
-        OCR 文档识别与测试台
-      </Link>
-      <Link className={`button sm${path === "/admin/integrations/logistics" ? " primary" : ""}`} href="/admin/integrations/logistics">
-        物流接口配置
-      </Link>
-    </div>
-  );
-}
+const HIDDEN_UNINTEGRATED_PROVIDERS = new Set(["creem", "dodo_payments", "airwallex", "oceanpayment"]);
 
 export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: string; actor: Actor; demo?: boolean }) {
   const isPaymentsView = path === "/admin/integrations/payments";
@@ -116,8 +99,9 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
 
   const isSuperAdmin = actor.roles.includes("super_admin");
   const providers: Row[] = data?.providers ?? [];
+  const visibleProviders = providers.filter((p) => !HIDDEN_UNINTEGRATED_PROVIDERS.has(p.provider_key));
   const events: Row[] = data?.events ?? [];
-  const selected: Row | undefined = providers.find((p) => p.provider_key === selectedKey) ?? providers[0];
+  const selected: Row | undefined = visibleProviders.find((p) => p.provider_key === selectedKey) ?? visibleProviders[0];
 
   function handleActionError(e: unknown) {
     if (e instanceof RequestError && e.code === "STAFF_REAUTH_REQUIRED") setReauthNeeded(true);
@@ -183,9 +167,9 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
     <div className="stack">
       <section className="page-head">
         <div>
-          <p className="eyebrow">INTEGRATIONS · NO CHINA ICP POLICY</p>
+          <p className="eyebrow">INTEGRATIONS</p>
           <h1>
-            {isPaymentsView ? "支付渠道配置与合规中心" : isOcrView ? "OCR 文档识别与提取工作台" : "第三方服务集成中心"}
+            {isPaymentsView ? "支付渠道配置" : isOcrView ? "OCR 文档识别" : "第三方集成"}
           </h1>
           <p className="subhead">
             统一管理 Stripe HK、PayPal 人工开票/自动预留、自托管 PaddleOCR ONNX、Google Cloud Vision 与运维接口；密钥经服务端 AES-256-GCM 密文库保管，永不向前端透出明文。
@@ -196,8 +180,6 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
           <Link className="button sm" href="/admin/payments">前往支付流水与人工核对 →</Link>
         </div>
       </section>
-
-      <IntegrationsSubNav path={path} />
 
       {reauthNeeded && (
         <StatusBanner tone="warning" title="需要员工二次身份认证（MFA）">
@@ -216,7 +198,7 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
       )}
 
       {isPaymentsView && (
-        <div className="grid-three" style={{ gap: 12 }}>
+        <div className="split-grid">
           <Panel title="主渠道 · Stripe (HK 个人商户)" subtitle="身份与收款账户状态真实核验">
             <ul className="plain-list">
               <li>✅ <strong>香港商户 KYC</strong>：已收到 Stripe 可开始收款通知，已验证通过（勿回退为未完成）。</li>
@@ -251,14 +233,6 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
               <Link className="button sm primary" href="/admin/payments">打开 PayPal 人工开票/核销工作台 →</Link>
             </div>
           </Panel>
-
-          <Panel title="受限/未来扩展渠道策略" subtitle="禁止无审批绕过合规限制">
-            <ul className="plain-list">
-              <li>🚫 <strong>Creem / Dodo Payments</strong>：状态 <Tag tone="yellow">待批准 Requires Approval</Tag>（MoR AUP 仅限数字软件商品，未取得书面例外许可前禁止上线实物商品质检）。</li>
-              <li>🔒 <strong>PayPal Orders v2 自动结账</strong>：状态 <Tag tone="yellow">待升级企业</Tag>（代码适配器已预留，门禁锁定）。</li>
-              <li>⏸️ <strong>Airwallex / Oceanpayment</strong>：状态 <Tag tone="gray">已停用 Disabled</Tag>（留待香港/内地公司主体设立后接入）。</li>
-            </ul>
-          </Panel>
         </div>
       )}
 
@@ -273,12 +247,12 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
       )}
 
       <Panel title="服务提供商注册表与生命周期状态" subtitle="点击任意服务商查看安全配置、AES-256-GCM 密钥库与实时连接测试">
-        {providers.length === 0 ? (
+        {visibleProviders.length === 0 ? (
           <p className="muted">正在加载第三方服务商列表…</p>
         ) : (
           <Table
-            headers={["服务商", "领域", "环境", "状态", "健康度", "主/备", "免备案", "24h 调用 / 异常 / 耗时 / 30d 成本", "操作"]}
-            rows={providers.map((p) => {
+            headers={["服务商", "领域 / 环境", "状态", "健康度", "24h 指标", "操作"]}
+            rows={visibleProviders.map((p) => {
               const st = STATE_TONE[p.lifecycle_state] ?? { label: p.lifecycle_state, tone: "gray" as const };
               const hl = HEALTH_TONE[p.health_status] ?? { label: p.health_status, tone: "gray" as const };
               const m = p.metrics ?? {};
@@ -287,21 +261,28 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
                   <strong>{p.display_name}</strong>
                   <small className="code">{p.provider_key} · {COMPLIANCE_ZH[p.compliance_status] ?? p.compliance_status}</small>
                 </div>,
-                <Tag key="d" tone="gray">{DOMAIN_ZH[p.domain] ?? p.domain}</Tag>,
-                <Tag key="e" tone={p.environment === "live" ? "blue" : "outline"}>{p.environment.toUpperCase()}</Tag>,
-                <Tag key="s" tone={st.tone}>{st.label}{p.enabled ? "" : " (未激活)"}</Tag>,
+                <div key="de" className="cell-stack">
+                  <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                    <Tag tone="gray">{DOMAIN_ZH[p.domain] ?? p.domain}</Tag>
+                    <Tag tone={p.environment === "live" ? "blue" : "outline"}>{p.environment.toUpperCase()}</Tag>
+                  </div>
+                  <small className="muted">
+                    {p.is_primary ? "主用 " : p.is_fallback ? "备选 " : "备用 "}#{p.priority}
+                  </small>
+                </div>,
+                <div key="s" className="cell-stack">
+                  <Tag tone={st.tone}>{st.label}</Tag>
+                  {!p.enabled && <small className="muted">未激活</small>}
+                </div>,
                 <div key="h" className="cell-stack">
                   <Tag tone={hl.tone}>{hl.label}</Tag>
                   {p.last_checked_at && <small>{stamp(p.last_checked_at, true)}</small>}
                 </div>,
-                <span key="p" className="small">
-                  {p.is_primary ? "主用 " : p.is_fallback ? "备选 " : "— "}#{p.priority}
-                </span>,
-                <Tag key="icp" tone="green">No ICP</Tag>,
-                <span key="m" className="small">
-                  {m.calls_24h ?? 0} 次 / {m.errors_24h ?? 0} 错 / {m.avg_latency_ms ?? "—"}ms / ${Number(m.cost_30d_usd ?? 0).toFixed(4)}
-                </span>,
-                <div key="act" className="actions" style={{ flexWrap: "nowrap" }}>
+                <div key="m" className="cell-stack small">
+                  <span>{m.calls_24h ?? 0} 次 / {m.errors_24h ?? 0} 错</span>
+                  <small className="muted">{m.avg_latency_ms ?? "—"}ms · ${Number(m.cost_30d_usd ?? 0).toFixed(4)}</small>
+                </div>,
+                <div key="act" className="actions" style={{ flexWrap: "wrap", gap: 6 }}>
                   <button
                     type="button"
                     className={`button sm nowrap${selected?.provider_key === p.provider_key ? " primary" : ""}`}
@@ -335,12 +316,14 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
               </p>
             )}
             <dl className="admin-kv-grid" style={{ marginBottom: 14 }}>
-              {Object.entries(selected.config ?? {}).map(([k, v]) => (
-                <div key={k} className="admin-kv-item">
-                  <dt className="code">{k}</dt>
-                  <dd className="mono">{typeof v === "object" ? JSON.stringify(v) : String(v)}</dd>
-                </div>
-              ))}
+              {Object.entries(selected.config ?? {})
+                .filter(([k]) => k !== "no_icp_required")
+                .map(([k, v]) => (
+                  <div key={k} className="admin-kv-item">
+                    <dt className="code">{k}</dt>
+                    <dd className="mono">{typeof v === "object" ? JSON.stringify(v) : String(v)}</dd>
+                  </div>
+                ))}
             </dl>
             {isSuperAdmin && (
               <Form
