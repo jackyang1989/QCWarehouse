@@ -10,6 +10,8 @@ import { ApparelIllustration } from "./report-guide";
 import { CategoryTiles, matchShowcaseCategoryOffer, SHOWCASE_CATEGORIES } from "./category-coverage";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { CustomerMultiChannelPaymentPanel } from "./customer-payments";
+import { upload } from "./ui";
 import {
   deriveExpectedLinesFromServerLine, draftRecoveryKey, expandExpectedLinesToDraftItems, missingLineFields,
   normalizeTrackingCode, parseStructuredPurchaseText, readDraftRecovery, removeDraftRecovery, sha256FileHex,
@@ -1193,6 +1195,83 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
     setShowMatrixBuilder(false);
   }
 
+  const [activeOcrBbox,setActiveOcrBbox]=useState<{evId:string;rect:[number,number,number,number]}|null>(null);
+
+  function mapOcrJobToCandidates(evId:string,fileName:string,job:Row,cands:Row[]):ExtractedCandidateLine[] {
+    return cands.map((c:Row)=>({
+      id:String(c.id),
+      ocr_candidate_id:String(c.id),
+      ocr_confidence_score:Number(c.confidence??0),
+      bbox:c.bbox??null,
+      evidence_id:evId,
+      source_evidence_id:evId,
+      source_file_name:fileName,
+      status:"unconfirmed",
+      edited_by_user:false,
+      sku_code:String(c.sku_code??""),
+      product_name:String(c.item_name??""),
+      color_declared:String(c.color??""),
+      size_label:String(c.size??""),
+      quantity:Math.max(1,Number(c.quantity??1)),
+      supplier_alias:String(c.supplier_name??job?.parsed_summary?.supplier_name??supplierRef.trim()),
+      purchase_order_ref:String(c.platform_order_no??job?.parsed_summary?.platform_order_no??""),
+      unit_price_note:c.unit_price_text?String(c.unit_price_text):undefined,
+      tracking_no:normalizeTrackingCode(String(c.tracking_no??job?.parsed_summary?.tracking_no??"")),
+      source_kind:"evidence_extract",
+      confidence:Number(c.confidence??0)>=0.72&&c.item_name&&c.color&&c.size?"structured":"needs_review",
+      needs_confirmation:true,
+      missing_fields:missingLineFields({
+        product_name:String(c.item_name??""),
+        color_declared:String(c.color??""),
+        size_label:String(c.size??""),
+        quantity:Number(c.quantity??1),
+      }),
+      selected:true,
+      confirmed:false,
+      raw_source:c.raw_excerpt?String(c.raw_excerpt):undefined,
+    }));
+  }
+
+  async function enrichEvidenceWithOcr(evId:string,mediaId:string,fileName:string) {
+    try {
+      const res=await request("/me/ocr/jobs","POST",{media_id:mediaId,execute_now:true});
+      const job:Row=res.job??{};
+      const rawCands:Row[]=Array.isArray(res.candidates)?res.candidates:[];
+      const mapped=mapOcrJobToCandidates(evId,fileName,job,rawCands);
+      const summary:Row=job.parsed_summary??{};
+      const warnings:string[]=Array.isArray(job.warnings)?job.warnings:[];
+      setPurchaseEvidences(prev=>prev.map(x=>{
+        if(x.id!==evId) return x;
+        const ok=job.state==="completed"||job.state==="needs_review";
+        return {
+          ...x,
+          ocr_job_id:job.id,
+          ocr_provider:job.provider_key,
+          ocr_confidence:Number(job.confidence??0),
+          ocr_latency_ms:Number(job.latency_ms??0),
+          ocr_raw_text:String(job.raw_text??""),
+          ocr_warnings:warnings,
+          platform_source:summary.platform?String(summary.platform):x.platform_source,
+          supplier_alias:summary.supplier_name?String(summary.supplier_name):x.supplier_alias,
+          purchase_order_ref:summary.platform_order_no?String(summary.platform_order_no):x.purchase_order_ref,
+          extraction_status:ok&&mapped.length>0?"needs_confirmation":ok?"manual_only":"failed",
+          extraction_note:ok
+            ?mapped.length>0
+              ?`Auto-OCR (${job.provider_key}, ${Math.round(Number(job.confidence??0)*100)}% conf, ${job.latency_ms??0}ms) extracted ${mapped.length} candidate item(s). Review, edit or merge/split rows before confirming.`
+              :`Auto-OCR completed (${job.provider_key}), but no complete product lines were isolated. Inspect raw text or transcribe rows manually.`
+            :`OCR failed (${job.error_code??"ERROR"}): ${job.error_message??"Use + Transcribe Row or Paste Order fallback."}`,
+          candidates:mapped.length>0?mapped:x.candidates,
+        };
+      }));
+    } catch(err) {
+      setPurchaseEvidences(prev=>prev.map(x=>x.id===evId?{
+        ...x,
+        extraction_status:"failed",
+        extraction_note:`Auto-OCR unavailable (${err instanceof Error?err.message:"error"}). Use + Transcribe Row or Paste Order fallback.`,
+      }:x));
+    }
+  }
+
   async function handleEvidenceFiles(files:File[]) {
     if(!files.length) return;
     setEvidenceDuplicateWarning("");
@@ -1224,11 +1303,12 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
             platform_source:"1688 / Taobao",
             purchase_order_ref:"",
             uploaded_at:new Date().toISOString(),
-            extraction_status:"manual_only",
-            extraction_note:"Reference only (No Auto-OCR): image archived with SHA-256 verification. Use + Transcribe Row, Paste Order Text, or Step 3B Quick Matrix to confirm product lines.",
+            extraction_status:"extracting",
+            extraction_note:"Uploaded image with SHA-256 verification. Running automatic OCR extraction…",
             candidates:[],
           };
           setPurchaseEvidences(prev=>[...prev,newEv]);
+          void enrichEvidenceWithOcr(evId,uploaded.id,file.name);
         } catch(err) {
           setWizardError(err instanceof Error?err.message:`Upload failed for ${file.name}.`);
         } finally {
@@ -1261,21 +1341,31 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
         };
         setPurchaseEvidences(prev=>[...prev,newEv]);
       } else {
-        const newEv:PurchaseEvidenceItem={
-          id:evId,
-          file_name:file.name,
-          mime_type:file.type||"application/pdf",
-          size_bytes:file.size,
-          sha256,
-          supplier_alias:supplierRef.trim(),
-          platform_source:"PDF / Order Sheet",
-          purchase_order_ref:"",
-          uploaded_at:new Date().toISOString(),
-          extraction_status:"manual_only",
-          extraction_note:"Recorded PDF metadata & SHA-256. Automated PDF OCR extraction is disabled in this environment — paste order text below or upload screenshots for visual reference.",
-          candidates:[],
-        };
-        setPurchaseEvidences(prev=>[...prev,newEv]);
+        setBusyMessage(`Uploading ${file.name} & running PDF OCR…`);
+        try {
+          const mediaId=await upload(file,"attachment");
+          const newEv:PurchaseEvidenceItem={
+            id:evId,
+            media_id:mediaId,
+            file_name:file.name,
+            mime_type:file.type||"application/pdf",
+            size_bytes:file.size,
+            sha256,
+            supplier_alias:supplierRef.trim(),
+            platform_source:"PDF Document",
+            purchase_order_ref:"",
+            uploaded_at:new Date().toISOString(),
+            extraction_status:"extracting",
+            extraction_note:"Uploaded PDF with %PDF- validation & SHA-256. Extracting text and line items…",
+            candidates:[],
+          };
+          setPurchaseEvidences(prev=>[...prev,newEv]);
+          void enrichEvidenceWithOcr(evId,mediaId,file.name);
+        } catch(err) {
+          setWizardError(err instanceof Error?err.message:`PDF upload failed for ${file.name}.`);
+        } finally {
+          setBusyMessage("");
+        }
       }
     }
     setServerQuote(undefined);
@@ -1389,6 +1479,67 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
     setServerQuote(undefined);
   }
 
+  async function retryEvidenceOcr(ev:PurchaseEvidenceItem) {
+    if(!ev.media_id) return;
+    setPurchaseEvidences(prev=>prev.map(x=>x.id===ev.id?{...x,extraction_status:"extracting",extraction_note:"Re-running OCR extraction…"}:x));
+    await enrichEvidenceWithOcr(ev.id,ev.media_id,ev.file_name);
+  }
+
+  async function mergeSelectedOcrRows(ev:PurchaseEvidenceItem) {
+    const picked=ev.candidates.filter(c=>c.selected);
+    if(picked.length<2) {
+      setWizardError("Select at least 2 candidate rows to merge.");
+      return;
+    }
+    const serverIds=picked.map(c=>c.ocr_candidate_id).filter((id):id is string=>Boolean(id));
+    if(ev.ocr_job_id&&serverIds.length>=2) {
+      try {
+        const res=await request(`/me/ocr/jobs/${ev.ocr_job_id}/merge`,"POST",{candidate_ids:serverIds});
+        const mapped=mapOcrJobToCandidates(ev.id,ev.file_name,res.job??{},(res.candidates??[]).filter((c:Row)=>["pending","confirmed"].includes(c.status)));
+        setPurchaseEvidences(prev=>prev.map(x=>x.id===ev.id?{...x,candidates:mapped}:x));
+        return;
+      } catch(err) {
+        setWizardError(err instanceof Error?err.message:"Failed to merge candidates.");
+        return;
+      }
+    }
+    const [first,...rest]=picked;
+    const totalQty=picked.reduce((acc,c)=>acc+Math.max(1,Number(c.quantity||1)),0);
+    const merged:ExtractedCandidateLine={...first,quantity:totalQty,edited_by_user:true};
+    const restIds=new Set(rest.map(r=>r.id));
+    setPurchaseEvidences(prev=>prev.map(x=>x.id===ev.id?{...x,candidates:x.candidates.filter(c=>!restIds.has(c.id)).map(c=>c.id===first.id?merged:c)}:x));
+  }
+
+  async function splitOcrRow(ev:PurchaseEvidenceItem,cand:ExtractedCandidateLine) {
+    const qty=Math.max(2,Number(cand.quantity||2));
+    const q1=Math.floor(qty/2),q2=qty-q1;
+    if(cand.ocr_candidate_id&&ev.ocr_job_id) {
+      try {
+        const res=await request(`/me/ocr/candidates/${cand.ocr_candidate_id}/split`,"POST",{quantities:[q1,q2]});
+        const mapped=mapOcrJobToCandidates(ev.id,ev.file_name,res.job??{},(res.candidates??[]).filter((c:Row)=>["pending","confirmed"].includes(c.status)));
+        setPurchaseEvidences(prev=>prev.map(x=>x.id===ev.id?{...x,candidates:mapped}:x));
+        return;
+      } catch(err) {
+        setWizardError(err instanceof Error?err.message:"Failed to split candidate.");
+        return;
+      }
+    }
+    const copyA:ExtractedCandidateLine={...cand,id:`${cand.id}-a`,quantity:q1,edited_by_user:true};
+    const copyB:ExtractedCandidateLine={...cand,id:`${cand.id}-b`,quantity:q2,edited_by_user:true};
+    setPurchaseEvidences(prev=>prev.map(x=>x.id===ev.id?{...x,candidates:x.candidates.flatMap(c=>c.id===cand.id?[copyA,copyB]:[c])}:x));
+  }
+
+  async function rejectOcrRow(ev:PurchaseEvidenceItem,cand:ExtractedCandidateLine) {
+    if(cand.ocr_candidate_id) {
+      try {
+        await request(`/me/ocr/candidates/${cand.ocr_candidate_id}`,"POST",{status:"rejected"});
+      } catch {
+        // continue updating UI
+      }
+    }
+    setPurchaseEvidences(prev=>prev.map(x=>x.id===ev.id?{...x,candidates:x.candidates.filter(c=>c.id!==cand.id)}:x));
+  }
+
   function confirmEvidenceCandidates(evidenceId:string) {
     const ev=purchaseEvidences.find(item=>item.id===evidenceId);
     if(!ev) return;
@@ -1401,6 +1552,24 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
     if(incomplete) {
       setWizardError(`Complete missing fields (${missingLineFields(incomplete).join(", ")}) on checked candidate rows before confirming.`);
       return;
+    }
+    const serverCandIds=chosen.map(c=>c.ocr_candidate_id).filter((cid):cid is string=>Boolean(cid));
+    if(ev.ocr_job_id&&serverCandIds.length>0) {
+      void (async()=>{
+        for(const c of chosen) {
+          if(c.ocr_candidate_id&&c.edited_by_user) {
+            await request(`/me/ocr/candidates/${c.ocr_candidate_id}`,"POST",{
+              item_name:c.product_name.trim(),
+              sku_code:c.sku_code.trim()||null,
+              color:c.color_declared.trim()||null,
+              size:c.size_label.trim()||null,
+              quantity:Math.max(1,Math.floor(Number(c.quantity)||1)),
+              supplier_name:c.supplier_alias.trim()||null,
+            }).catch(()=>undefined);
+          }
+        }
+        await request(`/me/ocr/jobs/${ev.ocr_job_id}/confirm`,"POST",{candidate_ids:serverCandIds}).catch(()=>undefined);
+      })();
     }
     const confirmedLines:ExpectedProductLine[]=chosen.map((c,idx)=>({
       id:`EL-${Date.now().toString(36)}-${idx}-${Math.random().toString(36).slice(2,5)}`,
@@ -2066,7 +2235,7 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
     setStep(targetStep);
   }
 
-  function startPayment() {
+  function startPayment(channel:"stripe"|"paypal_manual"="stripe") {
     return runWizard("Opening checkout…",async()=>{
       if(!hasValidQuote||!draftOrder||!serverQuote||Date.parse(serverQuote.expires_at)<=Date.now()||!allConsentsChecked) {
         setStep(4);
@@ -2096,6 +2265,11 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
       setSubmittedCharge(accepted.charge);
       if(accepted.order.state==="awaiting_payment") {
         try {
+          if(channel==="paypal_manual") {
+            await request("/charges/"+accepted.charge.charge_item_id+"/paypal-invoice","POST",{});
+            location.assign("/orders/"+accepted.order.public_no+"/payment");
+            return;
+          }
           await goCheckout(accepted.charge.charge_item_id,serverQuote.revision,"/orders/"+accepted.order.public_no);
           return;
         } catch(error) {
@@ -2800,8 +2974,8 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
             </div>
           </div>
 
-          <div className="line-note" data-testid="step3a-no-auto-ocr-note" style={{marginTop:8}}>
-            <strong>Reference only (Manual Confirmation Required):</strong> Automated image/PDF OCR extraction is disabled in this environment; files uploaded here are SHA-256 deduplicated and kept strictly in Step 3A for warehouse intake reference (never copied into Step 3B reference photos and never billed as SKUs). Convert your order into confirmed lines using <strong>+ Transcribe Row</strong>, <strong>Paste Order / CSV / 1688 Text</strong>, or <strong>Quick Matrix (3B)</strong>.
+          <div className="line-note" data-testid="step3a-ocr-active-note" style={{marginTop:8}}>
+            <strong>Auto-OCR &amp; Manual Confirmation Enabled:</strong> Uploaded screenshots (PNG/JPG/WebP) and PDFs (up to 15 MB / 10 pages) are extracted automatically using our self-hosted PaddleOCR engine, SHA-256 deduplicated, and placed into an editable confirmation queue below. Candidate rows only become formal Step 3B order lines after you explicitly confirm them.
           </div>
 
           {evidenceDuplicateWarning&&<div className="notice warning" role="alert" style={{marginTop:10}}>
@@ -2848,7 +3022,8 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
             {purchaseEvidences.map(ev=><div key={ev.id} className={`card flat candidate-card ${ev.extraction_status==="pending_reassociation"||(ev.extraction_status==="needs_confirmation"&&ev.candidates.length>0)?"needs-confirm":""}`}>
               <div className="row between flexwrap" style={{gap:10}}>
                 <div className="row" style={{gap:10,alignItems:"flex-start"}}>
-                  {ev.media_id&&<img className="thumb" src={`/api/v1/media/${ev.media_id}`} alt={ev.file_name} style={{width:56,height:56,objectFit:"cover",borderRadius:8}}/>}
+                  {ev.media_id&&ev.mime_type!=="application/pdf"&&<img className="thumb" src={`/api/v1/media/${ev.media_id}`} alt={ev.file_name} style={{width:56,height:56,objectFit:"cover",borderRadius:8}}/>}
+                  {ev.media_id&&ev.mime_type==="application/pdf"&&<span className="tag tag-blue">PDF</span>}
                   <div>
                     <strong>{ev.file_name}</strong>
                     <div className="small muted">
@@ -2894,9 +3069,16 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
               {ev.candidates.length===0&&ev.extraction_status!=="confirmed"&&ev.extraction_status!=="pending_reassociation"&&(
                 <div className="step3a-next-action-guide" data-testid="step3a-next-action-guide">
                   <div className="small" style={{marginBottom:6}}>
-                    <strong>Recommended Next Step for {ev.file_name}:</strong> Automated image/PDF OCR extraction is disabled in this environment; files are stored safely as purchase evidence. Choose the fastest way to turn this document into confirmed 3B product lines:
+                    <strong>{ev.extraction_status==="extracting"?`Extracting ${ev.file_name}…`:`Next Step for ${ev.file_name}:`}</strong>{" "}
+                    {ev.extraction_status==="extracting"
+                      ?"Running self-hosted OCR on your uploaded document. Parsed rows will appear below momentarily."
+                      :"Use + Transcribe Row, Paste Order Text, or Retry OCR to prepare Step 3B lines."}
+                    {ev.ocr_warnings&&ev.ocr_warnings.length>0&&<div className="muted" style={{marginTop:4}}>Warnings: {ev.ocr_warnings.join(" · ")}</div>}
                   </div>
                   <div className="actions" style={{margin:0,gap:8}}>
+                    {ev.media_id&&ev.extraction_status!=="extracting"&&(
+                      <button type="button" className="button sm" onClick={()=>void retryEvidenceOcr(ev)}>Retry Auto-OCR</button>
+                    )}
                     <button
                       type="button"
                       className="button sm primary"
@@ -2953,13 +3135,56 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
 
               {ev.candidates.length>0&&<div className="candidate-queue" style={{marginTop:10}}>
                 <div className="row between flexwrap" style={{marginBottom:6}}>
-                  <strong className="small">Pending Confirmation Queue ({ev.candidates.length} candidate rows — excluded from order &amp; quote until confirmed)</strong>
-                  <div className="row" style={{gap:6}}>
+                  <strong className="small">
+                    Pending Confirmation Queue ({ev.candidates.length} candidate row(s) — excluded from order &amp; quote until confirmed)
+                    {ev.ocr_provider&&<> · <Tag tone="blue">{ev.ocr_provider}</Tag></>}
+                    {ev.ocr_confidence!=null&&<> · <Tag tone={ev.ocr_confidence>=0.72?"green":"yellow"}>{Math.round(ev.ocr_confidence*100)}% avg conf</Tag></>}
+                  </strong>
+                  <div className="row flexwrap" style={{gap:6}}>
+                    {ev.candidates.filter(c=>c.selected).length>=2&&<button type="button" className="button sm" onClick={()=>void mergeSelectedOcrRows(ev)}>Merge Selected</button>}
+                    {ev.media_id&&<button type="button" className="button sm" onClick={()=>void retryEvidenceOcr(ev)}>Retry OCR</button>}
                     <button type="button" className="button sm primary" onClick={()=>confirmEvidenceCandidates(ev.id)}>Confirm Selected &amp; Add to Order</button>
                     <button type="button" className="button sm" onClick={()=>discardEvidenceQueue(ev.id,false)}>Discard Queue</button>
                   </div>
                 </div>
-                <div className="table-wrap wizard-items">
+                {ev.ocr_warnings&&ev.ocr_warnings.length>0&&(
+                  <div className="notice warning small" style={{marginBottom:8}}>
+                    <strong>OCR Review Alerts:</strong> {ev.ocr_warnings.join(" · ")}
+                  </div>
+                )}
+                <div className={ev.media_id?"ocr-split-workspace":""}>
+                  {ev.media_id&&(
+                    ev.mime_type==="application/pdf"?(
+                      <div className="card flat" style={{padding:12}}>
+                        <strong>Uploaded PDF Document</strong>
+                        <p className="small muted mono-wrap">{ev.file_name}</p>
+                        <a className="button sm" href={`/api/v1/media/${ev.media_id}`} target="_blank" rel="noreferrer">Open Original PDF ↗</a>
+                      </div>
+                    ):(
+                      <div className="ocr-preview-frame">
+                        <img src={`/api/v1/media/${ev.media_id}`} alt={ev.file_name} style={{width:"100%",height:"auto",display:"block"}}/>
+                        {activeOcrBbox?.evId===ev.id&&(
+                          <div
+                            className="ocr-bbox-highlight"
+                            style={{
+                              left:`${activeOcrBbox.rect[0]*100}%`,
+                              top:`${activeOcrBbox.rect[1]*100}%`,
+                              width:`${Math.max(2,(activeOcrBbox.rect[2]-activeOcrBbox.rect[0])*100)}%`,
+                              height:`${Math.max(2,(activeOcrBbox.rect[3]-activeOcrBbox.rect[1])*100)}%`,
+                            }}
+                          />
+                        )}
+                      </div>
+                    )
+                  )}
+                  {ev.media_id&&ev.ocr_raw_text&&(
+                    <div className="stack-tight">
+                      <div className="small muted">Raw Extracted Text Preview (hover a row below to highlight source region):</div>
+                      <textarea readOnly rows={7} value={ev.ocr_raw_text} className="mono-wrap" style={{width:"100%",fontSize:12}}/>
+                    </div>
+                  )}
+                </div>
+                <div className="table-wrap wizard-items" style={{marginTop:10}}>
                   <table className="tbl">
                     <thead>
                       <tr>
@@ -2970,7 +3195,7 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
                         <th>Size *</th>
                         <th>Qty *</th>
                         <th>Supplier</th>
-                        <th>Status</th>
+                        <th>Status / Actions</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -2979,7 +3204,11 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
                         const candSig=[cand.sku_code.trim().toUpperCase(),cand.color_declared.trim().toLowerCase(),cand.size_label.trim().toUpperCase(),cand.supplier_alias.trim().toLowerCase()].join("|");
                         const dupInQueue=candSig!=="|||"&&ev.candidates.some(other=>other.id!==cand.id&&[other.sku_code.trim().toUpperCase(),other.color_declared.trim().toLowerCase(),other.size_label.trim().toUpperCase(),other.supplier_alias.trim().toLowerCase()].join("|")===candSig);
                         const dupInConfirmed=candSig!=="|||"&&expectedLines.some(el=>[el.sku_code.trim().toUpperCase(),el.color_declared.trim().toLowerCase(),el.size_label.trim().toUpperCase(),el.supplier_alias.trim().toLowerCase()].join("|")===candSig);
-                        return <tr key={cand.id}>
+                        return <tr
+                          key={cand.id}
+                          onMouseEnter={()=>{if(cand.bbox?.rect) setActiveOcrBbox({evId:ev.id,rect:cand.bbox.rect});}}
+                          onFocus={()=>{if(cand.bbox?.rect) setActiveOcrBbox({evId:ev.id,rect:cand.bbox.rect});}}
+                        >
                           <td data-label="Use">
                             <input
                               type="checkbox"
@@ -2996,11 +3225,15 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
                           <td data-label="Supplier"><input className="input" style={{minWidth:118}} value={cand.supplier_alias} onChange={e=>updateCandidateRow(ev.id,cand.id,{supplier_alias:e.target.value})} placeholder="Supplier"/></td>
                           <td data-label="Status">
                             <div className="row flexwrap" style={{gap:4}}>
-                              {missing.length>0?<Tag tone="yellow">Missing: {missing.join(", ")}</Tag>:<Tag tone="blue">Unconfirmed</Tag>}
+                              {missing.length>0?<Tag tone="yellow">Missing: {missing.join(", ")}</Tag>:<Tag tone="blue">Ready</Tag>}
+                              {cand.ocr_confidence_score!=null&&<Tag tone={cand.ocr_confidence_score>=0.72?"green":"yellow"}>{Math.round(cand.ocr_confidence_score*100)}%</Tag>}
                               {cand.edited_by_user&&<Tag tone="outline">Edited</Tag>}
                               {(dupInQueue||dupInConfirmed)&&<Tag tone="yellow">Duplicate SKU/Variant</Tag>}
                             </div>
-                            <div className="small muted">{cand.source_file_name||ev.file_name}</div>
+                            <div className="actions" style={{marginTop:4,gap:4}}>
+                              {cand.quantity>=2&&<button type="button" className="button sm" onClick={()=>void splitOcrRow(ev,cand)}>Split</button>}
+                              <button type="button" className="button sm" onClick={()=>void rejectOcrRow(ev,cand)}>Reject</button>
+                            </div>
                           </td>
                         </tr>;
                       })}
@@ -4198,11 +4431,24 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
                 </ol>
               </div>
 
-              <div className="actions">
-                <button type="button" className="button primary" disabled={Boolean(busyMessage)} onClick={startPayment}>
-                  {busyMessage?"Opening checkout…":submittedCharge?"Open order to resume payment":"Confirm quote and pay "+usd(serverQuote!.amount_cents)}
-                </button>
-              </div>
+              {submittedCharge && draftOrder ? (
+                <CustomerMultiChannelPaymentPanel
+                  chargeId={submittedCharge.charge_item_id ?? submittedCharge.id}
+                  quoteRevision={serverQuote!.revision}
+                  amountCents={serverQuote!.amount_cents}
+                  demo={demo}
+                  onStripePay={(cid, rev) => goCheckout(cid, rev, "/orders/" + draftOrder.public_no)}
+                />
+              ) : (
+                <div className="actions" style={{flexWrap:"wrap",gap:10}}>
+                  <button type="button" className="button primary" disabled={Boolean(busyMessage)} onClick={()=>startPayment("stripe")}>
+                    {busyMessage?"Opening checkout…":"Confirm quote & pay with Stripe "+usd(serverQuote!.amount_cents)}
+                  </button>
+                  <button type="button" className="button" disabled={Boolean(busyMessage)} onClick={()=>startPayment("paypal_manual")}>
+                    Confirm quote &amp; request PayPal Invoice
+                  </button>
+                </div>
+              )}
             </>
           )}
         </Panel>}
@@ -4559,7 +4805,7 @@ function CustomerBatchDrawer({
   </ModalDrawer>;
 }
 
-export function OrderView({number,section}:{number:string;section?:OrderSection}) {
+export function OrderView({number,section,demo=false}:{number:string;section?:OrderSection;demo?:boolean}) {
   const stamp=useWorkspaceStamp();
   const returnedFromCheckout=useSearchParams().get("checkout")==="returned";
   const lookup=useLoad("/orders/by-number/"+number);
@@ -4776,8 +5022,16 @@ export function OrderView({number,section}:{number:string;section?:OrderSection}
           {payment.data.charge&&<p><strong>{usd(payment.data.charge.amount_cents)}</strong> · Quote {payment.data.charge.quote_revision}</p>}
           {paymentState==="open"&&<p className="small muted">Valid until {stamp(payment.data.charge?.expires_at)}.<br/>
             <QuoteCountdown expiresAt={payment.data.charge?.expires_at}/></p>}
-          {(paymentState==="open"||paymentState==="reconciliation")&&!checkoutNotice?.expired&&<Action primary run={()=>continuePayment(payment.data!.charge.id,payment.data!.charge.quote_revision)}>
-            {paymentState==="reconciliation"||manualRenewal?"Check previous payment status":"Resume payment"}</Action>}
+          {(paymentState==="open"||paymentState==="reconciliation"||paymentState==="processing")&&!checkoutNotice?.expired&&payment.data?.charge&&(
+            <CustomerMultiChannelPaymentPanel
+              chargeId={payment.data.charge.id}
+              quoteRevision={payment.data.charge.quote_revision}
+              amountCents={payment.data.charge.amount_cents}
+              demo={demo}
+              onStripePay={continuePayment}
+              onUpdated={refreshPayment}
+            />
+          )}
           {paymentState==="reconciliation"&&!checkoutNotice?.expired&&<p>The quote has expired. Check the previous checkout before requesting a new quote.</p>}
           {paymentState==="processing"&&<p role="status">{payment.data.reconciliation_required?
             <>Payment was received and needs review before your inspection can start. <Link href="/support">View support cases</Link>.</>:
@@ -6264,14 +6518,22 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
             location.assign(receipt_url);
           }}>{b.paid_ref?.startsWith("cs_test_")?"View test receipt":demo?"View demo receipt":"View payment receipt"}</Action>:
             b.paid_ref?.startsWith("demo_")?<Tag tone="yellow">Demo checkout</Tag>:
-            b.paid_ref?<details className="small"><summary className="code" title={b.paid_ref}>…{String(b.paid_ref).slice(-8)}</summary><span className="code" style={{overflowWrap:"anywhere"}}>{b.paid_ref}</span></details>:b.latest_attempt_state?label(b.latest_attempt_state):isDemoCharge&&shownState==="open"?<Tag tone="yellow">Demo checkout</Tag>:"—",
+            b.paid_ref?<span className="code mono-wrap">{b.paid_ref}</span>:
+            b.latest_attempt_provider==="paypal_manual"?<div className="cell-stack">
+              <Tag tone="blue">PayPal {b.latest_manual_state??b.latest_attempt_state}</Tag>
+              {b.latest_external_invoice_no&&<small className="code mono-wrap">Inv: {b.latest_external_invoice_no}</small>}
+            </div>:
+            b.latest_attempt_state?label(b.latest_attempt_state):isDemoCharge&&shownState==="open"?<Tag tone="yellow">Demo checkout</Tag>:"—",
           b.scope_revision_id&&b.order_numbers?.[0]?<Link href={inspectionScopePath(b.order_numbers[0],b.scope_revision_id)}>Review scope charge</Link>:
           inspectionPaymentHref&&inspectionPaymentLabel?<Link href={inspectionPaymentHref}>{inspectionPaymentLabel}</Link>:
           quoteExpired
             ?(b.unresolved_payment?<span>Payment confirmation pending</span>:
               b.purpose==="dispatch"&&b.batch_id?<CodeButton code="Review dispatch batch" onClick={()=>setBatchTarget(b.batch_id)}/>:
               b.purpose==="storage"&&b.storage_item_code?<Link href={"/items?item="+encodeURIComponent(b.storage_item_code)}>Review stored item</Link>:<span>Quote expired</span>)
-            :shownState==="open"?<Action run={()=>goCheckout(b.charge_item_id,b.quote_revision)}>{demo?"Demo pay":"Pay"}</Action>:null
+            :shownState==="open"?<div className="actions" style={{gap:6,flexWrap:"wrap"}}>
+              <Action run={()=>goCheckout(b.charge_item_id,b.quote_revision)}>{demo?"Demo pay":"Pay (Stripe)"}</Action>
+              {b.latest_attempt_provider!=="paypal_manual"&&<Action sm run={async()=>{await request("/charges/"+b.charge_item_id+"/paypal-invoice","POST",{});reload();}}>PayPal Invoice</Action>}
+            </div>:b.latest_attempt_provider==="paypal_manual"&&b.order_numbers?.[0]?<Link href={"/orders/"+b.order_numbers[0]+"/payment"}>Track PayPal Invoice</Link>:null
         ];
       })} empty="No charges yet."/>
       {(chargePage>1||data.has_more_charges)&&<nav className="actions" aria-label="Charge pages">

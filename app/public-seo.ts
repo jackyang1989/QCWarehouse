@@ -163,6 +163,9 @@ const PORTAL_ROUTE_TITLES: Record<string, string> = {
   "/admin/users": "员工权限 · 运营管理后台",
   "/admin/audit": "审计日志 · 运营管理后台",
   "/admin/operations": "后台任务 · 运营管理后台",
+  "/admin/integrations": "第三方集成中心 · 运营管理后台",
+  "/admin/integrations/payments": "支付渠道管理 · 运营管理后台",
+  "/admin/integrations/ocr": "OCR 文档识别配置 · 运营管理后台",
   "/admin/integrations/logistics": "物流接入 · 运营管理后台",
 };
 

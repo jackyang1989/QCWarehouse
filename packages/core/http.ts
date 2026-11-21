@@ -30,6 +30,9 @@ import { createReportShare, listPublishedReports, listReportShares, readSharedPh
 import { auditFilters, readAudit } from "./audit-read";
 import { completeMediaUpload, createMediaReadUrl, createMediaUploadUrl, putMediaStaging, readMediaBinary, uploadUrlInputSchema } from "./media";
 import { decodeLabelImage, labelPrintInputSchema, labelVerifyInputSchema, printLabels, readLabelPdf, readLabelPreviewPng, scanWarehouseCode, verifyLabelReadback } from "./labels";
+import { listIntegrationHub, revokeProviderSecret, saveProviderSecret, testProviderConnection, updateIntegrationProvider, validateProviderConfig, type EnvMode, type LifecycleState, type ProviderDomain } from "./integrations-admin";
+import { assertStripeCheckoutAllowed, cancelPaypalManualInvoice, customerReportPaypalPaid, executeManualRefund, issuePaypalManualInvoice, listCustomerPaymentChannels, listPaypalManualQueue, reconcileStripeStatus, recordPaypalManualReceipt, requestPaypalManualInvoice, verifyPaypalManualPayment } from "./payment-providers";
+import { adminListOcrJobs, adminTestOcrExtract, confirmOcrCandidates, enqueueOcrJob, getOcrJobDetail, listCustomerOcrJobs, mergeOcrCandidates, retryOcrJob, splitOcrCandidate, updateOcrCandidate } from "./ocr";
 
 type ContractOperation={
   operationId:string; "x-roles":string[];
@@ -380,7 +383,7 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     return json({ok:true},200,[cookie("session","",0),cookie("qcw_onboarding","",0),cookie("qcw_provider","",0),csrfCookie("",0)]);
   }
   if(method==="POST" && path==="/webhooks/stripe") {
-    const event=verifyStripe(await req.text(),req.headers.get("stripe-signature")??"");
+    const event=await verifyStripe(await req.text(),req.headers.get("stripe-signature")??"");
     const result=await transaction(db=>stripeEvent(db,event));
     // Rejected payment evidence must commit before returning its error response.
     if("rejection" in result) throw result.rejection;
@@ -766,18 +769,18 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   if(method==="POST" && path==="/staff/media") {
     csrf(req);
     const a=actorRequired(actor);role(a,"receiver","warehouse_admin","inspector","support","finance","super_admin");
-    guard(Number(req.headers.get("content-length")??0)<=8_100_000,"BODY_TOO_LARGE","Photo is too large.",413);
-    const form=await req.formData(),file=form.get("photo");
-    guard(file instanceof File,"FILE_INVALID","Choose a photo.",422);
+    guard(Number(req.headers.get("content-length")??0)<=15_500_000,"BODY_TOO_LARGE","File is too large.",413);
+    const form=await req.formData(),file=form.get("file")??form.get("photo");
+    guard(file instanceof File,"FILE_INVALID","Choose a file.",422);
     const kind=photoKinds.parse(form.get("kind")),bytes=Buffer.from(await file.arrayBuffer());
     return json(await transaction(db=>savePhoto(db,a,bytes,kind)),201);
   }
   if(method==="POST" && path==="/me/media") {
     csrf(req);
     const a=actorRequired(actor);organization(a);
-    guard(Number(req.headers.get("content-length")??0)<=8_100_000,"BODY_TOO_LARGE","Photo is too large.",413);
-    const form=await req.formData(),file=form.get("photo");
-    guard(file instanceof File,"FILE_INVALID","Choose a photo.",422);
+    guard(Number(req.headers.get("content-length")??0)<=15_500_000,"BODY_TOO_LARGE","File exceeds 15 MB limit.",413);
+    const form=await req.formData(),file=form.get("file")??form.get("photo");
+    guard(file instanceof File,"FILE_INVALID","Choose an image or PDF file.",422);
     const bytes=Buffer.from(await file.arrayBuffer());
     return json(await transaction(db=>savePhoto(db,a,bytes,"attachment")),201);
   }
@@ -1200,6 +1203,226 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   }));
   const fake=path.match(/^\/checkout\/demo\/([a-f0-9-]{36})$/i);
   if(method==="POST" && fake && isDemo()) return extraWrite(req,path,actor,z.object({}),(db,a)=>demoPay(db,a,idSchema.parse(fake[1])));
+
+  // Customer Multi-Channel Payments & Manual PayPal Invoice
+  if(method==="GET" && path==="/me/payment-channels") {
+    const a=actorRequired(actor);
+    const chargeParam=url.searchParams.get("charge_id");
+    const chargeId=chargeParam?idSchema.parse(chargeParam):null;
+    return json(await transaction(async db=>{
+      const channels=await listCustomerPaymentChannels(db);
+      let active_attempt:Record<string,unknown>|null=null;
+      if(chargeId && a.kind==="customer") {
+        active_attempt=(await db.query(
+          `select p.id, p.provider, p.state, p.manual_state, p.external_invoice_no, p.invoice_url, p.payer_email,
+                  p.provider_data->>'customer_reported_paid_at' customer_reported_at,
+                  p.provider_data->>'customer_reported_tx_ref' customer_reported_tx_ref
+           from payments p join charge_items c on c.id=p.charge_item_id
+           where p.charge_item_id=$1 and c.org_id=$2 and p.state<>'canceled'
+           order by p.created_at desc limit 1`,
+          [chargeId, organization(a)],
+        )).rows[0]??null;
+      }
+      return {channels, active_attempt};
+    }));
+  }
+  const chargePaypal=path.match(/^\/charges\/([a-f0-9-]{36})\/paypal-invoice$/i);
+  if(method==="POST" && chargePaypal) {
+    const key=idSchema.parse(req.headers.get("idempotency-key"));
+    return extraWrite(req,path,actor,z.object({payer_email:z.string().email().optional()}),
+      (db,a,b)=>requestPaypalManualInvoice(db,a,idSchema.parse(chargePaypal[1]),key,b.payer_email));
+  }
+  const meReportPaypal=path.match(/^\/me\/payments\/([a-f0-9-]{36})\/report-paypal-paid$/i);
+  if(method==="POST" && meReportPaypal) {
+    return extraWrite(req,path,actor,z.object({
+      transaction_ref:z.string().trim().max(128).optional(),
+      payer_email:z.string().email().optional(),
+      evidence_media_id:idSchema.optional(),
+      note:z.string().trim().max(1000).optional(),
+    }),(db,a,b)=>customerReportPaypalPaid(db,a,idSchema.parse(meReportPaypal[1]),b));
+  }
+
+  // Admin Integrations Hub & Encrypted Secrets Vault
+  if(method==="GET" && path==="/staff/admin/integrations") {
+    const domParam=url.searchParams.get("domain");
+    const dom=domParam?z.enum(["payment","ocr","logistics","email","storage","webhook"]).parse(domParam) as ProviderDomain:undefined;
+    return json(await transaction(db=>listIntegrationHub(db,actorRequired(actor),dom)));
+  }
+  const intSecret=path.match(/^\/staff\/admin\/integrations\/([a-z0-9_]+)\/secrets$/i);
+  if(method==="POST" && intSecret) {
+    return extraWrite(req,path,actor,z.object({
+      environment:z.enum(["sandbox","live"]),
+      secret_name:z.string().trim().min(2).max(64),
+      secret_value:z.string().trim().min(4).max(16000),
+    }),(db,a,b)=>saveProviderSecret(db,a,hash(getCookie(req,"session")),{
+      provider_key:intSecret[1],
+      environment:b.environment as EnvMode,
+      secret_name:b.secret_name,
+      secret_value:b.secret_value,
+    }));
+  }
+  const intRevoke=path.match(/^\/staff\/admin\/integrations\/([a-z0-9_]+)\/secrets\/revoke$/i);
+  if(method==="POST" && intRevoke) {
+    return extraWrite(req,path,actor,z.object({
+      environment:z.enum(["sandbox","live"]),
+      secret_name:z.string().trim().min(2).max(64),
+    }),(db,a,b)=>revokeProviderSecret(db,a,hash(getCookie(req,"session")),{
+      provider_key:intRevoke[1],
+      environment:b.environment as EnvMode,
+      secret_name:b.secret_name,
+    }));
+  }
+  const intValidate=path.match(/^\/staff\/admin\/integrations\/([a-z0-9_]+)\/validate$/i);
+  if(method==="POST" && intValidate) {
+    return extraWrite(req,path,actor,z.object({
+      environment:z.enum(["sandbox","live"]).optional(),
+    }),(db,a,b)=>validateProviderConfig(db,a,intValidate[1],b.environment as EnvMode|undefined));
+  }
+  const intTest=path.match(/^\/staff\/admin\/integrations\/([a-z0-9_]+)\/test$/i);
+  if(method==="POST" && intTest) {
+    return extraWrite(req,path,actor,z.object({
+      environment:z.enum(["sandbox","live"]).optional(),
+    }),(db,a,b)=>testProviderConnection(db,a,hash(getCookie(req,"session")),intTest[1],b.environment as EnvMode|undefined));
+  }
+  const intUpdate=path.match(/^\/staff\/admin\/integrations\/([a-z0-9_]+)$/i);
+  if(method==="POST" && intUpdate) {
+    return extraWrite(req,path,actor,z.object({
+      environment:z.enum(["sandbox","live"]).optional(),
+      lifecycle_state:z.enum(["configured","verified","enabled","degraded","disabled","requires_approval"]).optional(),
+      enabled:z.boolean().optional(),
+      priority:z.number().int().min(1).max(999).optional(),
+      is_primary:z.boolean().optional(),
+      is_fallback:z.boolean().optional(),
+      requires_icp:z.boolean().optional(),
+      config:z.record(z.string(),z.unknown()).optional(),
+    }),(db,a,b)=>updateIntegrationProvider(db,a,hash(getCookie(req,"session")),intUpdate[1],{
+      ...b,
+      environment:b.environment as EnvMode|undefined,
+      lifecycle_state:b.lifecycle_state as LifecycleState|undefined,
+    }));
+  }
+
+  // Admin Finance PayPal Manual Queue, Manual Refunds & Stripe Active Reconcile
+  if(method==="GET" && path==="/staff/finance/paypal-invoices") {
+    return json({rows:await transaction(db=>listPaypalManualQueue(db,actorRequired(actor)))});
+  }
+  const ppIssue=path.match(/^\/staff\/finance\/paypal-invoices\/([a-f0-9-]{36})\/issue$/i);
+  if(method==="POST" && ppIssue) {
+    return extraWrite(req,path,actor,z.object({
+      external_invoice_no:z.string().trim().min(2).max(128),
+      invoice_url:z.string().trim().max(500).optional(),
+      payer_email:z.string().email().optional(),
+      notes:z.string().trim().max(1000).optional(),
+    }),(db,a,b)=>issuePaypalManualInvoice(db,a,hash(getCookie(req,"session")),idSchema.parse(ppIssue[1]),b));
+  }
+  const ppReceipt=path.match(/^\/staff\/finance\/paypal-invoices\/([a-f0-9-]{36})\/record-receipt$/i);
+  if(method==="POST" && ppReceipt) {
+    return extraWrite(req,path,actor,z.object({
+      external_transaction_id:z.string().trim().min(4).max(128),
+      received_amount_cents:z.number().int().positive(),
+      fee_amount_cents:z.number().int().min(0).optional(),
+      payer_email:z.string().email().optional(),
+      evidence_media_id:idSchema.optional(),
+      notes:z.string().trim().max(1000).optional(),
+    }),(db,a,b)=>recordPaypalManualReceipt(db,a,hash(getCookie(req,"session")),idSchema.parse(ppReceipt[1]),b));
+  }
+  const ppVerify=path.match(/^\/staff\/finance\/paypal-invoices\/([a-f0-9-]{36})\/verify$/i);
+  if(method==="POST" && ppVerify) {
+    return extraWrite(req,path,actor,z.object({
+      decision:z.enum(["approve","reject"]),
+      note:z.string().trim().max(1000).optional(),
+      accept_overpayment:z.boolean().optional(),
+    }),(db,a,b)=>verifyPaypalManualPayment(db,a,hash(getCookie(req,"session")),idSchema.parse(ppVerify[1]),b));
+  }
+  const ppCancel=path.match(/^\/staff\/finance\/paypal-invoices\/([a-f0-9-]{36})\/cancel$/i);
+  if(method==="POST" && ppCancel) {
+    return extraWrite(req,path,actor,z.object({reason:z.string().trim().min(2).max(500)}),
+      (db,a,b)=>cancelPaypalManualInvoice(db,a,hash(getCookie(req,"session")),idSchema.parse(ppCancel[1]),b.reason));
+  }
+  const manualRefundExec=path.match(/^\/staff\/finance\/refunds\/([a-f0-9-]{36})\/execute-manual$/i);
+  if(method==="POST" && manualRefundExec) {
+    return extraWrite(req,path,actor,z.object({
+      manual_refund_ref:z.string().trim().min(4).max(128),
+      evidence_media_id:idSchema.optional(),
+      notes:z.string().trim().max(1000).optional(),
+    }),(db,a,b)=>executeManualRefund(db,a,hash(getCookie(req,"session")),idSchema.parse(manualRefundExec[1]),b));
+  }
+  if(method==="POST" && path==="/staff/finance/stripe/reconcile") {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>reconcileStripeStatus(db,a,hash(getCookie(req,"session"))));
+  }
+
+  // Customer & Admin OCR Endpoints
+  if(method==="GET" && path==="/me/ocr/jobs") {
+    const ordId=url.searchParams.get("order_id")?idSchema.parse(url.searchParams.get("order_id")):undefined;
+    return json(await transaction(db=>listCustomerOcrJobs(db,actorRequired(actor),ordId)));
+  }
+  const meOcrJob=path.match(/^\/me\/ocr\/jobs\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && meOcrJob) {
+    return json(await transaction(db=>getOcrJobDetail(db,actorRequired(actor),idSchema.parse(meOcrJob[1]))));
+  }
+  if(method==="POST" && path==="/me/ocr/jobs") {
+    return extraWrite(req,path,actor,z.object({
+      media_id:idSchema,
+      order_id:idSchema.optional(),
+      batch_key:z.string().trim().max(128).optional(),
+      force_rerun:z.boolean().optional(),
+      execute_now:z.boolean().optional(),
+    }),(db,a,b)=>enqueueOcrJob(db,a,b),201);
+  }
+  const meOcrRetry=path.match(/^\/me\/ocr\/jobs\/([a-f0-9-]{36})\/retry$/i);
+  if(method==="POST" && meOcrRetry) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>retryOcrJob(db,a,idSchema.parse(meOcrRetry[1])));
+  }
+  const meOcrCand=path.match(/^\/me\/ocr\/candidates\/([a-f0-9-]{36})$/i);
+  if(method==="POST" && meOcrCand) {
+    return extraWrite(req,path,actor,z.object({
+      status:z.enum(["pending","confirmed","rejected"]).optional(),
+      platform:z.string().trim().max(80).nullable().optional(),
+      supplier_name:z.string().trim().max(120).nullable().optional(),
+      platform_order_no:z.string().trim().max(120).nullable().optional(),
+      tracking_no:z.string().trim().max(64).nullable().optional(),
+      item_name:z.string().trim().min(1).max(200).optional(),
+      sku_code:z.string().trim().max(80).nullable().optional(),
+      color:z.string().trim().max(60).nullable().optional(),
+      size:z.string().trim().max(40).nullable().optional(),
+      quantity:z.number().int().min(1).max(9999).optional(),
+      unit_price_text:z.string().trim().max(60).nullable().optional(),
+      currency:z.string().trim().max(10).nullable().optional(),
+      order_date:z.string().trim().max(40).nullable().optional(),
+    }),(db,a,b)=>updateOcrCandidate(db,a,idSchema.parse(meOcrCand[1]),b));
+  }
+  const meOcrMerge=path.match(/^\/me\/ocr\/jobs\/([a-f0-9-]{36})\/merge$/i);
+  if(method==="POST" && meOcrMerge) {
+    return extraWrite(req,path,actor,z.object({candidate_ids:z.array(idSchema).min(2).max(20)}),
+      (db,a,b)=>mergeOcrCandidates(db,a,idSchema.parse(meOcrMerge[1]),b.candidate_ids));
+  }
+  const meOcrSplit=path.match(/^\/me\/ocr\/candidates\/([a-f0-9-]{36})\/split$/i);
+  if(method==="POST" && meOcrSplit) {
+    return extraWrite(req,path,actor,z.object({quantities:z.array(z.number().int().min(1).max(9999)).min(2).max(20)}),
+      (db,a,b)=>splitOcrCandidate(db,a,idSchema.parse(meOcrSplit[1]),b.quantities));
+  }
+  const meOcrConfirm=path.match(/^\/me\/ocr\/jobs\/([a-f0-9-]{36})\/confirm$/i);
+  if(method==="POST" && meOcrConfirm) {
+    return extraWrite(req,path,actor,z.object({candidate_ids:z.array(idSchema).min(1).max(100)}),
+      (db,a,b)=>confirmOcrCandidates(db,a,idSchema.parse(meOcrConfirm[1]),b.candidate_ids));
+  }
+  if(method==="GET" && path==="/staff/admin/ocr/jobs") {
+    return json({jobs:await transaction(db=>adminListOcrJobs(db,actorRequired(actor)))});
+  }
+  if(method==="POST" && path==="/staff/admin/ocr/test-extract") {
+    csrf(req);
+    const a=actorRequired(actor);
+    guard(Number(req.headers.get("content-length")??0)<=15_500_000,"BODY_TOO_LARGE","Test file exceeds 15 MB limit.",413);
+    const form=await req.formData(),file=form.get("file")??form.get("photo");
+    guard(file instanceof File,"FILE_INVALID","Choose an image or PDF file.",422);
+    const providerKey=typeof form.get("provider_key")==="string" && String(form.get("provider_key")).trim()
+      ? String(form.get("provider_key")).trim() : undefined;
+    const bytes=Buffer.from(await file.arrayBuffer());
+    const mime=file.type || (file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/png");
+    return json(await transaction(db=>adminTestOcrExtract(db,a,hash(getCookie(req,"session")),{bytes,mime,provider_key:providerKey})));
+  }
+
   return null;
 }
 async function extraWrite<S extends z.ZodType>(req:Request,path:string,actor:Actor|null,schema:S,run:(db:DB,actor:Actor,data:z.output<S>)=>Promise<unknown>,status=200) {
@@ -1311,6 +1534,7 @@ export async function handle(req:Request,path:string) {
     if(op.operationId==="chargeReceipt") return json(await chargeReceipt(a,args[0]),status);
     if(op.operationId==="checkout") {
       guard(key,"INVALID_REQUEST","Provide an idempotency key.",422);
+      await transaction(db=>assertStripeCheckoutAllowed(db));
       return json(await checkout(a,args[0],data.quote_revision,{scope:a.id+":"+req.method+":"+path,key}),status);
     }
     return json(await transaction(db=>{

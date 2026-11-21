@@ -2,7 +2,7 @@ import Stripe from "stripe";
 import { pool, transaction, type DB } from "../db";
 import { appOrigin, requireCustomerActive, requireStaffMfa } from "./auth";
 import { Problem, audit, code, event, guard, hash, idempotent, isDemo, lock, one, organization, role, uuid, type Actor } from "./common";
-import { stripeSettings } from "./integrations";
+import { stripeSettings, stripeSettingsFromDb } from "./integrations";
 import { activatePaidOrder, readyOrder } from "./orders";
 import { applyScopePositionsAndAdditions, computeOrderRefundStage, type ScopeAddition } from "./operations";
 import { inspectionScopePath } from "./portal-routes";
@@ -37,15 +37,16 @@ export async function orderPayment(db:DB,actor:Actor,id:string) {
   return {state:row.state,charge};
 }
 
-function stripe() {
-  const {key,mode,webhook,liveEnabled}=stripeSettings();
-  guard(key && mode && webhook,"STRIPE_UNAVAILABLE","Stripe checkout and webhook are not configured.",503);
-  guard(mode!=="live" || liveEnabled,"LIVE_PAYMENTS_DISABLED","Live payments have not been enabled.",503);
-  return new Stripe(key,{timeout:10000,maxNetworkRetries:1});
+function stripeFromSettings(settings: { key?: string; mode: string | null; webhook?: string; liveEnabled: boolean; enabled?: boolean }) {
+  guard(settings.enabled !== false, "CHANNEL_DISABLED", "Stripe Checkout is currently disabled by administrator.", 409);
+  const { key, mode, webhook, liveEnabled } = settings;
+  guard(key && mode && webhook, "STRIPE_UNAVAILABLE", "Stripe checkout and webhook are not configured.", 503);
+  guard(mode !== "live" || liveEnabled, "LIVE_PAYMENTS_DISABLED", "Live payments have not been enabled.", 503);
+  return new Stripe(key, { timeout: 10000, maxNetworkRetries: 1 });
 }
 export async function scheduleCheckoutExpirations() {
-  const settings=stripeSettings();
-  if(isDemo()||!settings.key||!settings.webhook||!settings.mode||(settings.mode==="live"&&!settings.liveEnabled))return false;
+  const settings = await stripeSettingsFromDb(pool);
+  if(isDemo()||!settings.enabled||!settings.key||!settings.webhook||!settings.mode||(settings.mode==="live"&&!settings.liveEnabled))return false;
   return transaction(async db=>{
     await lock(db,checkoutExpirySchedulingLock);
     const result=await db.query(`insert into outbox_events(type,payload,next_attempt_at)
@@ -68,13 +69,14 @@ export async function expireCheckout(db:DB,pid:string) {
     left join inspection_quotes i on i.id=c.inspection_quote_id left join dispatch_quote_versions d on d.id=c.dispatch_quote_id
     left join storage_quotes s on s.id=c.storage_quote_id where p.id=$1 for update of p`,[pid]);
   if(p.state!=="requires_payment")return;
-  const {mode}=stripeSettings();
+  const stripeSettingsResolved=await stripeSettingsFromDb(db);
+  const {mode}=stripeSettingsResolved;
   guard(!isDemo()&&p.provider==="stripe"&&mode&&p.provider_ref?.startsWith(`cs_${mode}_`),
     "CHECKOUT_MODE_MISMATCH","The checkout does not match the configured payment environment.",503);
   const sessionExpiry=Number(p.provider_data?.requested_checkout_expires_at);
   guard(p.voided_at||p.quote_expired||(Number.isFinite(sessionExpiry)&&sessionExpiry*1000<=Date.now()),
     "CHECKOUT_NOT_DUE","This checkout has not reached its expiration deadline.",409);
-  const api=stripe(),session=await api.checkout.sessions.retrieve(p.provider_ref);
+  const api=stripeFromSettings(stripeSettingsResolved),session=await api.checkout.sessions.retrieve(p.provider_ref);
   guard(session.id===p.provider_ref&&session.metadata?.payment_id===pid&&session.metadata.charge_item_id===p.charge_item_id&&
     session.metadata.org_id===p.org_id&&session.amount_total===p.expected_amount&&session.currency==="usd"&&session.livemode===(mode==="live"),
     "PAYMENT_MISMATCH","The provider session could not be matched to the charge.",409);
@@ -95,7 +97,7 @@ export async function chargeReceipt(actor:Actor,id:string) {
     from charge_items c left join payments p on p.id=c.applied_payment_id and p.charge_item_id=c.id
       and p.provider='stripe' and p.state in ('succeeded','partially_refunded','refunded')
     where c.id=$1 and c.org_id=$2`,[id,org]);
-  const {key,mode}=stripeSettings();
+  const {key,mode}=await stripeSettingsFromDb(pool);
   const intentId=payment.intent_id;
   guard(payment.id&&intentId&&intentId.startsWith("pi_")&&/^cs_(live|test)_/.test(payment.provider_ref??""),
     "RECEIPT_NOT_AVAILABLE","There is no Stripe receipt for this charge.",404);
@@ -132,8 +134,30 @@ async function verifyCharge(db:DB,id:string,org:string,rev:number) {
   return fee;
 }
 async function attempt(db:DB,id:string,amount:number) {
-  const open=(await db.query("select * from payments where charge_item_id=$1 and state in ('requires_payment','processing')",[id])).rows[0];
+  const open=(await db.query("select * from payments where charge_item_id=$1 and provider='stripe' and state in ('requires_payment','processing')",[id])).rows[0];
   if(open) return open;
+  const otherOpen=(await db.query<{id:string;provider:string;state:string;manual_state:string|null;external_transaction_id:string|null}>(
+    "select id,provider,state,manual_state,external_transaction_id from payments where charge_item_id=$1 and provider<>'stripe' and state in ('requires_payment','processing') for update",
+    [id]
+  )).rows;
+  for(const row of otherOpen) {
+    guard(row.state!=="processing","PAYMENT_PROCESSING","Another payment attempt is already processing for this charge.",409);
+    guard(
+      row.provider!=="paypal_manual"||(!row.external_transaction_id&&!["receipt_recorded","underpaid","overpaid"].includes(row.manual_state??"")),
+      "MANUAL_RECEIPT_PENDING",
+      "A manual PayPal receipt is already under verification for this charge.",
+      409,
+    );
+    await db.query(
+      `update payments
+       set state='canceled',
+           manual_state=case when provider='paypal_manual' then 'canceled' else manual_state end,
+           manual_notes=coalesce(manual_notes||' | ','')||'Superseded by Stripe checkout',
+           updated_at=now()
+       where id=$1`,
+      [row.id]
+    );
+  }
   const sequence=await one<{n:number}>(db,"select count(*)::int n from payments where charge_item_id=$1",[id]);
   const digest=hash(`stripe-checkout:${id}:${sequence.n}`);
   // Reuse the Stripe key if the transaction rolls back after the remote session was created.
@@ -164,9 +188,10 @@ async function prepareCheckout(db:DB,fee:Record<string,any>,org:string):Promise<
     return {state:"requires_payment",attempt_id:open.id,reference:null,params:null,fee,demo:true,mode:null};
   }
   guard(!fee.is_test,"TEST_ORDER","Test orders use the isolated development checkout.");
-  stripe();
+  const stripeCfg=await stripeSettingsFromDb(db);
+  stripeFromSettings(stripeCfg);
   if(!open.provider_ref)requireCurrentQuote(fee.quote_valid);
-  const mode=stripeSettings().mode;
+  const mode=stripeCfg.mode;
   guard(open.provider_ref?open.provider_ref.startsWith(`cs_${mode}_`):!open.provider_data?.checkout_params||open.provider_data.checkout_mode===mode,
     "PAYMENT_MODE_MISMATCH","This payment attempt belongs to a different payment environment.",409);
   if(open.provider_ref||open.provider_data?.checkout_params)
@@ -200,8 +225,9 @@ export async function checkout(actor:Actor,id:string,rev:number,request:{scope:s
     if(prepared.state!=="requires_payment")return prepared;
     let session:Stripe.Checkout.Session|undefined;
     if(!prepared.demo) {
-      guard(stripeSettings().mode===prepared.mode,"PAYMENT_MODE_MISMATCH","Payment environment changed.",409);
-      const api=stripe();
+      const runtimeCfg=await stripeSettingsFromDb(pool);
+      guard(runtimeCfg.mode===prepared.mode,"PAYMENT_MODE_MISMATCH","Payment environment changed.",409);
+      const api=stripeFromSettings(runtimeCfg);
       guard(prepared.reference||prepared.params,"CHECKOUT_UNAVAILABLE","Payment preparation is incomplete.",503);
       session=prepared.reference?await api.checkout.sessions.retrieve(prepared.reference):
         await api.checkout.sessions.create(prepared.params!,{idempotencyKey:prepared.attempt_id});
@@ -240,7 +266,7 @@ export async function checkout(actor:Actor,id:string,rev:number,request:{scope:s
   }
   throw new Problem("CHECKOUT_UNAVAILABLE","Checkout expired. Retry to start a new payment attempt.",409);
 }
-async function applyPayment(db:DB,pid:string,providerRef:string,details:object,confirmedAt:number) {
+export async function applyPayment(db:DB,pid:string,providerRef:string,details:object,confirmedAt:number) {
   const link=await one(db,`select c.org_id from payments p join charge_items c on c.id=p.charge_item_id where p.id=$1`,[pid]);
   await lock(db,"org:"+link.org_id);
   const payment=await one(db,"select * from payments where id=$1 for update",[pid]);
@@ -316,6 +342,13 @@ async function applyPayment(db:DB,pid:string,providerRef:string,details:object,c
     await db.query("update disposition_requests set state='completed',revision=revision+1 where id=$1",[item.id]);
   }
   await db.query("update charge_items set applied_payment_id=$2 where id=$1",[charge.id,pid]);
+  await db.query(
+    `update payments set state='canceled',
+       manual_state=case when provider='paypal_manual' then 'canceled' else manual_state end,
+       updated_at=now()
+     where charge_item_id=$1 and id<>$2 and state='requires_payment'`,
+    [charge.id,pid],
+  );
   await audit(db,null,"payment_confirmed","charge_items",charge.id);
   await event(db,"payment.confirmed",{charge_id:charge.id,...(confirmedOrderId?{order_id:confirmedOrderId}:{})});
 }
@@ -335,8 +368,8 @@ export async function demoPay(db:DB,actor:Actor,id:string) {
   await applyPayment(db,id,"demo_"+id,{demo:true,payment_intent:"pi_demo_"+id},Math.floor(Date.now()/1000));
   return {state:"paid",...(p.order_number?{order_number:p.order_number}:{}),...(p.scope_revision_id?{scope_revision_id:p.scope_revision_id}:{})};
 }
-export function verifyStripe(raw:string,signature:string) {
-  const {webhook,mode}=stripeSettings();
+export async function verifyStripe(raw:string,signature:string) {
+  const {webhook,mode}=await stripeSettingsFromDb(pool);
   guard(webhook && mode && !isDemo(),"STRIPE_UNAVAILABLE","Stripe webhooks are unavailable.",503);
   let event:Stripe.Event;
   try { event=Stripe.webhooks.constructEvent(raw,signature,webhook); }
@@ -547,16 +580,16 @@ export async function refundRequest(db:DB,actor:Actor,pid:string,cents:number,re
   role(actor,"support","super_admin");
   const first=await one(db,`select c.org_id from payments p join charge_items c on c.id=p.charge_item_id where p.id=$1`,[pid]);
   await lock(db,"org:"+first.org_id);
-  const p=await one(db,`select p.id,p.state,c.inspection_quote_id,p.amount_cents-(${committedRefunds}) refundable_cents
+  const p=await one(db,`select p.id,p.provider,p.state,c.inspection_quote_id,p.amount_cents-(${committedRefunds}) refundable_cents
     from payments p join charge_items c on c.id=p.charge_item_id where p.id=$1 for update of p`,[pid]);
   if(orderId) await one(db,`select id from inspection_quotes where id=$1 and order_id=$2`,[p.inspection_quote_id,orderId]);
   guard(refundableStates.includes(p.state) && cents>0 && cents<=p.refundable_cents,"REFUND_NOT_ALLOWED","Refund exceeds the available paid balance.");
-  const r=await one(db,`insert into refunds(id,payment_id,source,amount_cents,reason,requested_by) values($1,$2,'platform',$3,$4,$5)
-    returning id as refund_id,state`,[uuid(),pid,cents,reason,actor.id]);
+  const r=await one(db,`insert into refunds(id,payment_id,source,channel,amount_cents,reason,requested_by) values($1,$2,'platform',$3,$4,$5,$6)
+    returning id as refund_id,state`,[uuid(),pid,p.provider,cents,reason,actor.id]);
   await audit(db,actor,"request_refund","refunds",r.refund_id);
   return r;
 }
-async function syncPaymentRefundState(db:DB,paymentId:string) {
+export async function syncPaymentRefundState(db:DB,paymentId:string) {
   const row=(await db.query<{amount_cents:number;state:string;refunded_cents:number}>(
     `select p.amount_cents,p.state,
        coalesce((select sum(r.amount_cents)::int from refunds r where r.payment_id=p.id and r.state='succeeded'),0) refunded_cents
@@ -606,6 +639,11 @@ export async function refundReject(db:DB,actor:Actor,id:string,rev:number,reason
   return {refund_id:id,state:"rejected"};
 }
 export async function executeRefund(db:DB,id:string) {
+  const pre=(await db.query<{provider:string;channel:string}>("select p.provider, r.channel from refunds r join payments p on p.id=r.payment_id where r.id=$1",[id])).rows[0];
+  if(pre && pre.provider!=="stripe") {
+    await db.query("update refunds set notes=coalesce(notes,'Approved for manual finance execution') where id=$1",[id]);
+    return;
+  }
   const r=await one(db,`select r.*,p.provider_data from refunds r join payments p on p.id=r.payment_id where r.id=$1 for update of r`,[id]);
   if(r.state!=="approved" || r.provider_ref) return;
   if(isDemo() && r.provider_data.demo) {
@@ -614,7 +652,7 @@ export async function executeRefund(db:DB,id:string) {
     await audit(db,null,"refund_executed","refunds",id,{payment_id:r.payment_id,amount_cents:r.amount_cents,provider_ref:"demo_refund_"+id});
     return;
   }
-  const result=await stripe().refunds.create({payment_intent:r.provider_data.payment_intent,amount:r.amount_cents,metadata:{refund_id:id}},{idempotencyKey:id});
+  const result=await stripeFromSettings(await stripeSettingsFromDb(db)).refunds.create({payment_intent:r.provider_data.payment_intent,amount:r.amount_cents,metadata:{refund_id:id}},{idempotencyKey:id});
   const nextState=result.status==="succeeded"?"succeeded":result.status==="failed"?"failed":"approved";
   await db.query("update refunds set provider_ref=$2,state=$3 where id=$1",[id,result.id,nextState]);
   if(nextState==="succeeded") {

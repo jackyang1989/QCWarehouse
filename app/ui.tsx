@@ -28,6 +28,9 @@ export async function request(path:string,method="GET",body?:unknown,idempotency
   return data;
 }
 async function compressImageClient(file:File):Promise<{bytes:ArrayBuffer;mime:string}> {
+  if(file.type==="application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+    return {bytes:await file.arrayBuffer(),mime:"application/pdf"};
+  }
   if(typeof window!=="undefined" && typeof createImageBitmap==="function" && file.type!=="image/heic") {
     try {
       const bitmap=await createImageBitmap(file);

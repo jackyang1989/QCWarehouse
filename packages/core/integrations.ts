@@ -37,6 +37,71 @@ export function stripeSettings() {
     liveEnabled: get("STRIPE_LIVE_ENABLED") === "1" && origin(get("APP_URL")) !== null && !isDemo(),
   };
 }
+
+export async function stripeSettingsFromDb(db: Pick<import("../db").DB, "query">) {
+  const env = stripeSettings();
+  const providerRow = (
+    await db.query<{ environment: "sandbox" | "live"; enabled: boolean; updated_by: string | null; config: Record<string, unknown> }>(
+      "select environment, enabled, updated_by, config from integration_providers where provider_key='stripe' limit 1",
+    )
+  ).rows[0];
+  if (!providerRow) {
+    return {
+      ...env,
+      enabled: true,
+      environment: env.mode === "live" ? ("live" as const) : ("sandbox" as const),
+      config: {} as Record<string, unknown>,
+    };
+  }
+
+  const targetEnv = providerRow.environment;
+  const vaultRowCount = (
+    await db.query("select 1 from integration_secrets where provider_key='stripe' and environment=$1 limit 1", [targetEnv])
+  ).rowCount;
+  const dbGoverned =
+    Boolean(providerRow.updated_by) ||
+    providerRow.enabled === false ||
+    targetEnv === "live" ||
+    Boolean(vaultRowCount);
+
+  const { resolveProviderSecret } = await import("./integrations-admin");
+  const dbKey = await resolveProviderSecret(db, "stripe", targetEnv, "secret_key");
+  const dbWebhook = await resolveProviderSecret(db, "stripe", targetEnv, "webhook_secret");
+
+  const key = dbGoverned ? (dbKey ?? undefined) : (dbKey ?? env.key);
+  const webhook = dbGoverned ? (dbWebhook ?? undefined) : (dbWebhook ?? env.webhook);
+
+  const rawMode = /^(sk|rk)_live_\S+$/.test(key ?? "") ? ("live" as const) : /^(sk|rk)_test_\S+$/.test(key ?? "") ? ("test" as const) : null;
+  const mode = dbGoverned
+    ? targetEnv === "live"
+      ? rawMode === "live"
+        ? ("live" as const)
+        : null
+      : rawMode === "test"
+        ? ("test" as const)
+        : null
+    : rawMode;
+
+  const cfg = providerRow.config ?? {};
+  const validWebhook = /^whsec_\S+$/.test(webhook ?? "") ? webhook : undefined;
+  const liveReadyInDb =
+    targetEnv === "live" &&
+    mode === "live" &&
+    Boolean(key && validWebhook) &&
+    cfg.kyc_status === "verified" &&
+    cfg.live_checkout_verified === true &&
+    cfg.live_webhook_verified === true &&
+    origin(get("APP_URL")) !== null;
+  return {
+    key,
+    mode,
+    webhook: validWebhook,
+    liveEnabled: providerRow.enabled && !isDemo() && (liveReadyInDb || (!dbGoverned && env.liveEnabled)),
+    enabled: providerRow.enabled,
+    environment: targetEnv,
+    config: cfg,
+  };
+}
 export function postmarkSettings() {
   const token = get("POSTMARK_SERVER_TOKEN"), from = get("EMAIL_FROM");
   const stream = get("POSTMARK_MESSAGE_STREAM") ?? "outbound";

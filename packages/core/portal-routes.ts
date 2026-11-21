@@ -45,6 +45,9 @@ const adminTabs=[
   ["/admin/users","员工权限",["super_admin"]],
   ["/admin/audit","审计日志",["super_admin"]],
   ["/admin/operations","后台任务",["super_admin"]],
+  ["/admin/integrations","第三方集成",["super_admin"]],
+  ["/admin/integrations/payments","支付渠道配置",["super_admin"]],
+  ["/admin/integrations/ocr","OCR 文档识别",["super_admin"]],
   ["/admin/integrations/logistics","物流接入",staffAccess.trackingConfiguration],
 ] as const;
 
@@ -68,6 +71,8 @@ export function canOpenStaffPage(path:string,route:PortalRoute,roles:readonly st
   if(["/admin/catalog","/admin/categories","/admin/templates","/admin/shipping-rates","/admin/config","/admin/legal","/admin/users","/admin/settings"].includes(path)) return hasStaffAccess(roles,staffAccess.templates);
   if(["/admin/dispositions","/admin/incidents"].includes(path)) return hasStaffAccess(roles,staffAccess.orders);
   if(["/admin/refunds","/admin/payments"].includes(path)) return hasStaffAccess(roles,staffAccess.finance);
+  if(["/admin/integrations","/admin/integrations/payments"].includes(path)) return hasStaffAccess(roles,["super_admin","finance"]);
+  if(path==="/admin/integrations/ocr") return hasStaffAccess(roles,["super_admin","finance","warehouse_admin"]);
   return staffTabs(route.area,roles).some(([link])=>link===path);
 }
 
@@ -84,7 +89,7 @@ export const legalPages = {
 } as const;
 
 type Area = "public" | "customer" | "warehouse" | "admin";
-type StaticView = "catalog" | "how-it-works" | "faq" | "report-guide" | "public-inquiry" | "legal" | "login" | "onboarding" | "account-recovery" | "staff-login" | "customer" | "customer-actions" | "warehouse" | "admin" | "admin-customers" | "admin-inspections" | "staff-tickets" | "logistics" | "logistics-configuration" | "storage-move" | "storage-locations" | "warehouse-scan" | "report-desk" | "operations";
+type StaticView = "catalog" | "how-it-works" | "faq" | "report-guide" | "public-inquiry" | "legal" | "login" | "onboarding" | "account-recovery" | "staff-login" | "customer" | "customer-actions" | "warehouse" | "admin" | "admin-customers" | "admin-inspections" | "admin-integrations" | "staff-tickets" | "logistics" | "logistics-configuration" | "storage-move" | "storage-locations" | "warehouse-scan" | "report-desk" | "operations";
 type DetailView = "order" | "report" | "parcel" | "shipment" | "task" | "demo" | "warehouse-package" | "warehouse-item" | "customer-case" | "staff-ticket" | "staff-order" | "admin-customer" | "admin-payment" | "admin-refund" | "admin-incident" | "admin-disposal" | "admin-inspection-task" | "order-quote" | "order-shipment" | "dispatch-batch" | "staff-report";
 export const orderSections={
   payment:"Payment",parcels:"Parcels",dispositions:"Item instructions",storage:"Storage",
@@ -124,6 +129,7 @@ for(const [paths,route] of [
   [["/wh/scan"],{area:"warehouse",view:"warehouse-scan"}],
   [["/admin/storage/locations"],{area:"admin",view:"storage-locations"}],
   [["/admin/logistics"],{area:"admin",view:"logistics"}],
+  [["/admin/integrations","/admin/integrations/payments","/admin/integrations/ocr"],{area:"admin",view:"admin-integrations"}],
   [["/admin/integrations/logistics"],{area:"admin",view:"logistics-configuration"}],
 ] satisfies [string[],PortalRoute][]) {
   for(const path of paths) fixed.set(path,route);

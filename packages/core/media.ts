@@ -22,7 +22,20 @@ export const mediaMimeSchema = z.enum([
   "image/png",
   "image/webp",
   "image/heic",
+  "application/pdf",
 ]);
+
+export function isPdfBytes(bytes: Buffer): boolean {
+  return bytes.length >= 5 && bytes.subarray(0, 5).toString("ascii") === "%PDF-";
+}
+
+export function validatePdfBytes(bytes: Buffer): void {
+  guard(isPdfBytes(bytes), "FILE_INVALID", "Upload a valid PDF file (%PDF- header required).", 422);
+  guard(bytes.length >= 32 && bytes.length <= 15_000_000, "FILE_INVALID", "PDF must be between 32 bytes and 15 MB.", 422);
+  guard(!bytes.includes(Buffer.from("/Encrypt")), "PDF_ENCRYPTED", "Password-protected or encrypted PDFs are not supported.", 422);
+  const tail = bytes.subarray(Math.max(0, bytes.length - 1024));
+  guard(tail.includes(Buffer.from("%%EOF")), "PDF_CORRUPT", "Uploaded PDF appears truncated or corrupt.", 422);
+}
 
 export const uploadUrlInputSchema = z.object({
   kind: mediaKindSchema,
@@ -149,6 +162,7 @@ export async function createMediaUploadUrl(
   actor: Actor,
   input: z.infer<typeof uploadUrlInputSchema>
 ) {
+  guard(input.mime !== "application/pdf" || input.kind === "attachment", "FILE_INVALID", "PDF uploads are only supported for attachments and purchase evidence.", 422);
   let org: string | null = actor.kind === "customer" ? organization(actor) : null;
   if (actor.kind === "customer") {
     guard(input.kind === "attachment", "FORBIDDEN", "Only customer attachments can be uploaded.", 403);
@@ -281,6 +295,7 @@ export async function putMediaStaging(
 export async function completeMediaUpload(db: Pick<DB, "query">, actor: Actor, mediaId: string) {
   const m = await one<{
     id: string;
+    kind: string;
     uploaded_by: string;
     object_key: string;
     thumb_key: string | null;
@@ -297,6 +312,7 @@ export async function completeMediaUpload(db: Pick<DB, "query">, actor: Actor, m
     return {
       id: m.id,
       status: "ready",
+      mime: m.mime,
       sha256: m.sha256,
       width: m.width,
       height: m.height,
@@ -315,6 +331,47 @@ export async function completeMediaUpload(db: Pick<DB, "query">, actor: Actor, m
     await pool.query("delete from private_files where key=$1", [stagingKey]);
     await pool.query("update media_assets set status='rejected' where id=$1", [mediaId]);
     throw new Problem("MEDIA_CHECKSUM_MISMATCH", "Uploaded file sha256 or byte length does not match declaration.", 422);
+  }
+
+  if (m.mime === "application/pdf" || isPdfBytes(staged.data)) {
+    try {
+      guard(m.mime === "application/pdf" && isPdfBytes(staged.data), "FILE_INVALID", "Uploaded bytes do not match declared MIME type.", 422);
+      guard(m.kind === "attachment", "FILE_INVALID", "PDF uploads are only allowed for attachments.", 422);
+      validatePdfBytes(staged.data);
+    } catch (err) {
+      await pool.query("delete from private_files where key=$1", [stagingKey]);
+      await pool.query("update media_assets set status='rejected' where id=$1", [mediaId]);
+      throw err;
+    }
+    await db.query(
+      `insert into private_files(key,data,mime) values($1,$2,'application/pdf')
+       on conflict(key) do update set data=excluded.data,mime=excluded.mime`,
+      [m.object_key, staged.data]
+    );
+    await db.query("delete from private_files where key=$1", [stagingKey]);
+    const updatedPdf = await one<{
+      id: string;
+      status: string;
+      mime: string;
+      sha256: string;
+      width: number | null;
+      height: number | null;
+      thumb_key: string | null;
+      captured_at: Date | null;
+    }>(
+      db,
+      `update media_assets
+       set status='ready', mime='application/pdf', size_bytes=$2, width=null, height=null, thumb_key=null
+       where id=$1
+       returning id, status, mime, sha256, width, height, thumb_key, captured_at`,
+      [mediaId, staged.data.length]
+    );
+    await audit(db, actor, "complete_media_upload", "media_assets", mediaId, {
+      sha256: m.sha256,
+      mime: "application/pdf",
+      size_bytes: staged.data.length,
+    });
+    return updatedPdf;
   }
 
   let processed: Awaited<ReturnType<typeof processImageBytes>>;
@@ -464,6 +521,17 @@ export async function authorizeMediaRead(db: DB, actor: Actor, id: string) {
           [id]
         )
       ).rowCount;
+    const paymentProofAttachment =
+      m.kind === "attachment" &&
+      actor.roles.some(r => ["finance", "super_admin"].includes(r)) &&
+      (
+        await db.query(
+          `select 1 from payments where evidence_media_id=$1
+           union all
+           select 1 from refunds where evidence_media_id=$1`,
+          [id]
+        )
+      ).rowCount;
     const orderAttachment =
       m.kind === "attachment" &&
       actor.roles.some(r => ["receiver", "inspector", "reviewer", "support", "warehouse_admin", "super_admin"].includes(r)) &&
@@ -500,6 +568,7 @@ export async function authorizeMediaRead(db: DB, actor: Actor, id: string) {
     guard(
       claimProof ||
         complianceAttachment ||
+        paymentProofAttachment ||
         orderAttachment ||
         claimOuter ||
         m.uploaded_by === actor.id ||

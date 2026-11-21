@@ -16,9 +16,11 @@ import {
   Table,
   Tag,
   text,
+  upload,
   useLoad,
   type Row,
 } from "./ui";
+import type { Actor } from "../packages/core/common";
 import {
   AdminTabs,
   AUDIT_ACTION_ZH,
@@ -46,7 +48,18 @@ function FinanceSubNav({ active }: { active: "payments" | "refunds" | "finance" 
   );
 }
 
-export function AdminPaymentsWorkbench({ demo = false }: { demo?: boolean }) {
+const MANUAL_PAYPAL_STATE_ZH: Record<string, { label: string; tone: "green" | "blue" | "yellow" | "red" | "gray" }> = {
+  requested: { label: "待开具发票", tone: "yellow" },
+  invoice_sent: { label: "已发发票 · 待付款", tone: "blue" },
+  receipt_recorded: { label: "已录收款 · 待独立核销", tone: "blue" },
+  underpaid: { label: "实收少付 · 阻断激活", tone: "red" },
+  overpaid: { label: "实收超付 · 待财务确认", tone: "yellow" },
+  verified: { label: "双人核销已入账", tone: "green" },
+  rejected: { label: "核销退回", tone: "red" },
+  canceled: { label: "已作废取消", tone: "gray" },
+};
+
+export function AdminPaymentsWorkbench({ demo = false, actor }: { demo?: boolean; actor?: Row }) {
   const searchParams = useSearchParams();
   const initTab = searchParams.get("tab") ?? "all";
   const [tab, setTab] = useState(initTab);
@@ -58,26 +71,59 @@ export function AdminPaymentsWorkbench({ demo = false }: { demo?: boolean }) {
   const [purpose, setPurpose] = useState("all");
   const [testMode, setTestMode] = useState("all");
   const [page, setPage] = useState(1);
+  const [channelNotice, setChannelNotice] = useState<{ tone: "info" | "success" | "warning" | "error"; text: string }>();
+  const [channelError, setChannelError] = useState<string>();
+  const [activeManualId, setActiveManualId] = useState<string | null>(null);
 
   const params = new URLSearchParams({ tab, purpose, test: testMode, page: String(page), limit: "25" });
   if (q) params.set("q", q);
   const { data, error, reload } = useLoad("/staff/admin/payments?" + params.toString());
   const disputes = useLoad("/staff/admin/desk");
+  const paypalQueue = useLoad("/staff/finance/paypal-invoices");
   const d = data;
   const counts = d?.counts ?? {};
   const summary = d?.summary ?? {};
   const rows: Row[] = d?.rows ?? [];
   const disputeRows: Row[] = disputes.data?.disputes ?? [];
+  const paypalRows: Row[] = paypalQueue.data?.rows ?? [];
+  const selectedPaypal = paypalRows.find((r) => r.id === activeManualId) ?? paypalRows.find((r) => r.state !== "canceled" && r.state !== "succeeded") ?? paypalRows[0];
+
+  function reloadAll() {
+    reload();
+    disputes.reload();
+    paypalQueue.reload();
+  }
 
   return (
     <>
       <div className="page-head row">
         <div>
           <h1>支付与渠道对账工作台</h1>
-          <p className="muted">按业务状态查看每笔收费单与支付交易对应的客户、订单、用途、退款进度与账实对账结论；点击单号进入 6 区块完整交易详情。</p>
+          <p className="muted">统一处理 Stripe HK 与 PayPal Manual Invoice 人工开票/录收款/双人核销/主动对账，所有状态直接展示。</p>
         </div>
         <div className="head-actions">
-          <button type="button" className="button sm" onClick={() => { reload(); disputes.reload(); }}>刷新数据</button>
+          <Link className="button sm" href="/admin/integrations/payments">支付渠道设置 →</Link>
+          <Action
+            sm
+            run={async () => {
+              setChannelError(undefined);
+              try {
+                const res = await request("/staff/finance/stripe/reconcile", "POST", {});
+                setChannelNotice({
+                  tone: res.ok ? "success" : "warning",
+                  text: res.configured
+                    ? `Stripe 主动对账完成：核查 ${res.checked} 笔，补单激活 ${res.reconciled} 笔。`
+                    : `Stripe 主动对账未执行实时拉取（未配置 Secret Key，待核会话 ${res.checked} 笔）。`,
+                });
+                reloadAll();
+              } catch (e) {
+                setChannelError(e instanceof Error ? e.message : "主动对账失败");
+              }
+            }}
+          >
+            Stripe 主动对账
+          </Action>
+          <button type="button" className="button sm" onClick={reloadAll}>刷新数据</button>
         </div>
       </div>
 
@@ -85,9 +131,11 @@ export function AdminPaymentsWorkbench({ demo = false }: { demo?: boolean }) {
 
       {demo && (
         <StatusBanner tone="warning" title="演示环境账本边界提醒">
-          当前运行在本地演示模式（<code>QCW_DEMO=1</code>），标记为 <code>demo_</code> 的交易使用本地模拟结账，仅用于内部业务流程与对账验证，不代表真实 Stripe 资金清算。
+          当前运行在本地演示模式（<code>QCW_DEMO=1</code>），标记为 <code>demo_</code> 的交易使用本地模拟结账，PayPal 人工开票与双人核销全程走真实数据库 SoD 约束与统一 <code>applyPayment</code> 激活规则。
         </StatusBanner>
       )}
+      {channelNotice && <StatusBanner tone={channelNotice.tone} title="渠道核销结果">{channelNotice.text}</StatusBanner>}
+      {channelError && <ErrorBlock error={channelError} />}
 
       {error && <ErrorBlock error={error} />}
 
@@ -221,8 +269,15 @@ export function AdminPaymentsWorkbench({ demo = false }: { demo?: boolean }) {
                   </div>,
                   <Money key="amt" cents={r.amount_cents} currency={r.currency} />,
                   <div key="ch" className="cell-stack">
-                    <span className="nowrap">{r.is_demo_tx ? "Stripe (本地模拟)" : r.provider.toUpperCase()}</span>
-                    <small className="code" title={r.provider_ref ?? ""}>{r.provider_ref ? (r.provider_ref.length > 18 ? `${r.provider_ref.slice(0, 14)}…` : r.provider_ref) : "未生成会话"}</small>
+                    <span className="nowrap">
+                      {r.is_demo_tx ? "Stripe (模拟)" : r.provider === "paypal_manual" ? "PayPal 人工发票" : String(r.provider).toUpperCase()}
+                    </span>
+                    <small className="code mono-wrap">
+                      {r.external_invoice_no ?? r.external_transaction_id ?? (r.provider_ref ? (r.provider_ref.length > 20 ? `${r.provider_ref.slice(0, 16)}…` : r.provider_ref) : "待外部凭据")}
+                    </small>
+                    {r.manual_state && (
+                      <Tag tone={(MANUAL_PAYPAL_STATE_ZH[r.manual_state]?.tone ?? "gray")}>{MANUAL_PAYPAL_STATE_ZH[r.manual_state]?.label ?? r.manual_state}</Tag>
+                    )}
                   </div>,
                   <BizTag key="st" dict={PAYMENT_STATE_ZH} value={r.state} />,
                   <div key="rf" className="cell-stack">
@@ -251,6 +306,223 @@ export function AdminPaymentsWorkbench({ demo = false }: { demo?: boolean }) {
               </div>
             )}
           </>
+        )}
+      </Panel>
+
+      <Panel
+        title={`PayPal 人工开票与双人核销队列 (${paypalRows.length})`}
+        subtitle="所有待处理与历史 PayPal Manual Invoice 直接展开可见：客户申请后不可自激活，必须由财务开票录实收并由另一位财务/超管 MFA 独立核销。"
+      >
+        {paypalRows.length === 0 ? (
+          <p className="muted">当前暂无 PayPal 人工开票申请。</p>
+        ) : (
+          <Table
+            headers={["关联订单 / 客户", "应收金额", "实收 / 手续费 / 净额", "发票号 / PayPal 交易号", "经办人与 SoD 状态", "当前阶段", "操作"]}
+            rows={paypalRows.map((pr) => {
+              const st = MANUAL_PAYPAL_STATE_ZH[pr.manual_state ?? pr.state] ?? { label: pr.manual_state ?? pr.state, tone: "gray" as const };
+              const sameRecorder = Boolean(actor && pr.recorded_by && pr.recorded_by === actor.id);
+              return [
+                <div key="o" className="cell-stack">
+                  <strong className="code">{pr.order_public_no ?? `PAY-${String(pr.id).slice(0, 8)}`}</strong>
+                  <small>{pr.receiving_code ?? "—"} · {pr.payer_email ?? pr.customer_email ?? "—"}</small>
+                </div>,
+                <Money key="exp" cents={pr.expected_amount_cents ?? pr.amount_cents} currency={pr.currency} />,
+                <div key="rec" className="cell-stack">
+                  <span>实收：{pr.received_amount_cents != null ? <Money cents={pr.received_amount_cents} currency={pr.currency} align="left" /> : "—"}</span>
+                  <small>净额：{pr.net_amount_cents != null ? <Money cents={pr.net_amount_cents} currency={pr.currency} align="left" /> : "—"}</small>
+                </div>,
+                <div key="ref" className="cell-stack">
+                  <span className="code mono-wrap">发票: {pr.external_invoice_no ?? "待开具"}</span>
+                  <small className="code mono-wrap">TX: {pr.external_transaction_id ?? (pr.provider_data?.customer_reported_tx_ref ? `客户自报 ${pr.provider_data.customer_reported_tx_ref}` : "待录实收")}</small>
+                </div>,
+                <div key="sod" className="cell-stack">
+                  <small>开票：{pr.issued_by_name ?? "—"} · 录款：{pr.recorded_by_name ?? "—"}</small>
+                  <small>核销：{pr.verified_by_name ?? (sameRecorder ? "⚠️ 需换另一人核销" : "待第二人核销")}</small>
+                </div>,
+                <Tag key="st" tone={st.tone}>{st.label}</Tag>,
+                <button
+                  key="sel"
+                  type="button"
+                  className={`button sm${selectedPaypal?.id === pr.id ? " primary" : ""}`}
+                  onClick={() => setActiveManualId(pr.id)}
+                >
+                  {selectedPaypal?.id === pr.id ? "处理中" : "打开处理台"}
+                </button>,
+              ];
+            })}
+          />
+        )}
+
+        {selectedPaypal && (
+          <div className="split-grid" style={{ marginTop: 14 }}>
+            <div className="panel" style={{ padding: 14 }}>
+              <h3>1. 开具发票 &amp; 2. 登记实收 · {selectedPaypal.order_public_no ?? selectedPaypal.id.slice(0, 8)}</h3>
+              <p className="small muted">
+                客户申请金额：<Money cents={selectedPaypal.expected_amount_cents ?? selectedPaypal.amount_cents} currency={selectedPaypal.currency} align="left" /> · 客户 PayPal 邮箱：<code className="code">{selectedPaypal.payer_email ?? selectedPaypal.customer_email ?? "—"}</code>
+                {selectedPaypal.provider_data?.customer_reported_tx_ref ? ` · 客户自报交易号：${selectedPaypal.provider_data.customer_reported_tx_ref}` : ""}
+              </p>
+
+              {selectedPaypal.state !== "succeeded" && selectedPaypal.state !== "canceled" && (
+                <>
+                  <Form
+                    label="步骤 A：记录已发送的 PayPal Invoice 编号"
+                    idempotent
+                    run={async (f, key) => {
+                      setChannelError(undefined);
+                      try {
+                        await request(`/staff/finance/paypal-invoices/${selectedPaypal.id}/issue`, "POST", {
+                          external_invoice_no: text(f, "external_invoice_no"),
+                          ...(text(f, "invoice_url") ? { invoice_url: text(f, "invoice_url") } : {}),
+                          ...(text(f, "payer_email") ? { payer_email: text(f, "payer_email") } : {}),
+                          ...(text(f, "notes") ? { notes: text(f, "notes") } : {}),
+                        }, key);
+                        setChannelNotice({ tone: "success", text: `已记录发票号并标记为“已发发票”。` });
+                        reloadAll();
+                      } catch (e) {
+                        setChannelError(e instanceof Error ? e.message : "记录发票失败");
+                        throw e;
+                      }
+                    }}
+                  >
+                    <div className="filters-grid">
+                      <label>
+                        PayPal 发票号 (如 INV2-XXXX)
+                        <input name="external_invoice_no" required defaultValue={selectedPaypal.external_invoice_no ?? ""} placeholder="INV2-2026-0001" />
+                      </label>
+                      <label>
+                        发票链接 (可选，必须为 paypal.com HTTPS)
+                        <input name="invoice_url" type="url" defaultValue={selectedPaypal.invoice_url ?? ""} placeholder="https://www.paypal.com/invoice/p/..." />
+                      </label>
+                    </div>
+                  </Form>
+
+                  <hr className="sep" />
+
+                  <Form
+                    label="步骤 B：登记到账实收（PayPal TX ID 与净额）"
+                    idempotent
+                    run={async (f, key) => {
+                      setChannelError(undefined);
+                      try {
+                        const fileEntry = f.get("proof");
+                        let evidenceId: string | undefined;
+                        if (fileEntry instanceof File && fileEntry.size > 0) {
+                          evidenceId = await upload(fileEntry, "attachment");
+                        }
+                        const recCents = Math.round(Number(text(f, "received_usd")) * 100);
+                        const feeCents = Math.round(Number(text(f, "fee_usd") || "0") * 100);
+                        const res = await request(`/staff/finance/paypal-invoices/${selectedPaypal.id}/record-receipt`, "POST", {
+                          external_transaction_id: text(f, "external_transaction_id"),
+                          received_amount_cents: recCents,
+                          fee_amount_cents: feeCents,
+                          ...(evidenceId ? { evidence_media_id: evidenceId } : {}),
+                          ...(text(f, "notes") ? { notes: text(f, "notes") } : {}),
+                        }, key);
+                        setChannelNotice({
+                          tone: res.manual_state === "receipt_recorded" ? "success" : "warning",
+                          text: `已录入交易 ${res.external_transaction_id}（阶段：${MANUAL_PAYPAL_STATE_ZH[res.manual_state]?.label ?? res.manual_state}），现等待另一位财务/超管独立核销。`,
+                        });
+                        reloadAll();
+                      } catch (e) {
+                        setChannelError(e instanceof Error ? e.message : "录入实收失败");
+                        throw e;
+                      }
+                    }}
+                  >
+                    <div className="filters-grid">
+                      <label>
+                        PayPal 交易号 (唯一防重)
+                        <input name="external_transaction_id" required defaultValue={selectedPaypal.external_transaction_id ?? selectedPaypal.provider_data?.customer_reported_tx_ref ?? ""} placeholder="例如 9AB12345CD678901E" />
+                      </label>
+                      <label>
+                        实收总金额 (USD)
+                        <input name="received_usd" type="number" step="0.01" min="0.01" required defaultValue={((selectedPaypal.received_amount_cents ?? selectedPaypal.expected_amount_cents ?? selectedPaypal.amount_cents) / 100).toFixed(2)} />
+                      </label>
+                      <label>
+                        PayPal 手续费 (USD)
+                        <input name="fee_usd" type="number" step="0.01" min="0" defaultValue={((selectedPaypal.fee_amount_cents ?? 0) / 100).toFixed(2)} />
+                      </label>
+                    </div>
+                    <label>
+                      上传收款截图或凭证 PDF（可选）
+                      <input type="file" name="proof" accept="image/jpeg,image/png,image/webp,application/pdf" />
+                    </label>
+                    <label>
+                      财务对账备注
+                      <input name="notes" defaultValue={selectedPaypal.manual_notes ?? ""} placeholder="核实汇款人、货币与 PayPal 到账状态" />
+                    </label>
+                  </Form>
+                </>
+              )}
+            </div>
+
+            <div className="panel" style={{ padding: 14 }}>
+              <h3>3. 独立二次核销激活 (SoD) / 作废取消</h3>
+              <p className="small muted">
+                服务端强制校验：<code>verified_by !== recorded_by</code>。少付（Underpaid）严禁激活订单。
+              </p>
+              {selectedPaypal.state === "succeeded" ? (
+                <StatusBanner tone="success" title="已完成独立核销并入账激活">
+                  交易号 <code className="code">{selectedPaypal.external_transaction_id}</code> 已由 {selectedPaypal.verified_by_name ?? "独立审核人"} 核销并触发统一 <code>applyPayment</code>。
+                </StatusBanner>
+              ) : selectedPaypal.state === "canceled" ? (
+                <StatusBanner tone="info" title="该发票申请已作废">理由：{selectedPaypal.manual_notes ?? "—"}</StatusBanner>
+              ) : (
+                <>
+                  {actor && selectedPaypal.recorded_by === actor.id && (
+                    <StatusBanner tone="warning" title="职责分离提醒 (SoD)">
+                      该笔实收由您本人（{actor.id.slice(0, 8)}）录入，无法自录自核；请由另一位财务或超管账号登录验证并核销。
+                    </StatusBanner>
+                  )}
+                  <div className="actions" style={{ flexWrap: "wrap", marginTop: 8 }}>
+                    <Action
+                      primary
+                      disabled={!selectedPaypal.recorded_by || (Boolean(actor) && selectedPaypal.recorded_by === actor?.id)}
+                      run={async () => {
+                        setChannelError(undefined);
+                        const acceptOver = selectedPaypal.manual_state === "overpaid"
+                          ? window.confirm("检测到实收大于应收（超付），是否明确确认接受超付并激活关联订单/发运？")
+                          : false;
+                        await request(`/staff/finance/paypal-invoices/${selectedPaypal.id}/verify`, "POST", {
+                          decision: "approve",
+                          accept_overpayment: acceptOver,
+                          note: "Independent finance verification passed",
+                        });
+                        setChannelNotice({ tone: "success", text: `已完成第二人核销并调用 applyPayment 激活关联业务！` });
+                        reloadAll();
+                      }}
+                    >
+                      核销确认并激活订单
+                    </Action>
+                    <Action
+                      disabled={!selectedPaypal.recorded_by || (Boolean(actor) && selectedPaypal.recorded_by === actor?.id)}
+                      run={async () => {
+                        const note = window.prompt("填写驳回退回原因（将清空待核实收以便重录）：", "Transaction details mismatch");
+                        if (!note) return;
+                        await request(`/staff/finance/paypal-invoices/${selectedPaypal.id}/verify`, "POST", { decision: "reject", note });
+                        setChannelNotice({ tone: "warning", text: "已驳回该条收款登记，等待重新核对。" });
+                        reloadAll();
+                      }}
+                    >
+                      核销驳回退回
+                    </Action>
+                    <Action
+                      run={async () => {
+                        const reason = window.prompt("填写取消发票原因：", "Customer canceled manual invoice");
+                        if (!reason) return;
+                        await request(`/staff/finance/paypal-invoices/${selectedPaypal.id}/cancel`, "POST", { reason });
+                        setChannelNotice({ tone: "info", text: "已作废该笔 PayPal 人工发票申请。" });
+                        reloadAll();
+                      }}
+                    >
+                      作废取消发票
+                    </Action>
+                    <Link className="button sm" href={`/admin/payments/${selectedPaypal.id}`}>查看完整支付详情 →</Link>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
         )}
       </Panel>
 
@@ -675,7 +947,7 @@ export function AdminRefundsWorkbench() {
   );
 }
 
-export function AdminRefundDetail({ id, demo = false }: { id: string; demo?: boolean }) {
+export function AdminRefundDetail({ id, demo = false, actor: _actor }: { id: string; demo?: boolean; actor?: Actor }) {
   const { data, error, reload } = useLoad(`/staff/admin/refunds/${id}`);
   const [notice, setNotice] = useState("");
   const [reauthNeeded, setReauthNeeded] = useState(false);
@@ -906,6 +1178,49 @@ export function AdminRefundDetail({ id, demo = false }: { id: string; demo?: boo
                     审批结论：<strong>{REFUND_STATE_ZH[rf.state]?.label ?? rf.state}</strong>
                     {rf.approved_by_name ? `（由 ${rf.approved_by_name} 处理）` : ""}。
                   </p>
+                )}
+
+                {rf.state === "approved" && p?.provider && p.provider !== "stripe" && (
+                  <div style={{ marginTop: 14 }}>
+                    <hr className="sep" />
+                    <Form
+                      label="线下/人工通道退款执行回执（PayPal / 非 Stripe 渠道）"
+                      idempotent
+                      run={async (f, key) => {
+                        try {
+                          const fileEntry = f.get("proof");
+                          let evidenceId: string | undefined;
+                          if (fileEntry instanceof File && fileEntry.size > 0) {
+                            evidenceId = await upload(fileEntry, "attachment");
+                          }
+                          await request(`/staff/finance/refunds/${rf.id}/execute-manual`, "POST", {
+                            manual_refund_ref: text(f, "manual_refund_ref"),
+                            ...(evidenceId ? { evidence_media_id: evidenceId } : {}),
+                            ...(text(f, "notes") ? { notes: text(f, "notes") } : {}),
+                          }, key);
+                          setReauthNeeded(false);
+                          setNotice("已登记人工退款交易号与凭证并完成支付账本退款状态同步。");
+                          reload();
+                        } catch (e) {
+                          if (e instanceof RequestError && e.code === "STAFF_REAUTH_REQUIRED") setReauthNeeded(true);
+                          throw e;
+                        }
+                      }}
+                    >
+                      <label>
+                        外部退款流水号 / PayPal Refund TX ID
+                        <input name="manual_refund_ref" required placeholder="例如 RF-PP-987654321" />
+                      </label>
+                      <label>
+                        上传打款凭证截图或 PDF（可选）
+                        <input type="file" name="proof" accept="image/jpeg,image/png,image/webp,application/pdf" />
+                      </label>
+                      <label>
+                        退款执行说明
+                        <input name="notes" placeholder="已通过 PayPal 原路/全额退回客户账号" />
+                      </label>
+                    </Form>
+                  </div>
                 )}
               </Panel>
             </div>

@@ -13,7 +13,7 @@ async function seed() {
     const actors=new Map<string,string>();
     for(const [label,roles] of [
       ["receiving",["receiver","warehouse_admin"]],["inspector",["inspector","template_admin"]],
-      ["reviewer",["reviewer"]],["admin",["super_admin","finance","support"]]
+      ["reviewer",["reviewer"]],["finance",["finance"]],["admin",["super_admin","finance","support"]]
     ] as const) {
       const email=label+"@qcw.test",id=uuid();actors.set(label,id);
       await db.query("insert into users(id,display_name,locale) values($1,$2,'zh-CN')",[id,label]);

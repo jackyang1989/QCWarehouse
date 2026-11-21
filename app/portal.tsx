@@ -6,6 +6,7 @@ import { CustomerActions, CustomerDesk, DemoCheckout, NewOrder, OrderFulfillment
 import { AdminDesk, LogisticsConfiguration, LogisticsDesk, TaskView, WarehouseDesk, WarehouseDispatchBatch, WarehouseItemView, WarehousePackageView, WarehouseScan } from "./staff";
 import { AdminCustomerDetail, AdminCustomersDirectory } from "./admin-customers";
 import { AdminPaymentDetail, AdminRefundDetail } from "./admin-finance";
+import { AdminIntegrationsDesk } from "./admin-integrations";
 import { ROLE_ZH } from "./admin-labels";
 import { AdminDisposalDetail, AdminIncidentDetail, AdminInspectionsWorkbench, AdminInspectionTaskDetail } from "./admin-operations";
 import { AdminOrderDetailWorkbench } from "./admin-orders";
@@ -96,6 +97,7 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
     </div></section>;
   else if(route.view==="logistics") content=<LogisticsDesk actor={a}/>;
   else if(route.view==="logistics-configuration") content=<LogisticsConfiguration/>;
+  else if(route.view==="admin-integrations") content=<AdminIntegrationsDesk path={path} actor={a} demo={demo}/>;
   else if(route.view==="warehouse-scan") content=<WarehouseScan actor={a}/>;
   else if(route.view==="warehouse-item") content=<WarehouseItemView code={route.id} actor={a}/>;
   else if(route.view==="warehouse-package") content=<WarehousePackageView code={route.id} actor={a}/>;
@@ -110,7 +112,7 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
   else if(route.view==="admin-customers") content=<AdminCustomersDirectory/>;
   else if(route.view==="admin-customer") content=<AdminCustomerDetail key={route.id} id={route.id} actor={a}/>;
   else if(route.view==="admin-payment") content=<AdminPaymentDetail key={route.id} id={route.id} demo={demo}/>;
-  else if(route.view==="admin-refund") content=<AdminRefundDetail key={route.id} id={route.id} demo={demo}/>;
+  else if(route.view==="admin-refund") content=<AdminRefundDetail key={route.id} id={route.id} demo={demo} actor={a}/>;
   else if(route.view==="admin-inspections") content=<AdminInspectionsWorkbench actor={a}/>;
   else if(route.view==="admin-inspection-task") content=<AdminInspectionTaskDetail key={route.id} id={route.id} actor={a}/>;
   else if(route.view==="admin-incident") content=<AdminIncidentDetail key={route.id} id={route.id} actor={a}/>;
@@ -135,7 +137,7 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
   else if(route.view==="report") content=<ReportView key={route.id} number={route.id} version={route.version}/>;
   else if(path==="/reports") content=<PublishedReports/>;
   else if(path==="/account/notifications"||path==="/notifications") content=<NotificationInbox/>;
-  else if(route.view==="order") content=<OrderView key={route.id} number={route.id} section={route.section}/>;
+  else if(route.view==="order") content=<OrderView key={route.id} number={route.id} section={route.section} demo={demo}/>;
   else if(route.view==="demo") content=<DemoCheckout id={route.id}/>;
   else if(route.view==="parcel") content=<TrackView kind="parcels" id={route.id}/>;
   else if(route.view==="shipment") content=<OrderFulfillment key={route.id} id={route.id} kind="shipments"/>;

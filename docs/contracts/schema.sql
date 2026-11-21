@@ -664,7 +664,7 @@ CREATE TABLE charge_items (
 CREATE TABLE payments (
   id uuid PRIMARY KEY,
   charge_item_id uuid NOT NULL REFERENCES charge_items, provider_data jsonb NOT NULL DEFAULT jsonb_build_object(),
-  provider text NOT NULL CHECK (provider = 'stripe'),
+  provider text NOT NULL CONSTRAINT payments_provider_check CHECK (provider IN ('stripe', 'paypal_manual', 'paypal_auto', 'creem', 'dodo_payments', 'airwallex', 'oceanpayment')),
   provider_ref text,
   amount_cents int NOT NULL CHECK (amount_cents >= 0),
   currency text NOT NULL DEFAULT 'USD',
@@ -1071,5 +1071,190 @@ CREATE TRIGGER freeze_dispatch_quote BEFORE UPDATE OR DELETE ON dispatch_quote_v
 ALTER TABLE storage_quotes ADD COLUMN accepted_at timestamptz;
 CREATE TRIGGER freeze_storage_quote BEFORE UPDATE OR DELETE ON storage_quotes FOR EACH ROW EXECUTE FUNCTION freeze_accepted_quote();
 CREATE INDEX IF NOT EXISTS template_versions_category_key_idx ON template_versions(category_id, template_key, version DESC);
+
+ALTER TABLE payments
+  ADD COLUMN IF NOT EXISTS channel text,
+  ADD COLUMN IF NOT EXISTS environment text NOT NULL DEFAULT 'sandbox' CHECK (environment IN ('sandbox', 'live')),
+  ADD COLUMN IF NOT EXISTS manual_state text CHECK (
+    manual_state IS NULL OR manual_state IN (
+      'requested', 'invoice_sent', 'receipt_recorded', 'verified', 'rejected', 'canceled', 'underpaid', 'overpaid'
+    )
+  ),
+  ADD COLUMN IF NOT EXISTS external_invoice_no text,
+  ADD COLUMN IF NOT EXISTS external_transaction_id text,
+  ADD COLUMN IF NOT EXISTS payer_email text,
+  ADD COLUMN IF NOT EXISTS invoice_url text,
+  ADD COLUMN IF NOT EXISTS expected_amount_cents int CHECK (expected_amount_cents IS NULL OR expected_amount_cents >= 0),
+  ADD COLUMN IF NOT EXISTS received_amount_cents int CHECK (received_amount_cents IS NULL OR received_amount_cents >= 0),
+  ADD COLUMN IF NOT EXISTS fee_amount_cents int DEFAULT 0 CHECK (fee_amount_cents IS NULL OR fee_amount_cents >= 0),
+  ADD COLUMN IF NOT EXISTS net_amount_cents int CHECK (net_amount_cents IS NULL OR net_amount_cents >= 0),
+  ADD COLUMN IF NOT EXISTS evidence_media_id uuid REFERENCES media_assets(id),
+  ADD COLUMN IF NOT EXISTS issued_by uuid REFERENCES users(id),
+  ADD COLUMN IF NOT EXISTS issued_at timestamptz,
+  ADD COLUMN IF NOT EXISTS recorded_by uuid REFERENCES users(id),
+  ADD COLUMN IF NOT EXISTS recorded_at timestamptz,
+  ADD COLUMN IF NOT EXISTS verified_by uuid REFERENCES users(id),
+  ADD COLUMN IF NOT EXISTS verified_at timestamptz,
+  ADD COLUMN IF NOT EXISTS manual_notes text;
+
+ALTER TABLE payments
+  ADD CONSTRAINT payments_manual_verify_sod CHECK (verified_by IS NULL OR recorded_by IS DISTINCT FROM verified_by);
+
+CREATE UNIQUE INDEX IF NOT EXISTS payments_external_tx_uniq
+  ON payments(provider, external_transaction_id)
+  WHERE external_transaction_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS payments_manual_queue_idx
+  ON payments(provider, manual_state, updated_at DESC)
+  WHERE provider = 'paypal_manual';
+
+ALTER TABLE refunds
+  ADD COLUMN IF NOT EXISTS channel text NOT NULL DEFAULT 'stripe',
+  ADD COLUMN IF NOT EXISTS manual_refund_ref text,
+  ADD COLUMN IF NOT EXISTS evidence_media_id uuid REFERENCES media_assets(id),
+  ADD COLUMN IF NOT EXISTS executed_by uuid REFERENCES users(id),
+  ADD COLUMN IF NOT EXISTS executed_at timestamptz,
+  ADD COLUMN IF NOT EXISTS notes text;
+
+CREATE UNIQUE INDEX IF NOT EXISTS refunds_manual_ref_uniq
+  ON refunds(channel, manual_refund_ref)
+  WHERE manual_refund_ref IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS integration_providers (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  provider_key text NOT NULL UNIQUE,
+  domain text NOT NULL CHECK (domain IN ('payment', 'ocr', 'logistics', 'email', 'storage', 'webhook')),
+  display_name text NOT NULL,
+  lifecycle_state text NOT NULL DEFAULT 'disabled' CHECK (
+    lifecycle_state IN ('configured', 'verified', 'enabled', 'degraded', 'disabled', 'requires_approval')
+  ),
+  environment text NOT NULL DEFAULT 'sandbox' CHECK (environment IN ('sandbox', 'live')),
+  enabled boolean NOT NULL DEFAULT false,
+  priority int NOT NULL DEFAULT 100,
+  is_primary boolean NOT NULL DEFAULT false,
+  is_fallback boolean NOT NULL DEFAULT false,
+  requires_icp boolean NOT NULL DEFAULT false,
+  compliance_status text NOT NULL DEFAULT 'pending' CHECK (
+    compliance_status IN ('pending', 'approved', 'manual_only', 'requires_review', 'prohibited_aup', 'disabled_future')
+  ),
+  config jsonb NOT NULL DEFAULT '{}'::jsonb,
+  health_status text NOT NULL DEFAULT 'unknown' CHECK (
+    health_status IN ('healthy', 'degraded', 'unconfigured', 'error', 'unknown', 'blocked')
+  ),
+  last_checked_at timestamptz,
+  last_check_summary text,
+  last_error text,
+  updated_by uuid REFERENCES users(id),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS integration_secrets (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  provider_key text NOT NULL REFERENCES integration_providers(provider_key) ON DELETE CASCADE,
+  environment text NOT NULL CHECK (environment IN ('sandbox', 'live')),
+  secret_name text NOT NULL,
+  ciphertext bytea NOT NULL,
+  masked_hint text NOT NULL,
+  key_version int NOT NULL DEFAULT 1,
+  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'rotated', 'revoked')),
+  created_by uuid REFERENCES users(id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  rotated_by uuid REFERENCES users(id),
+  rotated_at timestamptz,
+  revoked_by uuid REFERENCES users(id),
+  revoked_at timestamptz
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS integration_secrets_active_uniq
+  ON integration_secrets(provider_key, environment, secret_name)
+  WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS integration_events (
+  id bigserial PRIMARY KEY,
+  provider_key text NOT NULL REFERENCES integration_providers(provider_key) ON DELETE CASCADE,
+  environment text NOT NULL CHECK (environment IN ('sandbox', 'live')),
+  event_kind text NOT NULL CHECK (
+    event_kind IN (
+      'config_saved', 'config_validated', 'connection_tested', 'secret_saved', 'secret_rotated',
+      'secret_revoked', 'state_changed', 'webhook_received', 'ocr_executed', 'payment_sync', 'error'
+    )
+  ),
+  status text NOT NULL CHECK (status IN ('ok', 'warn', 'error', 'blocked')),
+  latency_ms int,
+  cost_estimate_usd numeric(10, 6) DEFAULT 0,
+  summary text NOT NULL,
+  meta jsonb NOT NULL DEFAULT '{}'::jsonb,
+  actor_id uuid REFERENCES users(id),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS integration_events_provider_idx
+  ON integration_events(provider_key, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS ocr_jobs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id uuid REFERENCES organizations(id),
+  order_id uuid REFERENCES orders(id),
+  media_id uuid REFERENCES media_assets(id),
+  batch_key text,
+  file_sha256 text NOT NULL,
+  file_mime text NOT NULL,
+  page_count int NOT NULL DEFAULT 1 CHECK (page_count >= 1),
+  provider_key text NOT NULL,
+  fallback_provider_key text,
+  state text NOT NULL DEFAULT 'queued' CHECK (
+    state IN ('queued', 'processing', 'completed', 'needs_review', 'failed', 'canceled')
+  ),
+  confidence numeric(5, 4),
+  raw_text text,
+  raw_blocks jsonb NOT NULL DEFAULT '[]'::jsonb,
+  parsed_summary jsonb NOT NULL DEFAULT '{}'::jsonb,
+  warnings jsonb NOT NULL DEFAULT '[]'::jsonb,
+  error_code text,
+  error_message text,
+  latency_ms int,
+  attempts int NOT NULL DEFAULT 0,
+  is_test boolean NOT NULL DEFAULT false,
+  created_by uuid REFERENCES users(id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  started_at timestamptz,
+  completed_at timestamptz,
+  expires_at timestamptz
+);
+
+CREATE INDEX IF NOT EXISTS ocr_jobs_org_idx ON ocr_jobs(org_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ocr_jobs_media_idx ON ocr_jobs(media_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ocr_jobs_sha_idx ON ocr_jobs(org_id, file_sha256, state);
+
+CREATE TABLE IF NOT EXISTS ocr_candidates (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_id uuid NOT NULL REFERENCES ocr_jobs(id) ON DELETE CASCADE,
+  org_id uuid REFERENCES organizations(id),
+  sort_index int NOT NULL DEFAULT 0,
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'rejected', 'merged', 'split')),
+  platform text,
+  supplier_name text,
+  platform_order_no text,
+  tracking_no text,
+  item_name text NOT NULL DEFAULT '',
+  sku_code text,
+  color text,
+  size text,
+  quantity int NOT NULL DEFAULT 1 CHECK (quantity >= 1),
+  unit_price_text text,
+  currency text,
+  order_date text,
+  confidence numeric(5, 4) NOT NULL DEFAULT 0,
+  field_confidences jsonb NOT NULL DEFAULT '{}'::jsonb,
+  bbox jsonb,
+  raw_excerpt text,
+  confirmed_line_id uuid,
+  updated_by uuid REFERENCES users(id),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ocr_candidates_job_idx ON ocr_candidates(job_id, sort_index);
 
 COMMIT;

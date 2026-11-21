@@ -2,7 +2,7 @@ import type { DB } from "../db";
 import { audit, code, event, guard, hash, isDemo, lock, one, organization, revision, role, uuid, type Actor } from "./common";
 import { requireCustomerActive } from "./auth";
 import { demoWarehouseAddressZh, usableWarehouseAddressSql } from "./demo-fixtures";
-import { processImageBytes } from "./media";
+import { isPdfBytes, processImageBytes, validatePdfBytes } from "./media";
 import { orderAcceptsSampleAssignmentSql, readyOrder, summarizeExpectedLines } from "./orders";
 import { assertZonePurpose, requireSpace } from "./storage";
 
@@ -85,6 +85,15 @@ export async function savePhoto(db:DB,actor:Actor,bytes:Buffer,kind:string) {
   else role(actor,"receiver","inspector","warehouse_admin","super_admin");
   guard(bytes.length>0 && bytes.length<=25_000_000,"FILE_INVALID","Upload a photo up to 25 MB.",422);
   const rawSha=hash(bytes);
+  if(isPdfBytes(bytes)) {
+    guard(kind==="attachment","FORBIDDEN","PDF files are only supported for attachments and purchase evidence.",422);
+    validatePdfBytes(bytes);
+    const id=uuid(), key="media/"+id;
+    await db.query("insert into private_files(key,data,mime) values($1,$2,'application/pdf')",[key,bytes]);
+    await db.query(`insert into media_assets(id,kind,object_key,thumb_key,mime,size_bytes,width,height,sha256,status,captured_at,uploaded_by,org_id)
+      values($1,$2,$3,null,'application/pdf',$4,null,null,$5,'ready',null,$6,$7)`,[id,kind,key,bytes.length,rawSha,actor.id,org]);
+    return {id,sha256:rawSha,processed_sha256:rawSha,mime:"application/pdf",width:null,height:null,size_bytes:bytes.length};
+  }
   const {fullData,thumbData,width,height,capturedAt}=await processImageBytes(bytes);
   const id=uuid(), key="media/"+id, thumbKey="thumb/"+id;
   await db.query("insert into private_files(key,data,mime) values($1,$2,'image/jpeg'),($3,$4,'image/jpeg')",[key,fullData,thumbKey,thumbData]);

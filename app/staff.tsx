@@ -2142,7 +2142,7 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
   if(page==="dispositions") return <>{alertBanner}<AdminDispositionsWorkbench deskData={data} reloadDesk={reload} actor={actor} terms={terms.data?.terms??[]}/></>;
   if(page==="incidents") return <>{alertBanner}<AdminIncidentsWorkbench actor={actor}/></>;
   if(page==="refunds") return <>{alertBanner}<AdminRefundsWorkbench/></>;
-  if(page==="payments") return <>{alertBanner}<AdminPaymentsWorkbench demo={demo}/></>;
+  if(page==="payments") return <>{alertBanner}<AdminPaymentsWorkbench demo={demo} actor={actor}/></>;
   if(page==="finance") return <>{alertBanner}<AdminFinanceAnalytics demo={demo}/></>;
 
   const heading:Record<string,[string,string]>={

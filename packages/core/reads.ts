@@ -164,6 +164,13 @@ export async function bills(db:DB,actor:Actor,focusedCharge:string|null=null,pag
       where dr.id=s.disposition_id and dr.org_id=c.org_id) storage_item_code,
     ${unresolvedQuotePayment} unresolved_payment,
     (select p.state from payments p where p.charge_item_id=c.id order by p.updated_at desc nulls last,p.id desc limit 1) latest_attempt_state,
+    (select p.id from payments p where p.charge_item_id=c.id order by p.updated_at desc nulls last,p.id desc limit 1) latest_payment_id,
+    (select p.provider from payments p where p.charge_item_id=c.id order by p.updated_at desc nulls last,p.id desc limit 1) latest_attempt_provider,
+    (select p.manual_state from payments p where p.charge_item_id=c.id order by p.updated_at desc nulls last,p.id desc limit 1) latest_manual_state,
+    (select p.external_invoice_no from payments p where p.charge_item_id=c.id order by p.updated_at desc nulls last,p.id desc limit 1) latest_external_invoice_no,
+    (select p.invoice_url from payments p where p.charge_item_id=c.id order by p.updated_at desc nulls last,p.id desc limit 1) latest_invoice_url,
+    (select p.payer_email from payments p where p.charge_item_id=c.id order by p.updated_at desc nulls last,p.id desc limit 1) latest_payer_email,
+    (select p.provider_data->>'customer_reported_paid_at' from payments p where p.charge_item_id=c.id order by p.updated_at desc nulls last,p.id desc limit 1) latest_customer_reported_at,
     paid.provider_ref paid_ref,
     coalesce(paid.provider='stripe' and paid.state in ('succeeded','partially_refunded','refunded')
       and paid.provider_ref ~ '^cs_(live|test)_' and left(paid.provider_data->>'payment_intent',3)='pi_',false) receipt_available,

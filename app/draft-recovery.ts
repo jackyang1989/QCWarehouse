@@ -26,6 +26,9 @@ export type ExpectedProductLine = {
 
 export type ExtractedCandidateLine = ExpectedProductLine & {
   evidence_id:string;
+  ocr_candidate_id?:string;
+  ocr_confidence_score?:number;
+  bbox?:{page:number;rect:[number,number,number,number]}|null;
   status?:"unconfirmed"|"confirmed"|"discarded";
   source_evidence_id?:string;
   source_file_name?:string;
@@ -43,6 +46,13 @@ export type PurchaseEvidencePurpose = "purchase_evidence"|"reference_photo"|"siz
 export type PurchaseEvidenceItem = {
   id:string;
   media_id?:string;
+  ocr_job_id?:string;
+  ocr_provider?:string;
+  ocr_confidence?:number;
+  ocr_latency_ms?:number;
+  ocr_raw_text?:string;
+  ocr_warnings?:string[];
+  preview_url?:string;
   file_name:string;
   mime_type:string;
   size_bytes:number;
@@ -52,7 +62,7 @@ export type PurchaseEvidenceItem = {
   platform_source:string;
   purchase_order_ref:string;
   uploaded_at:string;
-  extraction_status:"needs_confirmation"|"confirmed"|"manual_only"|"pending_reassociation";
+  extraction_status:"needs_confirmation"|"confirmed"|"manual_only"|"pending_reassociation"|"extracting"|"failed";
   extraction_note?:string;
   candidates:ExtractedCandidateLine[];
 };

@@ -1,5 +1,6 @@
-import { createCipheriv, createDecipheriv, createHmac, randomBytes, randomInt, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomInt, scryptSync, timingSafeEqual } from "node:crypto";
 import * as oidc from "openid-client";
+import { pepper, seal, unseal } from "./crypto";
 import { oidcSettings, postmarkSettings, type OidcProvider } from "./integrations";
 import { pool, transaction, type DB } from "../db";
 import { Problem, audit, code, event, guard, hash, isDemo, lock, one, organization, role, uuid, type Actor } from "./common";
@@ -8,11 +9,6 @@ import { demoTermsVersion, demoWarehouseAddressZh, usableWarehouseAddressSql } f
 const token = () => randomBytes(32).toString("base64url");
 export function appOrigin() {
   return new URL(process.env.APP_URL ?? "http://localhost:3000").origin;
-}
-function pepper() {
-  const value = process.env.AUTH_OTP_PEPPER;
-  guard(value && value.length >= 32, "AUTH_UNAVAILABLE", "Authentication configuration is incomplete.", 503);
-  return value;
 }
 export function reportDownloadSignature(actorId:string,reportId:string,expires:number) {
   return createHmac("sha256",pepper()).update(`report-download:${actorId}:${reportId}:${expires}`).digest("base64url");
@@ -313,16 +309,8 @@ export async function completeRegistration(secret:string,browser:string,termsIds
   });
 }
 
-function seal(value:string) {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm",Buffer.from(hash(pepper()),"hex"),iv);
-  const data = Buffer.concat([cipher.update(value,"utf8"),cipher.final()]);
-  return Buffer.concat([iv,cipher.getAuthTag(),data]);
-}
-function unseal(value:Buffer) {
-  const decipher=createDecipheriv("aes-256-gcm",Buffer.from(hash(pepper()),"hex"),value.subarray(0,12));
-  decipher.setAuthTag(value.subarray(12,28));
-  return Buffer.concat([decipher.update(value.subarray(28)),decipher.final()]).toString();
+function sealNote() {
+  // Secret sealing primitives live in ./crypto and are re-exported at the bottom of auth.ts.
 }
 async function providerConfig(provider:OidcProvider) {
   const {clientId,clientSecret,issuer,callback}=oidcSettings(provider);

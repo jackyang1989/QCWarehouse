@@ -1,6 +1,7 @@
 import { pool, transaction } from "../db";
 import { publishReport } from "./inspection";
 import { executeRefund, expireCheckout, scheduleCheckoutExpirations } from "./payments";
+import { cleanupExpiredOcrJobs, runOcrJob } from "./ocr";
 import { consumeTrackingCallback, subscribeTrackingOnce, syncTrackingOnce } from "./logistics";
 import { consumeEmailWebhook, deliverEmailOnce, queueNotificationEmail } from "./email";
 import { cleanupStaleMediaUploads } from "./media";
@@ -10,7 +11,7 @@ import { eligibleManualQuoteOrderSql } from "./orders";
 import { pendingDispatchQuote, pendingStorageQuote } from "./dispatch";
 import type { DB } from "../db";
 
-const businessEvents=["payment.checkout_expire","account.registered","report.render","refund.approved","package.received","order.ready","order.identity_mismatch","order.cancelled","order.held","order.resumed","dispatch.quoted","storage.quoted","quote.offered","shipment.handed_over","shipment.return_received","payment.confirmed","report.published","report.amended","ticket.reply","tracking.exception_opened","reference.sealed","incident.resolved"];
+const businessEvents=["payment.checkout_expire","account.registered","report.render","refund.approved","ocr.extract","package.received","order.ready","order.identity_mismatch","order.cancelled","order.held","order.resumed","dispatch.quoted","storage.quoted","quote.offered","shipment.handed_over","shipment.return_received","payment.confirmed","report.published","report.amended","ticket.reply","tracking.exception_opened","reference.sealed","incident.resolved"];
 const maxJobAttempts=10;
 
 function eventDedupeKey(j:{id:string;type:string;payload:Record<string,unknown>}):string {
@@ -79,6 +80,7 @@ export async function workOnce() {
       jobId=j.id;
       if(j.type==="report.render") await publishReport(db,j.payload.version_id);
       else if(j.type==="refund.approved") await executeRefund(db,j.payload.refund_id);
+      else if(j.type==="ocr.extract") await runOcrJob(db,j.payload.job_id);
       else if(j.type==="payment.checkout_expire") await expireCheckout(db,j.payload.payment_id);
       else {
         if(j.type==="account.registered" && j.payload.warehouse_address_status==="pending") {
@@ -135,5 +137,6 @@ export async function trackingTick() {
   const subscribed=await subscribeTrackingOnce();
   const synced=await syncTrackingOnce();
   const cleaned=(await transaction(cleanupStaleMediaUploads)).cleaned>0;
-  return scheduled||subscribed||synced||cleaned;
+  const ocrCleaned=(await transaction(cleanupExpiredOcrJobs)).cleaned>0;
+  return scheduled||subscribed||synced||cleaned||ocrCleaned;
 }

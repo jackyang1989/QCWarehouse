@@ -79,6 +79,10 @@ export async function adminPaymentsList(db: DB, actor: Actor, filters: z.infer<t
   const { rows } = await db.query(
     `with enriched as (
       select p.id, p.charge_item_id, p.provider, p.provider_ref, p.amount_cents, p.currency, p.state,
+             p.channel, p.environment, p.manual_state, p.external_invoice_no, p.external_transaction_id,
+             p.payer_email, p.invoice_url, p.expected_amount_cents, p.received_amount_cents,
+             p.fee_amount_cents, p.net_amount_cents, p.evidence_media_id, p.issued_by, p.issued_at,
+             p.recorded_by, p.recorded_at, p.verified_by, p.verified_at, p.manual_notes,
              p.provider_data, p.created_at, p.updated_at,
              c.org_id, c.purpose, c.amount_cents charge_amount_cents, c.voided_at, c.applied_payment_id,
              c.inspection_quote_id, c.dispatch_quote_id, c.storage_quote_id, c.scope_revision_id,
@@ -127,6 +131,9 @@ export async function adminPaymentsList(db: DB, actor: Actor, filters: z.infer<t
           strpos(lower(p.id::text), $5) > 0 or
           strpos(upper('PAY-' || left(replace(p.id::text, '-', ''), 8)), $6) > 0 or
           strpos(lower(coalesce(p.provider_ref, '')), $5) > 0 or
+          strpos(lower(coalesce(p.external_invoice_no, '')), $5) > 0 or
+          strpos(lower(coalesce(p.external_transaction_id, '')), $5) > 0 or
+          strpos(lower(coalesce(p.payer_email, '')), $5) > 0 or
           strpos(lower(coalesce(p.provider_data->>'payment_intent', '')), $5) > 0 or
           strpos(upper(coalesce(crp.receiving_code, '')), $6) > 0 or
           strpos(lower(coalesce(ue.original_email, '')), $5) > 0 or
@@ -185,6 +192,14 @@ export async function adminPaymentsList(db: DB, actor: Actor, filters: z.infer<t
       currency: r.currency,
       state: r.state,
       provider: r.provider,
+      channel: r.channel ?? null,
+      environment: r.environment ?? null,
+      manual_state: r.manual_state ?? null,
+      external_invoice_no: r.external_invoice_no ?? null,
+      external_transaction_id: r.external_transaction_id ?? null,
+      payer_email: maskEmailForStaff(actor, r.payer_email, r.payer_email),
+      recorded_by: r.recorded_by ?? null,
+      verified_by: r.verified_by ?? null,
       provider_ref: r.provider_ref,
       payment_intent: r.provider_data?.payment_intent ?? null,
       is_demo_tx: isDemoTx,
@@ -283,11 +298,14 @@ export async function adminPaymentDetail(db: DB, actor: Actor, id: string) {
 
   const refunds = (await db.query(
     `select r.id, r.amount_cents, r.reason, r.state, r.source, r.provider_ref, r.revision, r.created_at,
+            r.channel, r.manual_refund_ref, r.evidence_media_id, r.executed_by, r.executed_at, r.notes,
             r.requested_by, ru.display_name requested_by_name,
-            r.approved_by, au.display_name approved_by_name
+            r.approved_by, au.display_name approved_by_name,
+            eu.display_name executed_by_name
      from refunds r
      left join users ru on ru.id = r.requested_by
      left join users au on au.id = r.approved_by
+     left join users eu on eu.id = r.executed_by
      where r.payment_id = $1
      order by r.created_at desc, r.id desc`,
     [id]
