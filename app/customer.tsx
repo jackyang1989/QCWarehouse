@@ -5324,8 +5324,8 @@ export function OrderView({number,section,demo=false}:{number:string;section?:Or
           <summary style={{cursor:"pointer"}}>
             <strong>6. Individual Physical Units &amp; Declarations ({rawUnits.length} commissioned positions · {rawUnits.filter(i=>i.item_id).length} SKU-identified)</strong>
           </summary>
-          <div className="row between flexwrap" style={{gap:8,margin:"10px 0"}}>
-            <input type="search" value={unitSearch} onChange={e=>{setUnitSearch(e.target.value);setUnitPage(1);}} placeholder="Filter item code, SKU, or parcel…" style={{maxWidth:260}}/>
+          <div className="row between flexwrap" style={{gap:8,marginBlock:10}}>
+            <input className="input" type="search" value={unitSearch} onChange={e=>{setUnitSearch(e.target.value);setUnitPage(1);}} placeholder="Filter item code, SKU, or parcel…" style={{width:280,maxWidth:"100%",height:34,minHeight:34}}/>
             <div className="actions">
               {([["all","All"],["identified","Identified"],["pending","Pending SKU ID"],["discrepancy","Discrepancy"]] as const).map(([fId,fLabel])=>(
                 <button key={fId} type="button" className={"button sm"+(unitFilter===fId?" primary":"")} onClick={()=>{setUnitFilter(fId);setUnitPage(1);}}>{fLabel}</button>
@@ -5840,7 +5840,7 @@ export function TrackView({kind,id,embedded=false}:{kind:"parcels"|"shipments";i
             <div className="row between flexwrap" style={{marginBottom:6}}>
               <strong className="small">Physically Logged Warehouse Items ({loggedItems.length})</strong>
               <div className="actions">
-                <input type="search" value={loggedSearch} onChange={e=>{setLoggedSearch(e.target.value);setLoggedPage(1);}} placeholder="Filter S-... / SKU / order…" style={{maxWidth:220}}/>
+                <input className="input" type="search" value={loggedSearch} onChange={e=>{setLoggedSearch(e.target.value);setLoggedPage(1);}} placeholder="Filter S39204 / SKU / order…" style={{width:240,maxWidth:"100%",height:34,minHeight:34}}/>
                 {linkedOrders[0]&&<Link className="button sm" href={`/orders/${linkedOrders[0]}#intake-reconciliation`}>Order Reconciliation →</Link>}
               </div>
             </div>

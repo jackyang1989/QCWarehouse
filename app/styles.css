@@ -780,7 +780,7 @@ details.card[open] > summary::after,
 details.card > :not(summary),
 .panel > details:not(.faq-item) > :not(summary),
 .card > details:not(.faq-item) > :not(summary) {
-  margin-inline: 15px;
+  margin-inline: 15px !important;
 }
 details.card > :nth-child(2),
 .panel > details:not(.faq-item) > :nth-child(2),
@@ -844,7 +844,7 @@ details.card > :last-child,
   color: var(--ink);
   cursor: pointer;
 }
-.form input, .form select, .form textarea, .panel > label > select, .input, .field input, .field select, .field textarea {
+.form input, .form select, .form textarea, .panel > label > select, .input, .field input, .field select, .field textarea, input[type="search"] {
   width: 100%;
   min-width: 0;
   height: 40px;
