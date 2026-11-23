@@ -133,12 +133,12 @@ const offersSql=`
     and not exists(select 1 from template_capabilities tc join capabilities cap on cap.id=tc.capability_id
       where tc.template_version_id=t.id and (cap.revoked_at is not null or cap.approved_by is null))
 `;
-function allowOfferRow(row:{rules?:{demo?:boolean};admission_snapshot?:{demo?:boolean}}) {
-  return isDemo() || (row.rules?.demo!==true && row.admission_snapshot?.demo!==true);
+function allowOfferRow(row:{rules?:{demo?:boolean};admission_snapshot?:{demo?:boolean}},includeDemo=isDemo()) {
+  return includeDemo || (row.rules?.demo!==true && row.admission_snapshot?.demo!==true);
 }
-export async function catalog(db: DB) {
+export async function catalog(db:DB,includeDemo=isDemo()) {
   return (await db.query(offersSql+" order by o.sku_code,t.version desc")).rows
-    .filter(allowOfferRow)
+    .filter(row=>allowOfferRow(row,includeDemo))
     .map(({admission_snapshot: _admission, ...rest}) => rest);
 }
 async function eligible(db: DB, line: LineInput,manual=false) {

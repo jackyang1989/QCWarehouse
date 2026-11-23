@@ -300,6 +300,7 @@ export async function checkout(actor:Actor,id:string,rev:number,request:{scope:s
       }
       if(fee.applied_payment_id||fee.free_authorization)return {state:"paid" as const,charge_item_id:id};
       if(["processing","succeeded","partially_refunded","refunded"].includes(p.state))return {state:"processing" as const,charge_item_id:id};
+      guard(p.state==="requires_payment","CHECKOUT_ATTEMPT_EXPIRED","Start a new payment attempt.");
       if(session?.status==="complete") {
         await db.query("update payments set state='processing',updated_at=now() where id=$1",[p.id]);
         return {state:"processing" as const,charge_item_id:id};
@@ -309,7 +310,6 @@ export async function checkout(actor:Actor,id:string,rev:number,request:{scope:s
         return {retry:true};
       }
       if(!fee.quote_valid)return {rejection:new Problem("QUOTE_EXPIRED","Request a new quote before continuing.",409)};
-      guard(p.state==="requires_payment","CHECKOUT_ATTEMPT_EXPIRED","Start a new payment attempt.");
       const url=prepared.demo?appOrigin()+"/checkout/demo/"+p.id:session?.url;
       guard(url,"STRIPE_UNAVAILABLE","Checkout could not be started.",503);
       return {state:"requires_payment" as const,attempt_id:p.id,checkout_url:url};

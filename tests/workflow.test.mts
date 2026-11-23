@@ -1253,6 +1253,16 @@ test("staff quote is versioned, private and can activate 101 positions with expl
   const chargeId=result.charge.charge_item_id;
   const paid=await c.fetch("/charges/"+chargeId+"/checkout",{quote_revision:current.revision});
   assert.equal(paid.state,"paid");
+  const {ensureIntegrationProvidersSeeded}=await import("../packages/core/integrations-admin");
+  await transaction(ensureIntegrationProvidersSeeded);
+  const {rows:[paypal]}=await pool.query("select enabled,lifecycle_state from integration_providers where provider_key='paypal_manual'");
+  await pool.query("update integration_providers set enabled=true,lifecycle_state='enabled' where provider_key='paypal_manual'");
+  try {
+    const rejectedInvoice=await c.fetch("/charges/"+chargeId+"/paypal-invoice",{},"POST",409);
+    assert.equal(rejectedInvoice.error.code,"ALREADY_PAID");
+  } finally {
+    await pool.query("update integration_providers set enabled=$1,lifecycle_state=$2 where provider_key='paypal_manual'",[paypal.enabled,paypal.lifecycle_state]);
+  }
   assert.equal((await c.fetch(path)).items.length,101);
   const {rows:[count]}=await pool.query("select count(*)::int n from payments where charge_item_id=$1",[chargeId]);
   assert.equal(count.n,0);
@@ -1377,6 +1387,7 @@ test("checkout withholds expired links and retains Stripe sessions for payment r
   const sessionPrototypes=new Set([Stripe,CommonJsStripe].map(StripeClient=>
     Object.getPrototypeOf(new StripeClient("sk_test_fixture").checkout.sessions)));
   const remote=new Map<string,{id:string;status:"open"|"complete"|"expired";url:string|null;metadata?:Record<string,string>;amount_total?:number;currency?:string;livemode?:boolean}>();
+  let duringRetrieve:(()=>Promise<void>)|undefined;
   let retrieved=0;
   async function waitForExpiry(quoteId:string) {
     await pool.query("select pg_sleep(greatest(0,extract(epoch from expires_at-clock_timestamp()))+.02) from inspection_quotes where id=$1",[quoteId]);
@@ -1393,6 +1404,7 @@ test("checkout withholds expired links and retains Stripe sessions for payment r
     t.mock.method(sessions,"retrieve",async(id:string)=>{
       retrieved++;
       assert(remote.has(id),"Look up only a session created for this fixture");
+      await duringRetrieve?.();
       return remote.get(id);
     });
     t.mock.method(sessions,"expire",async(id:string)=>{
@@ -1429,10 +1441,10 @@ test("checkout withholds expired links and retains Stripe sessions for payment r
   assert.deepEqual(await c.fetch(existing.checkoutPath,existing.body),{state:"processing",charge_item_id:existing.chargeId});
   assert.equal((await c.fetch(existing.path)).state,"awaiting_payment");
   const paymentIntent="pi_fixture_"+randomUUID();
-  async function sendEvent(type:string,paymentStatus:string) {
+  async function sendEvent(type:string,paymentStatus:string,sessionId=remoteId,fixture=existing,attemptId=first.attempt_id) {
     const payload=JSON.stringify({id:"evt_fixture_"+randomUUID(),object:"event",livemode:false,type,created:confirmedAt,
-      data:{object:{id:remoteId,payment_status:paymentStatus,amount_total:existing.quote.amount_cents,currency:"usd",
-        payment_intent:paymentIntent,metadata:{payment_id:first.attempt_id,charge_item_id:existing.chargeId,org_id:actor.org}}}});
+      data:{object:{id:sessionId,payment_status:paymentStatus,amount_total:fixture.quote.amount_cents,currency:"usd",
+        payment_intent:paymentIntent,metadata:{payment_id:attemptId,charge_item_id:fixture.chargeId,org_id:actor.org}}}});
     const webhook="/webhooks/stripe";
     const signature=Stripe.webhooks.generateTestHeaderString({payload,secret:"whsec_fixture"});
     const response=await handle(new Request(origin+"/api/v1"+webhook,{method:"POST",body:payload,headers:{"stripe-signature":signature}}),webhook);
@@ -1459,6 +1471,23 @@ test("checkout withholds expired links and retains Stripe sessions for payment r
   assert.equal(remote.size,2);
   await transaction(db=>expireCheckout(db,remote.get(attempts[0].provider_ref)!.metadata!.payment_id));
   assert.equal(remote.get(attempts[0].provider_ref)!.status,"expired");
+
+  process.env.QCW_DEMO="1";
+  const failed=await acceptedInspection(120);
+  process.env.QCW_DEMO="0";
+  const pending=await c.fetch(failed.checkoutPath,failed.body);
+  const pendingSession=[...remote.values()].find(s=>s.metadata?.payment_id===pending.attempt_id)!;
+  pendingSession.status="complete";
+  pendingSession.url=null;
+  duringRetrieve=()=>sendEvent("checkout.session.async_payment_failed","unpaid",pendingSession.id,failed,pending.attempt_id);
+  const raceKey=randomUUID();
+  const raced=await c.fetch(failed.checkoutPath,failed.body,"POST",409,raceKey);
+  duringRetrieve=undefined;
+  assert.equal(raced.error.code,"CHECKOUT_ATTEMPT_EXPIRED");
+  assert.equal((await pool.query("select state from payments where id=$1",[pending.attempt_id])).rows[0].state,"failed");
+  const retry=await c.fetch(failed.checkoutPath,failed.body,"POST",200,raceKey);
+  assert.notEqual(retry.attempt_id,pending.attempt_id);
+  assert.equal(retry.state,"requires_payment");
 });
 
 test("Google and Microsoft authorization requests use PKCE and reject mismatched or replayed callbacks",async t=>{
@@ -6080,12 +6109,26 @@ test("Week 29 & Week 30 rehearsal archiving, Hong Kong legal entity configuratio
   const initialReadiness=await admin.fetch("/staff/admin/launch-readiness");
   assert.equal(initialReadiness.gates.warehouse_address,false);
   assert.equal(initialReadiness.gates.legal_terms,false);
-  assert.equal(initialReadiness.gates.shipping_rates,true);
-  assert.equal(initialReadiness.gates.catalog_purity,true);
   assert.equal(initialReadiness.gates.legal_entity_configured,false);
   assert.equal(initialReadiness.gates.rehearsal_sets_completed,false);
   assert.equal(initialReadiness.effective_mode,"staging_only");
   assert.equal(typeof initialReadiness.in_flight_summary.in_flight_orders,"number");
+
+  const {rows:enabledOffers}=await pool.query("update service_offers set enabled=false where enabled returning id");
+  try {
+    assert.equal((await admin.fetch("/staff/admin/launch-readiness")).gates.catalog_purity,false);
+  } finally {
+    await pool.query("update service_offers set enabled=true where id=any($1::uuid[])",[enabledOffers.map(offer=>offer.id)]);
+  }
+  const {rows:[unauditedRate]}=await pool.query(`insert into shipping_rate_versions(id,version,rules,effective_at,published_by)
+    select $1,(select max(version)+1 from shipping_rate_versions),rules,now(),published_by
+    from shipping_rate_versions order by version desc limit 1 returning id,rules`,[randomUUID()]);
+  assert.equal((await admin.fetch("/staff/admin/launch-readiness")).gates.shipping_rates,false);
+  const publishedRate=await admin.fetch("/staff/admin/shipping-rates",unauditedRate.rules,"POST",201);
+  assert.equal((await admin.fetch("/staff/admin/launch-readiness")).gates.shipping_rates,true);
+  await pool.query("update shipping_rate_versions set effective_at=now()+interval '1 day' where id=$1",[publishedRate.id]);
+  assert.equal((await admin.fetch("/staff/admin/launch-readiness")).gates.shipping_rates,false);
+  await pool.query("update shipping_rate_versions set effective_at=now() where id=$1",[publishedRate.id]);
 
   // 2. Configure Hong Kong legal entity metadata (TASK-146 / Appendix C.12)
   const legalEntity=await admin.fetch("/staff/admin/legal-entity",{
@@ -6130,7 +6173,16 @@ test("Week 29 & Week 30 rehearsal archiving, Hong Kong legal entity configuratio
   assert.equal(updatedReadiness.gates.rehearsal_sets_completed,true);
   assert.equal(updatedReadiness.gates.recovery_drill_verified,true);
   assert.equal(updatedReadiness.rehearsal_coverage.completed_scenarios.length,5);
-  assert.ok(updatedReadiness.rehearsal_coverage.reverified_count>=1);
+  assert.equal(updatedReadiness.rehearsal_coverage.reverified_count,5);
+  const recordFirstScenario=(environment:"staging"|"real_warehouse",passed:boolean,reverified:boolean)=>
+    admin.fetch("/staff/admin/rehearsal-runs",{...scenarios[0],environment,passed,reverified},"POST",201);
+  await recordFirstScenario("real_warehouse",false,false);
+  await recordFirstScenario("staging",true,true);
+  assert.equal((await admin.fetch("/staff/admin/launch-readiness")).gates.rehearsal_sets_completed,false);
+  await recordFirstScenario("real_warehouse",true,false);
+  assert.equal((await admin.fetch("/staff/admin/launch-readiness")).gates.rehearsal_sets_completed,false);
+  await recordFirstScenario("real_warehouse",true,true);
+  assert.equal((await admin.fetch("/staff/admin/launch-readiness")).gates.rehearsal_sets_completed,true);
 
   // 5. TASK-150: Attempting to sign off target_mode="production" while external live provider gates are missing is blocked with 409 LAUNCH_GATES_INCOMPLETE ("缺一项即维持预发布")
   if(!updatedReadiness.all_gates_satisfied) {
@@ -6154,6 +6206,14 @@ test("Week 29 & Week 30 rehearsal archiving, Hong Kong legal entity configuratio
   assert.equal(stagingSignoff.effective_mode,"staging_only");
   assert.equal(stagingSignoff.signoff.rollback_contact,"ops-oncall@qcwarehouse.com (+852-5555-0199)");
   assert.equal(stagingSignoff.signoff.first_order_invite_enabled,true);
+  const previousSignoff={...stagingSignoff.signoff,target_mode:"production",effective_mode:"production"};
+  await pool.query("update app_config set value=$1 where key='launch.signoff'",[previousSignoff]);
+  try {
+    assert.equal((await admin.fetch("/staff/admin/launch-readiness")).effective_mode,"staging_only");
+    assert.equal((await admin.fetch("/staff/admin/desk")).effectiveLaunchMode,"staging_only");
+  } finally {
+    await pool.query("update app_config set value=$1 where key='launch.signoff'",[stagingSignoff.signoff]);
+  }
 });
 
 test("parcel post-linking, staff object quick-summary RBAC, item_code incident filing, super_admin/finance media permissions, and enriched customer/admin desks",async()=>{

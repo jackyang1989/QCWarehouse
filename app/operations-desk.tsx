@@ -186,8 +186,8 @@ const scenarioLabels:Record<string,string>={
 const gateLabels:Record<string,string>={
   warehouse_address:"唯一启用默认公共收件仓址",
   legal_terms:"4 类协议与须知均存在已发布生效版本",
-  shipping_rates:"正式运费版本已发布",
-  catalog_purity:"生产目录仅开放已准入 ACTIVE 品类",
+  shipping_rates:"当前生效运费版本已正式发布",
+  catalog_purity:"至少有一项正式可售服务，目录仅开放已准入品类",
   legal_entity_configured:"香港法律主体与客服邮箱已配置",
   recovery_drill_verified:"备份恢复与对账演练已验证",
   rehearsal_sets_completed:"5 组演练全部归档通过且完成复验",

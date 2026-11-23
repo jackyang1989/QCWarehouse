@@ -196,6 +196,7 @@ export async function requestPaypalManualInvoice(
     currency: string;
     voided_at: string | null;
     applied_payment_id: string | null;
+    free_authorization: object | null;
     inspection_quote_id: string | null;
     dispatch_quote_id: string | null;
     storage_quote_id: string | null;
@@ -207,7 +208,7 @@ export async function requestPaypalManualInvoice(
     disposition_id: string | null;
   }>(
     db,
-    `select c.id, c.org_id, c.purpose, c.amount_cents, c.currency, c.voided_at, c.applied_payment_id,
+    `select c.id, c.org_id, c.purpose, c.amount_cents, c.currency, c.voided_at, c.applied_payment_id, c.free_authorization,
             c.inspection_quote_id, c.dispatch_quote_id, c.storage_quote_id,
             iq.expires_at iq_expires_at, iq.order_id,
             dq.expires_at dq_expires_at, dq.batch_id,
@@ -223,7 +224,7 @@ export async function requestPaypalManualInvoice(
 
   guard(charge.org_id === org, "FORBIDDEN", "This charge item belongs to another workspace.", 403);
   guard(charge.voided_at === null, "CHARGE_VOIDED", "This charge has been voided.", 409);
-  guard(charge.applied_payment_id === null, "ALREADY_PAID", "This charge has already been settled.", 409);
+  guard(charge.applied_payment_id === null && charge.free_authorization === null, "ALREADY_PAID", "This charge has already been settled.", 409);
   guard(!(await db.query(`select 1 from payments p where p.charge_item_id=$1 and ${paymentAwaitingResolution}
     and (p.provider<>'paypal_manual' or p.state in ('succeeded','partially_refunded') or ${paypalCanceledReceiptAwaitingReview})`,[chargeItemId])).rowCount,
     "PAYMENT_PROCESSING","An existing payment must be resolved before starting a new payment attempt.",409);

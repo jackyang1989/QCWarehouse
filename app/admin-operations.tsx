@@ -194,9 +194,9 @@ export function AdminOverviewDashboard({
               含测试单全量 ({Number(m?.production_orders ?? 0) + Number(m?.test_orders ?? 0)})
             </button>
           </div>
-          <Tag tone={deskData?.effectiveLaunchMode === "production" ? "green" : "yellow"}>
-            {deskData?.effectiveLaunchMode === "production" ? "正式生产运行模式" : "预发布隔离模式 (staging_only)"}
-          </Tag>
+          {deskData&&<Tag tone={deskData.effectiveLaunchMode === "production" ? "green" : "yellow"}>
+            {deskData.effectiveLaunchMode === "production" ? "正式生产运行模式" : "预发布隔离模式 (staging_only)"}
+          </Tag>}
           <button type="button" className="button sm" onClick={reload}>刷新全景状态</button>
         </div>
       </div>

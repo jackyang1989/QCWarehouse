@@ -5,7 +5,7 @@ import { audit, code, event, guard, hash, lock, one, organization, revision, rol
 import { integrationPreflight, stripeSettingsFromDb } from "./integrations";
 import { demoTermsVersion, demoWarehouseAddressZh } from "./demo-fixtures";
 import { savePhoto } from "./intake";
-import { activatePaidOrder, orderItemReadiness, priceSchema, readyOrder, templateSchema } from "./orders";
+import { activatePaidOrder, catalog, orderItemReadiness, priceSchema, readyOrder, templateSchema } from "./orders";
 import { scopeSupplementState } from "./scope-payment";
 import { assertItemNotFrozen, assertZonePurpose, requestedReferenceDisposition, requireSpace } from "./storage";
 import { newQuoteValidity } from "./quote-policy";
@@ -1636,6 +1636,16 @@ export async function configureLegalEntity(
 
 export async function evaluateLaunchReadiness(db:DB,actor:Actor) {
   role(actor,"super_admin","warehouse_admin","support","finance");
+  return launchReadiness(db);
+}
+
+export async function effectiveLaunchMode(db:DB) {
+  const signoff=(await db.query<{mode:string}>("select value->>'target_mode' mode from app_config where key='launch.signoff'")).rows[0];
+  if(signoff?.mode!=="production")return "staging_only";
+  return (await launchReadiness(db)).effective_mode;
+}
+
+async function launchReadiness(db:DB) {
   const preflight=integrationPreflight(await stripeSettingsFromDb(db));
   const counts=await one<{
     default_address_count:number;
@@ -1654,13 +1664,16 @@ export async function evaluateLaunchReadiness(db:DB,actor:Actor) {
     `select
        (select count(*)::int from warehouse_addresses where active and is_default and address_zh<>$1) default_address_count,
        (select count(distinct kind)::int from terms_versions where effective_at<=now() and version<>$2) published_terms_kinds,
-       (select count(*)::int from shipping_rate_versions) shipping_rates_count,
+       (select count(*)::int from (
+         select id from shipping_rate_versions where effective_at<=now() order by version desc limit 1
+       ) effective_rate where exists(select 1 from audit_events a where a.entity_type='shipping_rate_versions'
+         and a.entity_id=effective_rate.id and a.action='publish_shipping_rate')) shipping_rates_count,
        (select count(*)::int from service_offers o
          join offer_templates ot on ot.offer_id=o.id
          join categories c on c.id=ot.category_id
          where o.enabled and c.status<>'ACTIVE') unadmitted_enabled_offers,
        (select count(*)::int from categories where status='ACTIVE') active_categories_count,
-       (select count(*)::int from recovery_runs where coalesce((reconciliation->>'verified')::boolean,true)=true) recovery_drills_count,
+       (select count(*)::int from recovery_runs where reconciliation->'verified'='true'::jsonb) recovery_drills_count,
        (select count(*)::int from orders where state not in ('draft','closed','cancelled')) in_flight_orders,
        (select count(*)::int from dispatch_batches where state not in ('draft','closed','cancelled')) in_flight_batches,
        (select count(*)::int from warehouse_items where custody_state in ('received','stored','packed')) stored_items,
@@ -1692,15 +1705,15 @@ export async function evaluateLaunchReadiness(db:DB,actor:Actor) {
     signed_by:string;
     signed_at:string;
   }|undefined)??null;
-  const passedScenarios=new Set(
-    rehearsalRuns.filter(r=>r.passed).map(r=>r.scenario)
-  );
-  const reverifiedRuns=rehearsalRuns.filter(r=>r.passed && r.reverified);
+  const latestRehearsals=REHEARSAL_SCENARIOS.map(scenario=>rehearsalRuns.find(run=>run.scenario===scenario&&
+    (scenario==="set_4_recovery_alerts"||run.environment==="real_warehouse")));
+  const passedScenarios=new Set(latestRehearsals.flatMap(run=>run?.passed?[run.scenario]:[]));
+  const reverifiedRuns=latestRehearsals.filter(run=>run?.passed&&run.reverified);
   const gates={
     warehouse_address:counts.default_address_count===1,
     legal_terms:counts.published_terms_kinds>=4,
     shipping_rates:counts.shipping_rates_count>=1,
-    catalog_purity:counts.active_categories_count>=1 && counts.unadmitted_enabled_offers===0,
+    catalog_purity:counts.active_categories_count>=1 && counts.unadmitted_enabled_offers===0 && (await catalog(db,false)).length>0,
     legal_entity_configured:Boolean(
       legalEntity?.entity_name &&
       legalEntity?.entity_address &&
@@ -1708,7 +1721,7 @@ export async function evaluateLaunchReadiness(db:DB,actor:Actor) {
       legalEntity?.support_email
     ),
     recovery_drill_verified:counts.recovery_drills_count>=1,
-    rehearsal_sets_completed:REHEARSAL_SCENARIOS.every(s=>passedScenarios.has(s)) && reverifiedRuns.length>=1,
+    rehearsal_sets_completed:reverifiedRuns.length===REHEARSAL_SCENARIOS.length,
     no_exhausted_jobs:counts.exhausted_jobs===0,
     oidc_configured:Boolean(preflight.google.configured && preflight.microsoft.configured),
     postmark_live:Boolean(preflight.postmark.enabled),

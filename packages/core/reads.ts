@@ -14,6 +14,7 @@ import { inspectionPaymentForOrder, isProviderDisputeClosed } from "./payments";
 import { quotePolicy } from "./quote-policy";
 import { itemInspectionStageSql } from "./inspection-stage";
 import { orderOperationNotes } from "./order-operation-notes";
+import { effectiveLaunchMode } from "./operations";
 
 const inventoryJoins=`from warehouse_items w
     left join order_line_item_links a on a.item_id=w.id and a.unlinked_at is null
@@ -1094,12 +1095,10 @@ export async function adminDesk(db:DB,actor:Actor) {
       and o.created_at < ((d.ts + interval '1 day') at time zone 'UTC')
     group by d.ts
     order by d.ts asc`)).rows:[];
-  const launchModeRow=(await db.query<{mode:string|null}>("select value->>'effective_mode' mode from app_config where key='launch.signoff'")).rows[0];
-  const effectiveLaunchMode=launchModeRow?.mode==="production"?"production":"staging_only";
   return {
     overviewMetrics,
     dailyTrend,
-    effectiveLaunchMode,
+    effectiveLaunchMode:await effectiveLaunchMode(db),
     orders:ops?(await db.query("select id,public_no,state,coalesce(is_test,false) is_test,sla_due_at,created_at from orders order by created_at desc limit 150")).rows:[],
     tickets:ops?(await db.query("select id,public_no,subject,category,state,next_action_at from tickets order by created_at desc limit 150")).rows:[],
     claims:ops?(await db.query(`select k.id,k.public_no,k.state,k.details->>'tracking_no' tracking_no,
