@@ -1,5 +1,5 @@
 import Stripe from "stripe";
-import { audit, event, guard, idempotent, lock, one, organization, role, uuid, type Actor, isDemo } from "./common";
+import { audit, event, guard, idempotent, lock, one, organization, role, uuid, type Actor, isDemo, paymentAwaitingResolution } from "./common";
 import { requireCustomerActive, requireStaffMfa } from "./auth";
 import { stripeCheckoutMode, stripeCheckoutReady, stripeSettingsFromDb, stripeSettlementCredentials } from "./integrations";
 import {
@@ -186,7 +186,7 @@ export async function requestPaypalManualInvoice(
   const provider = await one<ProviderRow>(db, "select * from integration_providers where provider_key='paypal_manual'");
   guard(provider.enabled && provider.lifecycle_state !== "disabled", "CHANNEL_DISABLED", "PayPal Manual Invoice is disabled.", 409);
 
-  await lock(db, "charge_paypal:" + chargeItemId);
+  await lock(db, "org:" + org);
 
   const charge = await one<{
     id: string;
@@ -224,6 +224,9 @@ export async function requestPaypalManualInvoice(
   guard(charge.org_id === org, "FORBIDDEN", "This charge item belongs to another workspace.", 403);
   guard(charge.voided_at === null, "CHARGE_VOIDED", "This charge has been voided.", 409);
   guard(charge.applied_payment_id === null, "ALREADY_PAID", "This charge has already been settled.", 409);
+  guard(!(await db.query(`select 1 from payments p where p.charge_item_id=$1 and ${paymentAwaitingResolution}
+    and (p.provider<>'paypal_manual' or p.state in ('succeeded','partially_refunded'))`,[chargeItemId])).rowCount,
+    "PAYMENT_PROCESSING","An existing payment must be resolved before starting a new payment attempt.",409);
 
   const expiresAt = charge.iq_expires_at ?? charge.dq_expires_at ?? charge.sq_expires_at;
   guard(!expiresAt || new Date(expiresAt).getTime() > Date.now(), "QUOTE_EXPIRED", "This quote has expired. Generate a fresh quote first.", 409);
@@ -259,7 +262,7 @@ export async function requestPaypalManualInvoice(
       `select id, state, manual_state, external_invoice_no, invoice_url, payer_email, amount_cents, currency
        from payments
        where charge_item_id = $1 and provider = 'paypal_manual'
-         and state not in ('canceled','failed')
+         and state in ('requires_payment','processing')
        order by created_at desc
        limit 1`,
       [chargeItemId],
@@ -361,6 +364,7 @@ export async function customerReportPaypalPaid(
 ) {
   await requireCustomerActive(db, actor);
   const org = organization(actor);
+  await lock(db,"org:"+org);
   const p = await one<{
     id: string;
     org_id: string;
@@ -379,7 +383,9 @@ export async function customerReportPaypalPaid(
   );
   guard(p.org_id === org, "FORBIDDEN", "This payment belongs to another workspace.", 403);
   guard(p.provider === "paypal_manual", "INVALID_PROVIDER", "Self-reported transfer applies only to PayPal Manual Invoice.", 400);
-  guard(p.state !== "succeeded" && p.state !== "canceled", "PAYMENT_FINALIZED", "This payment can no longer be modified.", 409);
+  guard(["requires_payment","processing"].includes(p.state), "PAYMENT_FINALIZED", "This payment can no longer be modified.", 409);
+  guard(input.transaction_ref?.trim()||input.evidence_media_id,
+    "PAYPAL_EVIDENCE_REQUIRED","Enter the PayPal transaction ID or attach your transfer receipt.",422);
 
   if (input.evidence_media_id) {
     const asset = await one<{ org_id: string | null; kind: string; status: string }>(
@@ -694,7 +700,7 @@ export async function verifyPaypalManualPayment(
            state = 'requires_payment',
            manual_state = 'rejected',
            manual_notes = coalesce($2, manual_notes),
-           provider_data = $3::jsonb - 'paypal_received_at',
+           provider_data = $3::jsonb - 'paypal_received_at' - 'customer_reported_paid_at',
            updated_at = now()
        where id = $1`,
       [paymentId, input.note?.trim() || null, JSON.stringify(nextData)],
@@ -781,6 +787,7 @@ export async function verifyPaypalManualPayment(
       verified_by: actor.id,
     },
     Math.floor(receivedAt / 1000),
+    new Date(receivedAt),
   );
 
   const result=await application();
@@ -822,6 +829,7 @@ export async function cancelPaypalManualInvoice(
   );
   guard(p.provider === "paypal_manual", "INVALID_PROVIDER", "Cancel applies only to paypal_manual payments.", 400);
   guard(!["succeeded", "partially_refunded", "refunded"].includes(p.state), "CANNOT_CANCEL_SETTLED", "Cannot cancel an already verified/settled payment.", 409);
+  guard(!p.external_transaction_id,"MANUAL_RECEIPT_PENDING","Resolve the recorded receipt before cancelling its invoice.",409);
 
   const nextData = {
     ...(p.provider_data ?? {}),

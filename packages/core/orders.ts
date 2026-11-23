@@ -1,8 +1,8 @@
 import { z } from "zod";
 import type { DB } from "../db";
 import { currentTerms, requireCustomerActive, requireTerms } from "./auth";
-import { audit, code, event, guard, isDemo, lock, one, orderCode, organization, revision, role, uuid, type Actor } from "./common";
-import { orderInboundRegistration, orderQuotes, orderShipments } from "./fulfillment-reads";
+import { audit, code, event, guard, isDemo, lock, one, orderCode, organization, revision, role, unresolvedQuotePayment, uuid, type Actor } from "./common";
+import { inboundParcelOrders, inboundShortageConfirmed, orderAttributedParcelItems, orderInboundRegistration, orderQuotes, orderShipments } from "./fulfillment-reads";
 import { scopeSupplementForOrder } from "./scope-payment";
 import { itemHandlingHoldSql } from "./storage";
 import { newQuoteValidity } from "./quote-policy";
@@ -275,9 +275,7 @@ export const expiredManualInspectionPaymentSql=`o.state='awaiting_payment' and e
   where q.order_id=o.id and q.id::text=o.submission_snapshot->>'quote_id'
     and q.terms_snapshot ? 'manual_request_id' and q.accepted_at is not null and q.expires_at<=now()
     and c.scope_revision_id is null and c.voided_at is null and c.applied_payment_id is null and c.free_authorization is null
-) and not exists(
-  select 1 from inspection_quotes q join charge_items c on c.inspection_quote_id=q.id and c.org_id=o.org_id
-  join payments p on p.charge_item_id=c.id where q.order_id=o.id and p.state='processing'
+    and not ${unresolvedQuotePayment}
 )`;
 export const eligibleManualQuoteOrderSql=`(o.state='draft' or (${expiredManualInspectionPaymentSql}))`;
 
@@ -354,8 +352,8 @@ export async function submitOrder(db:DB,actor:Actor,id:string,input:{revision:nu
     current.every((l,i)=>q.line_snapshot[i]?.price_version===l.price_version && (manualId || q.line_snapshot[i]?.amount_cents===l.amount_cents)) &&
     current.length===q.line_snapshot.length,
     "QUOTE_STALE","Request a new quote before paying.");
-  const existing=(await db.query(`select p.id from payments p join charge_items c on c.id=p.charge_item_id
-    join inspection_quotes q on q.id=c.inspection_quote_id where q.order_id=$1 and p.state='processing'`,[id])).rowCount;
+  const existing=(await db.query(`select c.id from charge_items c join inspection_quotes q on q.id=c.inspection_quote_id
+    where q.order_id=$1 and c.org_id=$2 and c.voided_at is null and ${unresolvedQuotePayment}`,[id,order.org_id])).rowCount;
   guard(!existing,"PAYMENT_PROCESSING","Wait for the existing payment to resolve.");
   await db.query(`update charge_items c set voided_at=now() from inspection_quotes q
     where q.id=c.inspection_quote_id and q.order_id=$1 and c.applied_payment_id is null and c.voided_at is null`,[id]);
@@ -555,6 +553,8 @@ export function summarizeExpectedLines(
     identified_item_count?:number|null;
     damaged_item_count?:number|null;
     item_codes?:string[]|null;
+    shared_parcel?:boolean;
+    shortage_confirmed?:boolean;
   }[]=[]
 ) {
   const breakdown:ExpectedLineBreakdown[]=[];
@@ -774,6 +774,8 @@ export function summarizeExpectedLines(
   const allExpectedParcelsCheckedIn=checkedInParcels.length>0
     && checkedInParcels.length===parcelRows.length
     && (plannedParcels.length===0 || checkedInParcels.length>=plannedParcels.length);
+  const allExpectedParcelsCounted=allExpectedParcelsCheckedIn&&checkedInParcels.every(p=>
+    p.shortage_confirmed||Number(p.logged_item_count??p.received_quantity??0)>0);
 
   const parcelReconciliation:ParcelReconciliationRow[]=parcelRows.map(p=>{
     const tn=normTrack(p.tracking_norm);
@@ -788,10 +790,10 @@ export function summarizeExpectedLines(
     const unidentifiedCount=Math.max(0,loggedCount-identifiedCount);
     const damagedCount=Number(p.damaged_item_count??0)||0;
     const checkedIn=Boolean(p.warehouse_state);
-    const shortQty=checkedIn && declaredQty>0?Math.max(0,declaredQty-loggedCount):0;
+    const shortQty=checkedIn && (p.shortage_confirmed||loggedCount>0&&!p.shared_parcel)&&declaredQty>0?Math.max(0,declaredQty-loggedCount):0;
     const extraQty=checkedIn && declaredQty>0?Math.max(0,loggedCount-declaredQty):0;
-    const unverifiedShortQty=unidentifiedCount>0?shortQty:0;
-    const confirmedShortQty=unidentifiedCount===0?shortQty:0;
+    const confirmedShortQty=p.shortage_confirmed&&unidentifiedCount===0?shortQty:0;
+    const unverifiedShortQty=shortQty-confirmedShortQty;
     return {
       advice_id:p.id,
       tracking_norm:p.tracking_norm,
@@ -819,8 +821,8 @@ export function summarizeExpectedLines(
   // Never attribute per-SKU Missing to in-transit parcels or while physically logged units are awaiting SKU identification
   for(const row of breakdown) {
     const rowCheckedIn=row.tracking_no
-      ?checkedInParcels.some(p=>normTrack(p.tracking_norm)===row.tracking_no)
-      :(allExpectedParcelsCheckedIn || (parcelRows.length===1 && checkedInParcels.length===1));
+      ?checkedInParcels.some(p=>p.shortage_confirmed&&normTrack(p.tracking_norm)===row.tracking_no)
+      :parcelRows.length===1&&parcelRows.some(p=>p.shortage_confirmed);
     if(!rowCheckedIn) {
       row.unidentified_pending_qty=0;
       row.missing_qty=0;
@@ -841,31 +843,28 @@ export function summarizeExpectedLines(
   }
 
   const parcelDeclaredSum=parcelReconciliation.reduce((s,pr)=>s+pr.declared_qty,0);
-  const canUseOrderTotalShort=allExpectedParcelsCheckedIn && (plannedParcels.length===0 || parcelDeclaredSum>=expectedUnitsTotal);
+  const canUseOrderTotalShort=allExpectedParcelsCounted&&!parcelRows.some(p=>p.shared_parcel)
+    && (plannedParcels.length===0 || parcelDeclaredSum>=expectedUnitsTotal);
   const shortUnitsTotal=canUseOrderTotalShort
     ?Math.max(0,expectedUnitsTotal-loggedUnitsTotal)
     :parcelReconciliation.reduce((s,pr)=>s+pr.short_qty,0);
-  const extraUnitsTotal=allExpectedParcelsCheckedIn
+  const extraUnitsTotal=allExpectedParcelsCounted
     ?Math.max(0,loggedUnitsTotal-expectedUnitsTotal)
     :parcelReconciliation.reduce((s,pr)=>s+pr.extra_qty,0);
-  const unarrivedUnitsTotal=allExpectedParcelsCheckedIn
+  const unarrivedUnitsTotal=canUseOrderTotalShort
     ?0
     :Math.max(0,expectedUnitsTotal-loggedUnitsTotal-shortUnitsTotal);
-  const unverifiedShortUnitsTotal=shortUnitsTotal>0 && (unidentifiedUnitsTotal>0 || !allExpectedParcelsCheckedIn)
-    ?shortUnitsTotal
-    :0;
-  const confirmedShortUnitsTotal=shortUnitsTotal>0 && allExpectedParcelsCheckedIn && unidentifiedUnitsTotal===0
-    ?shortUnitsTotal
-    :0;
+  const confirmedShortUnitsTotal=Math.min(shortUnitsTotal,parcelReconciliation.reduce((s,p)=>s+p.confirmed_short_qty,0));
+  const unverifiedShortUnitsTotal=shortUnitsTotal-confirmedShortUnitsTotal;
   const reconciliationStatus=checkedInParcels.length===0
     ?"awaiting_arrival"
     :confirmedShortUnitsTotal>0
       ?"confirmed_shortage"
       :(unverifiedShortUnitsTotal>0 || extraUnitsTotal>0 || damagedUnitsTotal>0 || mismatchUnitsTotal>0)
         ?"discrepancy_under_review"
-        :unidentifiedUnitsTotal>0
+        :unidentifiedUnitsTotal>0||allExpectedParcelsCheckedIn&&!allExpectedParcelsCounted
           ?"received_pending_identification"
-          :!allExpectedParcelsCheckedIn
+          :!allExpectedParcelsCheckedIn||unarrivedUnitsTotal>0
             ?"awaiting_arrival"
             :"matched";
   const hasIntakeDiscrepancy=checkedInParcels.length>0 && (
@@ -941,13 +940,12 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
     t.transport_state,t.sync_state,p.id package_id,p.code package_code,p.state warehouse_state,p.received_quantity,
     p.received_at,
     substring(p.condition_note from '^\\[outer:(intact|crushed|torn|wet)\\]') outer_condition,
-    (select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null) logged_item_count,
-    (select count(*)::int from warehouse_items wi join order_line_item_links olil on olil.item_id=wi.id and olil.unlinked_at is null
-      join order_lines ol on ol.id=olil.order_line_id where wi.package_id=p.id and wi.parent_item_id is null and ol.order_id=$1) identified_item_count,
-    (select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null and wi.condition_state not in ('good','unchecked')) damaged_item_count,
-    (select coalesce(array_agg(wi.code order by wi.code),array[]::text[]) from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null) item_codes
+    attributed.logged logged_item_count,attributed.identified identified_item_count,
+    attributed.damaged damaged_item_count,attributed.item_codes,${inboundParcelOrders}>1 shared_parcel,
+    ${inboundShortageConfirmed} shortage_confirmed
     from advice_orders ao join tracking_records t on t.advice_id=ao.advice_id and t.org_id=ao.org_id and t.closed_at is null
     left join packages p on p.id=t.package_id and p.org_id=ao.org_id
+    ${orderAttributedParcelItems}
     left join carriers c on c.code=t.carrier_code
     where ao.order_id=$1 and ao.org_id=$2 order by t.tracking_norm`,[id,order.org_id])).rows;
   const cases=(await db.query(`select id,public_no,subject,state from tickets

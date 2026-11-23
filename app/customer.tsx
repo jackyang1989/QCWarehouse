@@ -10,7 +10,7 @@ import { ApparelIllustration } from "./report-guide";
 import { CategoryTiles, matchShowcaseCategoryOffer, SHOWCASE_CATEGORIES } from "./category-coverage";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { CustomerMultiChannelPaymentPanel } from "./customer-payments";
+import { CustomerMultiChannelPaymentPanel, paypalInvoiceStatus } from "./customer-payments";
 import { upload } from "./ui";
 import {
   deriveExpectedLinesFromServerLine, draftRecoveryKey, expandExpectedLinesToDraftItems, missingLineFields,
@@ -21,7 +21,7 @@ import {
 } from "./draft-recovery";
 import { conditionMatches } from "../packages/core/template-conditions";
 import { sumMeasurements } from "../packages/core/measurement-decimals";
-import { billingChargePath, billingQuotePath, customerDestination, inspectionScopePath, legalPages, orderSections, type OrderSection, servicePages } from "../packages/core/portal-routes";
+import { billingChargePath, billingQuotePath, customerDestination, inspectionScopePath, legalPages, orderSections, type OrderSection, sampleCodePattern, servicePages } from "../packages/core/portal-routes";
 import { Action, checked, CodeButton, Empty, ErrorBlock, Field, FileInput, Form, MediaLightbox, ModalDrawer, Panel, Photo, QuoteCountdown, request, RequestError, Select, useWorkspaceStamp, Table, Tabs, Tag, text, useLoad, usd, type Row } from "./ui";
 
 const acknowledged={scope_notice:"I understand which checks are included.",samples_not_batch:"These samples do not represent an entire production batch.",seller_refund_is_mine:"I handle any refund request directly with my seller.",no_certification:"The report is an inspection record and does not provide certification.",restricted_items:"My items comply with the restricted items policy."};
@@ -5585,7 +5585,7 @@ export function ReportView({number,version}:{number:string;version?:number}) {
       </Panel>
       {id&&<ReportShares key={report.version} orderId={id} version={report.version}/>}
       {report.snapshot.sections.map((s:Row)=><Panel key={s.task_id} title={s.title}>
-        <div className="actions">{[...new Set<string>((s.results??[]).map((result:Row)=>result.item).filter((code:string)=>/^S(?:\d{5,8}|-[A-Z0-9])/i.test(code??"")))]
+        <div className="actions">{[...new Set<string>((s.results??[]).map((result:Row)=>result.item).filter((code:string)=>sampleCodePattern.test(code??"")))]
           .map(code=><Link className="code-btn" key={code} href={"/items?item="+encodeURIComponent(code)}>{code}</Link>)}</div>
         {s.summary&&<p className="muted small">Expected items: {s.summary.expected_count} · Inspected: {s.summary.checked_count} · Observed issues: {s.summary.issue_count}</p>}
         <ReportSection section={s} results={s.results} grouped={["compare","reference_match"].includes(s.service)} showPhoto={showPhoto}/>
@@ -5983,12 +5983,11 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     return "/account/billing"+(params.size?"?"+params:"")+"#"+(section==="charge"?"billing-charges":"billing-refunds");
   }
   const focusedQuote=useLoad(requestedQuote?"/quotes/"+encodeURIComponent(requestedQuote):null);
-  const billingChannels=useLoad(isBills?"/me/payment-channels":null);
-  const billingPaypalAvailable=Boolean((billingChannels.data?.channels??[]).find((c:Row)=>c.provider_key==="paypal_manual")?.available);
   const {data,error,reload}=useLoad("/me/desk?include_items=0"+(path==="/account"?"":"&include_activity=0")+
     (isBills?"&"+new URLSearchParams({charge_page:String(chargePage),refund_page:String(refundPage)}):"")+
     (requestedCharge?"&charge="+encodeURIComponent(requestedCharge):"")),carriers=useLoad("/carriers");
-  const focusedChargeAvailable=Boolean(requestedCharge&&data?.bills.some((bill:Row)=>bill.charge_item_id===requestedCharge));
+  const focusedCharge=requestedCharge?data?.bills.find((bill:Row)=>bill.charge_item_id===requestedCharge):undefined;
+  const focusedChargeAvailable=Boolean(focusedCharge);
   const focusedQuoteAvailable=Boolean(data&&requestedQuote&&focusedQuote.data?.id===requestedQuote);
   const homeActions=useLoad(path==="/account"?"/actions":null);
   const [next,setNext]=useState<string|null>(null);
@@ -6027,7 +6026,9 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
     return ()=>window.removeEventListener("hashchange",readHash);
   },[isBills]);
   useEffect(()=>{
-    if(focusedChargeAvailable&&!["#billing-charges","#billing-refunds"].includes(location.hash))
+    if(focusedChargeAvailable&&location.hash==="#billing-payment")
+      document.getElementById("billing-payment")?.focus();
+    else if(focusedChargeAvailable&&!["#billing-charges","#billing-refunds"].includes(location.hash))
       document.getElementById("charge-"+requestedCharge)?.focus();
   },[focusedChargeAvailable,requestedCharge]);
   useEffect(()=>{
@@ -6525,7 +6526,15 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         <Link className="button" href={"/orders/"+quote.order_number+"#inspection-quote"}>Review inspection quote</Link>
       </div>)}
       {!otherQuotes.length&&!data.inspectionQuotes.length&&<Empty>{focusedQuote.data?.state==="open"?"No other quotes to approve.":"No new quotes."}</Empty>}
-    </Panel><div id="billing-charges" className="billing-charge-anchor"><Panel title="Payments & charges" subtitle="Inspection, shipping and storage charges. Payment is confirmed only after server-side verification.">
+    </Panel>
+    {focusedCharge&&["open","processing"].includes(focusedCharge.state)&&<div id="billing-payment" className="billing-charge-anchor" tabIndex={-1}><Panel title={`${label(focusedCharge.purpose)} payment`}>
+      <p className="small">Quote expires {stamp(focusedCharge.expires_at)}.</p>
+      <CustomerMultiChannelPaymentPanel key={focusedCharge.charge_item_id} chargeId={focusedCharge.charge_item_id}
+        quoteRevision={focusedCharge.quote_revision} amountCents={focusedCharge.amount_cents} demo={demo} onUpdated={reload}
+        paymentLocked={focusedCharge.state==="processing"||Date.parse(focusedCharge.expires_at)<=Date.now()}
+        onStripePay={(id,revision)=>goCheckout(id,revision,billingPaymentHref(id))}/>
+    </Panel></div>}
+    <div id="billing-charges" className="billing-charge-anchor"><Panel title="Payments & charges" subtitle="Inspection, shipping and storage charges. Payment is confirmed only after server-side verification.">
       {requestedCharge&&chargePage===1&&!focusedChargeAvailable&&<p role="status">This charge is unavailable.</p>}
       <Table headers={["Purpose","Order / Batch","Amount","Refunded","Status","Date","Details",""]} rows={data.bills.map((b:Row)=>{
         const quoteExpired=b.state==="open"&&b.expires_at&&Date.parse(b.expires_at)<=Date.now();
@@ -6545,7 +6554,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
             {(b.pending_refund_cents??0)>0&&<Tag tone="yellow">Pending approval: {usd(b.pending_refund_cents)}</Tag>}
           </div>,
           <Tag tone={shownState==="paid"?"green":shownState==="open"?"yellow":["void","expired"].includes(shownState)?"gray":"blue"}>{
-            b.refunded_cents>0?(b.refunded_cents>=b.amount_cents?"Refunded":"Partially refunded"):
+            b.refunded_cents>0?(b.refunded_cents>=(b.gross_paid_cents||b.amount_cents)?"Refunded":"Partially refunded"):
               isFreeAuth&&shownState==="paid"?"Free auth confirmed":
               /^(demo_|cs_test_)/.test(b.paid_ref??"")?(b.paid_ref?.startsWith("demo_")?"Demo checkout confirmed":"Stripe test confirmed"):
                 shownState==="processing"&&["succeeded","partially_refunded","refunded"].includes(b.latest_attempt_state)?"Payment received · under review":label(shownState)
@@ -6558,20 +6567,21 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
             b.paid_ref?.startsWith("demo_")?<Tag tone="yellow">Demo checkout</Tag>:
             b.paid_ref?<span className="code mono-wrap">{b.paid_ref}</span>:
             b.latest_attempt_provider==="paypal_manual"?<div className="cell-stack">
-              <Tag tone="blue">PayPal {b.latest_manual_state??b.latest_attempt_state}</Tag>
+              <Tag tone="blue">{b.latest_customer_reported_at&&b.latest_attempt_state==="requires_payment"?"PayPal transfer under review":
+                "PayPal · "+paypalInvoiceStatus(b.latest_manual_state??b.latest_attempt_state)}</Tag>
               {b.latest_external_invoice_no&&<small className="code mono-wrap">Inv: {b.latest_external_invoice_no}</small>}
             </div>:
             b.latest_attempt_state?label(b.latest_attempt_state):isDemoCharge&&shownState==="open"?<Tag tone="yellow">Demo checkout</Tag>:"—",
-          b.scope_revision_id&&b.order_numbers?.[0]?<Link href={inspectionScopePath(b.order_numbers[0],b.scope_revision_id)}>Review scope charge</Link>:
+          b.latest_attempt_provider==="paypal_manual"&&["requires_payment","processing","succeeded","partially_refunded"].includes(b.latest_attempt_state)
+            &&["open","processing","expired"].includes(shownState)
+            ?<Link href={billingPaymentHref(b.charge_item_id)}>View PayPal invoice</Link>:
           inspectionPaymentHref&&inspectionPaymentLabel?<Link href={inspectionPaymentHref}>{inspectionPaymentLabel}</Link>:
           quoteExpired
             ?(b.unresolved_payment?<span>Payment confirmation pending</span>:
               b.purpose==="dispatch"&&b.batch_id?<CodeButton code="Review dispatch batch" onClick={()=>setBatchTarget(b.batch_id)}/>:
               b.purpose==="storage"&&b.storage_item_code?<Link href={"/items?item="+encodeURIComponent(b.storage_item_code)}>Review stored item</Link>:<span>Quote expired</span>)
-            :shownState==="open"?<div className="actions" style={{gap:6,flexWrap:"wrap"}}>
-              <Action run={()=>goCheckout(b.charge_item_id,b.quote_revision)}>{demo?"Demo pay":"Pay (Stripe)"}</Action>
-              {billingPaypalAvailable&&b.latest_attempt_provider!=="paypal_manual"&&<Action sm run={async()=>{await request("/charges/"+b.charge_item_id+"/paypal-invoice","POST",{});reload();}}>PayPal Invoice</Action>}
-            </div>:b.latest_attempt_provider==="paypal_manual"&&b.order_numbers?.[0]?<Link href={"/orders/"+b.order_numbers[0]+"/payment"}>Track PayPal Invoice</Link>:null
+            :shownState==="open"?<Link href={billingPaymentHref(b.charge_item_id)}>Payment options</Link>:
+            b.scope_revision_id&&b.order_numbers?.[0]?<Link href={inspectionScopePath(b.order_numbers[0],b.scope_revision_id)}>Review scope charge</Link>:null
         ];
       })} empty="No charges yet."/>
       {(chargePage>1||data.has_more_charges)&&<nav className="actions" aria-label="Charge pages">
@@ -6845,6 +6855,10 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
   </>;
 }
 
+function billingPaymentHref(id:string) {
+  return "/account/billing?charge="+encodeURIComponent(id)+"#billing-payment";
+}
+
 function FulfillmentQuote({quote,onUpdate,onOpenBatch,focused=false}:{quote:Row;onUpdate?:()=>void;onOpenBatch?:(batchId:string)=>void;focused?:boolean}) {
   const stamp=useWorkspaceStamp();
   const [expiredId,setExpiredId]=useState<string>();
@@ -6879,10 +6893,12 @@ function FulfillmentQuote({quote,onUpdate,onOpenBatch,focused=false}:{quote:Row;
     </>:<p>{snapshot.days} additional days · <span className="code">{Object.values(quote.item_codes).join(", ")}</span></p>}
     {state==="open"&&<Action primary run={async()=>{
       const charge=await request("/quotes/"+quote.id+"/accept","POST",{revision:quote.revision});
-      try {await goCheckout(charge.charge_item_id,quote.revision);} finally {onUpdate?.();}
-    }}>Accept and pay</Action>}
-    {state==="accepted"&&quote.charge_id&&<Action primary run={()=>goCheckout(quote.charge_id,quote.revision)}>Resume payment</Action>}
-    {state==="processing"&&<p role="status">Awaiting payment confirmation.</p>}
+      onUpdate?.();
+      location.assign(billingPaymentHref(charge.charge_item_id));
+    }}>Accept and choose payment</Action>}
+    {(state==="accepted"||state==="processing")&&quote.charge_id&&<Link className="button" href={billingPaymentHref(quote.charge_id)}>
+      {state==="accepted"?"Payment options":"Track payment confirmation"}
+    </Link>}
     {state==="paid"&&<Tag>Payment confirmed</Tag>}
     {state==="expired"&&<p className="notice">This quote has expired. Check <Link href="/account/billing">Billing</Link> for a new quote from the warehouse.</p>}
     {state==="inactive"&&<Empty>This quote is closed. Check <Link href="/account/billing">Billing</Link> for current quotes.</Empty>}

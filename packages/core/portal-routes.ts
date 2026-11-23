@@ -1,5 +1,7 @@
 import { hasStaffAccess, staffAccess } from "./staff-access";
 
+const sampleCodeBody="(?:S[A-Z0-9]{5,8}|S-[A-Z0-9-]{1,64}|DSP-?[A-Z0-9-]{1,64})";
+export const sampleCodePattern=new RegExp("^"+sampleCodeBody+"$","i");
 export const customerTabs:[string,string][]=[
   ["/account","Account"],["/orders","Orders"],["/orders/new","New Inspection"],["/parcels","Parcels"],["/items","Items"],
   ["/reports","Reports"],["/account/billing","Billing"],["/support","Support"],
@@ -158,7 +160,7 @@ const details:{pattern:RegExp;area:Area;view:DetailView}[]=[
   {pattern:new RegExp("^/wh/dispatch/"+uuid+"$"),area:"warehouse",view:"dispatch-batch"},
   {pattern:new RegExp("^/wh/review/"+uuid+"$"),area:"warehouse",view:"staff-report"},
   {pattern:/^\/wh\/packages\/(P(?:\d{5,8}|-[A-Z0-9-]{1,64}))$/,area:"warehouse",view:"warehouse-package"},
-  {pattern:/^\/wh\/samples\/((?:S\d{5,8}|S-[A-Za-z0-9-]{1,64}|DSP-?[A-Za-z0-9-]{1,64}))$/,area:"warehouse",view:"warehouse-item"},
+  {pattern:new RegExp("^/wh/samples/("+sampleCodeBody+")$","i"),area:"warehouse",view:"warehouse-item"},
   {pattern:new RegExp("^/checkout/demo/"+uuid+"$"),area:"customer",view:"demo"},
 ];
 

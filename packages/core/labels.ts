@@ -3,8 +3,9 @@ import sharp from "sharp";
 import { z } from "zod";
 import type { DB } from "../db";
 import { appOrigin } from "./auth";
-import { audit, extractReceivingCode, guard, one, resolveReceivingProfile, role, uuid, type Actor } from "./common";
+import { audit, extractReceivingCode, guard, one, resolveReceivingProfile, resolveSampleCode, role, uuid, type Actor } from "./common";
 import { lookup, waybill } from "./intake";
+import { sampleCodePattern } from "./portal-routes";
 
 export const labelSizeEnum = z.enum(["standard_80x50", "compact_50x30", "shelf_100x60"]);
 export type LabelSize = z.infer<typeof labelSizeEnum>;
@@ -908,7 +909,8 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
     };
   }
 
-  if (/^(?:S\d{5,8}|S-[A-Za-z0-9-]{3,64}|DSP-?[A-Za-z0-9-]{3,64})$/i.test(code)) {
+  const sample=sampleCodePattern.test(code)?await resolveSampleCode(db,code):undefined;
+  if (sample) {
     const item = (
       await db.query<{
         id: string;
@@ -947,8 +949,8 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
            where assignment_id = a.id and state <> 'VOID'
            order by id limit 1
          ) it on true
-         where replace(upper(w.code),'-','') = replace(upper($1),'-','')`,
-        [code]
+         where w.id=$1`,
+        [sample.id]
       )
     ).rows[0];
     guard(item, "NOT_FOUND", "Warehouse item code not found.", 404);
@@ -1439,8 +1441,9 @@ async function verifySingleReadback(db: DB, actor: Actor, expected: string) {
     await audit(db, actor, "verify_label_readback", "packages", pkg.id, { code: pkg.code });
     return { target_type: "package" as const, target_id: pkg.id, code: pkg.code };
   }
-  if (/^(?:S\d{5,8}|S-[A-Z0-9-]{3,64}|DSP-?[A-Z0-9-]{3,64})$/i.test(expected)) {
-    const item = await one<{ id: string; code: string }>(db, "select id, code from warehouse_items where replace(upper(code),'-','')=replace(upper($1),'-','')", [expected]);
+  if (sampleCodePattern.test(expected)) {
+    const item=await resolveSampleCode(db,expected);
+    guard(item,"NOT_FOUND","Warehouse item code not found.",404);
     await audit(db, actor, "verify_label_readback", "warehouse_items", item.id, { code: item.code });
     return { target_type: "item" as const, target_id: item.id, code: item.code };
   }

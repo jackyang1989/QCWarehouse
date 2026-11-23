@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { billingChargePath, billingQuotePath } from "../packages/core/portal-routes";
@@ -67,35 +66,29 @@ export function RecentUpdates({notices,onRead}:{notices:Row[];onRead:()=>void}) 
     <Link href="/account/notifications">View all notifications →</Link>
   </Panel>;
 }
-function noticeMatchesCategory(notice:Row,cat:"all"|"orders"|"reports"|"parcels"|"billing"|"support") {
-  if(cat==="all") return true;
-  const t=String(notice.template??"");
-  if(cat==="orders") return t.startsWith("order.");
-  if(cat==="reports") return t.startsWith("report.");
-  if(cat==="parcels") return t.startsWith("package.")||t.startsWith("shipment.")||t.startsWith("tracking.")||t==="reference.sealed";
-  if(cat==="billing") return t.startsWith("payment.")||t.endsWith(".quoted")||t==="quote.offered";
-  if(cat==="support") return t.startsWith("ticket.")||t.startsWith("incident.")||t==="email.delivery_failed"||t==="account.registered";
-  return true;
-}
 export function NotificationInbox() {
   const search=useSearchParams(),params=new URLSearchParams();
-  const [cat,setCat]=useState<"all"|"orders"|"reports"|"parcels"|"billing"|"support">("all");
+  const cat=search.get("category")??"all";
   const unread=search.get("unread")==="1",before=search.get("before");
   if(unread)params.set("unread","1");
+  if(cat!=="all")params.set("category",cat);
   if(before)params.set("before",before);
   const {data,error,reload}=useLoad("/me/notifications"+(params.size?"?"+params:""));
-  const first=unread?"/account/notifications?unread=1":"/account/notifications";
+  function firstPage(category:string,onlyUnread:boolean) {
+    const first=new URLSearchParams();
+    if(category!=="all")first.set("category",category);
+    if(onlyUnread)first.set("unread","1");
+    return "/account/notifications"+(first.size?"?"+first:"");
+  }
   const next=new URLSearchParams(params);
   if(data?.next_before)next.set("before",data.next_before);
-  const allRows:Row[]=data?.rows??[];
-  const visibleRows=allRows.filter(n=>noticeMatchesCategory(n,cat));
   return <>
     <div className="page-head"><Link href="/account">← Account</Link>
       <h1>Notifications</h1><p className="muted">Find updates about reports, payments, parcels, and support cases.</p></div>
     <Panel title={unread?"Unread updates":"All updates"}>
       <div className="actions" style={{flexWrap:"wrap"}}>
-        <Link className="button sm" href="/account/notifications" aria-current={!unread?"page":undefined}>All</Link>
-        <Link className="button sm" href="/account/notifications?unread=1" aria-current={unread?"page":undefined}>Unread{data?` (${data.unread_count})`:""}</Link>
+        <Link className="button sm" href={firstPage(cat,false)} aria-current={!unread?"page":undefined}>All</Link>
+        <Link className="button sm" href={firstPage(cat,true)} aria-current={unread?"page":undefined}>Unread{data?` (${data.unread_count})`:""}</Link>
         {(data?.unread_count??0)>0&&<Action sm primary run={async()=>{await request("/me/notifications/read-all","POST",{});reload();}}>Mark all read</Action>}
         <button className="button sm" type="button" onClick={reload}>Refresh</button>
       </div>
@@ -107,15 +100,13 @@ export function NotificationInbox() {
           ["parcels","Parcels & Tracking"],
           ["billing","Billing & Quotes"],
           ["support","Support & Account"],
-        ] as const).map(([cid,clabel])=>{
-          const count=allRows.filter(n=>noticeMatchesCategory(n,cid)).length;
-          return <button key={cid} type="button" className={"button sm"+(cat===cid?" primary":"")} onClick={()=>setCat(cid)}>{clabel}{data?` (${count})`:""}</button>;
-        })}
+        ] as const).map(([cid,clabel])=><Link key={cid} href={firstPage(cid,unread)} aria-current={cat===cid?"page":undefined}
+          className={"button sm"+(cat===cid?" primary":"")}>{clabel}</Link>)}
       </div>
       {error&&<ErrorBlock error={error}/>}
       {!data&&!error&&<p role="status">Loading updates…</p>}
-      {data&&!error&&<UpdatesTable notices={visibleRows} onRead={reload}/>}
-      <div className="actions">{before&&<Link href={first}>Back to first page</Link>}
+      {data&&!error&&<UpdatesTable notices={data.rows} onRead={reload}/>}
+      <div className="actions">{before&&<Link href={firstPage(cat,unread)}>Back to first page</Link>}
         {!error&&data?.next_before&&<Link href={"/account/notifications?"+next}>Older updates →</Link>}</div>
     </Panel>
   </>;

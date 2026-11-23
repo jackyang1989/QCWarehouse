@@ -3,10 +3,11 @@ import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import sharp from "sharp";
 import { z } from "zod";
 import type { DB } from "../db";
-import { audit, code, event, guard, hash, lock, one, organization, reportCode, revision, role, uuid, type Actor } from "./common";
+import { audit, code, event, guard, hash, lock, one, organization, reportCode, resolveSampleCode, revision, role, uuid, type Actor } from "./common";
 import { attachEvidence } from "./intake";
-import { templateSchema } from "./orders";
+import { checkSchema, templateSchema } from "./orders";
 import { staffAccess } from "./staff-access";
+import { sampleCodePattern } from "./portal-routes";
 
 type ResultInput={item_key:string;component:string;attempt:number;status:string;method:string;is_final:boolean;typed_value?:unknown;unit?:string;reason?:string;evidence_ids?:string[];details?:Record<string,unknown>};
 
@@ -107,6 +108,33 @@ const componentLabels:Record<string,string>={
 
 function roundMetric(n:number) {
   return Math.round(n*1e6)/1e6;
+}
+
+type ReportMeasurement={status:string;typed_value?:unknown};
+function reportTolerance(result:ReportMeasurement,rule?:ToleranceRule) {
+  if(result.status!=="RECORDED"||typeof result.typed_value!=="number"||!rule||
+    (rule.min===undefined&&rule.max===undefined))return {};
+  const value=result.typed_value;
+  return {
+    within_tolerance:(rule.min===undefined||value>=rule.min)&&(rule.max===undefined||value<=rule.max),
+    target:rule.target,tolerance_min:rule.min,tolerance_max:rule.max,
+    deviation:rule.target===undefined?undefined:roundMetric(value-rule.target),
+  };
+}
+
+function circumference(result:ReportMeasurement,check:z.infer<typeof checkSchema>) {
+  if(result.status!=="RECORDED"||check.type!=="number"||typeof result.typed_value!=="number")return undefined;
+  if(["value*2","2x"].includes(check.derived?.circumference_cm??"")||
+    ((check.key.endsWith("_flat")||check.key.endsWith("_flat_cm"))&&check.unit==="cm"))
+    return Math.round(result.typed_value*200)/100;
+}
+
+function comparisonDifference(results:(ReportMeasurement|undefined)[]) {
+  if(results.length<2||!results.every(result=>result?.status==="RECORDED"&&typeof result.typed_value==="number"))
+    return {max_minus_min:null,display_diff:"—"};
+  const numbers=results.map(result=>Number(result!.typed_value));
+  const diff=roundMetric(Math.max(...numbers)-Math.min(...numbers));
+  return {max_minus_min:diff,display_diff:String(diff)};
 }
 
 function checkThreshold(
@@ -385,6 +413,7 @@ export async function checkTaskCompleteness(db:DB,actor:Actor,id:string) {
 export async function findInspectionTaskByScan(db:DB,actor:Actor,input:{code:string;order_id?:string|null}) {
   role(actor,"inspector","reviewer","warehouse_admin","super_admin");
   const normalized=input.code.trim().toUpperCase();
+  const itemId=sampleCodePattern.test(normalized)?(await resolveSampleCode(db,normalized))?.id:null;
   const row=(await db.query<{
     task_id:string;state:string;revision:number;order_id:string;public_no:string;item_code:string|null;
   }>(`select t.id task_id,t.state,t.revision,o.id order_id,o.public_no,w.code item_code
@@ -396,17 +425,16 @@ export async function findInspectionTaskByScan(db:DB,actor:Actor,input:{code:str
     where t.state<>'VOID'
       and ($2::uuid is null or o.id=$2)
       and (
-        replace(upper(w.code),'-','')=replace($1,'-','')
+        w.id=$3
         or replace(upper(o.public_no),'-','')=replace($1,'-','')
         or exists(
           select 1 from group_members gm
           join order_line_item_links ga on ga.id=gm.assignment_id
-          join warehouse_items gw on gw.id=ga.item_id
-          where gm.group_id=t.group_id and replace(upper(gw.code),'-','')=replace($1,'-','')
+          where gm.group_id=t.group_id and ga.item_id=$3
         )
       )
     order by case when t.state='IN_PROGRESS' then 0 when t.state='READY' then 1 else 2 end, t.id limit 1`,
-    [normalized,input.order_id??null])).rows[0];
+    [normalized,input.order_id??null,itemId??null])).rows[0];
   guard(row,"NOT_FOUND","No matching inspection task found for this code.",404);
   return row;
 }
@@ -587,11 +615,9 @@ export async function recordResults(db:DB,actor:Actor,id:string,rev:number,resul
       }
     }
     const detailsObj:Record<string,unknown>={...(value.details??{})};
-    if(value.status==="RECORDED" && check.type==="number" && typeof value.typed_value==="number") {
-      if(["value*2","2x"].includes(String(check.derived?.circumference_cm??"")) || ((check.key.endsWith("_flat") || check.key.endsWith("_flat_cm")) && check.unit==="cm")) {
-        detailsObj.derived_circumference=Math.round(value.typed_value*2*100)/100;
-      }
-    }
+    delete detailsObj.derived_circumference;
+    const derived=circumference(value,check);
+    if(derived!==undefined)detailsObj.derived_circumference=derived;
     const serializedDetails=Object.keys(detailsObj).length>0?detailsObj:null;
     if(value.is_final) await db.query("update inspection_results set is_final=false where task_id=$1 and item_key=$2 and component=$3 and is_final",[id,value.item_key,value.component]);
     const r=await one<{id:string}>(db,`insert into inspection_results(task_id,item_key,component,attempt,status,typed_value,unit,method,reason,details,is_final,recorded_by)
@@ -826,16 +852,7 @@ export async function submitReport(db:DB,actor:Actor,id:string,rev:number,ids:st
     const single=t.assignment_id?await one<{code:string}>(db,`select w.code from warehouse_items w join order_line_item_links a on a.item_id=w.id where a.id=$1`,[t.assignment_id]):null;
     const mappedResults=rows.map(r=>{
       const check=template.checks.find(c=>c.key===r.item_key);
-      const tol=tolerances.find(rule=>rule.point_code===r.item_key);
-      const hasTolerance=Boolean(tol && (typeof tol.min==="number" || typeof tol.max==="number") && r.status==="RECORDED" && typeof r.typed_value==="number");
-      const withinTolerance=hasTolerance
-        ?((typeof tol!.min!=="number" || Number(r.typed_value)>=tol!.min) && (typeof tol!.max!=="number" || Number(r.typed_value)<=tol!.max))
-        :undefined;
-      const targetVal=hasTolerance && typeof tol!.target==="number"?tol!.target:undefined;
-      const toleranceMin=hasTolerance && typeof tol!.min==="number"?tol!.min:undefined;
-      const toleranceMax=hasTolerance && typeof tol!.max==="number"?tol!.max:undefined;
-      const deviation=hasTolerance && typeof targetVal==="number"?roundMetric(Number(r.typed_value)-targetVal):undefined;
-      const derivedCircumference=typeof r.details?.derived_circumference==="number"?r.details.derived_circumference:undefined;
+      const derivedCircumference=check?circumference(r,check):undefined;
       const englishReason=(typeof r.details?.note_en==="string" && r.details.note_en.trim())?r.details.note_en.trim():r.reason;
       const reasonZh=typeof r.reason==="string" && hasUntranslatedChinese(r.reason)?r.reason:(typeof r.details?.note_zh==="string"?r.details.note_zh:undefined);
       const typedValueZh=typeof r.typed_value==="string" && hasUntranslatedChinese(r.typed_value)
@@ -883,11 +900,7 @@ export async function submitReport(db:DB,actor:Actor,id:string,rev:number,ids:st
         label:check?.label??r.item_key,
         item:single?.code??members.find(m=>m.id===r.component)?.code??r.component,
         ...(derivedCircumference!==undefined?{derived_circumference:derivedCircumference}:{}),
-        ...(withinTolerance!==undefined?{within_tolerance:withinTolerance}:{}),
-        ...(targetVal!==undefined?{target:targetVal}:{}),
-        ...(toleranceMin!==undefined?{tolerance_min:toleranceMin}:{}),
-        ...(toleranceMax!==undefined?{tolerance_max:toleranceMax}:{}),
-        ...(deviation!==undefined?{deviation}:{}),
+        ...reportTolerance(r,tolerances.find(rule=>rule.point_code===r.item_key)),
         ...(r.details?.severity?{severity:r.details.severity}:{}),
         ...(r.details?.part_code?{part_code:r.details.part_code}:{}),
         ...(r.details?.uncertain?{uncertain:true}:{}),
@@ -917,13 +930,7 @@ export async function submitReport(db:DB,actor:Actor,id:string,rev:number,ids:st
     if(t.group_id) {
       const diffs=template.checks.filter(c=>c.type==="number").map(c=>{
         const memberRows=members.map(m=>mappedResults.find(r=>r.component===m.id && r.item_key===c.key));
-        const allNumeric=memberRows.length>=2 && memberRows.every(r=>r && r.status==="RECORDED" && typeof r.typed_value==="number");
-        if(!allNumeric) {
-          return {point_code:c.key,label:c.label,unit:c.unit??null,max_minus_min:null,display_diff:"—"};
-        }
-        const nums=memberRows.map(r=>Number(r!.typed_value));
-        const diff=roundMetric(Math.max(...nums)-Math.min(...nums));
-        return {point_code:c.key,label:c.label,unit:c.unit??null,max_minus_min:diff,display_diff:String(diff)};
+        return {point_code:c.key,label:c.label,unit:c.unit??null,...comparisonDifference(memberRows)};
       });
       const orderShots=(await db.query<{code:string;media_id:string}>(
         `select shot_code code,id media_id from media_assets
@@ -1171,12 +1178,14 @@ export async function editReportRevision(db:DB,actor:Actor,id:string,input:z.inf
   guard(v.state==="draft"&&v.snapshot.amends_version&&v.created_by===actor.id,"REPORT_UNAVAILABLE","Only the amendment author can edit this draft.");
   guard(v.published_version===v.snapshot.amends_version,"VERSION_CONFLICT","The published report has changed.");
   const changed=new Set<string>();
+  const touchedSections=new Set<number>();
   for(const edit of input.changes) {
     const key=edit.section+":"+edit.result;
     guard(!changed.has(key),"RESULT_INVALID","Save each result once per request.",422);changed.add(key);
     const section=v.snapshot.sections[edit.section],result=section?.results[edit.result];
     guard(result,"RESULT_INVALID","Select a result in this report.",422);
-    const template=await one(db,"select content from template_versions where id=$1",[section.template_version_id]);
+    const template=await one(db,`select t.content,l.options,l.attributes from template_versions t
+      join order_lines l on l.id=$2 and l.order_id=$3 where t.id=$1`,[section.template_version_id,section.order_line_id,v.order_id]);
     const check=templateSchema.parse(template.content).checks.find(c=>c.key===result.item_key);
     guard(check,"RESULT_INVALID","The checkpoint is missing from its original template.",422);
     const expectedJsType=check.type==="text"?"string":check.type;
@@ -1185,7 +1194,27 @@ export async function editReportRevision(db:DB,actor:Actor,id:string,input:z.inf
       "RESULT_INVALID","Explain the observed issue or missing result.",422);
     guard(edit.status!=="OBSERVED_ISSUE"||result.evidence_ids.length>0,"EVIDENCE_REQUIRED","An observed issue requires supporting evidence.",422);
     assertAllowedWording(edit.reason,typeof edit.typed_value==="string"?edit.typed_value:null);
-    Object.assign(result,{status:edit.status,typed_value:edit.status==="RECORDED"?edit.typed_value:null,reason:edit.reason||null});
+    const rule=extractTolerances(template.options,template.attributes).find(rule=>rule.point_code===result.item_key)??{
+      point_code:result.item_key,min:result.tolerance_min,max:result.tolerance_max,target:result.target,
+    };
+    Object.assign(result,{
+      status:edit.status,typed_value:edit.status==="RECORDED"?edit.typed_value:null,reason:edit.reason||null,
+      typed_value_zh:result.typed_value===edit.typed_value?result.typed_value_zh:undefined,
+      reason_zh:result.reason===edit.reason?result.reason_zh:undefined,
+      within_tolerance:undefined,target:undefined,tolerance_min:undefined,tolerance_max:undefined,deviation:undefined,
+      ...(edit.status!=="OBSERVED_ISSUE"?{severity:undefined,part_code:undefined,uncertain:undefined}:{}),
+    });
+    Object.assign(result,reportTolerance(result,rule),{derived_circumference:circumference(result,check)});
+    touchedSections.add(edit.section);
+  }
+  for(const index of touchedSections) {
+    const section=v.snapshot.sections[index];
+    section.summary.issue_count=section.results.filter((result:ReportMeasurement)=>result.status==="OBSERVED_ISSUE").length;
+    for(const diff of section.comparison?.diffs??[]) {
+      const results=section.results.filter((result:{item_key:string})=>result.item_key===diff.point_code);
+      if(results.length===section.summary.expected_count)Object.assign(diff,comparisonDifference(results));
+      else Object.assign(diff,comparisonDifference([]));
+    }
   }
   await db.query("update report_versions set snapshot=$2,revision=revision+1 where id=$1",[id,v.snapshot]);
   await audit(db,actor,"edit_report_revision","report_versions",id,{count:input.changes.length});

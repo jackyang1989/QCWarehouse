@@ -100,6 +100,9 @@ export async function setLocationActive(db:DB,actor:Actor,id:string,active:boole
   }
   return {id,active};
 }
+export const requestedReferenceDisposition=`d.id::text=r.authorization_snapshot->>'disposition_id'
+  and d.item_id=r.item_id and d.org_id=r.org_id and d.action='reserve_reference' and d.state='requested'`;
+
 export async function storageMovementDesk(
   db:DB,
   actor:Actor,
@@ -144,7 +147,7 @@ export async function storageMovementDesk(
     from reference_samples r
     join warehouse_items w on w.id=r.item_id
     left join storage_locations l on l.id=w.location_id
-    left join disposition_requests d on d.item_id=r.item_id and d.action='reserve_reference' and d.state='requested'
+    join disposition_requests d on ${requestedReferenceDisposition}
     where r.state='pending_safe_storage'
     order by r.id desc limit 50`);
   return {locations,moves,pending_reference_tasks};

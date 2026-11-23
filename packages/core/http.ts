@@ -18,9 +18,9 @@ import { acceptQuote, amendDispatchBatch, calculateShippingPreview, cancelDispos
 import { chargeReceipt, checkout, demoPay, orderPayment, orderRefundPayments, refundApprove, refundReject, refundRequest, resolvePaymentDispute, stripeEvent, verifyStripe } from "./payments";
 import { adminCustomerDetail, adminCustomerFilters, adminCustomersList, adminDisposalDetail, adminDispositionsOverview, adminIncidentDetail, adminInspectionTaskDetail, adminInspectionsOverview, adminPaymentDetail, adminPaymentListFilters, adminPaymentsList, adminRefundDetail, adminRefundListFilters, adminRefundsList, adminStorageLocationDetail } from "./admin-reads";
 import { approveTrackingTranslation, correctCustomerParcelTracking, correctStaffTracking, customerParcelContext, providerCallback, refreshTracking, submitTrackingTranslation, tracking, trackingAdmin, trackingMonitor, updateTrackingAlert, verificationState, verifyTracking } from "./logistics";
-import { adminDesk, bills, customerActions, customerDesk, customerInventory, customerNotifications, customerParcelTab, dispatchQueueStates, items, listCustomerOrders, listCustomerParcels, markAllNotificationsRead, markNotificationRead, orderLedger, orderLedgerCsv, readOrderByPublicNumber, readStaffObjectSummary, reconcileFinance, referenceSamples, searchStaffOrders, staffOrderDetail, staffOrderFilters, warehouseDesk, warehouseDispatchBatch, warehouseDispatchQueue, warehouseItem, warehousePackage } from "./reads";
+import { adminDesk, bills, customerActions, customerDesk, customerInventory, customerNotifications, customerParcelTab, dispatchQueueStates, items, listCustomerOrders, listCustomerParcels, markAllNotificationsRead, markNotificationRead, notificationCategory, orderLedger, orderLedgerCsv, readOrderByPublicNumber, readStaffObjectSummary, reconcileFinance, referenceSamples, searchStaffOrders, staffOrderDetail, staffOrderFilters, warehouseDesk, warehouseDispatchBatch, warehouseDispatchQueue, warehouseItem, warehousePackage } from "./reads";
 import { staffAccess } from "./staff-access";
-import { customerDestination, withDestination } from "./portal-routes";
+import { customerDestination, sampleCodePattern, withDestination } from "./portal-routes";
 import { customerFulfillmentQuote, customerShipment, orderFulfillmentRecord } from "./fulfillment-reads";
 import { renewScopeSupplement } from "./operations";
 import { canReadCasePhoto, caseDetail, createPublicInquiry, customerCaseHistory, customerCaseQuery, customerTicketMessage, inquiryCategories, publicInquiry, replyToCase, staffTicketEvent, staffTicketQueue, writeStaffTicket } from "./tickets";
@@ -170,7 +170,7 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   if(method==="GET"&&path==="/me/inventory") {
     const page=z.coerce.number().int().min(1).max(10000).parse(url.searchParams.get("page")??"1");
     const filter=z.enum(["all","in_warehouse","inspection","inspected","handling","reference"]).parse(url.searchParams.get("filter")??"all");
-    const code=z.string().regex(/^(?:S\d{5,8}|(?:S|DSP)-[a-zA-Z0-9-]{1,64}|DSP\d{5,8})$/i).optional().parse(url.searchParams.get("code")??undefined);
+    const code=z.string().regex(sampleCodePattern).optional().parse(url.searchParams.get("code")??undefined);
     return json(await transaction(db=>customerInventory(db,actorRequired(actor),page,filter,code)));
   }
   if(method==="GET"&&path==="/me/parcels") {
@@ -419,7 +419,8 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   if(method==="GET"&&path==="/me/notifications") {
     const unread=z.enum(["1","0"]).nullable().parse(url.searchParams.get("unread"))==="1";
     const before=idSchema.nullable().parse(url.searchParams.get("before"));
-    return json(await transaction(db=>customerNotifications(db,actorRequired(actor),unread,before)));
+    const category=notificationCategory.parse(url.searchParams.get("category")??"all");
+    return json(await transaction(db=>customerNotifications(db,actorRequired(actor),unread,before,undefined,category)));
   }
   const readNotice=path.match(/^\/me\/notifications\/([a-f0-9-]{36})\/read$/i);
   if(method==="POST"&&readNotice)return extraWrite(req,path,actor,z.object({}).strict(),
@@ -634,7 +635,10 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const r=await readReport(db,a,idSchema.parse(report[1]),version);
     if(report[3]) {
       verifyReportDownload(a.id,r.id,url.searchParams.get("expires")??"",url.searchParams.get("sig")??"");
-      return binary(await one<{data:Buffer;mime:string}>(db,"select data,mime from private_files where key=$1",[r.pdf_key]));
+      const response=binary(await one<{data:Buffer;mime:string}>(db,"select data,mime from private_files where key=$1",[r.pdf_key]));
+      const reportCode=String(r.snapshot.report_no??"").replace(/[^A-Z0-9-]/gi,"")||"inspection-report";
+      response.headers.set("content-disposition",`attachment; filename="${reportCode}-v${r.version}.pdf"`);
+      return response;
     }
     return json({id:r.id,version:r.version,state:r.state,snapshot:r.snapshot,published_at:r.published_at,amend_reason:r.amend_reason,versions:r.versions});
   });
@@ -1215,11 +1219,16 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
       if(chargeId && a.kind==="customer") {
         active_attempt=(await db.query(
           `select p.id, p.provider, p.state, p.manual_state, p.external_invoice_no, p.invoice_url, p.payer_email,
-                  p.state in ('succeeded','partially_refunded','refunded') and c.applied_payment_id is distinct from p.id reconciliation_required,
+                  p.state in ('succeeded','partially_refunded') and c.applied_payment_id is distinct from p.id reconciliation_required,
+                  c.voided_at is null and
+                    coalesce(i.expires_at,d.expires_at,s.expires_at)>clock_timestamp() quote_payable,
                   p.provider_data->>'customer_reported_paid_at' customer_reported_at,
                   p.provider_data->>'customer_reported_tx_ref' customer_reported_tx_ref
            from payments p join charge_items c on c.id=p.charge_item_id
-           where p.charge_item_id=$1 and c.org_id=$2 and p.state<>'canceled'
+           left join inspection_quotes i on i.id=c.inspection_quote_id
+           left join dispatch_quote_versions d on d.id=c.dispatch_quote_id
+           left join storage_quotes s on s.id=c.storage_quote_id
+           where p.charge_item_id=$1 and c.org_id=$2 and p.state not in ('canceled','refunded')
            order by p.created_at desc limit 1`,
           [chargeId, organization(a)],
         )).rows[0]??null;

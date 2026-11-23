@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { pool, type DB } from "../db";
 import { currentTerms, requireCustomerActive } from "./auth";
-import { audit, code, event, guard, lock, one, organization, revision, role, uuid, type Actor } from "./common";
+import { audit, code, event, guard, lock, one, organization, revision, role, unresolvedQuotePayment, uuid, type Actor } from "./common";
 import { validCarrier, waybill } from "./intake";
 import { assertItemNotFrozen, assertZonePurpose, requireSpace } from "./storage";
 import { newQuoteValidity } from "./quote-policy";
@@ -32,6 +32,11 @@ export async function instruct(db:DB,actor:Actor,itemId:string,input:Instruction
   guard(terms[0]?.id===input.terms_version_id,"TERMS_CHANGED","Review the current terms.");
   if(input.action==="reserve_reference") {
     await db.query("update reference_samples set state='expired' where item_id=$1 and state='active' and expires_at<=now()",[itemId]);
+    await db.query(`update reference_samples r set state='released',
+        authorization_snapshot=r.authorization_snapshot||jsonb_build_object('released_at',now(),'release_reason','Cancelled handling instruction')
+      from disposition_requests d where r.item_id=$1 and r.org_id=$2 and r.state='pending_safe_storage'
+        and d.id::text=r.authorization_snapshot->>'disposition_id' and d.item_id=r.item_id and d.org_id=r.org_id
+        and d.action='reserve_reference' and d.state='cancelled'`,[itemId,org]);
     guard(!(await db.query("select 1 from reference_samples where item_id=$1 and state in ('active','pending_safe_storage') and expires_at>now()",[itemId])).rowCount,
       "REFERENCE_ALREADY_ACTIVE","This item is already an active or pending reference sample.");
   }
@@ -39,24 +44,18 @@ export async function instruct(db:DB,actor:Actor,itemId:string,input:Instruction
     "ITEM_RESERVED","Resolve the active handling instruction before submitting a new one.");
   if(input.action==="reserve_reference") {
     await db.query("update warehouse_items set custody_state='stored',revision=revision+1 where id=$1 and custody_state='received'",[itemId]);
-    const curLoc=w.location_id
-      ?(await db.query<{id:string;code:string;zone:string}>("select id,code,zone from storage_locations where id=$1",[w.location_id])).rows[0]
-      :undefined;
-    const alreadyInSafeZone=curLoc?.zone==="reference";
     const sealCode=`GS-${new Date().toISOString().slice(0,10).replace(/-/g,"")}-${String(w.code).replace(/[^A-Z0-9]/gi,"").slice(-6).toUpperCase()}`;
-    const dispState=alreadyInSafeZone?"completed":"requested";
-    const refState=alreadyInSafeZone?"active":"pending_safe_storage";
     const out=await one(db,`insert into disposition_requests(org_id,item_id,action,destination,return_info,authorization_snapshot,state,created_by)
       values($1,$2,'reserve_reference',null,null,jsonb_build_object(
         'terms_version_id',$3::uuid,
         'authorized_at',now(),
-        'pending_safe_storage',$5::boolean,
-        'seal_code',$6::text
-      ),$7,$4)
-      returning id,item_id,state,revision`,[org,itemId,input.terms_version_id,actor.id,!alreadyInSafeZone,sealCode,dispState]);
+        'pending_safe_storage',true,
+        'seal_code',$5::text
+      ),'requested',$4)
+      returning id,item_id,state,revision`,[org,itemId,input.terms_version_id,actor.id,sealCode]);
     const nextRev=await one<{n:number}>(db,"select coalesce(max(revision),0)::int+1 n from reference_samples where item_id=$1",[itemId]);
     const ref=await one<{id:string}>(db,`insert into reference_samples(id,item_id,org_id,revision,authorization_snapshot,condition_note,expires_at,state)
-      values($1,$2,$3,$4,$5,$6,now()+interval '90 days',$7) returning id`,[
+      values($1,$2,$3,$4,$5,$6,now()+interval '90 days','pending_safe_storage') returning id`,[
       uuid(),itemId,org,nextRev.n,
       {
         terms_version_id:input.terms_version_id,
@@ -64,15 +63,13 @@ export async function instruct(db:DB,actor:Actor,itemId:string,input:Instruction
         authorized_at:new Date().toISOString(),
         disposition_id:out.id,
         seal_code:sealCode,
-        pending_safe_storage:!alreadyInSafeZone,
-        ...(alreadyInSafeZone?{safe_location_id:curLoc!.id,safe_location_code:curLoc!.code,sealed_at:new Date().toISOString()}:{}),
+        pending_safe_storage:true,
         ...(order?.category_id?{category_id:order.category_id}:{}),
       },
       input.condition_note??null,
-      refState,
     ]);
-    await audit(db,actor,"authorize_disposition","disposition_requests",out.id,{action:"reserve_reference",pending_safe_storage:!alreadyInSafeZone,seal_code:sealCode});
-    await audit(db,actor,"reserve_reference","reference_samples",ref.id,{version:nextRev.n,state:refState,seal_code:sealCode});
+    await audit(db,actor,"authorize_disposition","disposition_requests",out.id,{action:"reserve_reference",pending_safe_storage:true,seal_code:sealCode});
+    await audit(db,actor,"reserve_reference","reference_samples",ref.id,{version:nextRev.n,state:"pending_safe_storage",seal_code:sealCode});
     return out;
   }
   if(["to_forwarder","to_domestic_address","return_to_seller"].includes(input.action)) {
@@ -137,6 +134,13 @@ export async function cancelDisposition(db:DB,actor:Actor,id:string,input:{revis
     [id]
   );
   await db.query("update disposition_requests set state='cancelled',revision=revision+1 where id=$1",[id]);
+  if(d.action==="reserve_reference") {
+    await db.query(`update reference_samples set state='released',
+      authorization_snapshot=(authorization_snapshot-'pending_safe_storage')||
+        jsonb_build_object('released_at',now(),'released_by',$4::uuid,'release_reason','Cancelled handling instruction')
+      where org_id=$1 and item_id=$2 and state='pending_safe_storage' and authorization_snapshot->>'disposition_id'=$3`,
+      [org,d.item_id,id,actor.id]);
+  }
   await audit(db,actor,"cancel_disposition","disposition_requests",id,{reason:input.reason?.trim()||null});
   return {id,state:"cancelled",revision:d.revision+1};
 }
@@ -329,9 +333,6 @@ export async function calculateShippingPreview(
   const total_cents=handling_cents+parcels.reduce((n,p)=>n+p.amount_cents,0);
   return {rate_version_id:rate.id,rate_version:rate.version,version:rate.version,zone:input.zone??"default",handling_cents,parcels,total_cents};
 }
-export const unresolvedQuotePayment=`exists(select 1 from payments p where p.charge_item_id=c.id and (
-  p.state in ('processing','succeeded','partially_refunded','refunded') or
-  (p.state='requires_payment' and p.provider_ref is not null)))`;
 export const renewableFulfillmentQuote=`coalesce(q.expires_at<=now() and (q.accepted_at is null or (
   c.id is not null and c.applied_payment_id is null and c.free_authorization is null and not (${unresolvedQuotePayment})
 )),false)`;
@@ -504,6 +505,7 @@ export async function amendDispatchBatch(
   )).rows;
 
   const removeSet=new Set(input.remove_item_ids??[]);
+  guard(removeSet.size>0||input.destination,"AMENDMENT_UNCHANGED","Select items to remove or provide a new destination.",422);
   for(const remId of removeSet) {
     const m=members.find(x=>x.item_id===remId);
     guard(m,"PACK_MISMATCH","Select items that are currently active in this batch.");
@@ -522,7 +524,12 @@ export async function amendDispatchBatch(
 
   // Unpack any unshipped packed shipments if items or destination change
   const unshippedShipments=[...new Set(members.filter(m=>!m.shipped && m.packed_shipment_id).map(m=>m.packed_shipment_id!))];
+  let unpackedEvidence:{id:string;shipment_id:string}[]=[];
   if(unshippedShipments.length>0) {
+    unpackedEvidence=(await db.query<{id:string;shipment_id:string}>(
+      "select id,shipment_id from media_assets where shipment_id=any($1::uuid[]) for update",[unshippedShipments]
+    )).rows;
+    await db.query("update media_assets set shipment_id=null where id=any($1::uuid[])",[unpackedEvidence.map(media=>media.id)]);
     await db.query("delete from shipment_items where shipment_id=any($1::uuid[])",[unshippedShipments]);
     await db.query("delete from shipments where id=any($1::uuid[]) and shipped_at is null",[unshippedShipments]);
   }
@@ -576,7 +583,7 @@ export async function amendDispatchBatch(
 
   const remainingUnshipped=members.filter(m=>!m.shipped && !removeSet.has(m.item_id));
   const anyShipped=members.some(m=>m.shipped);
-  const nextState=remainingUnshipped.length===0?(anyShipped?"completed":"draft"):(b.state==="draft"?"draft":"confirmed");
+  const nextState=remainingUnshipped.length===0?(anyShipped?"completed":"cancelled"):(b.state==="draft"?"draft":"confirmed");
   const nextRev=b.revision+1;
   await db.query(
     "update dispatch_batches set destination_snapshot=coalesce($2,destination_snapshot),state=$3,revision=$4 where id=$1",
@@ -584,6 +591,7 @@ export async function amendDispatchBatch(
   );
   await audit(db,actor,"amend_dispatch_batch","dispatch_batches",id,{
     removed_item_ids:[...removeSet],
+    unpacked_evidence:unpackedEvidence,
     destination_changed:Boolean(input.destination),
     next_state:nextState,
     refund_ticket_no:refundTicketNo,

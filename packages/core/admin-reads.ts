@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { DB } from "../db";
-import { extractReceivingCode, guard, one, role, type Actor } from "./common";
+import { extractReceivingCode, guard, one, paymentGrossCents, role, type Actor } from "./common";
 import { taskDetail } from "./inspection";
 import { computeOrderRefundStage } from "./operations";
 import { hasStaffAccess, staffAccess } from "./staff-access";
@@ -78,7 +78,7 @@ export async function adminPaymentsList(db: DB, actor: Actor, filters: z.infer<t
 
   const { rows } = await db.query(
     `with enriched as (
-      select p.id, p.charge_item_id, p.provider, p.provider_ref, p.amount_cents, p.currency, p.state,
+      select p.id, p.charge_item_id, p.provider, p.provider_ref, ${paymentGrossCents} amount_cents, p.currency, p.state,
              p.channel, p.environment, p.manual_state, p.external_invoice_no, p.external_transaction_id,
              p.payer_email, p.invoice_url, p.expected_amount_cents, p.received_amount_cents,
              p.fee_amount_cents, p.net_amount_cents, p.evidence_media_id, p.issued_by, p.issued_at,
@@ -162,7 +162,7 @@ export async function adminPaymentsList(db: DB, actor: Actor, filters: z.infer<t
     const refundApprovedPendingCents = Number(r.refund_approved_pending_cents ?? 0);
     const refundPendingCents = refundRequestedCents + refundApprovedPendingCents;
     const amountCents = Number(r.amount_cents ?? 0);
-    const refundableCents = ["succeeded", "partially_refunded"].includes(r.state)
+    const refundableCents = ["succeeded", "partially_refunded", "refunded"].includes(r.state)
       ? Math.max(0, amountCents - refundedCents - refundApprovedPendingCents)
       : 0;
     const refundStatus = refundedCents >= amountCents && amountCents > 0
@@ -271,7 +271,7 @@ export async function adminPaymentDetail(db: DB, actor: Actor, id: string) {
   role(actor, ...staffAccess.finance);
   const p = await one(
     db,
-    `select p.*,
+    `select p.*, ${paymentGrossCents} gross_paid_cents,
             c.org_id, c.purpose, c.amount_cents charge_amount_cents, c.currency charge_currency,
             c.snapshot charge_snapshot, c.voided_at, c.applied_payment_id,
             c.inspection_quote_id, c.dispatch_quote_id, c.storage_quote_id, c.scope_revision_id,
@@ -375,8 +375,8 @@ export async function adminPaymentDetail(db: DB, actor: Actor, id: string) {
 
   const succeededRefunds = refunds.filter(r => r.state === "succeeded").reduce((s, r) => s + Number(r.amount_cents), 0);
   const pendingRefunds = refunds.filter(r => r.state === "requested" || r.state === "approved").reduce((s, r) => s + Number(r.amount_cents), 0);
-  const refundableBalance = ["succeeded", "partially_refunded"].includes(p.state)
-    ? Math.max(0, Number(p.amount_cents) - succeededRefunds - pendingRefunds)
+  const refundableBalance = ["succeeded", "partially_refunded", "refunded"].includes(p.state)
+    ? Math.max(0, Number(p.gross_paid_cents) - succeededRefunds - pendingRefunds)
     : 0;
 
   const linkedOrders = Array.isArray(p.linked_orders) ? p.linked_orders : [];
@@ -527,7 +527,7 @@ export async function adminPaymentDetail(db: DB, actor: Actor, id: string) {
     primary_order_no: primaryOrderNo,
     refund_summary: {
       original_charge_cents: Number(p.charge_amount_cents),
-      paid_cents: Number(p.amount_cents),
+      paid_cents: Number(p.gross_paid_cents),
       refunded_succeeded_cents: succeededRefunds,
       refund_pending_cents: pendingRefunds,
       remaining_refundable_cents: refundableBalance,
@@ -565,12 +565,12 @@ export async function adminRefundsList(db: DB, actor: Actor, filters: z.infer<ty
             r.approved_by, r.provider_ref, r.created_at, r.revision,
             ru.display_name requested_by_name,
             au.display_name approved_by_name,
-            p.amount_cents payment_amount_cents, p.currency, p.state payment_state, p.provider_ref payment_provider_ref,
+            ${paymentGrossCents} payment_amount_cents, p.currency, p.state payment_state, p.provider_ref payment_provider_ref,
             c.id charge_item_id, c.purpose, c.amount_cents charge_amount_cents,
             crp.user_id customer_user_id, crp.receiving_code, cu.display_name customer_name, ce.original_email customer_email,
             order_links.linked_orders,
             coalesce(order_links.any_test_order, false) is_test,
-            greatest(0, p.amount_cents - coalesce((select sum(r2.amount_cents)::int from refunds r2
+            greatest(0, (${paymentGrossCents}) - coalesce((select sum(r2.amount_cents)::int from refunds r2
               where r2.payment_id = p.id and r2.state in ('approved','succeeded')), 0)) remaining_refundable_cents,
             ae.at decision_at, ae.after->>'reason' decision_note
      from refunds r
@@ -667,7 +667,7 @@ export async function adminRefundDetail(db: DB, actor: Actor, id: string) {
   const r = await one(
     db,
     `select r.*, ru.display_name requested_by_name, au.display_name approved_by_name,
-            p.amount_cents payment_amount_cents, p.currency, p.state payment_state, p.provider,
+            ${paymentGrossCents} payment_amount_cents, p.currency, p.state payment_state, p.provider,
             p.provider_ref payment_provider_ref, p.provider_data, p.created_at payment_created_at, p.updated_at payment_updated_at,
             c.id charge_item_id, c.org_id, c.purpose, c.amount_cents charge_amount_cents, c.voided_at, c.applied_payment_id,
             c.inspection_quote_id, c.dispatch_quote_id, c.storage_quote_id, c.scope_revision_id,
@@ -744,7 +744,7 @@ export async function adminRefundDetail(db: DB, actor: Actor, id: string) {
 
   const isSuperAdmin = actor.roles.includes("super_admin");
   const isSelfRequested = r.requested_by === actor.id;
-  const amountWithinBalance = Number(r.amount_cents) <= remainingRefundableBeforeThis && ["succeeded", "partially_refunded"].includes(r.payment_state);
+  const amountWithinBalance = Number(r.amount_cents) <= remainingRefundableBeforeThis && ["succeeded", "partially_refunded", "refunded"].includes(r.payment_state);
 
   const blockReasons: string[] = [];
   if (r.state !== "requested") blockReasons.push(`当前退款单处于「${r.state}」状态，不可再次审批或驳回。`);

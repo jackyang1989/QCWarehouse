@@ -403,6 +403,7 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
 
   const ordPayPal = await createSubmittedOpenOrder(customer, "P13", 5);
   let ppPaymentId = "";
+  let lateReceipt:{orderId:string;chargeId:string;pid:string}|undefined;
 
   await t.test("P13: When opt-in enabled, customer requests PayPal Manual Invoice idempotently without auto-activating order", async () => {
     await admin.fetch("/staff/admin/integrations/paypal_manual", {
@@ -422,6 +423,7 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
   });
 
   await t.test("P14: Customer reporting paid records claim only and NEVER activates order", async () => {
+    await customer.fetch(`/me/payments/${ppPaymentId}/report-paypal-paid`,{},"POST",422);
     const proofPng = await render1688OrderPng(["PayPal Payment Receipt $58.00", "TX: 9PP000111222"]);
     const mediaId = await customer.uploadAttachment(proofPng, "image/png", "pp_receipt.png");
     const rep = await customer.fetch(`/me/payments/${ppPaymentId}/report-paypal-paid`, {
@@ -430,6 +432,12 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
       note: "Paid from personal PayPal",
     });
     assert.equal(rep.reported, true);
+    const current=await customer.fetch(`/orders/${ordPayPal.orderId}/payment`);
+    assert.equal(current.state,"processing");
+    assert.equal((await customer.fetch(`/charges/${ordPayPal.chargeId}/checkout`,{
+      quote_revision:current.charge.quote_revision,
+    })).state,"processing","Stripe must leave the reported PayPal receipt intact");
+    assert.equal((await pool.query("select state from payments where id=$1",[ppPaymentId])).rows[0].state,"requires_payment");
     // Finance must be able to read customer-uploaded PayPal receipt attachment (P2-1 fix)
     const mediaUrlRes = await finance.fetch(`/media/${mediaId}/url`);
     assert.ok(mediaUrlRes.url);
@@ -492,12 +500,22 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
       received_amount_cents: 6000,
     });
     assert.equal(oRec.manual_state, "overpaid");
+    const blockedCancel=await finance.fetch(`/staff/finance/paypal-invoices/${ppUnder.payment_id}/cancel`,{
+      reason:"Attempt to cancel before verifying the receipt.",
+    },"POST",409);
+    assert.equal(blockedCancel.error.code,"MANUAL_RECEIPT_PENDING");
     await admin.fetch(`/staff/finance/paypal-invoices/${ppUnder.payment_id}/verify`, { decision: "approve" }, "POST", 409);
     const verifiedOver = await admin.fetch(`/staff/finance/paypal-invoices/${ppUnder.payment_id}/verify`, {
       decision: "approve",
       accept_overpayment: true,
     });
     assert.equal(verifiedOver.state, "succeeded");
+    const detail=await admin.fetch("/staff/admin/payments/"+ppUnder.payment_id);
+    assert.equal(detail.charge.amount_cents,5800);
+    assert.equal(detail.refund_summary.remaining_refundable_cents,6000);
+    await admin.fetch(`/staff/orders/${ordUnder.orderId}/refunds`,{
+      payment_id:ppUnder.payment_id,amount_cents:6000,reason:"Return the full verified manual receipt",
+    },"POST",201);
   });
 
   await t.test("P17: Separation of Duties blocks self-verification; independent super_admin verify activates order via applyPayment", async () => {
@@ -526,6 +544,7 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
   await t.test("Late and unverified PayPal receipt times do not apply charges", async()=>{
     const order=await createSubmittedOpenOrder(customer,"P17-LATE",3);
     const {payment_id:pid}=await customer.fetch(`/charges/${order.chargeId}/paypal-invoice`,{});
+    lateReceipt={orderId:order.orderId,chargeId:order.chargeId,pid};
     const path=`/staff/finance/paypal-invoices/${pid}`,receipt={external_transaction_id:"PP-ISOLATED-LATE",received_amount_cents:5800};
     await finance.fetch(path+"/record-receipt",{...receipt,received_at:new Date(Date.now()+60000).toISOString()},"POST",422);
     await finance.fetch(path+"/record-receipt",receipt);
@@ -553,6 +572,19 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
     const row=queue.rows.find(r=>r.id===pid);
     assert.equal(row.applied,false);
     assert.equal(row.received_at,received_at);
+  });
+
+  await t.test("PayPal verification retains a receipt just before a fractional quote deadline",async()=>{
+    const order=await createSubmittedOpenOrder(customer,"P17-FRACTION",1.5);
+    const {payment_id:pid}=await customer.fetch(`/charges/${order.chargeId}/paypal-invoice`,{});
+    const timing=(await pool.query(`select q.expires_at-interval '10 milliseconds' received
+      from inspection_quotes q join charge_items c on c.inspection_quote_id=q.id where c.id=$1`,[order.chargeId])).rows[0];
+    await waitForInspectionQuoteExpiry(order.chargeId);
+    const path=`/staff/finance/paypal-invoices/${pid}`;
+    await finance.fetch(path+"/record-receipt",{
+      external_transaction_id:"PP-FRACTION-FIXTURE",received_amount_cents:5800,received_at:timing.received.toISOString(),
+    });
+    assert.equal((await admin.fetch(path+"/verify",{decision:"approve"})).applied,true);
   });
 
   await t.test("P18: Reject resets recorder for re-entry; cancel marks canceled and blocks verify", async () => {
@@ -625,6 +657,25 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
     });
     assert.equal(execRes.state, "succeeded");
     assert.equal(execRes.payment_state, "refunded");
+
+    assert(lateReceipt);
+    const late=lateReceipt;
+    const lateRefund=await admin.fetch(`/staff/orders/${late.orderId}/refunds`,{
+      payment_id:late.pid,amount_cents:5800,reason:"Return the unapplied late payment.",
+    },"POST",201);
+    await approver.fetch(`/staff/admin/refunds/${lateRefund.refund_id}/approve`,{revision:1,reason:"Approve return of unapplied receipt."},"POST",202);
+    await finance.fetch(`/staff/finance/refunds/${lateRefund.refund_id}/execute-manual`,{
+      manual_refund_ref:"RF-PP-MANUAL-LATE",notes:"Refunded the unapplied late transfer.",
+    });
+    assert.equal((await customer.fetch(`/orders/${late.orderId}/payment`)).state,"expired");
+    const lateOrder=await customer.fetch("/orders/"+late.orderId);
+    const newQuote=await customer.fetch(`/orders/${late.orderId}/quotes`,{revision:lateOrder.revision},"POST",201);
+    const {terms}=await customer.fetch("/public/terms");
+    const renewed=await customer.fetch(`/orders/${late.orderId}/submit`,{
+      revision:lateOrder.revision,quote_id:newQuote.id,terms_version_ids:terms.map((term:{id:string})=>term.id),
+      acknowledgements:{scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true},
+    });
+    assert.notEqual(renewed.charge.charge_item_id,late.chargeId);
 
     // Restore paypal_manual default disabled state
     await admin.fetch("/staff/admin/integrations/paypal_manual", {

@@ -1,7 +1,7 @@
 import Stripe from "stripe";
 import { pool, transaction, type DB } from "../db";
 import { appOrigin, requireCustomerActive, requireStaffMfa } from "./auth";
-import { Problem, audit, code, event, guard, hash, idempotent, isDemo, lock, one, organization, role, uuid, type Actor } from "./common";
+import { Problem, audit, code, event, guard, hash, idempotent, isDemo, lock, one, organization, paymentAwaitingResolution, paymentGrossCents, role, uuid, type Actor } from "./common";
 import { stripeCheckoutMode, stripeSettings, stripeSettingsFromDb, stripeSettlementCredentials } from "./integrations";
 import { activatePaidOrder, readyOrder } from "./orders";
 import { applyScopePositionsAndAdditions, computeOrderRefundStage, type ScopeAddition } from "./operations";
@@ -10,19 +10,21 @@ const refundApprovalMfaMinutes=15;
 const stripeCheckoutMinSeconds=30*60;
 const stripeCheckoutMaxSeconds=24*3600;
 const stripeCheckoutClockMarginSeconds=30;
+const stripeCheckoutRecoveryPages=5;
+const stripeCheckoutInFlightGraceMs=60_000;
 const checkoutExpirySchedulingLock="checkout-expiry-scheduling";
 
 export const inspectionPaymentForOrder=`left join lateral (
   select c.id,c.amount_cents,q.revision quote_revision,q.expires_at,case
     when c.applied_payment_id is not null or c.free_authorization is not null then 'paid'
     when o.state<>'awaiting_payment' then 'not_due'
-    when exists(select 1 from payments p where p.charge_item_id=c.id and p.state in ('succeeded','partially_refunded','refunded')) then 'processing'
-    when exists(select 1 from payments p where p.charge_item_id=c.id and p.state='processing') then 'processing'
+    when exists(select 1 from payments p where p.charge_item_id=c.id and ${paymentAwaitingResolution}) then 'processing'
     when q.expires_at>now() then 'open'
-    when exists(select 1 from payments p where p.charge_item_id=c.id and p.state='requires_payment' and p.provider_ref is not null)
+    when exists(select 1 from payments p where p.charge_item_id=c.id and p.provider='stripe' and p.state='requires_payment'
+      and (p.provider_ref is not null or p.provider_data ? 'checkout_params'))
       then 'reconciliation'
     else 'expired' end state,
-    exists(select 1 from payments p where p.charge_item_id=c.id and p.state in ('succeeded','partially_refunded','refunded')) reconciliation_required
+    exists(select 1 from payments p where p.charge_item_id=c.id and p.state in ('succeeded','partially_refunded')) reconciliation_required
   from inspection_quotes q join charge_items c on c.inspection_quote_id=q.id and c.org_id=o.org_id and c.voided_at is null
   where q.order_id=o.id and q.id::text=o.submission_snapshot->>'quote_id' and c.scope_revision_id is null
 ) inspection_payment on true`;
@@ -47,8 +49,12 @@ function stripeFromSettings(settings: { key?: string; mode: string | null; webho
 export async function scheduleCheckoutExpirations() {
   if(isDemo())return false;
   const prefixes:string[]=[];
+  const modes:string[]=[];
   for(const mode of ["test","live"] as const) {
-    if((await stripeSettlementCredentials(pool,mode)).key)prefixes.push(`cs_${mode}_%`);
+    if((await stripeSettlementCredentials(pool,mode)).key) {
+      prefixes.push(`cs_${mode}_%`);
+      modes.push(mode);
+    }
   }
   if(!prefixes.length)return false;
   return transaction(async db=>{
@@ -58,22 +64,45 @@ export async function scheduleCheckoutExpirations() {
       from payments p join charge_items c on c.id=p.charge_item_id
       left join inspection_quotes i on i.id=c.inspection_quote_id left join dispatch_quote_versions d on d.id=c.dispatch_quote_id
       left join storage_quotes s on s.id=c.storage_quote_id
-      where p.provider='stripe' and p.state='requires_payment' and p.provider_ref like any($1::text[])
+      where p.provider='stripe' and p.state='requires_payment' and (p.provider_ref like any($1::text[]) or
+        (p.provider_ref is null and p.provider_data ? 'checkout_params' and p.provider_data->>'checkout_mode'=any($2::text[])))
         and not exists(select 1 from outbox_events j where j.type='payment.checkout_expire' and j.payload->>'payment_id'=p.id::text)
-      order by coalesce(i.expires_at,d.expires_at,s.expires_at),p.id limit 100`,[prefixes]);
+      order by coalesce(i.expires_at,d.expires_at,s.expires_at),p.id limit 100`,[prefixes,modes]);
     return Boolean(result.rowCount);
   });
+}
+async function findPreparedStripeCheckout(api:Stripe,id:string,createdAt:Date,deadline:Date) {
+  const graceEnd=deadline.valueOf()+stripeCheckoutInFlightGraceMs;
+  let cursor:string|undefined;
+  for(let page=0;page<stripeCheckoutRecoveryPages;page++) {
+    const result:Stripe.ApiList<Stripe.Checkout.Session>=await api.checkout.sessions.list({
+      created:{gte:Math.floor(createdAt.valueOf()/1000)-stripeCheckoutClockMarginSeconds,lte:Math.ceil(graceEnd/1000)},
+      limit:100,...(cursor?{starting_after:cursor}:{}),
+    });
+    const session=result.data.find(session=>session.metadata?.payment_id===id);
+    if(session)return session;
+    if(!result.has_more) {
+      guard(Date.now()>=graceEnd,"CHECKOUT_RECOVERY_PENDING","Wait for the original Stripe request before closing the attempt.",503);
+      return null;
+    }
+    cursor=result.data.at(-1)?.id;
+    if(!cursor)break;
+  }
+  throw new Problem("CHECKOUT_RECOVERY_INCOMPLETE","The original checkout could not be checked within the recovery window.",503);
 }
 export async function expireCheckout(db:DB,pid:string) {
   const owner=await one(db,`select c.org_id from payments p join charge_items c on c.id=p.charge_item_id where p.id=$1`,[pid]);
   await lock(db,"org:"+owner.org_id);
   const p=await one(db,`select p.*,c.org_id,c.amount_cents expected_amount,c.voided_at,
+      coalesce(i.expires_at,d.expires_at,s.expires_at) quote_deadline,
       coalesce(i.expires_at,d.expires_at,s.expires_at)<=clock_timestamp() quote_expired
     from payments p join charge_items c on c.id=p.charge_item_id
     left join inspection_quotes i on i.id=c.inspection_quote_id left join dispatch_quote_versions d on d.id=c.dispatch_quote_id
     left join storage_quotes s on s.id=c.storage_quote_id where p.id=$1 for update of p`,[pid]);
   if(p.state!=="requires_payment")return;
-  const mode=stripeCheckoutMode(p.provider_ref);
+  const preparedMode=p.provider_data?.checkout_mode;
+  const recoverPrepared=!p.provider_ref&&p.provider_data?.checkout_params&&(preparedMode==="test"||preparedMode==="live");
+  const mode=stripeCheckoutMode(p.provider_ref)??(recoverPrepared?preparedMode:null);
   guard(!isDemo()&&p.provider==="stripe"&&mode,
     "CHECKOUT_MODE_MISMATCH","The checkout does not match the configured payment environment.",503);
   const sessionExpiry=Number(p.provider_data?.requested_checkout_expires_at);
@@ -82,10 +111,18 @@ export async function expireCheckout(db:DB,pid:string) {
   const {key}=await stripeSettlementCredentials(db,mode);
   guard(key,"STRIPE_UNAVAILABLE","Credentials for the original Stripe payment environment are unavailable.",503);
   const api=new Stripe(key,{timeout:10000,maxNetworkRetries:1});
-  const session=await api.checkout.sessions.retrieve(p.provider_ref);
-  guard(session.id===p.provider_ref&&session.metadata?.payment_id===pid&&session.metadata.charge_item_id===p.charge_item_id&&
+  const session=p.provider_ref?await api.checkout.sessions.retrieve(p.provider_ref):
+    await findPreparedStripeCheckout(api,pid,p.created_at,p.quote_deadline);
+  if(!session) {
+    await db.query("update payments set state='canceled',updated_at=now() where id=$1",[pid]);
+    await audit(db,null,"checkout_expired","payments",pid,{checkout_found:false});
+    return;
+  }
+  guard((p.provider_ref?session.id===p.provider_ref:stripeCheckoutMode(session.id)===mode)&&
+    session.metadata?.payment_id===pid&&session.metadata.charge_item_id===p.charge_item_id&&
     session.metadata.org_id===p.org_id&&session.amount_total===p.expected_amount&&session.currency==="usd"&&session.livemode===(mode==="live"),
     "PAYMENT_MISMATCH","The provider session could not be matched to the charge.",409);
+  if(!p.provider_ref)await db.query("update payments set provider_ref=$2 where id=$1",[pid,session.id]);
   if(session.status==="complete") {
     await db.query("update payments set state='processing',updated_at=now() where id=$1",[pid]);
     await audit(db,null,"checkout_completed_pending_webhook","payments",pid);
@@ -184,7 +221,7 @@ type PreparedCheckout={state:"requires_payment";attempt_id:string;reference:stri
 async function prepareCheckout(db:DB,fee:Record<string,any>,org:string):Promise<PreparedCheckout|Exclude<CheckoutResult,{state:"requires_payment"}>> {
   const id=fee.id;
   if(fee.applied_payment_id || fee.free_authorization) return {state:"paid",charge_item_id:id};
-  if((await db.query("select 1 from payments where charge_item_id=$1 and state in ('succeeded','partially_refunded','refunded') limit 1",[id])).rowCount)
+  if((await db.query(`select 1 from payments p where p.charge_item_id=$1 and ${paymentAwaitingResolution} limit 1`,[id])).rowCount)
     return {state:"processing",charge_item_id:id};
   const open=await attempt(db,id,fee.amount_cents);
   if(open.state==="processing") return {state:"processing",charge_item_id:id};
@@ -273,7 +310,7 @@ export async function checkout(actor:Actor,id:string,rev:number,request:{scope:s
   }
   throw new Problem("CHECKOUT_UNAVAILABLE","Checkout expired. Retry to start a new payment attempt.",409);
 }
-export async function applyPayment(db:DB,pid:string,providerRef:string,details:object,confirmedAt:number) {
+export async function applyPayment(db:DB,pid:string,providerRef:string,details:object,confirmedAt:number,exactReceiptTime?:Date) {
   const link=await one(db,`select c.org_id from payments p join charge_items c on c.id=p.charge_item_id where p.id=$1`,[pid]);
   await lock(db,"org:"+link.org_id);
   const payment=await one(db,"select * from payments where id=$1 for update",[pid]);
@@ -283,8 +320,9 @@ export async function applyPayment(db:DB,pid:string,providerRef:string,details:o
     where c.id=$1 for update of c`,[payment.charge_item_id]);
   if(["succeeded","partially_refunded","refunded"].includes(payment.state)) return;
   await db.query("update payments set state='succeeded',provider_ref=$2,provider_data=provider_data||$3::jsonb,updated_at=now() where id=$1",[pid,providerRef,{...details,confirmed_at:confirmedAt}]);
+  const expiresAt=new Date(charge.quote_expires_at).valueOf();
   const paidWithinQuote=Number.isSafeInteger(confirmedAt)&&confirmedAt>0&&charge.quote_expires_at&&
-    confirmedAt<Math.floor(new Date(charge.quote_expires_at).valueOf()/1000);
+    (exactReceiptTime?exactReceiptTime.valueOf()<expiresAt:confirmedAt<Math.floor(expiresAt/1000));
   if(charge.voided_at || charge.applied_payment_id || !paidWithinQuote) {
     const orderId=charge.inspection_quote_id
       ?(await db.query<{order_id:string}>("select order_id from inspection_quotes where id=$1",[charge.inspection_quote_id])).rows[0]?.order_id??null
@@ -369,11 +407,14 @@ export async function demoPay(db:DB,actor:Actor,id:string) {
     left join dispatch_quote_versions d on d.id=c.dispatch_quote_id left join storage_quotes s on s.id=c.storage_quote_id
     where p.id=$1 and c.org_id=$2`,[id,org]);
   guard(["requires_payment","succeeded"].includes(p.state),"PAYMENT_UNAVAILABLE","This checkout has ended.");
-  guard(!p.provider_data?.checkout_params&&(!p.provider_ref||p.provider_ref.startsWith("demo_")),
+  guard(p.provider==="stripe"&&!p.provider_data?.checkout_params&&(!p.provider_ref||p.provider_ref.startsWith("demo_")),
     "PAYMENT_MODE_MISMATCH","A provider checkout cannot be confirmed in demo mode.",409);
   guard(p.state==="succeeded"||p.quote_valid,"QUOTE_EXPIRED","Request a new quote before continuing.");
-  await applyPayment(db,id,"demo_"+id,{demo:true,payment_intent:"pi_demo_"+id},Math.floor(Date.now()/1000));
-  return {state:"paid",...(p.order_number?{order_number:p.order_number}:{}),...(p.scope_revision_id?{scope_revision_id:p.scope_revision_id}:{})};
+  const now=new Date();
+  await applyPayment(db,id,"demo_"+id,{demo:true,payment_intent:"pi_demo_"+id},Math.floor(now.valueOf()/1000),now);
+  const charge=await one<{applied_payment_id:string|null}>(db,"select applied_payment_id from charge_items where id=$1",[p.charge_item_id]);
+  return {state:charge.applied_payment_id===id?"paid":"processing",...(p.order_number?{order_number:p.order_number}:{}),
+    ...(p.scope_revision_id?{scope_revision_id:p.scope_revision_id}:{})};
 }
 export async function verifyStripe(raw:string,signature:string) {
   guard(!isDemo(),"STRIPE_UNAVAILABLE","Stripe webhooks are unavailable.",503);
@@ -584,15 +625,16 @@ export async function resolvePaymentDispute(
   });
   return {provider_id:providerId,state:input.decision==="release_freeze"?"resolved_by_staff":d.state};
 }
-const refundableStates=["succeeded","partially_refunded"];
+const refundableStates=["succeeded","partially_refunded","refunded"];
 const committedRefunds=`select coalesce(sum(r.amount_cents),0)::int from refunds r
   where r.payment_id=p.id and r.state in ('approved','succeeded')`;
 export async function orderRefundPayments(db:DB,actor:Actor,number:string) {
   role(actor,"support","super_admin");
   const order=await one(db,"select id,public_no from orders where replace(upper(public_no),'-','')=replace(upper($1),'-','')",[number]);
-  const rows=(await db.query(`select p.id,p.amount_cents,p.state,p.created_at,p.amount_cents-(${committedRefunds}) refundable_cents
+  const rows=(await db.query(`select p.id,${paymentGrossCents} amount_cents,p.state,p.created_at,(${paymentGrossCents})-(${committedRefunds}) refundable_cents
     from inspection_quotes q join charge_items c on c.inspection_quote_id=q.id join payments p on p.charge_item_id=c.id
-    where q.order_id=$1 and p.state=any($2::text[]) order by p.created_at desc`,[order.id,refundableStates])).rows;
+    where q.order_id=$1 and p.state=any($2::text[])
+      and (p.state<>'refunded' or (${paymentGrossCents})>(${committedRefunds})) order by p.created_at desc`,[order.id,refundableStates])).rows;
   const stage_preview=await computeOrderRefundStage(db,order.id);
   return {order,rows,stage_preview};
 }
@@ -600,7 +642,7 @@ export async function refundRequest(db:DB,actor:Actor,pid:string,cents:number,re
   role(actor,"support","super_admin");
   const first=await one(db,`select c.org_id from payments p join charge_items c on c.id=p.charge_item_id where p.id=$1`,[pid]);
   await lock(db,"org:"+first.org_id);
-  const p=await one(db,`select p.id,p.provider,p.state,c.inspection_quote_id,p.amount_cents-(${committedRefunds}) refundable_cents
+  const p=await one(db,`select p.id,p.provider,p.state,c.inspection_quote_id,(${paymentGrossCents})-(${committedRefunds}) refundable_cents
     from payments p join charge_items c on c.id=p.charge_item_id where p.id=$1 for update of p`,[pid]);
   if(orderId) await one(db,`select id from inspection_quotes where id=$1 and order_id=$2`,[p.inspection_quote_id,orderId]);
   guard(refundableStates.includes(p.state) && cents>0 && cents<=p.refundable_cents,"REFUND_NOT_ALLOWED","Refund exceeds the available paid balance.");
@@ -611,7 +653,7 @@ export async function refundRequest(db:DB,actor:Actor,pid:string,cents:number,re
 }
 export async function syncPaymentRefundState(db:DB,paymentId:string) {
   const row=(await db.query<{amount_cents:number;state:string;refunded_cents:number}>(
-    `select p.amount_cents,p.state,
+    `select ${paymentGrossCents} amount_cents,p.state,
        coalesce((select sum(r.amount_cents)::int from refunds r where r.payment_id=p.id and r.state='succeeded'),0) refunded_cents
      from payments p where p.id=$1 for update of p`,
     [paymentId]
@@ -630,7 +672,7 @@ export async function refundApprove(db:DB,actor:Actor,id:string,rev:number,sessi
   await lock(db,"org:"+first.org_id);
   const r=await one(db,"select * from refunds where id=$1 for update",[id]);
   guard(r.revision===rev && r.state==="requested" && r.requested_by!==actor.id,"REFUND_NOT_ALLOWED","An independent approval and current request are required.");
-  const p=await one(db,`select p.state,p.amount_cents-(${committedRefunds}) refundable_cents from payments p where p.id=$1 for update`,[r.payment_id]);
+  const p=await one(db,`select p.state,(${paymentGrossCents})-(${committedRefunds}) refundable_cents from payments p where p.id=$1 for update`,[r.payment_id]);
   guard(r.amount_cents<=p.refundable_cents && refundableStates.includes(p.state),"REFUND_NOT_ALLOWED","The refundable balance has changed.");
   await db.query("update refunds set state='approved',approved_by=$2,revision=revision+1 where id=$1",[id,actor.id]);
   await event(db,"refund.approved",{refund_id:id});

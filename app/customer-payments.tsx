@@ -26,18 +26,15 @@ export function CustomerMultiChannelPaymentPanel({
   const channels: Row[] = channelsLoad.data?.channels ?? [];
   const stripeChannel = channels.find((c) => c.provider_key === "stripe");
   const paypalChannel = channels.find((c) => c.provider_key === "paypal_manual");
-  const resolvedAttempt = latestAttempt ?? channelsLoad.data?.active_attempt ?? null;
+  const resolvedAttempt = channelsLoad.data ? channelsLoad.data.active_attempt : latestAttempt ?? null;
 
   const [payerEmail, setPayerEmail] = useState(String(resolvedAttempt?.payer_email ?? ""));
-  const [localInvoice, setLocalInvoice] = useState<Row | null>(null);
   const [notice, setNotice] = useState<string>("");
   const [err, setErr] = useState<string>("");
 
-  const currentManual=resolvedAttempt?.provider==="paypal_manual"&&resolvedAttempt.state!=="canceled"?resolvedAttempt:null;
-  const activeManual=currentManual&&(!localInvoice||(currentManual.id??currentManual.payment_id)===localInvoice.payment_id)
-    ?currentManual:localInvoice;
+  const activeManual=resolvedAttempt?.provider==="paypal_manual"&&resolvedAttempt.state!=="canceled"?resolvedAttempt:null;
   const manualFinal=Boolean(activeManual&&["succeeded","partially_refunded","refunded"].includes(activeManual.state));
-  const locked=paymentLocked||Boolean(activeManual?.reconciliation_required);
+  const locked=paymentLocked||Boolean(activeManual?.reconciliation_required||activeManual?.customer_reported_at||activeManual?.state==="processing");
   const showPaypalCard = Boolean(paypalChannel?.available || activeManual);
 
   async function requestPaypal() {
@@ -47,7 +44,6 @@ export function CustomerMultiChannelPaymentPanel({
       const res = await request(`/charges/${chargeId}/paypal-invoice`, "POST", {
         ...(payerEmail.trim() ? { payer_email: payerEmail.trim() } : {}),
       });
-      setLocalInvoice(res);
       channelsLoad.reload();
       setNotice(
         res.external_invoice_no
@@ -106,14 +102,12 @@ export function CustomerMultiChannelPaymentPanel({
           <div className="row between flexwrap" style={{ marginBottom: 6, gap: 6 }}>
             <strong>{paypalChannel?.label ?? "PayPal Manual Invoice"}</strong>
             <Tag tone={paypalChannel?.available === false ? "gray" : "blue"}>
-              {paypalChannel?.badge ?? "Manual Finance Verification"}
+              Finance review required
             </Tag>
           </div>
-          <p className="small muted" style={{ marginBottom: 10 }}>
-            {paypalChannel?.unavailable_reason ??
-              paypalChannel?.instructions ??
-              "Receive a PayPal Invoice (INV2-...) by email and upload your PayPal Transaction ID; Finance completes independent two-person verification to activate."}
-          </p>
+          {!activeManual&&<p className="small muted" style={{ marginBottom: 10 }}>
+            {paypalChannel?.unavailable_reason??"Request an invoice to pay this charge. Finance verifies the transfer before applying it."}
+          </p>}
 
           {!activeManual && (
             <div className="stack-tight">
@@ -141,42 +135,46 @@ export function CustomerMultiChannelPaymentPanel({
                 <span className="small">
                   <strong>Invoice Status:</strong>{" "}
                   <Tag tone={activeManual.reconciliation_required?"yellow":activeManual.manual_state === "verified" ? "green" : activeManual.manual_state === "underpaid" ? "red" : "blue"}>
-                    {activeManual.reconciliation_required?"Payment received · under review":String(activeManual.manual_state ?? activeManual.state)}
+                    {activeManual.reconciliation_required?"Payment received · under review":
+                      activeManual.customer_reported_at&&!manualFinal?"Transfer submitted · under review":
+                      paypalInvoiceStatus(activeManual.manual_state??activeManual.state)}
                   </Tag>
                 </span>
                 {activeManual.external_invoice_no && (
                   <code className="code mono-wrap">Invoice #{activeManual.external_invoice_no}</code>
                 )}
               </div>
-              {activeManual.invoice_url && !manualFinal && (
+              {activeManual.invoice_url&&activeManual.quote_payable!==false&&!manualFinal&&!locked&&(
                 <p className="small">
-                  PayPal Invoice Link:{" "}
                   <a href={activeManual.invoice_url} target="_blank" rel="noreferrer noopener" className="mono-wrap">
-                    {activeManual.invoice_url}
+                    Open PayPal invoice
                   </a>
                 </p>
               )}
-              {activeManual.payer_email && (
+              {activeManual.payer_email&&activeManual.external_invoice_no&&(
                 <p className="small muted">Sent to PayPal email: <span className="mono">{activeManual.payer_email}</span></p>
               )}
               {activeManual.customer_reported_at && !manualFinal && (
                 <p className="small">
-                  Transfer note submitted ({activeManual.customer_reported_tx_ref ?? "pending TX ref"}) — awaiting independent Finance verification.
+                  {activeManual.customer_reported_tx_ref&&<>Transaction {activeManual.customer_reported_tx_ref}. </>}
+                  Awaiting independent Finance verification.
                 </p>
               )}
-              {!manualFinal && (
+              {!manualFinal&&!activeManual.customer_reported_at&&(activeManual.external_invoice_no||activeManual.invoice_url)&&(
                 <Form
                   label="Report PayPal Invoice Paid (awaiting Finance verify)"
                   run={async (f) => {
                     setErr("");
                     const pid = activeManual.payment_id ?? activeManual.id;
                     const proof = f.get("proof");
+                    const transactionId=text(f,"tx_ref").trim();
                     let evidenceMediaId: string | undefined;
                     if (proof instanceof File && proof.size > 0) {
                       evidenceMediaId = await upload(proof, "attachment");
                     }
+                    if(!transactionId&&!evidenceMediaId)throw new Error("Enter the PayPal transaction ID or attach your transfer receipt.");
                     await request(`/me/payments/${pid}/report-paypal-paid`, "POST", {
-                      ...(text(f, "tx_ref") ? { transaction_ref: text(f, "tx_ref") } : {}),
+                      ...(transactionId?{transaction_ref:transactionId}:{}),
                       ...(text(f, "note") ? { note: text(f, "note") } : {}),
                       ...(evidenceMediaId ? { evidence_media_id: evidenceMediaId } : {}),
                     });
@@ -207,4 +205,12 @@ export function CustomerMultiChannelPaymentPanel({
       </div>
     </div>
   );
+}
+export function paypalInvoiceStatus(state:string|undefined) {
+  const labels:Record<string,string>={
+    requested:"Invoice requested",invoice_sent:"Invoice issued",receipt_recorded:"Receipt recorded",
+    underpaid:"Amount below invoice",overpaid:"Amount above invoice",verified:"Receipt verified",
+    rejected:"Receipt needs correction",canceled:"Invoice cancelled",processing:"Under review",
+  };
+  return (state&&labels[state])||"Invoice pending";
 }

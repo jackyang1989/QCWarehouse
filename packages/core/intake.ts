@@ -5,6 +5,7 @@ import { demoWarehouseAddressZh, usableWarehouseAddressSql } from "./demo-fixtur
 import { isPdfBytes, processImageBytes, validatePdfBytes } from "./media";
 import { orderAcceptsSampleAssignmentSql, readyOrder, summarizeExpectedLines } from "./orders";
 import { assertZonePurpose, requireSpace } from "./storage";
+import { inboundParcelOrders, inboundShortageConfirmed, orderAttributedParcelItems } from "./fulfillment-reads";
 
 export function waybill(value:string) {
   const normalized=value.replace(/\s+/g,"").toUpperCase();
@@ -202,18 +203,18 @@ export async function intakeItems(db:DB,actor:Actor,id:string,input:{revision:nu
   const pkg=await one(db,"select * from packages where id=$1 for update",[id]);
   revision(pkg.revision,input.revision);
   guard(pkg.state!=="quarantined","PACKAGE_QUARANTINED","Quarantined parcels cannot be unpacked into regular inventory.");
-  const seenCodes=new Set<string>();
   const seenNormalized=new Set<string>();
   for(const item of input.items) {
     const trimmedCode=item.code.trim();
     const normalizedCode=trimmedCode.toUpperCase();
     const stripped=normalizedCode.replace(/-/g,"");
-    guard(/^(?:S|DSP)-?[A-Z0-9]{5,8}$/.test(normalizedCode),"SAMPLE_CODE_INVALID","Sample code must start with S (or DSP) followed by 5 to 8 digits or characters (e.g. S39204).",422);
+    guard(/^(?:(?:S|DSP)\d{5,8}|(?:S|DSP)-[A-Z0-9]{5,8})$/.test(normalizedCode),
+      "SAMPLE_CODE_INVALID","Use a numeric sample code such as S39204 or a previously printed label with a hyphen.",422);
     guard(!seenNormalized.has(stripped),"SAMPLE_CODE_DUPLICATE",`Duplicate sample code ${normalizedCode} in unpack request.`,422);
-    seenCodes.add(normalizedCode);
     seenNormalized.add(stripped);
     item.code=normalizedCode;
   }
+  for(const normalized of [...seenNormalized].sort())await lock(db,"sample-code:"+normalized);
   const existingCode=(await db.query<{code:string}>("select code from warehouse_items where replace(upper(code),'-','')=any($1::text[]) limit 1",[[...seenNormalized]])).rows[0];
   guard(!existingCode,"SAMPLE_CODE_ALREADY_EXISTS",`Sample code ${existingCode?.code} has already been issued and cannot be reused.`,409);
   const counts=new Map<string,number>();
@@ -915,18 +916,19 @@ export async function getIntakeContext(
       id:string;tracking_norm:string;carrier_code:string|null;package_code:string|null;
       warehouse_state:string|null;outer_condition:string|null;received_quantity:number|null;
       logged_item_count:number|null;identified_item_count:number|null;damaged_item_count:number|null;
+      shared_parcel:boolean;shortage_confirmed:boolean;
     }>(
       `select ao.advice_id id,coalesce(t.tracking_norm,'') tracking_norm,t.carrier_code,
               p.code package_code,p.state warehouse_state,
               substring(p.condition_note from '^\\[outer:(intact|crushed|torn|wet)\\]') outer_condition,
               p.received_quantity,
-              (select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null) logged_item_count,
-              (select count(*)::int from warehouse_items wi join order_line_item_links olil on olil.item_id=wi.id and olil.unlinked_at is null
-                join order_lines ol on ol.id=olil.order_line_id where wi.package_id=p.id and wi.parent_item_id is null and ol.order_id=$1) identified_item_count,
-              (select count(*)::int from warehouse_items wi where wi.package_id=p.id and wi.parent_item_id is null and wi.condition_state not in ('good','unchecked')) damaged_item_count
+              attributed.logged logged_item_count,attributed.identified identified_item_count,attributed.damaged damaged_item_count,
+              ${inboundParcelOrders}>1 shared_parcel,
+              ${inboundShortageConfirmed} shortage_confirmed
        from advice_orders ao
        left join tracking_records t on t.advice_id=ao.advice_id and t.direction='inbound' and t.closed_at is null
-       left join packages p on p.id=t.package_id
+       left join packages p on p.id=t.package_id and p.org_id=ao.org_id
+       ${orderAttributedParcelItems}
        where ao.order_id=$1`,
       [ord.id]
     )).rows;
@@ -945,7 +947,7 @@ export async function getIntakeContext(
     );
 
     const totalDeclaredQty=declaredItems.length;
-    const cumulativeReceivedQty=advisedParcels.reduce((sum,p)=>sum+Number(p.received_quantity||0),0);
+    const cumulativeReceivedQty=parcelStatsRows.reduce((sum,p)=>sum+Number(p.logged_item_count??0),0);
     const cumulativeLinkedQty=declaredItems.filter(d=>Boolean(d.linked_item_id)).length;
     const inTransitParcelsCount=advisedParcels.filter(p=>!p.package_id).length;
 

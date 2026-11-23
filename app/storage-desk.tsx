@@ -608,24 +608,27 @@ export function StorageMove({path="/wh/storage",actor}:{path?:string;actor?:Row}
           const locId=text(f,"target_location_id");
           const targetLoc=refLocations.find((l:Row)=>l.id===locId);
           if(!targetLoc) throw new Error("请选择已启用的确认样专区库位。");
-          const scannedItem=text(f,"scanned_item_code")||task.item_code;
-          const sealCode=text(f,"seal_code")||task.seal_code;
-          await request("/staff/storage/move","POST",{
+          const scannedItem=text(f,"scanned_item_code").trim();
+          const scannedLocation=text(f,"scanned_location_code").trim();
+          const sealCode=text(f,"seal_code").trim();
+          const result=await request("/staff/storage/move","POST",{
             item_id:task.item_id,
             revision:task.item_revision,
             location_id:targetLoc.id,
             scanned_item_code:scannedItem,
-            scanned_location_code:targetLoc.code,
+            scanned_location_code:scannedLocation,
             seal_code:sealCode,
           });
-          setReceipt(`确认样 ${task.item_code} 已加施铅封 ${sealCode} 并存入 ${targetLoc.code}，确认样身份已正式激活并通知客户。`);
+          if(result.reference_activated)
+            setReceipt(`确认样 ${task.item_code} 已在 ${targetLoc.code} 封存，确认样已生效。`);
           reload();
           if(code===task.item_code) found.reload();
         }}>
-          <div className="fields three">
-            <Field label="扫描样品条码确认" name="scanned_item_code" value={task.item_code}/>
-            <Field label="防拆铅封编号 (Seal Code)" name="seal_code" value={task.seal_code??""}/>
+          <div className="fields two">
+            <Field label="扫描样品条码确认" name="scanned_item_code"/>
+            <Field label="扫描已施加的防拆铅封" name="seal_code"/>
             <Select label="目标确认样专柜库位 (REF_SAFE)" name="target_location_id" value={refLocations[0]?.id} choices={refLocations.map((l:Row)=>({id:l.id,label:`${l.code} · ${zones[l.zone]??l.zone} (${l.occupied}/${l.capacity??"∞"})`}))}/>
+            <Field label="扫描目标货架标签" name="scanned_location_code"/>
           </div>
         </Form>:<p className="bad small">当前尚未启用用途为“确认样区 (reference)”的库位，请先由超级管理员在库位管理中启用确认样专柜。</p>):<p className="small muted">当前角色仅查看确认样封存任务状态。</p>}
       </div>)}
@@ -661,15 +664,17 @@ export function StorageMove({path="/wh/storage",actor}:{path?:string;actor?:Row}
         {!item&&!found.error&&<Empty>请先扫描或查询实物编号。</Empty>}
         {item&&!item.movable&&<Empty>此实物当前不处于可移位的在库状态（{item.custody_state}）。</Empty>}
         {item&&item.handling_hold&&<Empty>该实物当前处于「{item.handling_hold}」冻结管控中，须先完成盘点复核或事故结案后方可移位。</Empty>}
-        {item?.movable&&!item.handling_hold&&data&&!found.error&&canMove&&<Form key={item.id+"-"+item.revision+"-"+(lockedTarget||prefilledLoc)} idempotent={true} label="确认移位" run={async f=>{
+        {item?.movable&&!item.handling_hold&&data&&!found.error&&canMove&&<Form key={item.id+"-"+item.revision+"-"+(lockedTarget||prefilledLoc)} idempotent={true}
+          label={item.reference_sample_state==="pending_safe_storage"?"核对实物与封存":"确认移位"} run={async f=>{
           const targetCode=text(f,"target").trim().toUpperCase();
-          const target=data.locations.find((row:Row)=>row.code.toUpperCase()===targetCode&&row.code!==item.location);
-          if(!target)throw new Error("请输入不同于原位置的已启用目标库位码。");
+          const target=data.locations.find((row:Row)=>row.code.toUpperCase()===targetCode&&
+            (row.code!==item.location||row.zone==="reference"&&item.reference_sample_state==="pending_safe_storage"));
+          if(!target)throw new Error("请选择可用的目标库位。");
           if(!checked(f,"confirmed"))throw new Error("请勾选已现场扫描核对实物与货架标签。");
           const scannedItem=text(f,"scanned_item_code").trim();
           const scannedLoc=text(f,"scanned_location_code").trim();
           const sealCode=text(f,"seal_code").trim();
-          await request("/staff/storage/move","POST",{
+          const result=await request("/staff/storage/move","POST",{
             item_id:item.id,
             revision:item.revision,
             location_id:target.id,
@@ -677,16 +682,20 @@ export function StorageMove({path="/wh/storage",actor}:{path?:string;actor?:Row}
             ...(scannedLoc?{scanned_location_code:scannedLoc}:{}),
             ...(sealCode?{seal_code:sealCode}:{}),
           });
-          setReceipt(item.code+" 已移至 "+target.code+(target.zone==="reference"&&item.reference_sample_state==="pending_safe_storage"?"（已完成确认样铅封激活并通知客户）。":"（已完成实物与货架校验）。"));
-          setBatchMoveCount(c=>c+1);
+          setReceipt(result.reference_activated?`${item.code} 已在 ${target.code} 封存，确认样已生效。`:
+            `${item.code} 已移至 ${target.code}（已完成实物与货架校验）。`);
+          if(target.code!==item.location)setBatchMoveCount(c=>c+1);
           setCode("");
           found.reload();reload();
         }}>
-          <Field label="扫描实物条码复核（须与左侧待移位件一致）" name="scanned_item_code" value={item.code}/>
-          {item.reference_sample_state==="pending_safe_storage"&&<Field label="防拆铅封编号 (转入确认样区必填)" name="seal_code" value={item.reference_seal_code??""} required={false}/>}
+          <Field label="扫描实物条码复核（须与左侧待移位件一致）" name="scanned_item_code" value={item.reference_sample_state==="pending_safe_storage"?"":item.code}/>
+          {item.reference_sample_state==="pending_safe_storage"&&<><p className="small">分配的铅封编号 <span className="code">{item.reference_seal_code}</span></p>
+            <Field label="扫描已施加的防拆铅封（在确认样区封存时必填）" name="seal_code" required={false}/></>}
           <label>目标库位码（系统校验分区用途及容量）<input name="target" list="active-location-codes" defaultValue={lockedTarget||prefilledLoc} required/></label>
-          <Field label="目标货架标签复核扫入码（与目标库位一致）" name="scanned_location_code" value={lockedTarget||prefilledLoc} required={false}/>
-          <datalist id="active-location-codes">{data.locations.filter((row:Row)=>row.code!==item.location).map((row:Row)=>
+          <Field label="目标货架标签复核扫入码（与目标库位一致）" name="scanned_location_code"
+            value={item.reference_sample_state==="pending_safe_storage"?"":lockedTarget||prefilledLoc} required={false}/>
+          <datalist id="active-location-codes">{data.locations.filter((row:Row)=>row.code!==item.location||
+            row.zone==="reference"&&item.reference_sample_state==="pending_safe_storage").map((row:Row)=>
             <option key={row.id} value={row.code}>{`${zones[row.zone]??row.zone} · 占用 ${row.occupied}/${row.capacity??"∞"}`}</option>)}</datalist>
           <datalist id="all-location-codes">{data.locations.map((row:Row)=>
             <option key={row.id} value={row.code}>{`${zones[row.zone]??row.zone} · 占用 ${row.occupied}/${row.capacity??"∞"}`}</option>)}</datalist>

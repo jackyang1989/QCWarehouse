@@ -106,3 +106,19 @@ export async function idempotent<T>(db: DB, scope: string, key: string, payload:
   return result;
 }
 export { randomUUID as uuid };
+export const paymentAwaitingResolution=`(p.state in ('processing','succeeded','partially_refunded')
+  or (p.provider='paypal_manual' and p.state='requires_payment' and p.provider_data ? 'customer_reported_paid_at'))`;
+
+export const unresolvedQuotePayment=`exists(select 1 from payments p where p.charge_item_id=c.id and (
+  ${paymentAwaitingResolution} or (p.provider='stripe' and p.state='requires_payment'
+    and (p.provider_ref is not null or p.provider_data ? 'checkout_params'))))`;
+
+export const paymentGrossCents=`case when p.provider='paypal_manual' and p.manual_state='verified'
+  then coalesce(p.received_amount_cents,p.amount_cents) else p.amount_cents end`;
+
+export async function resolveSampleCode(db:DB,code:string) {
+  const {rows}=await db.query<{id:string;code:string}>(`select id,code from warehouse_items
+    where replace(upper(code),'-','')=replace(upper($1),'-','') limit 2`,[code]);
+  guard(rows.length<2,"AMBIGUOUS_SAMPLE_CODE","This sample code matches more than one item. Ask a warehouse supervisor to review the labels.",409);
+  return rows[0];
+}

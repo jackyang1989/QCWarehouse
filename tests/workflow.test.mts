@@ -24,7 +24,7 @@ process.env.NODE_ENV="test";
 const origin=new URL(process.env.APP_URL??"http://localhost:3000").origin;
 const {handle}=await import("../packages/core/http");
 const {pool,transaction}=await import("../packages/db");
-const {expireCheckout}=await import("../packages/core/payments");
+const {expireCheckout,scheduleCheckoutExpirations}=await import("../packages/core/payments");
 const {workOnce}=await import("../packages/core/worker");
 const {syncTrackingOnce}=await import("../packages/core/logistics");
 const {encryptSecret,decryptSecret,passwordHash}=await import("../packages/core/auth");
@@ -67,7 +67,7 @@ class Client {
     }
     if(response.headers.get("content-type")?.startsWith("application/pdf")) {
       assert.equal(response.status,expected,path);
-      return {pdf:Buffer.from(await response.arrayBuffer())};
+      return {pdf:Buffer.from(await response.arrayBuffer()),disposition:response.headers.get("content-disposition")};
     }
     if(response.headers.get("content-type")?.startsWith("image/")) {
       assert.equal(response.status,expected,path);
@@ -2242,6 +2242,10 @@ test("notification history paginates equal timestamps and keeps unread state and
   assert(!unread.rows.some((n:{id:string})=>n.id===anchor));
   const all=await c.fetch("/me/notifications");
   assert(all.rows.find((n:{id:string})=>n.id===anchor).read_at);
+  const oldReport=(await pool.query(`insert into notifications(user_id,template,locale,payload,dedupe_key,created_at)
+    values($1,'report.published','en','{}',$2,'2026-01-01') returning id`,[registration.user_id,"inbox-report:"+randomUUID()])).rows[0];
+  assert(!(await c.fetch("/me/notifications")).rows.some((n:{id:string})=>n.id===oldReport.id));
+  assert.deepEqual((await c.fetch("/me/notifications?category=reports")).rows.map((n:{id:string})=>n.id),[oldReport.id]);
 });
 
 test("audit filters expose immutable records to administrators with explicit field projection",async()=>{
@@ -2790,6 +2794,12 @@ test("reference sample reservation, active comparison lock, outbound shipping co
   },"POST",201);
   const refV2=(await c.fetch("/me/desk")).references.find((r:{revision:number})=>r.revision===2);
   assert(refV2);
+  assert.equal(refV2.state,"pending_safe_storage");
+  const renewTask=(await receiver.fetch("/staff/storage")).pending_reference_tasks.find((t:{item_id:string})=>t.item_id===seedItemId);
+  await receiver.fetch("/staff/storage/move",{
+    item_id:seedItemId,revision:renewTask.item_revision,location_id:renewTask.current_location_id,
+    scanned_item_code:renewTask.item_code,scanned_location_code:renewTask.current_location_code,seal_code:renewTask.seal_code,
+  });
   await pool.query("update reference_samples set expires_at=now()-interval '2 minutes' where id=$1",[refV2.reference_id]);
   assert((await c.fetch("/actions")).rows.some((r:{kind:string;state:string;id:string})=>r.kind==="reference"&&r.state==="reference_expired"&&r.id===refV2.reference_id));
 
@@ -4412,6 +4422,10 @@ test("report review, wording guard, English translation review, comparison diffs
   const pdfMeta=await c.fetch(`/orders/${draft.id}/report/versions/1/pdf`);
   assert.equal(pdfMeta.version,1);
   assert.ok(pdfMeta.url.includes("/api/v1/orders/"));
+  const file=await c.fetch(pdfMeta.url.split("/api/v1")[1]);
+  assert.match(file.disposition,/^attachment; filename="[A-Z0-9-]+-v1\.pdf"$/i);
+  assert.equal(createHash("sha256").update(file.pdf).digest("hex"),
+    (await pool.query("select pdf_sha256 from report_versions where id=$1",[repSub.id])).rows[0].pdf_sha256);
 
   // 8. TASK-084: Customer opens a report dispute linked to version 1 and checkpoint boolCheck.key
   const disputeItem=sec0.results[defectIdx].item;
@@ -4426,6 +4440,20 @@ test("report review, wording guard, English translation review, comparison diffs
   assert.equal(dispute.state,"waiting_internal");
   assert.equal(dispute.details.report_version,1);
   assert.equal(dispute.details.item_key,boolCheck.key);
+  const reportId=(await pool.query("select report_id from report_versions where id=$1",[repSub.id])).rows[0].report_id;
+  const amendment=await reviewer.fetch(`/staff/reports/${reportId}/amend`,{base_version:1,reason:"Correct a comparison measurement and condition result."});
+  const measured=sec0.results.find((r:{item_key:string;status:string})=>r.item_key===numCheck.key&&r.status==="RECORDED");
+  const missing=sec0.results.findIndex((r:{item_key:string;status:string})=>r.item_key===numCheck.key&&r.status==="NOT_TESTED");
+  assert(measured&&missing>=0);
+  const amendmentPath="/staff/reports/"+amendment.id;
+  await reviewer.fetch(amendmentPath,{revision:amendment.revision,changes:[
+    {section:0,result:missing,status:"RECORDED",typed_value:Number(measured.typed_value)+2,reason:"Corrected from the original measurement evidence."},
+    {section:0,result:defectIdx,status:"RECORDED",typed_value:true,reason:"Corrected condition from the original evidence."},
+  ]},"PATCH");
+  const amendedSection=(await reviewer.fetch(amendmentPath)).snapshot.sections[0];
+  assert.equal(amendedSection.summary.issue_count,0);
+  assert.equal(amendedSection.comparison.diffs.find((d:{point_code:string})=>d.point_code===numCheck.key).max_minus_min,2);
+  assert.deepEqual((await c.fetch(`/orders/${draft.id}/report/versions/1`)).snapshot.sections[0],sec0);
 });
 
 test("TASK-086..100 & TASK-160: per-item dispositions, shipping rates & calculator, manual parcel pricing, consolidation/split amendments, storage reminders, and financial reconciliation",async()=>{
@@ -4646,14 +4674,22 @@ test("TASK-086..100 & TASK-160: per-item dispositions, shipping rates & calculat
     remove_item_ids:[item1A],
   },"POST",409);
   assert.equal(shipAmendErr.error.code,"SHIPMENT_ALREADY_HANDED_OVER");
+  const pendingPhoto=await receiving.photo("dispatch");
+  const packedOnly=await receiving.fetch(`/staff/dispatch-batches/${batch.batch_id}/parcels`,{
+    revision:batchPart.revision,quote_id:q2.quote_id,item_ids:[itemZero],weight_g:600,packed_media_ids:[pendingPhoto],
+  },"POST",201);
+  const packedBatch=await c.fetch(`/dispatch-batches/${batch.batch_id}`);
 
   // Amending remaining unshipped itemZero (removing it from this batch so it returns to requested, while the batch with shipped items completes)
   const splitRes=await c.fetch(`/dispatch-batches/${batch.batch_id}/amend`,{
-    revision:batchPart.revision,
+    revision:packedBatch.revision,
     remove_item_ids:[itemZero],
   });
   assert.equal(splitRes.state,"completed");
   assert.ok(splitRes.refund_ticket_id,"Post-payment amendment must open a payment_refund reconciliation ticket");
+  assert.equal((await pool.query("select id from shipments where id=$1",[packedOnly.shipment_id])).rowCount,0);
+  assert.equal((await pool.query("select shipment_id from media_assets where id=$1",[pendingPhoto])).rows[0].shipment_id,null);
+  assert.equal((await pool.query("select state from shipments where id=$1",[pack1.shipment_id])).rows[0].state,"shipped");
 
   // 8. TASK-099 (T53): Cancel retDisp1B so item1B has no pending instruction, then check storage reminders and verify round deduplication
   await c.fetch(`/me/dispositions/${retDisp1B.id}/cancel`,{});
@@ -7103,6 +7139,11 @@ test("independent review remediation (NEW-001 to NEW-011) and 4-step Golden Samp
   const stDesk=await receiving.fetch("/staff/storage");
   const wfTask=stDesk.pending_reference_tasks.find((t:{item_id:string})=>t.item_id===cmpItemA);
   assert.ok(wfTask,"Warehouse storage desk lists pending Golden Sample sealing task");
+  const unsealedMove=await receiving.fetch("/staff/storage/move",{
+    item_id:cmpItemA,revision:wfTask.item_revision,location_id:locRef.id,
+    scanned_item_code:cmpCodeA,scanned_location_code:locRef.code,
+  },"POST",409);
+  assert.equal(unsealedMove.error.code,"SEAL_REQUIRED");
   const wrongSealErr=await receiving.fetch("/staff/storage/move",{
     item_id:cmpItemA,
     revision:wfTask.item_revision,
@@ -7135,6 +7176,31 @@ test("independent review remediation (NEW-001 to NEW-011) and 4-step Golden Samp
 
   const notices=(await cust.fetch("/me/notifications")).rows;
   assert.ok(notices.some((n:{template:string})=>n.template==="reference.sealed"),"Customer receives reference.sealed notification");
+  await cust.fetch("/me/reference-samples/"+activatedGs.reference_id+"/release",{terms_version_id:termsId});
+  const nextRequest=await cust.fetch(`/orders/${orderCmp.id}/dispositions`,{
+    item_id:cmpItemA,action:"reserve_reference",terms_version_id:termsId,
+  },"POST",201);
+  assert.equal(nextRequest.state,"requested","A prior seal in the same location is insufficient for a new authorization");
+  const cancelledTask=(await receiving.fetch("/staff/storage")).pending_reference_tasks.find((t:{item_id:string})=>t.item_id===cmpItemA);
+  assert.ok(cancelledTask);
+  await cust.fetch("/me/dispositions/"+nextRequest.id+"/cancel",{revision:nextRequest.revision,reason:"Cancel new safe-storage request"});
+  assert.ok(!(await receiving.fetch("/staff/storage")).pending_reference_tasks.some((t:{item_id:string})=>t.item_id===cmpItemA));
+  await receiving.fetch("/staff/storage/move",{
+    item_id:cmpItemA,revision:cancelledTask.item_revision,location_id:locRef.id,
+    scanned_item_code:cmpCodeA,scanned_location_code:locRef.code,seal_code:cancelledTask.seal_code,
+  },"POST",409);
+  const renewed=await cust.fetch(`/orders/${orderCmp.id}/dispositions`,{
+    item_id:cmpItemA,action:"reserve_reference",terms_version_id:termsId,
+  },"POST",201);
+  const nextTask=(await receiving.fetch("/staff/storage")).pending_reference_tasks.find((t:{item_id:string})=>t.item_id===cmpItemA);
+  const movesBefore=await pool.query("select count(*)::int n from storage_events where item_id=$1 and action='move'",[cmpItemA]);
+  const resealed=await receiving.fetch("/staff/storage/move",{
+    item_id:cmpItemA,revision:nextTask.item_revision,location_id:locRef.id,
+    scanned_item_code:cmpCodeA,scanned_location_code:locRef.code,seal_code:nextTask.seal_code,
+  });
+  assert.equal(resealed.reference_activated,true);
+  assert.equal((await pool.query("select state from disposition_requests where id=$1",[renewed.id])).rows[0].state,"completed");
+  assert.deepEqual((await pool.query("select count(*)::int n from storage_events where item_id=$1 and action='move'",[cmpItemA])).rows,movesBefore.rows);
 });
 
 test("customer workspace binds the reviewed checklist, preserves notes and paginates owned orders",async()=>{
@@ -7226,6 +7292,9 @@ test("a ten-item shortage stays frozen until the case is resolved and all ten it
 
   const first=await advise(),later=await advise();
   const pkg=await receive(first,declared.slice(0,8));
+  const splitOrder=(await c.fetch("/me/orders")).rows.find((row:{id:string})=>row.id===draft.id);
+  assert.equal(splitOrder.has_intake_discrepancy,false);
+  assert.equal((await c.fetch(path)).expected_lines_summary.confirmed_short_units_total,0);
   const discrepancyPath="/staff/packages/"+pkg.id+"/discrepancy";
   const partial=await receiver.fetch(discrepancyPath,{revision:pkg.revision,order_id:draft.id,
     discrepancy_type:"partial_shipment_in_transit",expected_qty:10,actual_qty:8,note:"Two items are in a separate parcel."});
@@ -7249,6 +7318,39 @@ test("a ten-item shortage stays frozen until the case is resolved and all ten it
   assert.equal((await c.fetch(path)).items.filter((item:{item_id:string|null})=>item.item_id).length,10);
   assert.equal((await pool.query("select count(*)::int n from inspection_tasks t join order_lines l on l.id=t.order_line_id where l.order_id=$1",[draft.id])).rows[0].n,10);
   assert(!(await c.fetch("/actions")).rows.some((row:{id:string})=>row.id===shortage.ticket_id));
+});
+
+test("a shared inbound parcel attributes scanned items only to their own inspection orders",async()=>{
+  const {c,terms,registration}=await signCustomer();
+  const receiver=await staffLogin("receiving");
+  const offer=(await c.fetch("/catalog")).offers.find((row:{sku_code:string})=>row.sku_code==="apparel-inspection-1");
+  const orderIds=[];
+  for(const quantity of [1,2]) {
+    const {draft}=await createAndPay(c,[{category_id:offer.category_id,offer_id:offer.offer_id,quantity}],terms);
+    orderIds.push(draft.id);
+  }
+  const tracking_no="SF"+randomUUID().replaceAll("-","").slice(0,10).toUpperCase();
+  const advice=await c.fetch("/me/parcels",{address_id:registration.warehouse_address.id,tracking_no,carrier_code:"sf",order_ids:orderIds},"POST",201);
+  const pkg=await receiver.fetch("/staff/intake/check-in",{tracking_no,advice_id:advice.id,carrier_code:"sf",
+    outer_media_ids:[await receiver.photo("intake_outer")]},"POST",201);
+  const receiving=(await receiver.fetch("/staff/desk")).locations.find((row:{code:string})=>row.code==="R-01");
+  const unpacked=await receiver.fetch("/staff/packages/"+pkg.id+"/items",{revision:pkg.revision,
+    items:Array.from({length:3},()=>({code:newSampleCode(),location_id:receiving.id}))},"POST",201);
+  let index=0;
+  for(const id of orderIds) {
+    const order=await c.fetch("/orders/"+id);
+    assert.equal(order.expected_lines_summary.confirmed_short_units_total,0);
+    for(const position of order.items) await receiver.fetch("/staff/items/"+unpacked.item_ids[index++]+"/assign",{
+      revision:1,order_line_id:position.order_line_id,expected_item_id:position.id,evidence_ids:[await receiver.photo("label_photo")],
+    });
+  }
+  for(const [index,id] of orderIds.entries()) {
+    const order=await c.fetch("/orders/"+id);
+    assert.equal(order.parcels[0].logged_item_count,index+1);
+    assert.equal(order.expected_lines_summary.extra_units_total,0);
+    assert.equal(order.expected_lines_summary.short_units_total,0);
+  }
+  assert.ok(!(await c.fetch("/actions")).rows.some((row:{kind:string;id:string})=>row.kind==="parcel_discrepancy"&&row.id===advice.id));
 });
 
 test("a standalone 30-item inspection splits a documented defect, a reference sample and forwarding",async()=>{
@@ -7634,7 +7736,7 @@ test("Checkout deadlines persist across response loss, expire remotely with reco
   const {c,terms}=await signCustomer(),admin=await staffLogin("admin");
   const {actor}=await c.fetch("/me"),offer=(await c.fetch("/catalog")).offers.find(row=>row.sku_code==="apparel-inspection-1");
   const cases=[];
-  for(let index=0;index<3;index++) {
+  for(let index=0;index<4;index++) {
     const draft=await c.fetch("/orders",{lines:[{category_id:offer.category_id,offer_id:offer.offer_id,quantity:1}]},"POST",201);
     const quote=await c.fetch(`/orders/${draft.id}/quotes`,{revision:draft.revision},"POST",201);
     await pool.query("update inspection_quotes set expires_at=date_trunc('second',clock_timestamp())+interval '4 seconds' where id=$1",[quote.id]);
@@ -7663,6 +7765,10 @@ test("Checkout deadlines persist across response loss, expire remotely with reco
     t.mock.method(prototype,"retrieve",async(id:string)=>{
       const session=[...sessions.values()].find(row=>row.id===id);assert(session,"Only isolated fixture sessions may be read");return session;
     });
+    t.mock.method(prototype,"list",async(filters:Stripe.Checkout.SessionListParams)=>{
+      assert(filters.created);
+      return {data:[...sessions.values()],has_more:false};
+    });
     t.mock.method(prototype,"expire",async(id:string,_body:unknown,options:{idempotencyKey:string})=>{
       const session=[...sessions.values()].find(row=>row.id===id);assert(session);assert.equal(options.idempotencyKey,"checkout-expire:"+session.metadata.payment_id);
       session.status="expired";session.url=null;
@@ -7672,10 +7778,26 @@ test("Checkout deadlines persist across response loss, expire remotely with reco
   }
   const path=(entry:typeof cases[number])=>`/charges/${entry.charge}/checkout`,body=(entry:typeof cases[number])=>({quote_revision:entry.quote.revision});
   await c.fetch(path(cases[0]),body(cases[0]),"POST",500,cases[0].key);
+  async function replaceOrderQuote(entry:typeof cases[number],expected:number) {
+    process.env.QCW_DEMO="1";
+    try {
+      const current=await c.fetch("/orders/"+entry.draft.id);
+      const quote=await c.fetch(`/orders/${entry.draft.id}/quotes`,{revision:current.revision},"POST",201);
+      return await c.fetch(`/orders/${entry.draft.id}/submit`,{
+        revision:current.revision,quote_id:quote.id,terms_version_ids:terms.map(term=>term.id),
+        acknowledgements:{scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true},
+      },"POST",expected);
+    } finally {process.env.QCW_DEMO="0";}
+  }
+  assert.equal((await replaceOrderQuote(cases[0],409)).error.code,"PAYMENT_PROCESSING");
   const recovered=await Promise.all([c.fetch(path(cases[0]),body(cases[0]),"POST",200,cases[0].key),c.fetch(path(cases[0]),body(cases[0]))]);
   const first=recovered[0];assert.deepEqual(recovered[1],first);
   const second=await c.fetch(path(cases[1]),body(cases[1])),third=await c.fetch(path(cases[2]),body(cases[2]));
-  assert.equal(sessions.size,3);
+  loseCreate=true;
+  await c.fetch(path(cases[3]),body(cases[3]),"POST",500,cases[3].key);
+  const abandoned=(await pool.query("select id,provider_ref from payments where charge_item_id=$1",[cases[3].charge])).rows[0];
+  assert.equal(abandoned.provider_ref,null);
+  assert.equal(sessions.size,4);
   process.env.QCW_DEMO="1";
   try {
     assert.equal((await c.fetch(`/checkout/demo/${first.attempt_id}`,{},"POST",409)).error.code,"PAYMENT_MODE_MISMATCH");
@@ -7712,6 +7834,14 @@ test("Checkout deadlines persist across response loss, expire remotely with reco
     await workOnce();
   }
   assert.equal((await pool.query("select state from payments where id=$1",[second.attempt_id])).rows[0].state,"canceled");
+  assert.equal(await scheduleCheckoutExpirations(),true);
+  assert.equal((await pool.query("select count(*)::int n from outbox_events where type='payment.checkout_expire' and payload->>'payment_id'=$1",[abandoned.id])).rows[0].n,1);
+  for(let attempt=0;attempt<20;attempt++) {
+    if(sessions.get(abandoned.id).status==="expired")break;
+    await workOnce();
+  }
+  const recoveredAbandoned=(await pool.query("select state,provider_ref from payments where id=$1",[abandoned.id])).rows[0];
+  assert.deepEqual(recoveredAbandoned,{state:"canceled",provider_ref:sessions.get(abandoned.id).id});
   async function paid(entry:typeof cases[number],paymentId:string,created:number) {
     const session=sessions.get(paymentId),event={id:"evt_deadline_"+randomUUID(),object:"event",type:"checkout.session.completed",livemode:false,created,
       data:{object:{...session,payment_status:"paid",payment_intent:"pi_fixture_"+paymentId}}};
@@ -7726,6 +7856,7 @@ test("Checkout deadlines persist across response loss, expire remotely with reco
   assert.equal((await pool.query("select applied_payment_id from charge_items where id=$1",[cases[2].charge])).rows[0].applied_payment_id,null);
   assert.equal((await pool.query("select count(*)::int n from tickets where details->>'payment_id'=$1",[third.attempt_id])).rows[0].n,1);
   const payment=await c.fetch(`/orders/${cases[2].draft.id}/payment`);assert.equal(payment.state,"processing");assert.equal(payment.reconciliation_required,true);
+  assert.equal((await replaceOrderQuote(cases[2],409)).error.code,"PAYMENT_PROCESSING");
   const bill=(await c.fetch(`/me/desk?include_items=0&include_activity=0&charge=${cases[2].charge}`)).bills[0];assert.equal(bill.state,"processing");
   await c.fetch(path(cases[1]),body(cases[1]),"POST",409);
   assert.equal((await pool.query("select count(*)::int n from expected_items e join order_lines l on l.id=e.order_line_id where l.order_id=$1",[cases[2].draft.id])).rows[0].n,0);
@@ -7892,6 +8023,10 @@ test("expected product lines batch (50 units / 6 SKUs), unconfirmed evidence gua
     carrier_code:"sf",
     outer_media_ids:[await receiver.photo("intake_outer")],
   },"POST",201);
+  const unopened=await c.fetch(`/orders/${patched.id}`);
+  assert.equal(unopened.expected_lines_summary.confirmed_short_units_total,0);
+  assert.equal(unopened.expected_lines_summary.short_units_total,0);
+  assert.ok(!(await c.fetch("/actions")).rows.some((row:{kind:string;id:string})=>row.kind==="parcel_discrepancy"&&row.id===advice.id));
   const receiving=(await receiver.fetch("/staff/desk")).locations.find((row:{code:string})=>row.code==="R-01");
   await receiver.fetch(`/staff/packages/${pkg.id}/items`,{
     revision:pkg.revision,

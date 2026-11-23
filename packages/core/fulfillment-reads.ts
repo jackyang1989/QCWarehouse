@@ -1,6 +1,6 @@
 import type { DB } from "../db";
-import { guard, one, organization, type Actor } from "./common";
-import { latestDispatchQuote, latestStorageQuote, unresolvedQuotePayment } from "./dispatch";
+import { guard, one, organization, paymentAwaitingResolution, unresolvedQuotePayment, type Actor } from "./common";
+import { latestDispatchQuote, latestStorageQuote } from "./dispatch";
 
 const relatedItems=`select a.item_id,a.linked_at,a.unlinked_at
   from order_line_item_links a join order_lines l on l.id=a.order_line_id
@@ -8,6 +8,20 @@ const relatedItems=`select a.item_id,a.linked_at,a.unlinked_at
 
 export const declaredItemTracking=`upper(regexp_replace(coalesce(e.declared_fields->>'declared_tracking_no',
   e.declared_fields->>'tracking_no',e.declared_fields->>'waybill',e.declared_fields->>'source_tracking_no',''),'[[:space:]]+','','g'))`;
+
+export const inboundParcelOrders=`(select count(*) from advice_orders linked where linked.advice_id=ao.advice_id and linked.org_id=ao.org_id)`;
+export const inboundShortageConfirmed=`exists(select 1 from tickets k where k.order_id=ao.order_id and k.org_id=ao.org_id
+  and k.category='receipt_mismatch' and k.details->>'package_id'=p.id::text
+  and k.details->>'discrepancy_type'='shortage' and k.state not in ('resolved','closed'))`;
+export const orderAttributedParcelItems=`left join lateral (
+  select count(*)::int logged, count(*) filter(where l.order_id=ao.order_id)::int identified,
+    count(*) filter(where wi.condition_state not in ('good','unchecked'))::int damaged,
+    coalesce(array_agg(wi.code order by wi.code),array[]::text[]) item_codes
+  from warehouse_items wi left join order_line_item_links a on a.item_id=wi.id and a.unlinked_at is null
+  left join order_lines l on l.id=a.order_line_id
+  where wi.package_id=p.id and wi.org_id=ao.org_id and wi.parent_item_id is null
+    and (l.order_id=ao.order_id or (a.id is null and ${inboundParcelOrders}=1))
+) attributed on p.id is not null`;
 
 export const orderInboundRegistration=`left join lateral (
   with registered as (
@@ -97,7 +111,7 @@ async function fulfillmentQuotes(db:DB,orderId:string|null,org:string,quoteId:st
   ) select id,revision,amount_cents,expires_at,accepted_at,purpose,action,batch_id,snapshot,item_codes,charge_id,
     case when applied_payment_id is not null or free_authorization is not null then 'paid'
       when voided_at is not null or not current_quote then 'inactive'
-      when exists(select 1 from payments p where p.charge_item_id=charge_id and p.state='processing')
+      when exists(select 1 from payments p where p.charge_item_id=charge_id and ${paymentAwaitingResolution})
         or (expires_at<=now() and unresolved_payment) then 'processing'
       when expires_at<=now() then 'expired'
       when accepted_at is not null then 'accepted'

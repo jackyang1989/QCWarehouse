@@ -1,4 +1,4 @@
-import { unresolvedQuotePayment } from "./dispatch";
+import { paymentAwaitingResolution, unresolvedQuotePayment } from "./common";
 
 const currentScopeSupplement=`o.state='awaiting_samples' and s.accepted_at is not null
   and s.previous_snapshot->>'order_revision'=o.revision::text
@@ -8,7 +8,7 @@ const currentScopeSupplement=`o.state='awaiting_samples' and s.accepted_at is no
 export const scopeSupplementState=`case
   when c.applied_payment_id is not null or c.free_authorization is not null then 'paid'
   when c.voided_at is not null or not coalesce((${currentScopeSupplement}),false) then 'inactive'
-  when exists(select 1 from payments p where p.charge_item_id=c.id and p.state='processing')
+  when exists(select 1 from payments p where p.charge_item_id=c.id and ${paymentAwaitingResolution})
     or (q.expires_at<=now() and ${unresolvedQuotePayment}) then 'processing'
   when q.expires_at<=now() then 'expired'
   else 'open' end`;
