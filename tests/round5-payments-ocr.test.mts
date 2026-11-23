@@ -80,7 +80,9 @@ class Client {
       const match = c.match(/^([^=]+)=([^;]*)/);
       if (match) this.jar.set(match[1], match[2]);
     }
-    const data = await response.json();
+    const contentType=response.headers.get("content-type")??"";
+    const data = contentType.startsWith("image/")||contentType.startsWith("application/pdf")
+      ?Buffer.from(await response.arrayBuffer()):await response.json();
     assert.equal(response.status, expected, `${method} ${path} -> expected ${expected}, got ${response.status}: ${JSON.stringify(data)}`);
     return data;
   }
@@ -609,6 +611,36 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
     });
     assert.equal(canceled.manual_state, "canceled");
     await admin.fetch(`/staff/finance/paypal-invoices/${ppRej.payment_id}/verify`, { decision: "approve" }, "POST", 409);
+  });
+
+  await t.test("An issued canceled PayPal invoice records verified cash for reconciliation only",async()=>{
+    const order=await createSubmittedOpenOrder(customer,"P18-CANCELED-RECEIPT");
+    const {payment_id:id}=await customer.fetch(`/charges/${order.chargeId}/paypal-invoice`,{});
+    const path=`/staff/finance/paypal-invoices/${id}`;
+    await finance.fetch(path+"/issue",{external_invoice_no:"INV2-CANCELED-QA"});
+    await finance.fetch(path+"/cancel",{reason:"Invoice already canceled locally"});
+    const receipt={external_transaction_id:"PP-CANCELED-RECEIPT-FIXTURE",received_amount_cents:2500,received_at:new Date().toISOString()};
+    const missingProof=await finance.fetch(path+"/record-receipt",receipt,"POST",422);
+    assert.equal(missingProof.error.code,"CANCELED_INVOICE_PROOF_REQUIRED");
+    const png=await sharp({create:{width:80,height:80,channels:3,background:"#146273"}}).png().toBuffer();
+    const form=new FormData();
+    form.set("kind","attachment");
+    form.set("photo",new Blob([new Uint8Array(png)],{type:"image/png"}),"fixture.png");
+    const proof=await finance.fetch("/staff/media",form,"POST",201);
+    assert.equal((await finance.fetch(path+"/record-receipt",{...receipt,evidence_media_id:proof.id})).state,"canceled");
+    assert.equal((await customer.fetch(`/orders/${order.orderId}/payment`)).state,"processing");
+    await customer.fetch(`/charges/${order.chargeId}/paypal-invoice`,{},"POST",409);
+    assert.ok(Buffer.isBuffer(await admin.fetch(`/media/${proof.id}`)));
+    await finance.fetch(path+"/verify",{decision:"approve"},"POST",403);
+    const verified=await admin.fetch(path+"/verify",{decision:"approve"});
+    assert.equal(verified.reconciliation_required,true);
+    assert.equal(verified.applied,false);
+    assert.equal((await admin.fetch(path+"/verify",{decision:"approve"})).idempotent,true);
+    const status=(await pool.query(`select p.state,p.provider_data->'canceled_snapshot' is not null preserved,
+      c.applied_payment_id,o.state order_state,(select count(*)::int from tickets where details->>'payment_id'=p.id::text) cases
+      from payments p join charge_items c on c.id=p.charge_item_id join inspection_quotes q on q.id=c.inspection_quote_id
+      join orders o on o.id=q.order_id where p.id=$1`,[id])).rows[0];
+    assert.deepEqual(status,{state:"succeeded",preserved:true,applied_payment_id:null,order_state:"awaiting_payment",cases:1});
   });
 
   await t.test("P19: PayPal manual refund skips Stripe worker call cleanly and completes via manual finance execute", async () => {

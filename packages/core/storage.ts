@@ -19,6 +19,16 @@ export const itemHandlingHoldSql=`case
   when exists(select 1 from incident_cases ic
     where ic.item_id=w.id and ic.state not in ('resolved','closed')) then 'incident' end`;
 
+export const itemQuarantineSql=`(w.identity_state='quarantined' or w.condition_state='restricted' or exists(
+  select 1 from warehouse_items part where part.parent_item_id=w.id
+   and (part.identity_state='quarantined' or part.condition_state='restricted')
+))`;
+
+export async function assertItemsOutsideQuarantine(db:DB,itemIds:string[],errorCode:string) {
+  const blocked=await db.query(`select 1 from warehouse_items w where w.id=any($1::uuid[]) and ${itemQuarantineSql} limit 1`,[itemIds]);
+  guard(!blocked.rowCount,errorCode,"A quarantined or restricted item requires warehouse review.");
+}
+
 export async function assertItemNotFrozen(db:DB,itemIds:string[],errorCode="ITEM_FROZEN") {
   if(!itemIds.length) return;
   const holds=(await db.query<{reason:string|null}>(`select ${itemHandlingHoldSql} reason

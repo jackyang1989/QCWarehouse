@@ -1,5 +1,5 @@
 import Stripe from "stripe";
-import { audit, event, guard, idempotent, lock, one, organization, role, uuid, type Actor, isDemo, paymentAwaitingResolution } from "./common";
+import { audit, event, guard, idempotent, lock, one, organization, role, uuid, type Actor, isDemo, paymentAwaitingResolution, paypalCanceledReceiptAwaitingReview } from "./common";
 import { requireCustomerActive, requireStaffMfa } from "./auth";
 import { stripeCheckoutMode, stripeCheckoutReady, stripeSettingsFromDb, stripeSettlementCredentials } from "./integrations";
 import {
@@ -225,7 +225,7 @@ export async function requestPaypalManualInvoice(
   guard(charge.voided_at === null, "CHARGE_VOIDED", "This charge has been voided.", 409);
   guard(charge.applied_payment_id === null, "ALREADY_PAID", "This charge has already been settled.", 409);
   guard(!(await db.query(`select 1 from payments p where p.charge_item_id=$1 and ${paymentAwaitingResolution}
-    and (p.provider<>'paypal_manual' or p.state in ('succeeded','partially_refunded'))`,[chargeItemId])).rowCount,
+    and (p.provider<>'paypal_manual' or p.state in ('succeeded','partially_refunded') or ${paypalCanceledReceiptAwaitingReview})`,[chargeItemId])).rowCount,
     "PAYMENT_PROCESSING","An existing payment must be resolved before starting a new payment attempt.",409);
 
   const expiresAt = charge.iq_expires_at ?? charge.dq_expires_at ?? charge.sq_expires_at;
@@ -511,6 +511,9 @@ export async function recordPaypalManualReceipt(
   const feeCents = input.fee_amount_cents ?? 0;
   guard(Number.isInteger(feeCents) && feeCents >= 0 && feeCents <= input.received_amount_cents, "INVALID_FEE", "Fee must be non-negative and at most received amount.", 422);
 
+  const owner=await one<{org_id:string}>(db,`select c.org_id from payments p join charge_items c on c.id=p.charge_item_id where p.id=$1`,[paymentId]);
+  await lock(db,"org:"+owner.org_id);
+
   const p = await one<{
     id: string;
     provider: string;
@@ -519,9 +522,14 @@ export async function recordPaypalManualReceipt(
     expected_amount_cents: number | null;
     environment: EnvMode;
     created_at: Date;
-  }>(db, "select id, provider, state, amount_cents, expected_amount_cents, environment, created_at from payments where id=$1 for update", [paymentId]);
+    external_invoice_no:string|null;
+  }>(db, "select id, provider, state, amount_cents, expected_amount_cents, environment, created_at, external_invoice_no from payments where id=$1 for update", [paymentId]);
   guard(p.provider === "paypal_manual", "INVALID_PROVIDER", "Receipt recording applies only to paypal_manual.", 400);
-  guard(!["succeeded", "partially_refunded", "refunded", "canceled"].includes(p.state), "PAYMENT_ALREADY_FINAL", "Payment is already settled or canceled.", 409);
+  const canceled=p.state==="canceled";
+  guard(!["succeeded", "partially_refunded", "refunded"].includes(p.state) && (!canceled||p.external_invoice_no),
+    "PAYMENT_ALREADY_FINAL", "Payment is already settled or canceled without an issued invoice.", 409);
+  guard(!canceled||input.received_at&&input.evidence_media_id,
+    "CANCELED_INVOICE_PROOF_REQUIRED","Provide the confirmed receipt time and a PayPal receipt for this canceled invoice.",422);
   const receivedAt=input.received_at===undefined?null:new Date(input.received_at);
   if(receivedAt)guard(Number.isFinite(receivedAt.valueOf())&&receivedAt.valueOf()<=Date.now()&&
     Math.floor(receivedAt.valueOf()/1000)>=Math.floor(p.created_at.valueOf()/1000),
@@ -536,8 +544,9 @@ export async function recordPaypalManualReceipt(
   guard(!dup, "DUPLICATE_EXTERNAL_TRANSACTION", `PayPal Transaction ID '${txId}' is already linked to another payment.`, 409);
 
   if (input.evidence_media_id) {
-    const asset = await one<{ kind: string; status: string }>(db, "select kind, status from media_assets where id=$1", [input.evidence_media_id]);
-    guard(asset.kind === "attachment" && asset.status === "ready", "INVALID_EVIDENCE", "Proof file must be a ready attachment.", 422);
+    const asset = await one<{kind:string;status:string;uploaded_by:string}>(db,"select kind,status,uploaded_by from media_assets where id=$1",[input.evidence_media_id]);
+    guard(asset.kind === "attachment" && asset.status === "ready" && (!canceled||asset.uploaded_by===actor.id),
+      "INVALID_EVIDENCE", "Provide a ready PayPal receipt attachment.", 422);
   }
 
   const expected = p.expected_amount_cents ?? p.amount_cents;
@@ -561,7 +570,7 @@ export async function recordPaypalManualReceipt(
          recorded_at = now(),
          verified_by = null,
          verified_at = null,
-         state = 'processing',
+         state = case when state='canceled' then state else 'processing' end,
          manual_state = $9,
          manual_notes = coalesce($10, manual_notes),
          provider_data = (provider_data - 'paypal_received_at') || $11::jsonb,
@@ -610,7 +619,7 @@ export async function recordPaypalManualReceipt(
     net_amount_cents: netCents,
     received_at: receivedAt?.toISOString()??null,
     manual_state: manualState,
-    state: "processing",
+    state: canceled?"canceled":"processing",
   };
 }
 
@@ -650,11 +659,14 @@ export async function verifyPaypalManualPayment(
     payer_email: string | null;
     recorded_by: string | null;
     recorded_at: Date | null;
+    evidence_media_id:string|null;
     provider_data: Record<string, unknown>;
   }>(db, "select * from payments where id=$1 for update", [paymentId]);
 
   guard(p.provider === "paypal_manual", "INVALID_PROVIDER", "Verification applies only to paypal_manual payments.", 400);
-  guard(p.state !== "canceled", "PAYMENT_CANCELED", "Canceled invoice attempt cannot be verified.", 409);
+  const canceled=p.state==="canceled";
+  guard(!canceled||Boolean(p.external_invoice_no&&p.recorded_by&&p.evidence_media_id),
+    "PAYMENT_CANCELED", "Register documented receipts for an issued canceled invoice before verification.", 409);
 
   guard(Boolean(p.recorded_by && p.external_transaction_id), "RECEIPT_NOT_RECORDED", "Record PayPal transaction ID and received amount before verification.", 409);
   guard(
@@ -697,8 +709,8 @@ export async function verifyPaypalManualPayment(
            recorded_at = null,
            verified_by = null,
            verified_at = null,
-           state = 'requires_payment',
-           manual_state = 'rejected',
+           state = case when state='canceled' then state else 'requires_payment' end,
+           manual_state = case when state='canceled' then 'canceled' else 'rejected' end,
            manual_notes = coalesce($2, manual_notes),
            provider_data = $3::jsonb - 'paypal_received_at' - 'customer_reported_paid_at',
            updated_at = now()
@@ -706,18 +718,18 @@ export async function verifyPaypalManualPayment(
       [paymentId, input.note?.trim() || null, JSON.stringify(nextData)],
     );
     await audit(db, actor, "paypal_manual_rejected", "payments", paymentId, { note: input.note?.trim() || null });
-    return { payment_id: paymentId, state: "requires_payment", manual_state: "rejected" };
+    return {payment_id:paymentId,state:canceled?"canceled":"requires_payment",manual_state:canceled?"canceled":"rejected"};
   }
 
   const expected = p.expected_amount_cents ?? p.amount_cents;
   const received = p.received_amount_cents ?? 0;
   guard(
-    received >= expected,
+    canceled ? received>0 : received>=expected,
     "UNDERPAYMENT_CANNOT_ACTIVATE",
     `Received amount ($${(received / 100).toFixed(2)}) is below invoice total ($${(expected / 100).toFixed(2)}). Collect remaining balance before verification.`,
     409,
   );
-  if (received > expected) {
+  if (!canceled && received > expected) {
     guard(
       input.accept_overpayment === true,
       "OVERPAYMENT_CONFIRMATION_REQUIRED",
@@ -788,6 +800,7 @@ export async function verifyPaypalManualPayment(
     },
     Math.floor(receivedAt / 1000),
     new Date(receivedAt),
+    canceled?"canceled_paypal_invoice_receipt":undefined,
   );
 
   const result=await application();

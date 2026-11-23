@@ -5014,6 +5014,13 @@ export function OrderView({number,section,demo=false}:{number:string;section?:Or
             </>}
         </Panel>
       </>}
+      {section==="parcels"&&!parcelLinkStates.includes(o.state)&&o.late_sample_registration&&<Panel title="Register a late comparison sample"
+        subtitle="Enter the late seller tracking number so the warehouse can check the parcel against this order.">
+        {receiving.error||carriers.error?<ErrorBlock error={receiving.error||carriers.error}/>:
+          !receiving.data||!carriers.data?<p role="status">Loading parcel registration…</p>:
+            <InboundParcelForm address={receiving.data.warehouse_address} carriers={carriers.data.carriers} orderId={o.id} lateComparison
+              onSave={()=>{detail.reload();desk.reload();}}/>}
+      </Panel>}
       {(section==="dispositions"||section==="storage")&&<OrderHandling
         order={o}
         storage={section==="storage"}
@@ -5465,16 +5472,18 @@ export function OrderView({number,section,demo=false}:{number:string;section?:Or
       </details>)}
     </Panel>}
     {section==="parcels"&&<Panel title="Inbound parcels linked to this order">
-      <Table headers={["Seller tracking number","Carrier","Sync status","Carrier status","Warehouse intake",""]} rows={o.parcels.map((p:Row)=>{
+      <Table headers={["Seller tracking","Carrier","Sync status","Carrier status","Warehouse intake"]} rows={o.parcels.map((p:Row)=>{
         const logged=p.logged_item_count??p.received_quantity;
         return [
-          <CodeButton code={p.tracking_norm} onClick={()=>setTrackTarget({kind:"parcels",id:p.id,code:p.tracking_norm})}/>,
+          <div className="cell-stack">
+            <CodeButton code={p.tracking_norm} onClick={()=>setTrackTarget({kind:"parcels",id:p.id,code:p.tracking_norm})}/>
+            <Link className="small nowrap" href={"/parcels/"+p.id}>View parcel</Link>
+          </div>,
           p.carrier_name??"—",
           p.sync_state?label(p.sync_state):"—",
           label(p.transport_state),
           p.warehouse_state?<div className="cell-stack"><span>{label(p.warehouse_state)}{p.package_code?` (${p.package_code})`:""}</span>
             {logged!=null&&<small>{logged} item(s) logged</small>}</div>:"Awaiting physical receipt",
-          <Link className="small" href={"/parcels/"+p.id}>Full page →</Link>,
         ];
       })} empty="No seller waybills are linked to this order."/>
       <div className="actions"><Link href="/account">View your warehouse address</Link><Link href="/parcels">Open all parcels</Link></div>
@@ -7055,9 +7064,9 @@ export function CustomerActions() {
   </>;
 }
 
-function InboundParcelForm({address,carriers,orderId,orders=[],preferredOrder,pendingWaybills=[],onSave}:{
+function InboundParcelForm({address,carriers,orderId,orders=[],preferredOrder,pendingWaybills=[],lateComparison,onSave}:{
   address:Row|null;carriers:Row[];orderId?:string;orders?:Row[];preferredOrder?:string|null;
-  pendingWaybills?:{tracking_no:string;item_count:number}[];onSave:()=>void;
+  pendingWaybills?:{tracking_no:string;item_count:number}[];lateComparison?:boolean;onSave:()=>void;
 }) {
   const [saved,setSaved]=useState<string>();
   const [trackingInput,setTrackingInput]=useState("");
@@ -7067,7 +7076,7 @@ function InboundParcelForm({address,carriers,orderId,orders=[],preferredOrder,pe
       const carrier=text(f,"carrier"),order=orderId??text(f,"order");
       const tracking=text(f,"tracking");
       await request("/me/parcels","POST",{address_id:address.id,tracking_no:tracking,
-        ...(carrier?{carrier_code:carrier}:{}),order_ids:order?[order]:[]});
+        ...(carrier?{carrier_code:carrier}:{}),order_ids:order?[order]:[],...(lateComparison&&order?{late_comparison_order_id:order}:{})});
       setSaved(tracking);setTrackingInput("");onSave();
     }}>
       {pendingWaybills.length>0&&<label>Use a tracking number declared in this order

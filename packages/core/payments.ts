@@ -319,7 +319,7 @@ export async function checkout(actor:Actor,id:string,rev:number,request:{scope:s
   }
   throw new Problem("CHECKOUT_UNAVAILABLE","Checkout expired. Retry to start a new payment attempt.",409);
 }
-export async function applyPayment(db:DB,pid:string,providerRef:string,details:object,confirmedAt:number,exactReceiptTime?:Date) {
+export async function applyPayment(db:DB,pid:string,providerRef:string,details:object,confirmedAt:number,exactReceiptTime?:Date,reconciliationReason?:string) {
   const link=await one(db,`select c.org_id from payments p join charge_items c on c.id=p.charge_item_id where p.id=$1`,[pid]);
   await lock(db,"org:"+link.org_id);
   const payment=await one(db,"select * from payments where id=$1 for update",[pid]);
@@ -332,13 +332,13 @@ export async function applyPayment(db:DB,pid:string,providerRef:string,details:o
   const expiresAt=new Date(charge.quote_expires_at).valueOf();
   const paidWithinQuote=Number.isSafeInteger(confirmedAt)&&confirmedAt>0&&charge.quote_expires_at&&
     (exactReceiptTime?exactReceiptTime.valueOf()<expiresAt:confirmedAt<Math.floor(expiresAt/1000));
-  if(charge.voided_at || charge.applied_payment_id || !paidWithinQuote) {
+  if(reconciliationReason || charge.voided_at || charge.applied_payment_id || !paidWithinQuote) {
     const orderId=charge.inspection_quote_id
       ?(await db.query<{order_id:string}>("select order_id from inspection_quotes where id=$1",[charge.inspection_quote_id])).rows[0]?.order_id??null
       :null;
     await db.query("insert into tickets(id,public_no,org_id,order_id,category,subject,details) values($1,$2,$3,$4,'payment_refund',$5,$6)",
       [uuid(),code("PAY-"),charge.org_id,orderId,"Reconcile late or duplicate payment",{payment_id:pid,
-        reason:!paidWithinQuote?"quote_expired_or_confirmation_time_unverified":"superseded_or_duplicate",
+        reason:reconciliationReason??(!paidWithinQuote?"quote_expired_or_confirmation_time_unverified":"superseded_or_duplicate"),
         confirmed_at:confirmedAt??null,quote_expires_at:charge.quote_expires_at}]);
     await audit(db,null,"payment_reconciliation_required","payments",pid,{charge_id:charge.id,confirmed_at:confirmedAt??null,quote_expires_at:charge.quote_expires_at});
     return;
@@ -405,6 +405,25 @@ export async function applyPayment(db:DB,pid:string,providerRef:string,details:o
   );
   await audit(db,null,"payment_confirmed","charge_items",charge.id);
   await event(db,"payment.confirmed",{charge_id:charge.id,...(confirmedOrderId?{order_id:confirmedOrderId}:{})});
+}
+
+const closedDisputeStates=new Set(["won","lost","warning_closed","prevented"]);
+
+async function acceptDisputeEvent(db:DB,event:Stripe.Event,dispute:Stripe.Dispute,paymentId:string) {
+  const current=(await db.query<{state:string;payment_id:string}>(
+    "select state,payment_id from payment_disputes where provider_id=$1 for update",[dispute.id])).rows[0];
+  guard(!current||current.payment_id===paymentId,"PAYMENT_MISMATCH","The Stripe dispute does not belong to this payment.",409);
+  if(!current)return {accepted:true,freeze:true};
+  const previous=(await db.query<{created:number|null}>(`select max(case when jsonb_typeof(payload->'created')='number'
+      then (payload->>'created')::double precision end) created
+    from payment_events where provider='stripe' and type in ('charge.dispute.created','charge.dispute.updated','charge.dispute.closed')
+      and payload#>>'{data,object,id}'=$1 and processed_at is not null`,[dispute.id])).rows[0];
+  const stale=previous.created!==null&&(!Number.isSafeInteger(event.created)||event.created<previous.created);
+  const duplicateOpening=event.type==="charge.dispute.created"&&previous.created!==null&&event.created===previous.created;
+  const appeal=dispute.status.startsWith("appeal_")&&Number.isSafeInteger(event.created)&&previous.created!==null&&event.created>previous.created;
+  if(stale||duplicateOpening||current.state==="resolved_by_staff"&&!appeal||
+    (closedDisputeStates.has(current.state)&&!closedDisputeStates.has(dispute.status)&&!appeal))return {accepted:false,freeze:false};
+  return {accepted:true,freeze:current.state==="resolved_by_staff"&&appeal};
 }
 export async function demoPay(db:DB,actor:Actor,id:string) {
   guard(isDemo(),"NOT_FOUND","Checkout not found.",404);
@@ -547,15 +566,20 @@ export async function stripeEvent(db:DB,e:Stripe.Event) {
     const p=(await db.query<{id:string;charge_item_id:string;org_id:string;inspection_quote_id:string|null;dispatch_quote_id:string|null}>(
       `select p.id,p.charge_item_id,c.org_id,c.inspection_quote_id,c.dispatch_quote_id
        from payments p join charge_items c on c.id=p.charge_item_id
-       where p.provider_data->>'payment_intent'=$1`,
+       where p.provider='stripe' and p.provider_data->>'payment_intent'=$1`,
       [typeof dispute.payment_intent==="string"?dispute.payment_intent:dispute.payment_intent?.id]
     )).rows[0];
     if(p) {
       await lock(db,"org:"+p.org_id);
+      const transition=await acceptDisputeEvent(db,e,dispute,p.id);
+      if(!transition.accepted) {
+        await db.query("update payment_events set processed_at=now() where provider='stripe' and event_id=$1",[e.id]);
+        return {received:true};
+      }
       await db.query(`insert into payment_disputes(provider_id,payment_id,state,evidence_due_at,updated_at) values($1,$2,$3,$4,now())
         on conflict(provider_id) do update set state=excluded.state,evidence_due_at=excluded.evidence_due_at,updated_at=now()`,
         [dispute.id,p.id,dispute.status,dispute.evidence_details?.due_by?new Date(dispute.evidence_details.due_by*1000):null]);
-      if(e.type==="charge.dispute.created") {
+      if(transition.freeze) {
         const linkedOrders=(await db.query<{order_id:string}>(
           `select order_id from inspection_quotes where id=$1
            union
@@ -615,6 +639,9 @@ export async function resolvePaymentDispute(
   input:{decision:"release_freeze"|"maintain_hold";reason:string}
 ) {
   role(actor,"finance","super_admin");
+  const {org_id}=await one<{org_id:string}>(db,`select c.org_id from payment_disputes d join payments p on p.id=d.payment_id
+    join charge_items c on c.id=p.charge_item_id where d.provider_id=$1`,[providerId]);
+  await lock(db,"org:"+org_id);
   const d=await one<{provider_id:string;payment_id:string;state:string;org_id:string}>(
     db,
     `select d.provider_id,d.payment_id,d.state,c.org_id
@@ -622,9 +649,8 @@ export async function resolvePaymentDispute(
      where d.provider_id=$1 for update of d`,
     [providerId]
   );
-  await lock(db,"org:"+d.org_id);
   guard(
-    !["needs_response","under_review","warning_needs_response"].includes(d.state),
+    closedDisputeStates.has(d.state)||d.state==="resolved_by_staff",
     "DISPUTE_STILL_OPEN",
     "Wait for the provider dispute to close before resolving the freeze."
   );

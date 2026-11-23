@@ -9,6 +9,7 @@ import { attachEvidence } from "./intake";
 import { checkSchema, templateSchema } from "./orders";
 import { staffAccess } from "./staff-access";
 import { sampleCodePattern } from "./portal-routes";
+import { assertItemsOutsideQuarantine } from "./storage";
 
 type ResultInput={item_key:string;component:string;attempt:number;status:string;method:string;is_final:boolean;typed_value?:unknown;unit?:string;reason?:string;evidence_ids?:string[];details?:Record<string,unknown>};
 
@@ -156,7 +157,7 @@ async function lockedTask(db:DB,id:string) {
   const initial=await one(db,`select l.org_id from inspection_tasks t join order_lines l on l.id=t.order_line_id where t.id=$1`,[id]);
   await lock(db,"org:"+initial.org_id);
   return one(db,`select t.*,l.org_id,l.order_id,l.attributes line_attributes,v.content,o.state order_state,
-    e.declared_fields
+    e.declared_fields,a.item_id task_item_id
     from inspection_tasks t join order_lines l on l.id=t.order_line_id join orders o on o.id=l.order_id
     join template_versions v on v.id=t.template_version_id
     left join order_line_item_links a on a.id=t.assignment_id
@@ -202,6 +203,11 @@ async function components(db:DB,t:{group_id?:string|null;content?:unknown}) {
     members.push({...r,is_reference:true});
   }
   return members;
+}
+
+async function assertTaskItemsOutsideQuarantine(db:DB,t:{group_id?:string|null;task_item_id?:string|null}) {
+  const itemIds=t.group_id?(await components(db,t)).map(member=>member.id):t.task_item_id?[t.task_item_id]:[];
+  await assertItemsOutsideQuarantine(db,itemIds,"TASK_UNAVAILABLE");
 }
 
 export type MissingCompletenessItem = {
@@ -551,6 +557,7 @@ export async function startTask(db:DB,actor:Actor,id:string,rev:number) {
   revision(t.revision,rev);
   const blocked=(await db.query("select 1 from order_blocks where order_id=$1 and resolved_at is null limit 1",[t.order_id])).rowCount;
   guard(t.state==="READY" && ["queued","inspecting"].includes(t.order_state) && !blocked,"TASK_UNAVAILABLE","The task is already claimed or blocked.");
+  await assertTaskItemsOutsideQuarantine(db,t);
   const ref=(await db.query(`select r.id from inspection_groups g join reference_samples r on r.id=g.reference_id
     where g.id=$1 and (r.state<>'active' or r.expires_at<=now())`,[t.group_id])).rowCount;
   guard(!ref,"REFERENCE_UNAVAILABLE","The reference sample is no longer active.");
@@ -806,6 +813,7 @@ export async function submitTask(db:DB,actor:Actor,id:string,rev:number) {
   const t=await lockedTask(db,id);
   revision(t.revision,rev);
   guard(t.state==="IN_PROGRESS" && t.assignee_id===actor.id && t.order_state==="inspecting","TASK_UNAVAILABLE","This task is not assigned to you.");
+  await assertTaskItemsOutsideQuarantine(db,t);
   const comp=await evaluateCompleteness(db,t);
   guard(comp.ok,"INSPECTION_INCOMPLETE",comp.missing[0]?.hint ?? "Complete all required checks and photos before submitting.");
   await db.query("update inspection_tasks set state='SUBMITTED',revision=revision+1 where id=$1",[id]);

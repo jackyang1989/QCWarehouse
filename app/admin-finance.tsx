@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Action,
   Empty,
@@ -93,6 +93,7 @@ export function AdminPaymentsWorkbench({ demo = false, actor }: { demo?: boolean
   const disputeRows: Row[] = disputes.data?.disputes ?? [];
   const paypalRows: Row[] = paypalQueue.data?.rows ?? [];
   const selectedPaypal = paypalRows.find((r) => r.id === activeManualId) ?? paypalRows.find((r) => r.state !== "canceled" && r.state !== "succeeded") ?? paypalRows[0];
+  const paypalEvidenceAttempt=useRef<{key:string;mediaId:string}|null>(null);
 
   function reloadAll() {
     reload();
@@ -371,9 +372,10 @@ export function AdminPaymentsWorkbench({ demo = false, actor }: { demo?: boolean
                 {selectedPaypal.provider_data?.customer_reported_tx_ref ? ` · 客户自报交易号：${selectedPaypal.provider_data.customer_reported_tx_ref}` : ""}
               </p>
 
-              {!['succeeded','partially_refunded','refunded','canceled'].includes(selectedPaypal.state) && (
+              {!['succeeded','partially_refunded','refunded'].includes(selectedPaypal.state) &&
+                (selectedPaypal.state!=="canceled"||selectedPaypal.external_invoice_no) && (
                 <>
-                  <Form
+                  {selectedPaypal.state!=="canceled"&&<Form
                     label="步骤 A：记录已发送的 PayPal Invoice 编号"
                     idempotent
                     run={async (f, key) => {
@@ -403,12 +405,12 @@ export function AdminPaymentsWorkbench({ demo = false, actor }: { demo?: boolean
                         <input name="invoice_url" type="url" defaultValue={selectedPaypal.invoice_url ?? ""} placeholder="https://www.paypal.com/invoice/p/..." />
                       </label>
                     </div>
-                  </Form>
+                  </Form>}
 
                   <hr className="sep" />
 
                   <Form
-                    label="步骤 B：登记到账实收（PayPal TX ID 与净额）"
+                    label={selectedPaypal.state==="canceled"?"登记作废发票的实际到账":"步骤 B：登记到账实收（PayPal TX ID 与净额）"}
                     idempotent
                     run={async (f, key) => {
                       setChannelError(undefined);
@@ -416,7 +418,9 @@ export function AdminPaymentsWorkbench({ demo = false, actor }: { demo?: boolean
                         const fileEntry = f.get("proof");
                         let evidenceId: string | undefined;
                         if (fileEntry instanceof File && fileEntry.size > 0) {
-                          evidenceId = await upload(fileEntry, "attachment");
+                          const prior=paypalEvidenceAttempt.current;
+                          evidenceId=key&&prior?.key===key?prior.mediaId:await upload(fileEntry,"attachment");
+                          if(key)paypalEvidenceAttempt.current={key,mediaId:evidenceId};
                         }
                         const recCents = Math.round(Number(text(f, "received_usd")) * 100);
                         const feeCents = Math.round(Number(text(f, "fee_usd") || "0") * 100);
@@ -430,6 +434,7 @@ export function AdminPaymentsWorkbench({ demo = false, actor }: { demo?: boolean
                           ...(evidenceId ? { evidence_media_id: evidenceId } : {}),
                           ...(text(f, "notes") ? { notes: text(f, "notes") } : {}),
                         }, key);
+                        paypalEvidenceAttempt.current=null;
                         setChannelNotice({
                           tone: res.manual_state === "receipt_recorded" ? "success" : "warning",
                           text: `已录入交易 ${res.external_transaction_id}（阶段：${MANUAL_PAYPAL_STATE_ZH[res.manual_state]?.label ?? res.manual_state}），现等待另一位财务/超管独立核销。`,
@@ -460,8 +465,8 @@ export function AdminPaymentsWorkbench({ demo = false, actor }: { demo?: boolean
                       </label>
                     </div>
                     <label>
-                      上传收款截图或凭证 PDF（可选）
-                      <input type="file" name="proof" accept="image/jpeg,image/png,image/webp,application/pdf" />
+                      上传收款截图或凭证 PDF（{selectedPaypal.state==="canceled"?"必填":"可选"}）
+                      <input type="file" name="proof" required={selectedPaypal.state==="canceled"} accept="image/jpeg,image/png,image/webp,application/pdf" />
                     </label>
                     <label>
                       财务对账备注
@@ -481,11 +486,12 @@ export function AdminPaymentsWorkbench({ demo = false, actor }: { demo?: boolean
                 <StatusBanner tone={selectedPaypal.applied?"success":"warning"} title={selectedPaypal.applied?"收款已应用到收费项":"实收已核实，等待人工对账"}>
                   交易号 <code className="code">{selectedPaypal.external_transaction_id}</code> 已由 {selectedPaypal.verified_by_name ?? "独立审核人"} 复核。
                 </StatusBanner>
-              ) : selectedPaypal.state === "canceled" ? (
-                <StatusBanner tone="info" title="该发票申请已作废">理由：{selectedPaypal.manual_notes ?? "—"}</StatusBanner>
+              ) : selectedPaypal.state === "canceled" && !selectedPaypal.recorded_by ? (
+                <StatusBanner tone="info" title="该发票申请已作废">已发发票若确认到账，可登记凭证后独立复核，转人工对账。</StatusBanner>
               ) : (
                 <>
                   {selectedPaypal.recorded_by&&<p className="small">凭证到账时间（UTC）：{selectedPaypal.received_at??"缺失，请根据原凭证补录"}</p>}
+                  {selectedPaypal.evidence_media_id&&<a className="button sm" href={`/api/v1/media/${selectedPaypal.evidence_media_id}`} target="_blank" rel="noreferrer">查看实收凭证</a>}
                   {actor && selectedPaypal.recorded_by === actor.id && (
                     <StatusBanner tone="warning" title="职责分离提醒 (SoD)">
                       该笔实收由您本人（{actor.id.slice(0, 8)}）录入，无法自录自核；请由另一位财务或超管账号登录验证并核销。
@@ -497,7 +503,7 @@ export function AdminPaymentsWorkbench({ demo = false, actor }: { demo?: boolean
                       disabled={!selectedPaypal.received_at || !selectedPaypal.recorded_by || (Boolean(actor) && selectedPaypal.recorded_by === actor?.id)}
                       run={async () => {
                         setChannelError(undefined);
-                        const acceptOver = selectedPaypal.manual_state === "overpaid"
+                        const acceptOver = selectedPaypal.state!=="canceled"&&selectedPaypal.manual_state === "overpaid"
                           ? window.confirm("检测到实收大于应收（超付），是否明确确认接受超付并激活关联订单/发运？")
                           : false;
                         const result=await request(`/staff/finance/paypal-invoices/${selectedPaypal.id}/verify`, "POST", {

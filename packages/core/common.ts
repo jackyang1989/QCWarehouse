@@ -106,7 +106,9 @@ export async function idempotent<T>(db: DB, scope: string, key: string, payload:
   return result;
 }
 export { randomUUID as uuid };
-export const paymentAwaitingResolution=`(p.state in ('processing','succeeded','partially_refunded')
+export const paypalCanceledReceiptAwaitingReview=`(p.provider='paypal_manual' and p.state='canceled' and p.recorded_by is not null
+  and p.external_transaction_id is not null and p.evidence_media_id is not null)`;
+export const paymentAwaitingResolution=`(p.state in ('processing','succeeded','partially_refunded') or ${paypalCanceledReceiptAwaitingReview}
   or (p.provider='paypal_manual' and p.state='requires_payment' and p.provider_data ? 'customer_reported_paid_at'))`;
 
 export const unresolvedQuotePayment=`exists(select 1 from payments p where p.charge_item_id=c.id and (

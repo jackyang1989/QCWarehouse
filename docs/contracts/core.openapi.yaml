@@ -536,6 +536,10 @@ paths:
                     type: string
                     format: uuid
                   minItems: 0
+                late_comparison_order_id:
+                  type: string
+                  format: uuid
+                  description: Explicit declaration of a late sample from an accepted three-to-two comparison. Must be the sole order in order_ids.
               additionalProperties: false
   /staff/intake/lookup:
     post:

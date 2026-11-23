@@ -24,7 +24,7 @@ export function OperationNotes({notes,writePath,reload}:{notes:Row[];writePath?:
   const [saved,setSaved]=useState(0);
   return <Panel title="操作备注与交接" subtitle="仅授权员工可见。追加记录会保留记录人和时间。">
     <OperationNoteList notes={notes}/>
-    {notes.length===50&&<p className="muted small">显示最近 50 条记录。</p>}
+    {notes.filter(note=>note.action!=="customer_instruction_confirmed").length===50&&<p className="muted small">显示最近 50 条操作记录及全部已确认的客户补充说明。</p>}
     {writePath&&<Form key={saved} label="追加操作备注" idempotent run={async(fields,key)=>{
       await request(writePath,"POST",{body:text(fields,"body")},key);
       setSaved(count=>count+1);

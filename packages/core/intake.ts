@@ -5,7 +5,7 @@ import { demoWarehouseAddressZh, usableWarehouseAddressSql } from "./demo-fixtur
 import { isPdfBytes, processImageBytes, validatePdfBytes } from "./media";
 import { orderAcceptsSampleAssignmentSql, readyOrder, summarizeExpectedLines } from "./orders";
 import { assertZonePurpose, requireSpace } from "./storage";
-import { inboundParcelOrders, inboundShortageConfirmed, orderAttributedParcelItems } from "./fulfillment-reads";
+import { declaredItemTracking, inboundParcelOrders, inboundShortageConfirmed, orderAttributedParcelItems } from "./fulfillment-reads";
 
 export function waybill(value:string) {
   const normalized=value.replace(/\s+/g,"").toUpperCase();
@@ -17,7 +17,7 @@ export async function validCarrier(db:DB,carrier:string) {
   await one(db,"select code from carriers where code=$1 and enabled",[normalized]);
   return normalized;
 }
-export async function advise(db:DB,actor:Actor,input:{tracking_no:string;address_id:string;carrier_code?:string;order_ids?:string[]}) {
+export async function advise(db:DB,actor:Actor,input:{tracking_no:string;address_id:string;carrier_code?:string;order_ids?:string[];late_comparison_order_id?:string}) {
   const org=organization(actor),tracking=waybill(input.tracking_no);
   await lock(db,"org:"+org);await lock(db,"waybill:"+tracking);
   const carrier=input.carrier_code ? await validCarrier(db,input.carrier_code) : null;
@@ -28,6 +28,13 @@ export async function advise(db:DB,actor:Actor,input:{tracking_no:string;address
   const prev=match?{id:match.advice_id,revision:match.advice_revision}:undefined;
   const orders=[...new Set(input.order_ids??[])];
   for(const order of orders) await one(db,"select id from orders where id=$1 and org_id=$2",[order,org]);
+  let lateScope:{id:string}|null=null;
+  if(input.late_comparison_order_id) {
+    guard(orders.length===1&&orders[0]===input.late_comparison_order_id,"LATE_SAMPLE_ORDER_REQUIRED","Select the original comparison order for the late sample.",422);
+    lateScope=await one<{id:string}>(db,`select s.id from scope_revisions s join orders o on o.id=s.order_id
+      where o.id=$1 and o.org_id=$2 and s.accepted_at is not null and s.proposed_snapshot->>'conversion'='three_to_two'`,[orders[0],org]);
+    guard(!match?.package_id,"PARCEL_ALREADY_RECEIVED","Ask the warehouse to verify a late parcel that has already been received.",409);
+  }
   let row=prev;
   if(!row) {
     const address=await one(db,`select * from warehouse_addresses where id=$1 and active and ${usableWarehouseAddressSql("$2","$3")}`,
@@ -38,6 +45,10 @@ export async function advise(db:DB,actor:Actor,input:{tracking_no:string;address
     await audit(db,actor,"advise_parcel","package_advices",row.id);
   }
   for(const order of orders) await db.query("insert into advice_orders(advice_id,order_id,org_id) values($1,$2,$3) on conflict do nothing",[row.id,order,org]);
+  if(lateScope&&!(await db.query(`select 1 from audit_events where entity_type='package_advices' and entity_id=$1
+    and action='declare_late_comparison_parcel' and after->>'scope_revision_id'=$2`,[row.id,lateScope.id])).rowCount) {
+    await audit(db,actor,"declare_late_comparison_parcel","package_advices",row.id,{scope_revision_id:lateScope.id});
+  }
   return {id:row.id,revision:row.revision,state:"advised"};
 }
 export async function linkParcelToOrder(db:DB,actor:Actor,adviceId:string,input:{order_id:string}) {
@@ -113,6 +124,19 @@ export async function attachEvidence(db:DB,actor:Actor,ids:string[],kind:string,
       [id,scope.org,scope.package??null,scope.task??null]);
   }
 }
+async function lateComparisonParcel(db:DB,adviceId:string,tracking:string) {
+  return (await db.query<{order_id:string;org_id:string;scope_revision_id:string}>(`select ao.order_id,ao.org_id,s.id scope_revision_id
+    from advice_orders ao join scope_revisions s on s.order_id=ao.order_id and s.accepted_at is not null
+    join expected_items e on e.id::text=s.proposed_snapshot->>'dropped_expected_item_id' and not e.in_scope
+    where ao.advice_id=$1 and s.proposed_snapshot->>'conversion'='three_to_two'
+      and (${declaredItemTracking}=$2 or exists(select 1 from audit_events a where a.entity_type='package_advices'
+        and a.entity_id=ao.advice_id and a.action='declare_late_comparison_parcel' and a.after->>'scope_revision_id'=s.id::text))
+      and not exists(select 1 from advice_orders registered join order_lines line on line.order_id=registered.order_id
+        join expected_items e on e.order_line_id=line.id and e.in_scope
+        where registered.advice_id=ao.advice_id and ${declaredItemTracking}=$2)
+    order by s.accepted_at desc,s.id limit 1`,[adviceId,tracking])).rows[0];
+}
+
 export async function checkIn(
   db:DB,
   actor:Actor,
@@ -153,8 +177,10 @@ export async function checkIn(
   if(t?.package_id) return one(db,"select id,state,revision from packages where id=$1",[t.package_id]);
   guard(t?.org_id||cleanNote.length>=4,"UNMATCHED_PARCEL_NOTE_REQUIRED",
     "Describe the unmatched parcel before placing it in the verification area (at least 4 characters).",422);
+  const late=t?.org_id&&t.advice_id?await lateComparisonParcel(db,t.advice_id,tracking):null;
   let targetLocId:string|null=null;
-  if(input.location_id) {
+  if(late) targetLocId=await resolveQuarantineLocation(db,input.location_id);
+  else if(input.location_id) {
     await assertZonePurpose(db,input.location_id,{hasOwner:Boolean(t?.org_id),quarantined:false});
     targetLocId=input.location_id;
   } else if(!t?.org_id) {
@@ -171,7 +197,7 @@ export async function checkIn(
        values($1,$2,$3,$4,now(),0,$5,$6,$7,$8)
        on conflict (code) do nothing
        returning id,state,revision`,
-      [packageCode(attempt >= 5 ? 6 : 5),t?.org_id??null,t?.advice_id??null,actor.id,input.weight_g??null,t?.org_id?"checked_in":"unmatched",targetLocId,formattedConditionNote],
+      [packageCode(attempt >= 5 ? 6 : 5),t?.org_id??null,t?.advice_id??null,actor.id,input.weight_g??null,late?"quarantined":t?.org_id?"checked_in":"unmatched",targetLocId,formattedConditionNote],
     );
     if (inserted.rows[0]) {
       pkg = inserted.rows[0];
@@ -181,7 +207,7 @@ export async function checkIn(
   guard(pkg, "PACKAGE_CODE_EXHAUSTED", "Could not allocate a unique package code. Try again.", 503);
   if(targetLocId) {
     await db.query("insert into storage_events(package_id,to_location_id,action,operator_id) values($1,$2,$3,$4)",
-      [pkg.id,targetLocId,t?.org_id?"intake_receiving":"intake_unmatched",actor.id]);
+      [pkg.id,targetLocId,late?"quarantine":t?.org_id?"intake_receiving":"intake_unmatched",actor.id]);
   }
   await attachEvidence(db,actor,input.outer_media_ids,"intake_outer",{org:t?.org_id??null,package:pkg.id});
   if(t) await db.query(`update tracking_records set package_id=$2,carrier_code=coalesce(carrier_code,$3),
@@ -194,9 +220,46 @@ export async function checkIn(
       values($1,$2,null,'identity_unclear',$3,$4)`,
       [uuid(),code("UNM-"),"Unmatched inbound parcel: "+tracking,{tracking_no:tracking,carrier_code:carrier,package_id:pkg.id,outer_condition:outerCondition}]);
   }
+  if(late) {
+    const ticketId=uuid();
+    await db.query(`insert into tickets(id,public_no,org_id,order_id,category,state,subject,details)
+      values($1,$2,$3,$4,'receipt_mismatch','waiting_customer','Late parcel needs verification',$5)`,
+    [ticketId,code("C-"),late.org_id,late.order_id,{package_id:pkg.id,tracking_no:tracking,late_comparison_parcel:true,scope_revision_id:late.scope_revision_id}]);
+    await db.query(`insert into ticket_events(id,ticket_id,actor_type,kind,body) values($1,$2,'system','message',$3)`,
+      [uuid(),ticketId,`The warehouse has set aside seller parcel ${tracking} for verification. Please reply if the tracking number differs from your shipment. Your original inspection scope stays the same.`]);
+    await event(db,"ticket.reply",{ticket_id:ticketId,org_id:late.org_id});
+    await audit(db,actor,"late_comparison_parcel_held","packages",pkg.id,{ticket_id:ticketId,order_id:late.order_id});
+  }
   await audit(db,actor,"physical_check_in","packages",pkg.id,{outer_condition:outerCondition,condition_note:formattedConditionNote,location_id:targetLocId});
   await event(db,"package.received",{package_id:pkg.id});
   return pkg;
+}
+
+export async function reviewLateComparisonParcel(db:DB,actor:Actor,packageId:string,input:{revision:number;reason:string}) {
+  role(actor,"receiver","warehouse_admin");
+  const {org_id}=await one<{org_id:string|null}>(db,"select org_id from packages where id=$1",[packageId]);
+  guard(org_id,"NOT_FOUND","Late parcel review not found.",404);
+  await lock(db,"org:"+org_id);
+  const parcel=await one<{revision:number;state:string;location_id:string|null}>(db,
+    "select revision,state,location_id from packages where id=$1 and org_id=$2 for update",[packageId,org_id]);
+  revision(parcel.revision,input.revision);
+  const ticket=await one<{id:string}>(db,`select id from tickets where org_id=$1 and details->>'package_id'=$2
+    and details->>'late_comparison_parcel'='true' and not (details ? 'warehouse_verified_at') for update`,[org_id,packageId]);
+  const otherHold=await db.query(`select 1 from audit_events where entity_type='packages' and entity_id=$1
+    and action='quarantine_package' limit 1`,[packageId]);
+  guard(parcel.state==="quarantined"&&!otherHold.rowCount,"PACKAGE_QUARANTINED","Resolve the separate warehouse quarantine before releasing this parcel.");
+  const receiving=await one<{id:string}>(db,"select id from storage_locations where zone='receiving' and active order by code limit 1");
+  await db.query("update packages set state='checked_in',location_id=$2,revision=revision+1 where id=$1",[packageId,receiving.id]);
+  await db.query("insert into storage_events(package_id,from_location_id,to_location_id,action,operator_id) values($1,$2,$3,'late_parcel_review',$4)",
+    [packageId,parcel.location_id,receiving.id,actor.id]);
+  await db.query(`update tickets set state=case when state='waiting_internal' then state else 'resolved' end,
+    resolved_at=case when state='waiting_internal' then null else now() end,revision=revision+1,
+    details=details||jsonb_build_object('warehouse_verified_at',now()) where id=$1`,[ticket.id]);
+  await db.query(`insert into ticket_events(id,ticket_id,actor_type,kind,body) values($1,$2,'system','message',$3)`,
+    [uuid(),ticket.id,"The warehouse verified the late parcel. After it is unpacked, you can review the items in Warehouse Items and request handling separately from the original inspection."]);
+  await event(db,"ticket.reply",{ticket_id:ticket.id,org_id,dedupe_key:`late-parcel-verified:${ticket.id}`});
+  await audit(db,actor,"late_comparison_parcel_verified","packages",packageId,{ticket_id:ticket.id,reason:input.reason});
+  return {id:packageId,state:"checked_in",revision:parcel.revision+1};
 }
 export async function intakeItems(db:DB,actor:Actor,id:string,input:{revision:number;items:{code:string;location_id:string;component_of?:string}[]}) {
   role(actor,"receiver","warehouse_admin");

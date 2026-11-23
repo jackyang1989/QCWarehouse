@@ -7,7 +7,7 @@ import { eligibleManualQuoteOrderSql, expiredManualInspectionPaymentSql, orderAc
 import { declaredItemTracking, inboundParcelOrders, orderAttributedParcelItems, orderInboundRegistration, orderShipments } from "./fulfillment-reads";
 import { getIntakeContext, pendingIntakeClaimSql, waybill } from "./intake";
 import { scopeSupplementForOrder, scopeSupplementState } from "./scope-payment";
-import { incidentAwaitingCustomer, itemHandlingHoldSql } from "./storage";
+import { incidentAwaitingCustomer, itemHandlingHoldSql, itemQuarantineSql } from "./storage";
 import { hasStaffAccess, staffAccess } from "./staff-access";
 import { effectiveDispatchCharge, pendingDispatchQuote, pendingStorageQuote, renewableFulfillmentQuote } from "./dispatch";
 import { inspectionPaymentForOrder } from "./payments";
@@ -330,7 +330,9 @@ export async function customerActions(db:DB,actor:Actor,page?:number) {
       k.public_no,case when not incident.decision_required then k.next_action_at end,
       case when incident.decision_required or (k.next_action_at is not null and k.next_action_at<=now()+interval '48 hours') then 1 else 2 end,
       (select o2.public_no from orders o2 where o2.id=k.order_id),k.subject,
-      case when incident.decision_required then 'Review warehouse incident resolution and respond.' else 'Support case requires your reply.' end,
+      case when incident.decision_required then 'Review warehouse incident resolution and respond.'
+        when k.details->>'late_comparison_parcel'='true' then 'Review the late parcel in this order and reply to the warehouse.'
+        else 'Support case requires your reply.' end,
       null::int,null::text,null::int,null::int,null::int,null::int,null::int,null::int,null::text,null::text
       from tickets k cross join lateral (select exists(select 1 from incident_cases ic
         where ic.ticket_id=k.id and ic.state=$3) decision_required) incident
@@ -676,6 +678,9 @@ export async function warehousePackage(db:DB,actor:Actor,value:string,byCode=fal
     array(select m.id from media_assets m where m.package_id=p.id and m.kind='intake_outer' and m.status='ready' order by m.captured_at) outer_media_ids,
     array(select m.id from media_assets m where m.package_id=p.id and m.kind='intake_open' and m.status='ready' order by m.captured_at) open_media_ids,
     (select crp.receiving_code from customer_receiving_profiles crp where crp.org_id=p.org_id limit 1) receiving_code,
+    (select k.public_no from tickets k where k.org_id=p.org_id and k.details->>'package_id'=p.id::text
+      and k.details->>'late_comparison_parcel'='true' and not (k.details ? 'warehouse_verified_at')
+      and not exists(select 1 from audit_events a where a.entity_type='packages' and a.entity_id=p.id and a.action='quarantine_package') limit 1) late_sample_review,
     t.tracking_norm,t.transport_state,t.sync_state,
     (select s.events_json from tracking_snapshots s where s.tracker_id=t.id and s.locale='zh-CN'
       order by s.latest_event_at desc nulls last,s.fetched_at desc limit 1) tracking_events,
@@ -843,7 +848,7 @@ const warehouseBatches=`select b.id,b.revision,b.state,b.action,b.destination_sn
   q.revision quote_revision,q.amount_cents,q.expires_at,q.accepted_at,
   b.state='quoted' and ${renewableFulfillmentQuote} renewable_quote,
   (select jsonb_agg(jsonb_build_object(
-    'id',w.id,'code',w.code,'location_code',sl.code,
+    'id',w.id,'code',w.code,'location_code',sl.code,'quarantined',${itemQuarantineSql},
     'product_name',coalesce(nullif(e.declared_fields->>'name',''),''),
     'sku_code',coalesce(nullif(e.declared_fields->>'sku_code',''),nullif(e.declared_fields->>'sample_code',''),''),
     'order_no',o3.public_no
@@ -874,30 +879,38 @@ export async function warehouseDispatchQueue(db:DB,actor:Actor,state:typeof disp
       (select min((d.return_info->>'deadline')::timestamptz) from dispatch_batch_items i
         join disposition_requests d on d.id=i.disposition_id where i.batch_id=b.id and i.released_at is null) return_deadline,
       (select count(*)::int from dispatch_batch_items i where i.batch_id=b.id and i.released_at is null) remaining,
-      s.packed,s.shipped,s.returns,s.last_handover,s.waybills,
+      s.packed,s.ready_packed,s.shipped,s.returns,s.last_handover,s.waybills,
       exists(select 1 from dispatch_quote_versions dq join charge_items c on c.dispatch_quote_id=dq.id
         where dq.batch_id=b.id and ${effectiveDispatchCharge}) paid,
-      exists(select 1 from dispatch_batch_items i left join shipment_items si on si.batch_id=i.batch_id and si.item_id=i.item_id
-        where i.batch_id=b.id and i.released_at is null and si.item_id is null) needs_packing,
+      exists(select 1 from dispatch_batch_items i join warehouse_items w on w.id=i.item_id
+        where i.batch_id=b.id and i.released_at is null and ${itemQuarantineSql}) has_quarantine,
+      exists(select 1 from jsonb_array_elements(coalesce(q.snapshot->'parcels','[]'::jsonb)) plan
+        where exists(select 1 from dispatch_batch_items i where i.batch_id=b.id and i.released_at is null
+          and (plan->'item_ids') ? i.item_id::text
+          and not exists(select 1 from shipment_items si where si.batch_id=i.batch_id and si.item_id=i.item_id))
+        and not exists(select 1 from dispatch_batch_items i join warehouse_items w on w.id=i.item_id
+          where i.batch_id=b.id and i.released_at is null and (plan->'item_ids') ? i.item_id::text and ${itemQuarantineSql})) needs_packing,
       b.state,${renewableFulfillmentQuote} renewable
-    from dispatch_batches b left join lateral(select id,expires_at,accepted_at from dispatch_quote_versions
+    from dispatch_batches b left join lateral(select id,expires_at,accepted_at,snapshot from dispatch_quote_versions
       where batch_id=b.id order by revision desc limit 1) q on true
     left join charge_items c on c.dispatch_quote_id=q.id
     left join lateral(select count(*) filter (where sh.state='packed')::int packed,
+      count(*) filter(where sh.state='packed' and not exists(select 1 from shipment_items si join warehouse_items w on w.id=si.item_id
+        where si.shipment_id=sh.id and ${itemQuarantineSql}))::int ready_packed,
       count(*) filter (where sh.shipped_at is not null)::int shipped,
       count(*) filter (where exists(select 1 from shipment_return_items sr where sr.shipment_id=sh.id))::int returns,
       max(sh.shipped_at) last_handover,
       array_agg(distinct sh.tracking_norm order by sh.tracking_norm) filter (where sh.tracking_norm is not null) waybills
       from shipments sh where sh.batch_id=b.id) s on true
     where b.state<>'draft'
-  ) select id,action,state,receiving_code,order_numbers,expires_at,return_deadline,remaining,packed,shipped,returns,last_handover,waybills from queue where ($2::text is null or id::text=$2 or $2=any(waybills) or upper(coalesce(receiving_code,''))=upper($2) or upper($2)=any(select upper(onum) from unnest(order_numbers) onum)) and case $1::text
+  ) select id,action,state,receiving_code,order_numbers,expires_at,return_deadline,remaining,packed,shipped,returns,last_handover,waybills,has_quarantine from queue where ($2::text is null or id::text=$2 or $2=any(waybills) or upper(coalesce(receiving_code,''))=upper($2) or upper($2)=any(select upper(onum) from unnest(order_numbers) onum)) and case $1::text
     when 'weighing' then state='confirmed' or state='quoted' and renewable
     when 'payment' then state='quoted' and not coalesce(renewable,false)
     when 'packing' then state='paid' and paid and needs_packing
-    when 'handover' then state='paid' and paid and packed>0
+    when 'handover' then state='paid' and paid and ready_packed>0
     when 'shipped' then shipped>0
     when 'returned' then returns>0
-    when 'blocked' then state='paid' and not paid
+    when 'blocked' then state='paid' and (not paid or has_quarantine)
     else false end
   order by case when $1 in ('weighing','payment','packing','handover') then least(return_deadline,
     case when $1 in ('weighing','payment') then expires_at end) end nulls last,
@@ -912,7 +925,7 @@ export async function warehouseDispatchBatch(db:DB,actor:Actor,id:string) {
     array(select jsonb_build_object('id',ae.id,'at',ae.at,'action',ae.action,'body',ae.after->>'body','display_name',u.display_name)
       from audit_events ae left join users u on u.id=ae.actor_id where ae.entity_type='shipments' and ae.entity_id=s.id
       and ae.action in ('pack_shipment','handover') and ae.after->>'body' is not null order by ae.at desc,ae.id desc) operation_notes,
-    (select jsonb_agg(jsonb_build_object('id',w.id,'code',w.code,'received_at',r.received_at) order by w.code)
+    (select jsonb_agg(jsonb_build_object('id',w.id,'code',w.code,'received_at',r.received_at,'quarantined',${itemQuarantineSql}) order by w.code)
       from shipment_items si join warehouse_items w on w.id=si.item_id and w.org_id=b.org_id
       left join shipment_return_items r on r.shipment_id=si.shipment_id and r.item_id=si.item_id
       where si.shipment_id=s.id) items,

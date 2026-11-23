@@ -12,7 +12,7 @@ import { failedJobs, retryFailedJob } from "./worker";
 import { quotePolicy, quotePolicyInput, saveQuotePolicy } from "./quote-policy";
 import { customerEmailDeliveryStatus, receivePostmarkWebhook, retryEmailDelivery, staffEmailDeliveries } from "./email";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
-import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, savePhoto, unassignItem, waybill } from "./intake";
+import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
 import { acceptQuote, amendDispatchBatch, calculateShippingPreview, cancelDisposition, checkStorageReminders, closeCompletedOrder, confirmBatch, handover, instruct, packShipment, planBatch, publishShippingRate, quoteBatch, readDispatchBatch, receiveReturn, releaseReferenceSample, storageQuote } from "./dispatch";
 import { chargeReceipt, checkout, demoPay, orderPayment, orderRefundPayments, refundApprove, refundReject, refundRequest, resolvePaymentDispute, stripeEvent, verifyStripe } from "./payments";
@@ -805,6 +805,9 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   if(method==="POST" && pkgQuarantine) return extraWrite(req,path,actor,z.object({
     revision:revSchema,reason:z.string().trim().min(4).max(1000),location_id:idSchema.optional(),evidence_ids:z.array(idSchema).optional()
   }),(db,a,b)=>quarantinePackage(db,a,idSchema.parse(pkgQuarantine[1]),b));
+  const lateComparison=path.match(/^\/staff\/packages\/([a-f0-9-]{36})\/late-sample-review$/i);
+  if(method==="POST"&&lateComparison) return extraWrite(req,path,actor,z.object({revision:revSchema,reason:z.string().trim().min(4).max(1000)}).strict(),
+    (db,a,b)=>reviewLateComparisonParcel(db,a,idSchema.parse(lateComparison[1]),b));
   const pkgBindOwner=path.match(/^\/staff\/packages\/([a-f0-9-]{36})\/bind-owner$/i);
   if(method==="POST" && pkgBindOwner) return extraWrite(req,path,actor,z.object({
     revision:revSchema,receiving_code:z.string().trim().min(3).max(64),evidence_ids:z.array(idSchema).min(1),reason:z.string().trim().min(4).max(1000)

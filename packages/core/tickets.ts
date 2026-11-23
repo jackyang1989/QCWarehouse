@@ -274,6 +274,7 @@ export async function writeStaffTicket(db:DB,actor:Actor,id:string,input:z.infer
       state="resolved";due=null;
     } else if(input.kind==="resolve") {
       guard(k.category!=="identity_unclear","CLAIM_DECISION_REQUIRED","Use the separate parcel ownership decision.");
+      guard(!k.details.late_comparison_parcel||k.details.warehouse_verified_at,"WAREHOUSE_REVIEW_REQUIRED","The warehouse must complete verification of this late parcel first.");
       guard(!k.details.order_instruction,"INSTRUCTION_DECISION_REQUIRED","Record the instruction decision and reply to the customer.");
       state="resolved";due=null;
       await append(db,actor,id,"internal_note",input.body);

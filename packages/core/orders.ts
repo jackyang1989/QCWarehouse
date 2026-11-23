@@ -961,6 +961,8 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
     where ao.order_id=$1 and ao.org_id=$2 order by t.tracking_norm`,[id,order.org_id])).rows;
   const cases=(await db.query(`select id,public_no,subject,state from tickets
     where order_id=$1 and org_id=$2 order by created_at desc limit 50`,[id,order.org_id])).rows;
+  const lateSampleRegistration=(await db.query(`select 1 from scope_revisions where order_id=$1 and accepted_at is not null
+    and proposed_snapshot->>'conversion'='three_to_two' limit 1`,[id])).rowCount===1;
   const discrepancyResolutionRecord=(await db.query(`select id,public_no,state,details->>'discrepancy_resolution' discrepancy_resolution,created_at
     from tickets where order_id=$1 and org_id=$2 and category in ('receipt_mismatch','damage_or_loss') and details ? 'discrepancy_resolution'
     order by created_at desc limit 1`,[id,order.org_id])).rows[0]??null;
@@ -993,6 +995,7 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
   };
   const expected_lines_summary={...summarizeExpectedLines(lines,rows,parcels),discrepancy_resolution_record:discrepancyResolutionRecord};
   return {...orderDTO(order as Parameters<typeof orderDTO>[0]),price_cents:order.price_cents,
+    late_sample_registration:lateSampleRegistration,
     customer_notes:order.customer_notes??null,held_at:order.held_at??null,held_from_state:order.held_from_state??null,hold_reason:order.hold_reason??null,
     created_at:order.created_at,report_published_at:order.report_published_at??null,closed_at:order.closed_at??null,paid_at:order.paid_at??null,samples_ready_at:order.samples_ready_at??null,sla_due_at:order.sla_due_at??null,
     lines,items:rows,expected_lines_summary,tasks_summary,tasks,report_version:progress.published_version??null,scope_payment:progress.scope_payment,manual_quote:manual??null,manual_quote_renewable:manualQuoteRenewable,

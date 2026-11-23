@@ -181,6 +181,20 @@ async function shipOne(c:Client,staff:Client,rate:string,instructionId:string,it
     await pool.query("update charge_items set voided_at=null where id=$1",[fee.charge_item_id]);
   }
   await staff.fetch("/staff/dispatch-batches/"+batch.batch_id+"/parcels",{...packing,revision:quote.revision+1,item_ids:[randomUUID()]},"POST",409);
+  const original=(await pool.query(`select revision,location_id,identity_state,condition_state from warehouse_items where id=$1`,[itemId])).rows[0];
+  async function quarantineFixture() {
+    const {revision}=(await pool.query("select revision from warehouse_items where id=$1",[itemId])).rows[0];
+    await staff.fetch(`/staff/items/${itemId}/quarantine`,{revision,reason:"Test warehouse isolation before dispatch."});
+  }
+  const restoreFixture=()=>pool.query(`update warehouse_items set location_id=$2,identity_state=$3,condition_state=$4 where id=$1`,
+    [itemId,original.location_id,original.identity_state,original.condition_state]);
+  await quarantineFixture();
+  const deniedPacking=await staff.fetch("/staff/dispatch-batches/"+batch.batch_id+"/parcels",{...packing,revision:quote.revision+1},"POST",409);
+  assert.equal(deniedPacking.error.code,"SHIPMENT_BLOCKED");
+  assert.deepEqual((await staff.fetch(queue("packing"))).rows,[]);
+  assert.equal((await staff.fetch(queue("blocked"))).rows[0].has_quarantine,true);
+  assert.equal((await staff.fetch(detailPath)).shipments.length,0);
+  await restoreFixture();
   const shipment=await staff.fetch("/staff/dispatch-batches/"+batch.batch_id+"/parcels",{...packing,revision:quote.revision+1},"POST",201);
   const packed=await staff.fetch(detailPath);
   assert.equal(packed.shipments[0].items[0].id,itemId);
@@ -191,6 +205,12 @@ async function shipOne(c:Client,staff:Client,rate:string,instructionId:string,it
   assert.deepEqual((await staff.fetch(queue("packing"))).rows,[]);
   const actual="YTO"+randomUUID().slice(0,8).toUpperCase();
   const hand={revision:shipment.revision,item_ids:[itemId],carrier_code:"yto",tracking_no:actual,evidence_ids:[await staff.photo("dispatch")],handed_at:new Date().toISOString(),operation_note:"Collected from the dispatch desk."};
+  await quarantineFixture();
+  const deniedHandover=await staff.fetch("/staff/shipments/"+shipment.shipment_id+"/handover",hand,"POST",409);
+  assert.equal(deniedHandover.error.code,"SHIPMENT_BLOCKED");
+  assert.deepEqual((await staff.fetch(queue("handover"))).rows,[]);
+  assert.equal((await staff.fetch(detailPath)).shipments[0].state,"packed");
+  await restoreFixture();
   await staff.fetch("/staff/shipments/"+shipment.shipment_id+"/handover",hand);
   await staff.fetch("/staff/shipments/"+shipment.shipment_id+"/handover",hand,"POST",409);
   const done=await staff.fetch(detailPath);
@@ -911,8 +931,20 @@ test("33 physical items from three parcels share one order, report and selective
   await c.fetch("/checkout/demo/"+checkout.attempt_id,{});
   assert.equal((await c.fetch(scopedQuote)).state,"paid");
   assert(!(await c.fetch("/actions")).rows.some((action:{id:string})=>action.id===charge.charge_item_id));
+  const heldItem=parcels[1].item_ids[0];
+  const originalHold=(await pool.query("select revision,location_id,identity_state,condition_state from warehouse_items where id=$1",[heldItem])).rows[0];
+  await staff.fetch(`/staff/items/${heldItem}/quarantine`,{revision:originalHold.revision,reason:"Second outbound parcel requires fixture verification."});
+  const dispatchQueue=(state:string)=>"/staff/dispatch-batches?"+new URLSearchParams({state,reference:batch.batch_id});
+  assert.equal((await staff.fetch(dispatchQueue("packing"))).rows[0].id,batch.batch_id);
+  assert.equal((await staff.fetch(dispatchQueue("blocked"))).rows[0].has_quarantine,true);
   const shipments=[];
   for(const parcel of parcels) {
+    if(parcel===parcels[1]) {
+      assert.deepEqual((await staff.fetch(dispatchQueue("packing"))).rows,[]);
+      assert.equal((await staff.fetch(dispatchQueue("handover"))).rows[0].id,batch.batch_id);
+      await pool.query("update warehouse_items set location_id=$2,identity_state=$3,condition_state=$4 where id=$1",
+        [heldItem,originalHold.location_id,originalHold.identity_state,originalHold.condition_state]);
+    }
     shipments.push(await staff.fetch(batchPath+"/parcels",{...parcel,revision:splitQuote.revision+1,quote_id:splitQuote.quote_id,
       packed_media_ids:[await staff.photo("dispatch")]},"POST",201));
   }
@@ -5173,6 +5205,7 @@ test("Stocktake, warehouse incident compensation, stage refunds, dispute freezes
     object:"event",
     livemode:false,
     type:"charge.dispute.closed",
+    created:2000,
     data:{object:{
       id:disputeId,
       payment_intent:payRow.provider_payment_intent_id,
@@ -5183,6 +5216,12 @@ test("Stocktake, warehouse incident compensation, stage refunds, dispute freezes
     }},
   });
   assert.equal(dispClosedRes.status,200);
+  async function staleDispute() {
+    return sendStripeWebhook({id:"evt_stale_dispute_"+randomUUID(),livemode:false,type:"charge.dispute.created",created:1999,
+      data:{object:{id:disputeId,payment_intent:payRow.provider_payment_intent_id,status:"needs_response"}}});
+  }
+  assert.equal((await staleDispute()).status,200);
+  assert.equal((await pool.query("select state from payment_disputes where provider_id=$1",[disputeId])).rows[0].state,"won");
   const stillBlockedErr=await receiving.fetch(`/staff/dispatch-batches/${batchMain.batch_id}/parcels`,{
     revision:batchBeforePack.revision,
     quote_id:qMain.quote_id,
@@ -5198,6 +5237,8 @@ test("Stocktake, warehouse incident compensation, stage refunds, dispute freezes
     reason:"Dispute won in Stripe; releasing shipment and order freeze",
   });
   assert.equal(resolvedDisp.state,"resolved_by_staff");
+  assert.equal((await staleDispute()).status,200);
+  assert.equal((await pool.query("select state from payment_disputes where provider_id=$1",[disputeId])).rows[0].state,"resolved_by_staff");
 
   // Now pack and hand over [itemA, itemB] -> both items become outbound
   const packedMain=await receiving.fetch(`/staff/dispatch-batches/${batchMain.batch_id}/parcels`,{
@@ -5891,6 +5932,7 @@ test("Week 28 full-chain regression: 1/5-item standard & 3-item compare, 3-to-2 
     carrier_code:"yto",
     tracking_no:lateWaybill,
     order_ids:[cmp3Order.id],
+    late_comparison_order_id:cmp3Order.id,
   },"POST",201);
   const latePkg=await receiving.fetch("/staff/intake/check-in",{
     tracking_no:lateWaybill,
@@ -5898,8 +5940,25 @@ test("Week 28 full-chain regression: 1/5-item standard & 3-item compare, 3-to-2 
     carrier_code:"yto",
     outer_media_ids:[await receiving.photo("intake_outer")],
   },"POST",201);
+  assert.equal(latePkg.state,"quarantined");
+  assert.equal(cmp3Published.late_sample_registration,true);
+  const lateActions=await c.fetch("/actions");
+  const lateAction=lateActions.rows.find((action:{order_public_no:string;summary:string})=>action.order_public_no===cmp3Order.public_no&&action.summary==="Late parcel needs verification");
+  assert.ok(lateAction);
+  const lateCasePath=`/cases/${lateAction.id}`;
+  const lateCase=await c.fetch(lateCasePath);
+  await c.fetch(lateCasePath+"/messages",{revision:lateCase.revision,body:"The seller tracking number is correct."});
+  const lateBlocked=await receiving.fetch(`/staff/packages/${latePkg.id}/items`,{
+    revision:latePkg.revision,items:[{code:newSampleCode(),location_id:locId}],
+  },"POST",409);
+  assert.equal(lateBlocked.error.code,"PACKAGE_QUARANTINED");
+  const clearedLate=await receiving.fetch(`/staff/packages/${latePkg.id}/late-sample-review`,{
+    revision:latePkg.revision,reason:"The return label and receiving code match the late third comparison sample.",
+  });
+  assert.equal((await c.fetch(lateCasePath)).state,"waiting_internal");
+  assert.equal((await c.fetch(`/orders/${cmp3Order.id}`)).state,"report_ready");
   const lateIntake=await receiving.fetch(`/staff/packages/${latePkg.id}/items`,{
-    revision:latePkg.revision,
+    revision:clearedLate.revision,
     items:[{code:newSampleCode(),location_id:locId}],
   },"POST",201);
   const lateItemId=lateIntake.item_ids[0] as string;
@@ -7328,6 +7387,12 @@ test("order instructions and operation notes reach the authorized staff without 
   for(const body of [handoff.body,verdict.body,taskHandoff.body]){
     assert.ok(view.operation_notes.some((note:{body:string})=>note.body===body));
   }
+  await pool.query(`insert into audit_events(at,actor_type,action,entity_type,entity_id,after)
+    select now()+interval '1 second','staff','order_handoff_note','orders',$1,jsonb_build_object('body','Fixture note '||n)
+    from generate_series(1,51) n`,[draft.id]);
+  const manyNotes=await inspector.fetch(taskPath);
+  assert.equal(manyNotes.operation_notes.length,51);
+  assert.equal(manyNotes.operation_notes[0].body,verdict.body);
   const lateStaff=`/staff/tickets/${late.id}`;
   const pending=await admin.fetch(lateStaff);
   assert.equal(pending.order_instruction.can_confirm,false);

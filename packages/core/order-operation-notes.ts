@@ -3,7 +3,7 @@ import { audit, guard, one, role, type Actor } from "./common";
 import { staffAccess } from "./staff-access";
 
 export async function orderOperationNotes(db:DB,orderId:string,taskId?:string) {
-  const {rows}=await db.query(`select a.id,a.at,a.action,u.display_name,
+  const {rows}=await db.query(`with notes as (select a.id,a.at,a.action,u.display_name,
     coalesce(a.after->>'body',a.after->>'reason') body,
     a.after->>'task_id' task_id
     from audit_events a left join users u on u.id=a.actor_id
@@ -11,7 +11,11 @@ export async function orderOperationNotes(db:DB,orderId:string,taskId?:string) {
       and a.action in ('order_handoff_note','task_handoff_note','customer_instruction_confirmed','hold_order','resume_order','extend_order_arrival')
       and coalesce(a.after->>'body',a.after->>'reason') is not null
       and ($2::text is null or a.after->>'task_id' is null or a.after->>'task_id'=$2)
-    order by a.at desc,a.id desc limit 50`,[orderId,taskId??null]);
+    ) select * from (
+      select * from notes where action='customer_instruction_confirmed'
+      union all
+      (select * from notes where action<>'customer_instruction_confirmed' order by at desc,id desc limit 50)
+    ) visible order by (action='customer_instruction_confirmed') desc,at desc,id desc`,[orderId,taskId??null]);
   return rows;
 }
 

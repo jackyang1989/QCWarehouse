@@ -3,7 +3,7 @@ import { pool, type DB } from "../db";
 import { currentTerms, requireCustomerActive } from "./auth";
 import { audit, code, event, guard, lock, one, organization, revision, role, unresolvedQuotePayment, uuid, type Actor } from "./common";
 import { validCarrier, waybill } from "./intake";
-import { assertItemNotFrozen, assertZonePurpose, requireSpace } from "./storage";
+import { assertItemNotFrozen, assertItemsOutsideQuarantine, assertZonePurpose, requireSpace } from "./storage";
 import { newQuoteValidity } from "./quote-policy";
 
 type Destination={recipient:string;phone:string;address:string;member_code?:string};
@@ -15,6 +15,7 @@ export async function instruct(db:DB,actor:Actor,itemId:string,input:Instruction
   const w=await one(db,"select * from warehouse_items where id=$1 and org_id=$2 for update",[itemId,org]);
   guard(["stored","received"].includes(w.custody_state) && !w.parent_item_id && w.identity_state!=="quarantined",
     "ITEM_UNAVAILABLE","This item cannot be released.");
+  await assertItemsOutsideQuarantine(db,[itemId],"ITEM_UNAVAILABLE");
   await assertItemNotFrozen(db,[itemId],"ITEM_UNAVAILABLE");
   const order=(await db.query(`select o.id,o.state,l.category_id from orders o join order_lines l on l.order_id=o.id
     join order_line_item_links a on a.order_line_id=l.id where a.item_id=$1 and a.unlinked_at is null`,[itemId])).rows[0];
@@ -639,6 +640,7 @@ async function paidBatch(db:DB,b:{id:string}) {
   return q;
 }
 async function assertItemsNotBlockedByOrderOrDispute(db:DB,itemIds:string[]) {
+  await assertItemsOutsideQuarantine(db,itemIds,"SHIPMENT_BLOCKED");
   await assertItemNotFrozen(db,itemIds,"SHIPMENT_BLOCKED");
   const blocked=(await db.query(`select 1 from order_line_item_links a join order_lines l on l.id=a.order_line_id join orders o on o.id=l.order_id
     where a.item_id=any($1::uuid[]) and a.unlinked_at is null and (o.state='on_hold' or

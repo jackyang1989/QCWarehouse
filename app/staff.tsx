@@ -382,7 +382,7 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
               关联委托订单：{lookup.context.orders.map((o:Row)=>`${o.public_no}（申报 ${o.total_declared_qty} / 已收 ${o.cumulative_received_qty} / 待绑 ${o.remaining_unlinked_qty}）`).join(" · ")}
             </p>
           </div>}
-          {lookup.result.package_id&&<p>此运单已有实收记录，已定位到拆包登记。</p>}
+          {lookup.result.package_id&&<p>此运单已有实收记录，请按下方包裹状态继续处理。</p>}
         </div>}
         {lookup&&lookup.result.match_state!=="ambiguous"&&!lookup.result.package_id&&(canIntakeWrite?<Form key={lookup.tracking+"-"+lookup.carrier} label="确认实物到仓" run={async f=>{
           const outerCondition=text(f,"outer_condition")||"intact";
@@ -930,7 +930,7 @@ function DispatchQueue({onOpenDrawer,canShipWrite=true}:{onOpenDrawer?:(t:StaffO
       </div>,
       <div key="s" className="cell-stack">
         <strong>{dispatchAction(batch.action)}</strong>
-        <div><Tag>{label(batch.state)}</Tag></div>
+        <div><Tag>{label(batch.state)}</Tag>{batch.has_quarantine&&<Tag tone="red">有隔离实物</Tag>}</div>
       </div>,
       <div key="p" className="cell-stack">
         <span>待发 <strong>{batch.remaining}</strong> · 已装箱 <strong>{batch.packed}</strong></span>
@@ -952,6 +952,7 @@ function DispatchQueue({onOpenDrawer,canShipWrite=true}:{onOpenDrawer?:(t:StaffO
 function PackParcel({batch,parcel,reload}:{batch:Row;parcel:Row;reload:()=>void}) {
   const expected=parcel.item_ids.map((id:string)=>batch.items.find((item:Row)=>item.id===id));
   if(expected.some((item:Row|undefined)=>!item))return <ErrorBlock error="报价内实物已变更，请刷新核对批次。"/>;
+  if(expected.some((item:Row)=>item.quarantined))return <p className="notice">本包裹包含待解除隔离的实物，暂不能装箱。</p>;
   return <div className="card">
     <h3>待装箱 · {parcel.item_ids.length} 件 · {parcel.weight_g} 克</h3>
     <ScanAndSubmit items={expected} label="确认装箱" run={async fields=>{
@@ -1046,7 +1047,8 @@ export function WarehouseDispatchBatch({id,actor}:{id:string;actor?:Row}) {
             <CodeButton code={i.code} onClick={()=>setDrawer({kind:"item",ref:i.code})}/>,
             i.received_at?stamp(i.received_at):"—",
           ])}/>
-          {canShipWrite&&s.state==="packed"&&<ScanAndSubmit key={s.revision} items={s.items} label="确认已交给快递" run={async fields=>{
+          {s.state==="packed"&&s.items.some((item:Row)=>item.quarantined)&&<p className="notice">本包裹包含待解除隔离的实物，暂不能交给快递。</p>}
+          {canShipWrite&&s.state==="packed"&&!s.items.some((item:Row)=>item.quarantined)&&<ScanAndSubmit key={s.revision} items={s.items} label="确认已交给快递" run={async fields=>{
             const photo=await upload(fields.get("photo"),"dispatch");
             await request("/staff/shipments/"+s.id+"/handover","POST",{
               revision:s.revision,item_ids:s.items.map((i:Row)=>i.id),carrier_code:text(fields,"carrier"),
@@ -3278,13 +3280,19 @@ export function WarehousePackageView({code,actor}:{code:string;actor?:Row}) {
     <div className="page-head row"><div><p className="eyebrow">WAREHOUSE / PACKAGE RECORD</p><h1>包裹详情</h1>
       <p className="code">{code}</p></div>
       <div className="head-actions">
-        {parcel&&canIntakeWrite&&<Link className="button primary" href={"/wh/intake?package="+parcel.id+"#intake-unpack"}>打开拆包登记</Link>}
+        {parcel&&canIntakeWrite&&parcel.state!=="quarantined"&&<Link className="button primary" href={"/wh/intake?package="+parcel.id+"#intake-unpack"}>打开拆包登记</Link>}
         <Link className="button" href="/wh/packages">返回包裹列表</Link>
       </div></div>
     {!canIntakeWrite&&<div className="notice" style={{marginBottom:12}}><strong>只读监督模式：</strong>收货拆包、包裹隔离与库位操作仅限收货员（receiver）及仓库主管（warehouse_admin）执行。</div>}
     {error&&<><ErrorBlock error={error}/><button type="button" onClick={reload}>重试</button></>}
     {!data&&!error&&<p role="status">正在读取包裹…</p>}
     {data&&parcel&&<>
+      {parcel.late_sample_review&&<Panel title="对比检迟到包裹核验" subtitle={`工单 ${parcel.late_sample_review}。核对外箱证据、收件码和原委托后再放行拆包。`}>
+        {canIntakeWrite&&<Form label="核验通过并转拆包" idempotent run={async(fields,key)=>{
+          await request(`/staff/packages/${parcel.id}/late-sample-review`,"POST",{revision:parcel.revision,reason:text(fields,"reason")},key);
+          reload();
+        }}><label>核验依据（必填）<textarea name="reason" required minLength={4} maxLength={1000}/></label></Form>}
+      </Panel>}
       <div className="ops-columns">
         <Panel title="仓库实收与外箱证据">
           <dl className="location-facts">
@@ -3354,7 +3362,7 @@ export function WarehousePackageView({code,actor}:{code:string;actor?:Row}) {
           <Photo label="面单收件码核对照"/>
         </Form>
       </Panel>}
-      {canIntakeWrite&&parcel.state!=="quarantined"&&<Panel title="禁限品与异常包裹隔离">
+      {canIntakeWrite&&(parcel.state!=="quarantined"||parcel.late_sample_review)&&<Panel title="禁限品与异常包裹隔离">
         <details className="card">
           <summary>登记为禁限品或拒收异常并转入隔离区（Quarantine）</summary>
           <Form label="确认转入隔离区" run={async f=>{
