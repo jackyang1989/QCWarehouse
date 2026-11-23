@@ -151,6 +151,8 @@ export async function checkIn(
   const t=rows[0];
   guard(!input.advice_id || t?.advice_id===input.advice_id,"TRACKING_REVIEW_REQUIRED","The selected advice does not match the tracking number.");
   if(t?.package_id) return one(db,"select id,state,revision from packages where id=$1",[t.package_id]);
+  guard(t?.org_id||cleanNote.length>=4,"UNMATCHED_PARCEL_NOTE_REQUIRED",
+    "Describe the unmatched parcel before placing it in the verification area (at least 4 characters).",422);
   let targetLocId:string|null=null;
   if(input.location_id) {
     await assertZonePurpose(db,input.location_id,{hasOwner:Boolean(t?.org_id),quarantined:false});

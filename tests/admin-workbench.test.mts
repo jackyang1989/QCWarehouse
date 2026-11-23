@@ -297,6 +297,7 @@ test("admin workbench: payment refund state sync (partially_refunded -> refunded
       tracking_no: "ZTO" + randomUUID().slice(0, 10).toUpperCase(),
       carrier_code: "zto",
       outer_condition: "intact",
+      condition_note: "No matching intake advice.",
       weight_g: 500,
       location_id: uLoc.id,
       outer_media_ids: [outerPhoto],

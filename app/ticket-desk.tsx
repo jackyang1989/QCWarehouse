@@ -108,6 +108,7 @@ export function CustomerCase({id,order}:{id:string;order?:string}) {
       <h1>{data?.subject??"Support case"}</h1>
       {data&&<div className="actions"><span className="code">{data.public_no}</span><Tag>{claim?claimStatus(claim,data.state):incident?.decision_required?"Decision required":status[data.state]?.[0]}</Tag>
         {data.handling_team&&<Tag tone="outline">{data.handling_team}{data.assigned?" · Assigned":" · Queued"}</Tag>}
+        {data.order_instruction&&<Tag tone="blue">{data.order_instruction.decision==="confirmed"?"Instructions shared with the warehouse":data.order_instruction.decision==="declined"?"Instructions could not be applied":"Instructions awaiting review"}</Tag>}
         {data.next_action_at&&<Tag tone="gray">Target {stamp(data.next_action_at)}</Tag>}
         {data.discrepancy_resolution&&<Tag tone="blue">Instruction: {({
           proceed_with_received:"Proceed with received items",
@@ -258,8 +259,8 @@ export function StaffTicket({id,actor}:{id:string;actor:Row}) {
   const api="/staff/tickets/"+id;
   const {data,error,reload}=useLoad(api);
   const [saved,setSaved]=useState<number>();
-  async function update(body:Row) {
-    const result=await request(api+"/events","POST",{revision:data?.revision,...body});
+  async function update(body:Row,key?:string) {
+    const result=await request(api+"/events","POST",{revision:data?.revision,...body},key);
     setSaved(result.revision);reload();
   }
   const open=data&&isOpen(data.state);
@@ -362,7 +363,18 @@ export function StaffTicket({id,actor}:{id:string;actor:Row}) {
           <Form key={"note-"+saved} label="保存内部备注" run={async f=>update({kind:"internal_note",body:text(f,"body")})}>
             <label>内部备注<textarea name="body" required minLength={2} maxLength={2000}/></label>
           </Form>
-          {data.category!=="identity_unclear"&&<Form label="结案" run={async f=>update({kind:"resolve",body:text(f,"body")})}>
+          {data.order_instruction&&<Form label="保存处理结果并回复客户" idempotent run={async(fields,key)=>{
+            await update({kind:"decide_order_instruction",decision:text(fields,"decision"),body:text(fields,"body")},key);
+          }}>
+            <label>补充说明处理结果<select name="decision" defaultValue="" required>
+              <option value="" disabled>选择处理结果</option>
+              <option value="confirmed" disabled={!data.order_instruction.can_confirm}>确认并传给质检员</option>
+              <option value="declined">无法按本订单执行</option>
+            </select></label>
+            <label>回复客户（必填）<textarea name="body" minLength={2} maxLength={1000} required/></label>
+            <p className="muted small">确认时写明可执行的具体内容，仅限尚未开工且属于现有范围的要求。</p>
+          </Form>}
+          {data.category!=="identity_unclear"&&!data.order_instruction&&<Form label="结案" run={async f=>update({kind:"resolve",body:text(f,"body")})}>
             <label>结案原因<textarea name="body" required minLength={2} maxLength={2000}/></label>
           </Form>}
         </Panel>

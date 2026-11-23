@@ -20,6 +20,7 @@ import {
   type ParcelMode, type PlannedParcelEntry, type PurchaseEvidenceItem,
 } from "./draft-recovery";
 import { conditionMatches } from "../packages/core/template-conditions";
+import { skuNoteLimit } from "../packages/core/order-note-limits";
 import { sumMeasurements } from "../packages/core/measurement-decimals";
 import { billingChargePath, billingQuotePath, customerDestination, inspectionScopePath, legalPages, orderSections, type OrderSection, sampleCodePattern, servicePages } from "../packages/core/portal-routes";
 import { Action, checked, CodeButton, Empty, ErrorBlock, Field, FileInput, Form, MediaLightbox, ModalDrawer, Panel, Photo, QuoteCountdown, request, RequestError, Select, useWorkspaceStamp, Table, Tabs, Tag, text, useLoad, usd, type Row } from "./ui";
@@ -1814,6 +1815,11 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
   const currentLine=addingServiceLine&&!effectiveDisplayName?null:buildCurrentLine();
   const allLines=extraLines.length>0?(currentLine?[...extraLines,currentLine]:extraLines):(currentLine?[currentLine]:[]);
   const totalItems=allLines.reduce((sum,l)=>sum+(Number(l.quantity)||0),0);
+  const skuNotes=step===4?allLines.flatMap((line,serviceIndex)=>
+    (line.attributes.expected_lines??[]).flatMap((sku:ExpectedProductLine,skuIndex:number)=>{
+      const note=sku.inspection_note?.trim();
+      return note?[{key:`${serviceIndex}-${skuIndex}`,service:line.title,label:sku.sku_code||sku.product_name,note}]:[];
+    })):[];
 
   const draftPayload={lines:allLines.map(({title,...line})=>line),customer_notes:notes.trim()};
   const fingerprint=JSON.stringify(draftPayload);
@@ -1881,6 +1887,10 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
       throw new Error(`Expected product lines total ${expectedTotalQty} items, which does not match the commissioned quantity (${clampedQty}). Sync commissioned quantity or update your lines.`);
     }
     if(notes.trim().length>500) throw new Error("Keep special instructions within 500 characters.");
+    if(lines.some(line=>(line.attributes?.expected_lines??[]).some((sku:ExpectedProductLine)=>
+      Array.from(sku.inspection_note?.trim()??"").length>skuNoteLimit))) {
+      throw new Error(`Keep each SKU note within ${skuNoteLimit} characters in Step 3.`);
+    }
     if(productLink.trim()&&!/^https?:\/\//i.test(productLink.trim())) throw new Error("Enter a product link beginning with https:// or http://.");
     if(serviceKind==="compare"&&!sizeMismatchConfirmed&&new Set(currentLine?.items.map((item:Row)=>item.size_label).filter(Boolean)).size>1) {
       throw new Error("Confirm the size difference before comparing samples with different declared sizes.");
@@ -3473,7 +3483,8 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
                           <td><input id={`step3b-line-${idx}-quantity`} aria-invalid={missing.includes("quantity")||undefined} className={`input ${missing.includes("quantity")?"input-warn":""}`} type="number" min={1} max={300} style={{width:68}} aria-label={`Line ${idx+1} quantity`} value={line.quantity||""} onChange={e=>updateExpectedLine(line.id,{quantity:Math.max(0,Math.floor(Number(e.target.value)||0)),edited_by_user:true})}/></td>
                           <td><input className="input" aria-label={`Line ${idx+1} supplier`} value={line.supplier_alias} onChange={e=>updateExpectedLine(line.id,{supplier_alias:e.target.value,edited_by_user:true})} placeholder={supplierRef||"Supplier"}/></td>
                           <td><input className="input" aria-label={`Line ${idx+1} waybill`} value={line.tracking_no??""} onChange={e=>updateExpectedLine(line.id,{tracking_no:e.target.value,edited_by_user:true})} placeholder="Waybill"/></td>
-                          <td><input className="input" aria-label={`Line ${idx+1} note`} value={line.inspection_note??""} onChange={e=>updateExpectedLine(line.id,{inspection_note:e.target.value,edited_by_user:true})} placeholder="Note"/></td>
+                          <td><input className="input" aria-label={`Line ${idx+1} note`} maxLength={skuNoteLimit} value={line.inspection_note??""} onChange={e=>updateExpectedLine(line.id,{inspection_note:e.target.value,edited_by_user:true})} placeholder="Optional"/>
+                            <small className="muted">{line.inspection_note?.length??0}/{skuNoteLimit}</small></td>
                           <td>
                             <div className="actions" style={{gap:4}}>
                               <button type="button" className="button sm" title="Copy row" onClick={()=>duplicateExpectedLine(line)}>Copy</button>
@@ -3527,8 +3538,9 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
                         <label className="field"><span>Waybill</span>
                           <input className="input" aria-label={`Line ${idx+1} waybill`} value={line.tracking_no??""} onChange={e=>updateExpectedLine(line.id,{tracking_no:e.target.value,edited_by_user:true})} placeholder="Optional seller tracking"/>
                         </label>
-                        <label className="field"><span>Check Note</span>
-                          <input className="input" aria-label={`Line ${idx+1} note`} value={line.inspection_note??""} onChange={e=>updateExpectedLine(line.id,{inspection_note:e.target.value,edited_by_user:true})} placeholder="Focus point for this SKU"/>
+                        <label className="field"><span>Check note (optional, {skuNoteLimit} characters)</span>
+                          <input className="input" aria-label={`Line ${idx+1} note`} maxLength={skuNoteLimit} value={line.inspection_note??""} onChange={e=>updateExpectedLine(line.id,{inspection_note:e.target.value,edited_by_user:true})} placeholder="Focus point for this SKU"/>
+                          <small className="muted">{line.inspection_note?.length??0}/{skuNoteLimit}</small>
                         </label>
                       </div>
                     </div>;
@@ -4196,6 +4208,7 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
                 onChange={e=>{setNotes(e.target.value);setServerQuote(undefined);}}
                 placeholder="Highlight any specific seams, logo embroidery placement, care label language, or hardware details for extra close-up photos…"
               />
+              <small className="muted">{notes.length}/500 characters</small>
             </label>
           </div>
 
@@ -4265,6 +4278,19 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
             </>}
             <dl className="def"><dt>Commissioned quantity</dt><dd>{totalItems} {totalItems===1?"unit":"units"} across {totalExpectedLineCount} line(s)</dd></dl>
           </div>
+
+          {(notes.trim()||skuNotes.length>0)&&<section className="card flat" style={{marginTop:12}} aria-label="Inspection notes">
+            <div className="row between flexwrap"><strong>Inspection notes for the warehouse</strong>
+              <div className="actions">
+                {notes.trim()&&<button type="button" className="button sm" disabled={Boolean(busyMessage)} onClick={()=>void goToStep(3)}>Edit order note</button>}
+                {skuNotes.length>0&&<button type="button" className="button sm" disabled={Boolean(busyMessage)} onClick={()=>void goToStep(2)}>Edit SKU notes</button>}
+              </div>
+            </div>
+            <dl className="def" style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>
+              {notes.trim()&&<><dt>Entire order</dt><dd>{notes.trim()}</dd></>}
+              {skuNotes.map(sku=><div key={sku.key}><dt>{allLines.length>1?`${sku.service} · `:""}{sku.label}</dt><dd>{sku.note}</dd></div>)}
+            </dl>
+          </section>}
 
           {serviceKind==="reference_match"&&(selectedRef||referenceId)&&(
             <div className="line-note" data-testid="step5-golden-reference-card" style={{marginTop:10}}>
@@ -4849,6 +4875,7 @@ export function OrderView({number,section,demo=false}:{number:string;section?:Or
   const [calculatedQuote,setQuote]=useState<Row>();
   const [checkoutNotice,setCheckoutNotice]=useState<{text:string;error?:boolean;expired?:boolean}>();
   const [openedCase,setOpenedCase]=useState<string>();
+  const [instructionCase,setInstructionCase]=useState<Row>();
   const [discrepancyNotice,setDiscrepancyNotice]=useState<string>("");
   const [discrepancyError,setDiscrepancyError]=useState<string>("");
   const [resolvingDiscrepancy,setResolvingDiscrepancy]=useState(false);
@@ -5085,7 +5112,7 @@ export function OrderView({number,section,demo=false}:{number:string;section?:Or
 
       {/* LAYERS 2, 3, 4, 5, 6: Issues/Reconciliation -> SKU Summary -> Parcel Summary -> Tasks Summary -> Individual Units */}
       {(!section||section==="payment")&&<Panel title="2–6. Intake Reconciliation, SKU Summary, Parcels, Tasks &amp; Individual Units">
-      {o.customer_notes&&<p className="muted">Notes: {o.customer_notes}</p>}
+      {o.customer_notes&&<div className="line-note" style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}><strong>Inspection instructions for this order</strong><p>{o.customer_notes}</p></div>}
       {o.sla_due_at&&<p className="muted small">Inspection SLA target · {stamp(o.sla_due_at)}</p>}
       {!section&&o.parcels.length>0&&<div className="actions" style={{marginBottom:10}}>
         <small className="muted">Linked seller waybills:</small>
@@ -5455,6 +5482,18 @@ export function OrderView({number,section,demo=false}:{number:string;section?:Or
     {!section&&<ScopeReview key={o.revision} orderId={id} onSave={detail.reload}/>}
     {!section&&(o.state!=="draft"||o.cases.length>0)&&<Panel title="Support, after-sales &amp; order actions">
       {(o.state!=="draft"||o.cases.length>0)&&<Table headers={["Case","Subject","Status"]} rows={o.cases.map((c:Row)=>[<Link className="code" href={base+"/cases/"+c.id}>{c.public_no}</Link>,c.subject,label(c.state)])} empty="No support cases are linked to this order."/>}
+      {!['draft','closed','cancelled'].includes(o.state)&&<details className="card">
+        <summary>Send additional inspection instructions</summary>
+        <p className="muted">Support will review your request and reply here. Requests sent after inspection starts are handled through support.</p>
+        <Form key={instructionCase?.id??id} label="Send for review" idempotent run={async(fields,key)=>{
+          const result=await request(`/orders/${id}/inspection-instructions`,"POST",{body:text(fields,"body")},key);
+          setInstructionCase(result);
+          detail.reload();
+        }}>
+          <label>Additional instructions (required)<textarea name="body" minLength={2} maxLength={500} required/></label>
+        </Form>
+        {instructionCase&&<p role="status">Request sent. <Link href={`${base}/cases/${instructionCase.id}`}>View {instructionCase.public_no}</Link></p>}
+      </details>}
       {o.state!=="draft"&&<details className="card"><summary>Open a support case for this order</summary>
         <Form key={openedCase} label="Submit support case" run={async f=>{
           const result=await request("/me/cases","POST",{order_id:id,category:text(f,"category"),subject:text(f,"subject"),message:text(f,"message")});

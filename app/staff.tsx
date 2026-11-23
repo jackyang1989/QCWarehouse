@@ -21,6 +21,8 @@ import {
 import { AdminFinanceAnalytics, AdminPaymentsWorkbench, AdminRefundsWorkbench } from "./admin-finance";
 import { AdminOrdersWorkbench } from "./admin-orders";
 import { AdminDispositionsWorkbench, AdminIncidentsWorkbench, AdminOverviewDashboard } from "./admin-operations";
+import { OperationNoteList, OperationNotes } from "./operation-notes";
+import { operationNoteLimit } from "../packages/core/order-note-limits";
 
 function generateRandomSampleCode():string {
   const buf=new Uint32Array(1);
@@ -385,8 +387,8 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
         {lookup&&lookup.result.match_state!=="ambiguous"&&!lookup.result.package_id&&(canIntakeWrite?<Form key={lookup.tracking+"-"+lookup.carrier} label="确认实物到仓" run={async f=>{
           const outerCondition=text(f,"outer_condition")||"intact";
           const conditionNote=text(f,"condition_note").trim();
-          if(outerCondition!=="intact" && conditionNote.length<4) {
-            throw new Error("外箱处于压扁/破损/水渍异常时，请填写不少于 4 个字的异常情况说明。");
+          if((lookup.result.match_state==="unmatched"||outerCondition!=="intact")&&conditionNote.length<4) {
+            throw new Error("包裹未匹配或外箱异常时，请填写不少于 4 个字的收货说明。");
           }
           setReceiving(true);
           try {
@@ -414,7 +416,7 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
               {id:"torn",label:"破损开裂 (torn)"},
               {id:"wet",label:"水渍受潮 (wet)"},
             ]}/>
-            <Field name="condition_note" label="外箱破损/异常备注（外箱异常时必填 ≥4字）" required={false}/>
+            <Field name="condition_note" label={lookup.result.match_state==="unmatched"?"未匹配说明（必填，至少 4 字）":"外箱异常备注（外箱异常时必填，至少 4 字）"} required={lookup.result.match_state==="unmatched"}/>
           </div>
           <Photo label="包裹外箱照片（含快递面单与外箱全貌）"/>
         </Form>:<p className="notice">当前为只读监督模式：收货实收写操作仅限收货员（receiver）与仓库主管（warehouse_admin）。</p>)}
@@ -956,9 +958,9 @@ function PackParcel({batch,parcel,reload}:{batch:Row;parcel:Row;reload:()=>void}
       const photo=await upload(fields.get("photo"),"dispatch");
       await request("/staff/dispatch-batches/"+batch.id+"/parcels","POST",{
         revision:batch.revision,quote_id:batch.quote_id,item_ids:parcel.item_ids,
-        weight_g:parcel.weight_g,packed_media_ids:[photo],
+        weight_g:parcel.weight_g,packed_media_ids:[photo],operation_note:text(fields,"operation_note").trim()||undefined,
       });reload();
-    }}/>
+    }}><label>装箱备注（选填，仅员工可见）<textarea name="operation_note" maxLength={operationNoteLimit}/></label></ScanAndSubmit>
   </div>;
 }
 function ScanAndSubmit({items,label,run,children}:{items:Row[];label:string;run:(fields:FormData)=>Promise<void>;children?:ReactNode}) {
@@ -1049,12 +1051,15 @@ export function WarehouseDispatchBatch({id,actor}:{id:string;actor?:Row}) {
             await request("/staff/shipments/"+s.id+"/handover","POST",{
               revision:s.revision,item_ids:s.items.map((i:Row)=>i.id),carrier_code:text(fields,"carrier"),
               tracking_no:text(fields,"tracking"),evidence_ids:[photo],handed_at:new Date().toISOString(),
+              operation_note:text(fields,"operation_note").trim()||undefined,
             });reload();
           }}>
             {carriers.error&&<ErrorBlock error={carriers.error}/>}
             <Select name="carrier" label="实际承运商" choices={(carriers.data?.carriers??[]).map((c:Row)=>({id:c.code,label:c.labels["zh-CN"]??c.labels.en}))}/>
             <Field name="tracking" label="实际寄出运单号"/>
+            <label>出库交接备注（选填，仅员工可见）<textarea name="operation_note" maxLength={operationNoteLimit}/></label>
           </ScanAndSubmit>}
+          {s.operation_notes?.length>0&&<OperationNoteList notes={s.operation_notes}/>}
           {s.shipped_at&&<p>实际交接 {stamp(s.shipped_at)} · {s.carrier_code} {s.tracking_norm?<CodeButton code={s.tracking_norm} onClick={()=>setDrawer({kind:"tracking",ref:s.tracking_norm})}/>:"—"}</p>}
           {s.shipped_at&&<details><summary>查看中文物流轨迹 · {label(s.transport_state??"unknown")}</summary>
             <p>同步状态 {label(s.sync_state??"unknown")} · 更新 {stamp(s.tracking_updated_at)}</p>
@@ -1132,7 +1137,7 @@ function DispatchQuoteForm({batch,rates,reload}:{batch:Row;rates:Row[];reload:()
       <Field label={"包裹 "+number+" 实重（克）"} name={"weight-"+number} type="number" min={1}/>
       {manualMode&&<Field label={"包裹 "+number+" 核定运费 (USD)"} name={"manual-usd-"+number} type="number" min={0} step="0.01"/>}
     </div>)}</div>
-    {manualMode&&<Field label="人工核价原因说明（客户与审计可见）" name="manual_reason" value="超体积抛重或偏远派送附加费人工核定"/>}
+    {manualMode&&<Field label="人工核价原因（必填，客户与审计可见）" name="manual_reason"/>}
   </Form>;
 }
 function readFileAsDataUrl(file:File):Promise<string> {
@@ -1305,6 +1310,9 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
         {data.customer_notes&&<div><strong>客户整单特别要求：</strong>{data.customer_notes}</div>}
         {df.notes&&<div style={{marginTop:data.customer_notes?4:0}}><strong>本品申报备注：</strong>{df.notes}</div>}
       </div>}
+      {data.group_id&&data.components.filter((item:Row)=>!item.is_reference&&item.declared_fields?.notes).map((item:Row)=><p className="line-note" key={item.id}>
+        <strong>{item.code} 样品备注：</strong>{item.declared_fields.notes}
+      </p>)}
       {(refAttachments.length>0||purchaseEvidences.length>0)&&<div className="task-ref-strip">
         {refAttachments.map((att:Row,idx:number)=><div className="task-ref-card" key={att.id??idx}>
           <div className="row"><Tag tone={att.purpose==="size_chart"?"blue":"outline"}>{att.purpose==="size_chart"?"尺寸表":"参考照片"}</Tag><small className="muted">#{idx+1}</small></div>
@@ -1341,6 +1349,10 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
         </div>}
       </div>
     </Panel>
+
+    <OperationNotes notes={data.operation_notes??[]} reload={reload} writePath={data.state!=="VOID"&&
+      (data.assignee_id===actor.id||actor.roles.some((r:string)=>["reviewer","warehouse_admin","super_admin"].includes(r)))
+      ?`/staff/inspection-tasks/${id}/operation-notes`:undefined}/>
 
     {refComponents.length>0&&<Panel title="确认样对比基准 (Golden Sample Baseline)" subtitle="将待检样品与以下封存确认样进行实测尺寸与外观横向对照。">
       <div className="actions" style={{flexWrap:"wrap"}}>

@@ -13,6 +13,7 @@ import { effectiveDispatchCharge, pendingDispatchQuote, pendingStorageQuote, ren
 import { inspectionPaymentForOrder } from "./payments";
 import { quotePolicy } from "./quote-policy";
 import { itemInspectionStageSql } from "./inspection-stage";
+import { orderOperationNotes } from "./order-operation-notes";
 
 const inventoryJoins=`from warehouse_items w
     left join order_line_item_links a on a.item_id=w.id and a.unlinked_at is null
@@ -908,6 +909,9 @@ export async function warehouseDispatchBatch(db:DB,actor:Actor,id:string) {
   const batch=await one(db,warehouseBatches+" where b.id=$1 and b.state<>'draft'",[id]);
   const {rows:shipments}=await db.query(`select s.id,s.revision,s.state,s.weight_g,s.carrier_code,s.tracking_norm,
     s.shipped_at,s.returned_at,t.transport_state,t.sync_state,zh.fetched_at tracking_updated_at,zh.events_json tracking_events,
+    array(select jsonb_build_object('id',ae.id,'at',ae.at,'action',ae.action,'body',ae.after->>'body','display_name',u.display_name)
+      from audit_events ae left join users u on u.id=ae.actor_id where ae.entity_type='shipments' and ae.entity_id=s.id
+      and ae.action in ('pack_shipment','handover') and ae.after->>'body' is not null order by ae.at desc,ae.id desc) operation_notes,
     (select jsonb_agg(jsonb_build_object('id',w.id,'code',w.code,'received_at',r.received_at) order by w.code)
       from shipment_items si join warehouse_items w on w.id=si.item_id and w.org_id=b.org_id
       left join shipment_return_items r on r.shipment_id=si.shipment_id and r.item_id=si.item_id
@@ -1435,7 +1439,7 @@ export async function staffOrderDetail(db:DB,actor:Actor,publicNo:string) {
     customer,lines,items,expected_lines_summary,parcels,tasks,reports,quotes,charges,
     payments:payments.map(p=>({...p,display_ref:`PAY-${String(p.id).replace(/-/g,"").slice(0,8).toUpperCase()}`})),
     refunds:refunds.map(r=>({...r,display_ref:`RFD-${String(r.id).replace(/-/g,"").slice(0,8).toUpperCase()}`})),
-    dispositions,tickets,blocks,activity,shipments};
+    dispositions,tickets,blocks,activity,shipments,operation_notes:await orderOperationNotes(db,id)};
 }
 
 export async function reconcileFinance(db:DB,actor:Actor,includeTest=true,filters?:{query:string;purpose:string;page?:number}) {

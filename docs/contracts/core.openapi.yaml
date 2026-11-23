@@ -1632,6 +1632,10 @@ paths:
                 handed_at:
                   type: string
                   format: date-time
+                operation_note:
+                  type: string
+                  maxLength: 1000
+                  description: Optional internal handover note for authorized staff.
               additionalProperties: false
   /staff/shipments/{id}/receive-return:
     post:
@@ -2341,6 +2345,10 @@ paths:
                     type: string
                     format: uuid
                   minItems: 1
+                operation_note:
+                  type: string
+                  maxLength: 1000
+                  description: Optional internal packing note for authorized staff.
               additionalProperties: false
   /orders/{id}/scope-revisions:
     post:
@@ -3188,6 +3196,10 @@ components:
           type: array
           items:
             type: object
+            properties:
+              notes:
+                type: string
+                maxLength: 300
             additionalProperties: true
             description: Published template or versioned snapshot defines keys.
           minItems: 0

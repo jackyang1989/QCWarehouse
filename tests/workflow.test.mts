@@ -166,7 +166,7 @@ async function shipOne(c:Client,staff:Client,rate:string,instructionId:string,it
   assert.equal((await staff.fetch(queue("payment"))).rows[0].id,batch.batch_id);
   assert.deepEqual((await staff.fetch(queue("packing"))).rows,[]);
   const packedPhoto=await staff.photo("dispatch");
-  const packing={revision:quote.revision,quote_id:quote.quote_id,item_ids:[itemId],weight_g:540,packed_media_ids:[packedPhoto]};
+  const packing={revision:quote.revision,quote_id:quote.quote_id,item_ids:[itemId],weight_g:540,packed_media_ids:[packedPhoto],operation_note:"Packed with cardboard protection."};
   await staff.fetch("/staff/dispatch-batches/"+batch.batch_id+"/parcels",packing,"POST",409);
   const fee=await c.fetch("/quotes/"+quote.quote_id+"/accept",{revision:quote.revision});
   const payment=await c.fetch("/charges/"+fee.charge_item_id+"/checkout",{quote_revision:quote.revision});
@@ -186,10 +186,11 @@ async function shipOne(c:Client,staff:Client,rate:string,instructionId:string,it
   assert.equal(packed.shipments[0].items[0].id,itemId);
   assert.equal(packed.shipments[0].tracking_norm,null);
   assert.deepEqual(packed.shipments[0].evidence_ids,[packedPhoto]);
+  assert.equal(packed.shipments[0].operation_notes[0].body,packing.operation_note);
   assert.equal((await staff.fetch(queue("handover"))).rows[0].packed,1);
   assert.deepEqual((await staff.fetch(queue("packing"))).rows,[]);
   const actual="YTO"+randomUUID().slice(0,8).toUpperCase();
-  const hand={revision:shipment.revision,item_ids:[itemId],carrier_code:"yto",tracking_no:actual,evidence_ids:[await staff.photo("dispatch")],handed_at:new Date().toISOString()};
+  const hand={revision:shipment.revision,item_ids:[itemId],carrier_code:"yto",tracking_no:actual,evidence_ids:[await staff.photo("dispatch")],handed_at:new Date().toISOString(),operation_note:"Collected from the dispatch desk."};
   await staff.fetch("/staff/shipments/"+shipment.shipment_id+"/handover",hand);
   await staff.fetch("/staff/shipments/"+shipment.shipment_id+"/handover",hand,"POST",409);
   const done=await staff.fetch(detailPath);
@@ -198,6 +199,8 @@ async function shipOne(c:Client,staff:Client,rate:string,instructionId:string,it
   assert.equal(done.shipments[0].transport_state,"unknown");
   assert.equal(done.shipments[0].tracking_events,null);
   assert.equal(done.shipments[0].evidence_ids.length,2);
+  assert.deepEqual(done.shipments[0].operation_notes.map((note:{body:string})=>note.body),[hand.operation_note,packing.operation_note]);
+  assert.equal((await c.fetch(`/shipments/${shipment.shipment_id}`)).operation_notes,undefined);
   assert.equal((await staff.fetch(queue("shipped",actual.toLowerCase()))).rows[0].id,batch.batch_id);
   return {shipment,actual};
 }
@@ -1062,7 +1065,10 @@ test("unmatched intake remains private until a staff evidence decision",async()=
   const staff=await staffLogin("receiving"),support=await staffLogin("admin");
   const tracking="ZT"+randomUUID().slice(0,8).toUpperCase();
   const outer=await staff.photo("intake_outer");
-  const pkg=await staff.fetch("/staff/intake/check-in",{tracking_no:tracking,carrier_code:"zto",outer_media_ids:[outer]},"POST",201);
+  const input={tracking_no:tracking,carrier_code:"zto",outer_media_ids:[outer]};
+  const missingNote=await staff.fetch("/staff/intake/check-in",input,"POST",422);
+  assert.equal(missingNote.error.code,"UNMATCHED_PARCEL_NOTE_REQUIRED");
+  const pkg=await staff.fetch("/staff/intake/check-in",{...input,condition_note:"Receiving code missing."},"POST",201);
   assert.equal(pkg.state,"unmatched");
   const desk=await staff.fetch("/staff/desk");
   const quarantine=desk.locations.find((location:{code:string})=>location.code==="Q-01");
@@ -1714,7 +1720,7 @@ test("an inbound waybill matches the intended carrier and does not leak another 
 test("an unclaimed warehouse parcel has one tracker and cannot be exposed by preadvice alone",async()=>{
   const {c,registration}=await signCustomer(),staff=await staffLogin("receiving");
   const tracking="YTO"+randomUUID().slice(0,8).toUpperCase();
-  const request={tracking_no:tracking,carrier_code:"yto",outer_media_ids:[await staff.photo("intake_outer")]};
+  const request={tracking_no:tracking,carrier_code:"yto",outer_media_ids:[await staff.photo("intake_outer")],condition_note:"No receiving code available."};
   const scans=await Promise.all([
     staff.fetch("/staff/intake/check-in",request,"POST",201),staff.fetch("/staff/intake/check-in",request,"POST",201)
   ]);
@@ -3453,7 +3459,7 @@ test("presigned media upload, sha256 verification, 800px thumbnails, 24h stale c
   },"POST",201);
   // Referencing a pending media asset in check-in fails with 409 MEDIA_NOT_READY
   const notReadyErr=await receiving.fetch("/staff/intake/check-in",{
-    tracking_no:"ZTO"+randomUUID().slice(0,8).toUpperCase(),carrier_code:"zto",outer_media_ids:[badTicket.media_id],
+    tracking_no:"ZTO"+randomUUID().slice(0,8).toUpperCase(),carrier_code:"zto",outer_media_ids:[badTicket.media_id],condition_note:"No matching intake advice.",
   },"POST",409);
   assert.equal(notReadyErr.error.code,"MEDIA_NOT_READY");
 
@@ -3594,8 +3600,8 @@ test("intake quarantine, half-unpacking, suit components, post-pay & cross-order
   const outer2=await receiving.photo("intake_outer");
   // TASK-060 & T12/T46: Concurrent check-in of the same waybill produces a single package
   const [unmPkg1,unmPkg2]=await Promise.all([
-    receiving.fetch("/staff/intake/check-in",{tracking_no:unmWaybill,carrier_code:"zto",weight_g:820,outer_media_ids:[outer1]},"POST",201),
-    receiving.fetch("/staff/intake/check-in",{tracking_no:unmWaybill,carrier_code:"zto",weight_g:820,outer_media_ids:[outer2]},"POST",201),
+    receiving.fetch("/staff/intake/check-in",{tracking_no:unmWaybill,carrier_code:"zto",weight_g:820,outer_media_ids:[outer1],condition_note:"No matching intake advice."},"POST",201),
+    receiving.fetch("/staff/intake/check-in",{tracking_no:unmWaybill,carrier_code:"zto",weight_g:820,outer_media_ids:[outer2],condition_note:"No matching intake advice."},"POST",201),
   ]);
   assert.equal(unmPkg1.id,unmPkg2.id);
   assert.equal(unmPkg1.state,"unmatched");
@@ -6375,6 +6381,7 @@ test("warehouse expert audit remediations (AUD-001 to AUD-015) and 12 warehouse 
   const zoneErr=await receiving.fetch("/staff/intake/check-in",{
     tracking_no:wbUnmGuard,
     carrier_code:"zto",
+    condition_note:"No matching intake advice.",
     location_id:locA01.id,
     outer_media_ids:[await receiving.photo("intake_outer")],
   },"POST",409);
@@ -6384,6 +6391,7 @@ test("warehouse expert audit remediations (AUD-001 to AUD-015) and 12 warehouse 
   const pkgUnmOk=await receiving.fetch("/staff/intake/check-in",{
     tracking_no:wbUnmGuard,
     carrier_code:"zto",
+    condition_note:"No matching intake advice.",
     location_id:locU01.id,
     outer_media_ids:[await receiving.photo("intake_outer")],
   },"POST",201);
@@ -7255,6 +7263,82 @@ test("independent review remediation (NEW-001 to NEW-011) and 4-step Golden Samp
   assert.equal(resealed.reference_activated,true);
   assert.equal((await pool.query("select state from disposition_requests where id=$1",[renewed.id])).rows[0].state,"completed");
   assert.deepEqual((await pool.query("select count(*)::int n from storage_events where item_id=$1 and action='move'",[cmpItemA])).rows,movesBefore.rows);
+});
+
+test("order instructions and operation notes reach the authorized staff without changing committed scope",async()=>{
+  const {c,terms}=await signCustomer(),other=(await signCustomer()).c;
+  const admin=await staffLogin("admin"),receiver=await staffLogin("receiving"),inspector=await staffLogin("inspector");
+  const {offers}=await c.fetch("/catalog");
+  const offer=offers.find((row:{sku_code:string})=>row.sku_code==="apparel-inspection-1");
+  const sku={id:"EL-test",quantity:1,sku_code:"H-01",product_name:"Test jacket",size_label:"M",
+    color_declared:"Black",inspection_note:"Check stitching near the zipper."};
+  const line={category_id:offer.category_id,offer_id:offer.offer_id,quantity:1,attributes:{expected_lines:[sku]}};
+  const tooLong=await c.fetch("/orders",{lines:[{...line,attributes:{expected_lines:[{...sku,inspection_note:"缝".repeat(301)}]}}]},"POST",422);
+  assert.equal(tooLong.error.code,"SKU_NOTE_TOO_LONG");
+  const {draft,quote}=await createAndPay(c,[line],terms);
+  const path=`/orders/${draft.id}`;
+  const order=await c.fetch(path);
+  assert.equal(order.items[0].declared_fields.notes,sku.inspection_note);
+
+  const operationPath=`/staff/orders/${draft.id}/operation-notes`;
+  const adminPath=`/staff/orders/by-number/${draft.public_no}`;
+  const handoff={body:"Private handoff: matched seller evidence."};
+  await admin.fetch(operationPath,{body:"  "},"POST",422);
+  await c.fetch(operationPath,handoff,"POST",403);
+  const handoffKey=randomUUID();
+  await Promise.all([admin.fetch(operationPath,handoff,"POST",201,handoffKey),admin.fetch(operationPath,handoff,"POST",201,handoffKey)]);
+  const operations=await admin.fetch(adminPath);
+  assert.equal(operations.operation_notes.filter((note:{body:string})=>note.body===handoff.body).length,1);
+  assert.ok(operations.operation_notes[0].at);
+  assert.ok(operations.operation_notes[0].display_name);
+  assert.equal((await c.fetch(path)).operation_notes,undefined);
+
+  const supplementPath=path+"/inspection-instructions";
+  await other.fetch(supplementPath,{body:"Unauthorized instructions."},"POST",404);
+  await c.fetch(supplementPath,{body:"  "},"POST",422);
+  const first=await c.fetch(supplementPath,{body:"Could you also check the zipper pull?"},"POST",201);
+  const late=await c.fetch(supplementPath,{body:"Could you check the cuff?"},"POST",201);
+  const firstStaff=`/staff/tickets/${first.id}`;
+  const initial=await admin.fetch(firstStaff);
+  assert.equal(initial.order_instruction.can_confirm,true);
+  const verdict={kind:"decide_order_instruction",revision:initial.revision,decision:"confirmed",body:"Check the zipper pull during the visual check."};
+  await admin.fetch(firstStaff+"/events",verdict);
+  const reply=await c.fetch(`/cases/${first.id}`);
+  assert.deepEqual(reply.order_instruction,{decision:"confirmed"});
+  assert.ok(reply.events.some((event:{body:string})=>event.body===verdict.body));
+  await other.fetch(`/cases/${first.id}`,undefined,"GET",404);
+
+  const address=(await c.fetch("/me/receiving-address")).warehouse_address.id;
+  const tracking="ZT"+randomUUID().slice(0,8).toUpperCase();
+  const advice=await c.fetch("/me/parcels",{address_id:address,carrier_code:"zto",tracking_no:tracking,order_ids:[draft.id]},"POST",201);
+  const parcel=await receiver.fetch("/staff/intake/check-in",{tracking_no:tracking,advice_id:advice.id,carrier_code:"zto",
+    outer_media_ids:[await receiver.photo("intake_outer")]},"POST",201);
+  const loc=(await pool.query<{id:string}>("select id from storage_locations where code='R-01'")).rows[0].id;
+  const unpacked=await receiver.fetch(`/staff/packages/${parcel.id}/items`,{revision:parcel.revision,items:[{code:newSampleCode(),location_id:loc}]},"POST",201);
+  await receiver.fetch(`/staff/items/${unpacked.item_ids[0]}/assign`,{revision:1,order_line_id:order.items[0].order_line_id,
+    expected_item_id:order.items[0].id,evidence_ids:[await receiver.photo("label_photo")]});
+  const task=(await admin.fetch(adminPath)).tasks[0];
+  const taskPath=`/staff/inspection-tasks/${task.id}`;
+  const taskHandoff={body:"Private task note: item staged at the measuring table."};
+  await inspector.fetch(taskPath+"/operation-notes",taskHandoff,"POST",403);
+  await inspector.fetch(taskPath+"/start",{revision:task.revision});
+  await inspector.fetch(taskPath+"/operation-notes",taskHandoff,"POST",201);
+  const view=await inspector.fetch(taskPath);
+  assert.equal(view.declared_fields.notes,sku.inspection_note);
+  for(const body of [handoff.body,verdict.body,taskHandoff.body]){
+    assert.ok(view.operation_notes.some((note:{body:string})=>note.body===body));
+  }
+  const lateStaff=`/staff/tickets/${late.id}`;
+  const pending=await admin.fetch(lateStaff);
+  assert.equal(pending.order_instruction.can_confirm,false);
+  const blocked=await admin.fetch(lateStaff+"/events",{...verdict,revision:pending.revision},"POST",409);
+  assert.equal(blocked.error.code,"ORDER_INSTRUCTION_TOO_LATE");
+  await admin.fetch(lateStaff+"/events",{...verdict,revision:pending.revision,decision:"declined",body:"Inspection is underway."});
+  assert.deepEqual((await c.fetch(`/cases/${late.id}`)).order_instruction,{decision:"declined"});
+  const final=await admin.fetch(adminPath);
+  assert.equal(final.order.state,"inspecting");
+  assert.equal(final.quotes[0].amount_cents,quote.amount_cents);
+  assert.equal((await c.fetch(path)).customer_notes,null);
 });
 
 test("customer workspace binds the reviewed checklist, preserves notes and paginates owned orders",async()=>{

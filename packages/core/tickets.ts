@@ -4,6 +4,7 @@ import { audit, code, event, guard, hash, lock, one, organization, revision, rol
 import { approvedIntakeAdviceSql, savePhoto } from "./intake";
 import { hasStaffAccess, staffAccess } from "./staff-access";
 import { customerIncidentProposal } from "./storage";
+import { operationNoteLimit } from "./order-note-limits";
 
 const body=z.string().trim().min(2).max(2000);
 const version=z.number().int().positive();
@@ -14,6 +15,7 @@ export const publicInquiry=z.object({
   description:z.string().trim().min(1).max(1000),
 });
 export const customerTicketMessage=z.object({revision:version,body});
+export const orderInstructionRequest=z.object({body:z.string().trim().min(2).max(500)}).strict();
 export const customerCaseQuery=z.object({
   q:z.string().trim().max(80).default(""),
   state:z.enum(["open","waiting_customer","waiting_internal","resolved","closed"]).optional(),
@@ -25,7 +27,34 @@ export const staffTicketEvent=z.discriminatedUnion("kind",[
   z.object({kind:z.literal("reply"),revision:version,body,reply_by:z.iso.datetime().optional()}),
   z.object({kind:z.literal("internal_note"),revision:version,body}),
   z.object({kind:z.literal("resolve"),revision:version,body}),
+  z.object({kind:z.literal("decide_order_instruction"),revision:version,
+    decision:z.enum(["confirmed","declined"]),body:z.string().trim().min(2).max(operationNoteLimit)}),
 ]);
+
+const instructionOrderStates=["awaiting_payment","awaiting_samples","samples_ready","queued"];
+
+export async function requestOrderInstruction(db:DB,actor:Actor,orderId:string,note:string) {
+  const org=organization(actor);
+  await lock(db,"org:"+org);
+  const order=await one<{state:string}>(db,"select state from orders where id=$1 and org_id=$2 for update",[orderId,org]);
+  guard(!["draft","closed","cancelled"].includes(order.state),"ORDER_INSTRUCTION_UNAVAILABLE",
+    "This order is unavailable for inspection instruction requests.",409);
+  const id=uuid();
+  const created=await one(db,`insert into tickets(id,public_no,org_id,order_id,category,subject,next_action_at,details)
+    values($1,$2,$3,$4,'non_standard_quote','Additional inspection instructions',now()+interval '24 hours',$5)
+    returning id,public_no,state`,[id,code("C-"),org,orderId,{order_instruction:true}]);
+  await append(db,actor,id,"message",note);
+  await audit(db,actor,"create_ticket","tickets",id,{order_instruction:true});
+  return created;
+}
+
+async function orderAcceptsAdditionalInstructions(db:DB,orderId:string,orgId:string,write=false) {
+  const order=await one<{state:string;inspection_started:boolean}>(db,`select o.state,
+    exists(select 1 from order_lines l join inspection_tasks t on t.order_line_id=l.id
+      where l.order_id=o.id and t.state not in ('READY','VOID')) inspection_started
+    from orders o where o.id=$1 and o.org_id=$2${write?" for update of o":""}`,[orderId,orgId]);
+  return instructionOrderStates.includes(order.state)&&!order.inspection_started;
+}
 
 export async function inquiryCategories(db:DB) {
   return (await db.query(`select id,labels->>'en' label from categories
@@ -121,6 +150,8 @@ export async function caseDetail(db:DB,actor:Actor,id:string,orderNumber:string|
     created_at:k.created_at,resolved_at:k.resolved_at,
     next_action_at:k.next_action_at,order_number:k.order_number,
     handling_team:teamOf(k.category),assigned:Boolean(k.assignee_id),
+    ...(k.details.order_instruction?{order_instruction:{decision:k.details.order_instruction_decision??null,
+      ...(actor.kind==="staff"?{can_confirm:await orderAcceptsAdditionalInstructions(db,k.order_id,k.org_id)}:{})}}:{}),
     discrepancy_resolution:typeof k.details?.discrepancy_resolution==="string"?k.details.discrepancy_resolution:null,
     ...(actor.kind==="staff"?{order_state:k.order_state,customer,linked_payment_id:linkedPaymentId,linked_charge_item_id:linkedChargeItemId}:{}),
     incident,...(parcel?{parcel}:{}),
@@ -229,8 +260,21 @@ export async function writeStaffTicket(db:DB,actor:Actor,id:string,input:z.infer
     }
   } else {
     guard(assignee===actor.id||actor.roles.includes("super_admin"),"CASE_ASSIGNED","Claim this case before making changes.");
-    if(input.kind==="resolve") {
+    if(input.kind==="decide_order_instruction") {
+      guard(k.details.order_instruction===true&&k.order_id&&k.org_id,"ORDER_INSTRUCTION_UNAVAILABLE","This case is not an inspection instruction request.",422);
+      if(input.decision==="confirmed") {
+        await lock(db,"org:"+k.org_id);
+        guard(await orderAcceptsAdditionalInstructions(db,k.order_id,k.org_id,true),"ORDER_INSTRUCTION_TOO_LATE",
+          "Inspection has started or the order is unavailable. Explain the outcome in the support case.",409);
+        await audit(db,actor,"customer_instruction_confirmed","orders",k.order_id,{body:input.body,ticket_id:id});
+      }
+      await append(db,actor,id,"message",input.body);
+      await db.query("update tickets set details=details||$2::jsonb where id=$1",[id,{order_instruction_decision:input.decision}]);
+      await event(db,"ticket.reply",{ticket_id:id,org_id:k.org_id});
+      state="resolved";due=null;
+    } else if(input.kind==="resolve") {
       guard(k.category!=="identity_unclear","CLAIM_DECISION_REQUIRED","Use the separate parcel ownership decision.");
+      guard(!k.details.order_instruction,"INSTRUCTION_DECISION_REQUIRED","Record the instruction decision and reply to the customer.");
       state="resolved";due=null;
       await append(db,actor,id,"internal_note",input.body);
     } else if(input.kind==="internal_note") {

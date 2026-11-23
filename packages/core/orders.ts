@@ -7,6 +7,7 @@ import { scopeSupplementForOrder } from "./scope-payment";
 import { itemHandlingHoldSql } from "./storage";
 import { newQuoteValidity } from "./quote-policy";
 import { itemInspectionStageSql } from "./inspection-stage";
+import { skuNoteLimit } from "./order-note-limits";
 
 export const checkSchema = z.object({
   key:z.string().min(1).max(80), label:z.string().min(1).max(120), zh:z.string().min(1).max(120),
@@ -196,6 +197,14 @@ export async function saveOrder(db:DB,actor:Actor,input:{lines:LineInput[];custo
     const rawExpected=Array.isArray((line.attributes as Record<string,unknown>|undefined)?.expected_lines)
       ?((line.attributes as Record<string,unknown>).expected_lines as Record<string,unknown>[])
       :[];
+    const skuNotes=new Map<string,string>();
+    for(const [index,el] of rawExpected.entries()) {
+      const note=el?.inspection_note;
+      if(note===undefined||note===null) continue;
+      guard(typeof note==="string"&&Array.from(note.trim()).length<=skuNoteLimit,
+        "SKU_NOTE_TOO_LONG",`Keep each SKU note within ${skuNoteLimit} characters.`,422);
+      if(note.trim()) skuNotes.set(String(el.id??`EL-${index+1}`),note.trim());
+    }
     const expandedFromExpected:Record<string,unknown>[]=[];
     if(!line.items?.length && rawExpected.length>0) {
       for(let elIdx=0;elIdx<rawExpected.length;elIdx++) {
@@ -217,11 +226,13 @@ export async function saveOrder(db:DB,actor:Actor,input:{lines:LineInput[];custo
     }
     const normalizedItems=Array.from({length:line.quantity},(_,idx)=>{
       const raw=(line.items?.[idx]??expandedFromExpected[idx]??{}) as Record<string,unknown>;
+      const note=skuNotes.get(String(raw.expected_line_id??""));
       const defaultCode=`L${lineIndex+1}-P${String(idx+1).padStart(2,"0")}`;
       return {
         position:idx+1,
         sample_code:typeof raw.sample_code==="string"&&raw.sample_code.trim()?raw.sample_code.trim():defaultCode,
         ...raw,
+        ...(note&&raw.notes===undefined?{notes:note}:{}),
       };
     });
     await db.query(`insert into order_lines(order_id,org_id,offer_id,category_id,template_version_id,quantity,options,attributes,draft_items)

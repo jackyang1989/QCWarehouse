@@ -307,7 +307,7 @@ export function expandExpectedLinesToDraftItems(params:{
         ...(rowTracking?{tracking_no:rowTracking,declared_tracking_no:rowTracking}:{}),
         ...(rowCarrier?{carrier_code:rowCarrier}:{}),
         ...(line.carton_no?.trim()||assigned?.carton_no?{carton_no:line.carton_no?.trim()||assigned?.carton_no}:{}),
-        ...(line.inspection_note?.trim()?{notes:line.inspection_note.trim().slice(0,300)}:{}),
+        ...(line.inspection_note?.trim()?{notes:line.inspection_note.trim()}:{}),
         ...(defaults.garmentType?{garment_type:defaults.garmentType}:{}),
         ...(mergedAttachments.length?{attachment_ids:mergedAttachments}:{}),
       });

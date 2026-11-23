@@ -655,7 +655,7 @@ async function shipEvidence(db:DB,actor:Actor,shipmentId:string,org:string,ids:s
     await db.query("update media_assets set org_id=$2,shipment_id=$3 where id=$1",[id,org,shipmentId]);
   }
 }
-export async function packShipment(db:DB,actor:Actor,id:string,input:{revision:number;quote_id:string;item_ids:string[];weight_g:number;packed_media_ids:string[]}) {
+export async function packShipment(db:DB,actor:Actor,id:string,input:{revision:number;quote_id:string;item_ids:string[];weight_g:number;packed_media_ids:string[];operation_note?:string}) {
   role(actor,"warehouse_admin","super_admin");
   const b=await lockBatch(db,id);revision(b.revision,input.revision);
   guard(b.state==="paid","BATCH_UNAVAILABLE","Confirm payment before packing.");
@@ -669,10 +669,11 @@ export async function packShipment(db:DB,actor:Actor,id:string,input:{revision:n
     await one(db,"select id from warehouse_items where id=$1 and org_id=$2 and custody_state in ('received','stored') for update",[item,b.org_id]);
     await db.query("insert into shipment_items(shipment_id,batch_id,item_id) values($1,$2,$3)",[sh.id,id,item]);
   }
-  await audit(db,actor,"pack_shipment","shipments",sh.id);
+  const note=input.operation_note?.trim();
+  await audit(db,actor,"pack_shipment","shipments",sh.id,note?{body:note}:undefined);
   return {shipment_id:sh.id,revision:sh.revision};
 }
-export async function handover(db:DB,actor:Actor,id:string,input:{revision:number;item_ids:string[];carrier_code:string;tracking_no:string;evidence_ids:string[];handed_at:string}) {
+export async function handover(db:DB,actor:Actor,id:string,input:{revision:number;item_ids:string[];carrier_code:string;tracking_no:string;evidence_ids:string[];handed_at:string;operation_note?:string}) {
   role(actor,"warehouse_admin","super_admin");
   const found=await one(db,"select batch_id from shipments where id=$1",[id]);
   const b=await lockBatch(db,found.batch_id);
@@ -706,7 +707,8 @@ export async function handover(db:DB,actor:Actor,id:string,input:{revision:numbe
   const dir=b.action==="return_to_seller"?"outbound_return":b.action==="to_forwarder"?"outbound_forward":"outbound_domestic";
   const t=await one<{id:string}>(db,`insert into tracking_records(org_id,direction,shipment_id,carrier_code,tracking_norm,generation,transport_state,sync_state,next_query_at,batch_id)
     values($1,$2,$3,$4,$5,1,'unknown','pending',now(),$6) returning id`,[b.org_id,dir,id,carrier,tracking,b.id]);
-  await audit(db,actor,"handover","shipments",id,{tracking_id:t.id});
+  const note=input.operation_note?.trim();
+  await audit(db,actor,"handover","shipments",id,{tracking_id:t.id,...(note?{body:note}:{})});
   await event(db,"shipment.handed_over",{shipment_id:id,tracking_id:t.id});
   return {shipment_id:id,tracking_id:t.id,state:"shipped"};
 }

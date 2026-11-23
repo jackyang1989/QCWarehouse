@@ -2,6 +2,7 @@ import { conditionMatches } from "./template-conditions";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import sharp from "sharp";
 import { z } from "zod";
+import { orderOperationNotes } from "./order-operation-notes";
 import type { DB } from "../db";
 import { audit, code, event, guard, hash, lock, one, organization, reportCode, resolveSampleCode, revision, role, uuid, type Actor } from "./common";
 import { attachEvidence } from "./intake";
@@ -535,6 +536,7 @@ export async function taskDetail(db:DB,actor:Actor,id:string) {
     sibling_tasks:siblingTasks,
     shots,
     step_timings:stepTimings,
+    operation_notes:await orderOperationNotes(db,t.order_id,id),
     completeness,
     results:(await db.query(`select r.*,array(select m.id from media_assets m where m.result_id=r.id order by m.id) evidence_ids
       from inspection_results r where r.task_id=$1 order by r.item_key,r.component,r.attempt`,[id])).rows,

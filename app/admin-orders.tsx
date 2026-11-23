@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
+import { OperationNotes } from "./operation-notes";
 import {
   Action,
   CodeButton,
@@ -585,7 +586,7 @@ export function AdminOrderDetailWorkbench({ number, actor }: { number: string; a
               {openBlocks.length > 0 && <Tag tone="red">当前阻塞 {openBlocks.length} 项</Tag>}
               {nextResp && <Tag tone={nextResp.tone}>下一步责任方：{nextResp.owner}（{nextResp.action}）</Tag>}
               {cust?.id && (
-                <Link className="button sm" href={`/admin/customers/${cust.id}`}>
+                <Link className="button sm" href={`/admin/customers/${cust.id}`} style={{whiteSpace:"normal",overflowWrap:"anywhere",maxWidth:"100%",minWidth:0}}>
                   客户 {cust.receiving_code} ({cust.display_name ?? cust.email})
                 </Link>
               )}
@@ -671,6 +672,8 @@ export function AdminOrderDetailWorkbench({ number, actor }: { number: string; a
                     </div>
                   )}
                 </Panel>
+
+                <OperationNotes notes={data.operation_notes??[]} writePath={`/staff/orders/${order.id}/operation-notes`} reload={reload}/>
 
                 <Panel title="订单阻塞记录 (Order Blocks)" subtitle="所有异常阻塞均由业务事件打开与关闭，禁止后台直接下拉覆盖订单状态。">
                   <Table

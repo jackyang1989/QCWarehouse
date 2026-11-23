@@ -23,7 +23,7 @@ import { staffAccess } from "./staff-access";
 import { customerDestination, sampleCodePattern, withDestination } from "./portal-routes";
 import { customerFulfillmentQuote, customerShipment, orderFulfillmentRecord } from "./fulfillment-reads";
 import { renewScopeSupplement } from "./operations";
-import { canReadCasePhoto, caseDetail, createPublicInquiry, customerCaseHistory, customerCaseQuery, customerTicketMessage, inquiryCategories, publicInquiry, replyToCase, staffTicketEvent, staffTicketQueue, writeStaffTicket } from "./tickets";
+import { canReadCasePhoto, caseDetail, createPublicInquiry, customerCaseHistory, customerCaseQuery, customerTicketMessage, inquiryCategories, orderInstructionRequest, publicInquiry, replyToCase, requestOrderInstruction, staffTicketEvent, staffTicketQueue, writeStaffTicket } from "./tickets";
 import { approveDisposalCase, approveIncidentResolution, approveStocktake, createDisposalCase, createIncident, createLocations, createStocktake, customerReadIncident, customerRespondIncident, executeDisposalCase, listIncidents, listOverdueAndRestrictedQueue, listStocktakes, locationBatchSchema, locationMaster, proposeIncidentResolution, resolveIncidentCompensation, scanStocktakeItem, setLocationActive, storageMovementDesk, submitStocktake } from "./storage";
 import { acceptScope, approveCapability, cancelOrder, computeOrderRefundStage, configureLegalEntity, convertOrderToTwo, createCapability, createCategory, createTermsVersion, discrepancyResolutionKind, evaluateLaunchReadiness, exportCustomerPrivacyData, extendOrderArrival, holdOrder, moveItem, newTemplate, orderCaseCategory, publishSkuPrice, publishTemplate, publishTermsVersion, recordLaunchSignoff, recordRecoveryDrill, recordRehearsalRun, reportIssue, requestCustomerPrivacyAction, requestOrderAfterSales, respondOrderMismatch, resumeOrder, revokeCapability, scopeProposal, scopeReview, setAddress, setDisposalExecutionSwitch, setOfferEnabled, staffSchemas, systemHealthAndBackupCheck, updateBusinessCalendar, updateCategoryStatus, updateWarehouseAddress, upsertOffer } from "./operations";
 import { createReportShare, listPublishedReports, listReportShares, readSharedPhoto, readSharedReport, reportSharingEnabled, revokeReportShare, shareInput, shareTokenPattern } from "./report-shares";
@@ -33,6 +33,8 @@ import { decodeLabelImage, labelPrintInputSchema, labelVerifyInputSchema, printL
 import { listIntegrationHub, revokeProviderSecret, saveProviderSecret, testProviderConnection, updateIntegrationProvider, validateProviderConfig, type EnvMode, type LifecycleState, type ProviderDomain } from "./integrations-admin";
 import { assertStripeCheckoutAllowed, cancelPaypalManualInvoice, customerReportPaypalPaid, executeManualRefund, issuePaypalManualInvoice, listCustomerPaymentChannels, listPaypalManualQueue, reconcileStripeStatus, recordPaypalManualReceipt, requestPaypalManualInvoice, verifyPaypalManualPayment } from "./payment-providers";
 import { adminListOcrJobs, adminTestOcrExtract, confirmOcrCandidates, enqueueOcrJob, getOcrJobDetail, listCustomerOcrJobs, mergeOcrCandidates, retryOcrJob, splitOcrCandidate, updateOcrCandidate } from "./ocr";
+import { appendOrderOperationNote, appendTaskOperationNote } from "./order-operation-notes";
+import { operationNoteLimit } from "./order-note-limits";
 
 type ContractOperation={
   operationId:string; "x-roles":string[];
@@ -58,6 +60,7 @@ const operations=Object.entries(contract.paths).flatMap(([path,methods])=>Object
 }));
 const idSchema=z.string().uuid();
 const revSchema=z.number().int().positive();
+const operationNote=z.object({body:z.string().trim().min(2).max(operationNoteLimit)}).strict();
 const emailSchema=z.email().max(254).transform(v=>v.toLowerCase());
 const photoKinds=z.enum(["intake_outer","intake_open","label_photo","shot","defect","dispatch","attachment"]);
 const publicShareRoute=new RegExp("^/public/report-shares/("+shareTokenPattern+")(?:/photos/(\\d{1,6})/(\\d{1,6})/(\\d{1,6}))?$");
@@ -611,6 +614,12 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   }
   const task=path.match(/^\/staff\/inspection-tasks\/([a-f0-9-]{36})$/i);
   if(method==="GET" && task) return json(await transaction(db=>taskDetail(db,actorRequired(actor),idSchema.parse(task[1]))));
+  const taskNote=path.match(/^\/staff\/inspection-tasks\/([a-f0-9-]{36})\/operation-notes$/i);
+  if(method==="POST"&&taskNote) return extraWrite(req,path,actor,operationNote,
+    (db,a,b)=>appendTaskOperationNote(db,a,idSchema.parse(taskNote[1]),b.body),201);
+  const orderNote=path.match(/^\/staff\/orders\/([a-f0-9-]{36})\/operation-notes$/i);
+  if(method==="POST"&&orderNote) return extraWrite(req,path,actor,operationNote,
+    (db,a,b)=>appendOrderOperationNote(db,a,idSchema.parse(orderNote[1]),b.body),201);
   const taskCompleteness=path.match(/^\/staff\/inspection-tasks\/([a-f0-9-]{36})\/completeness$/i);
   if(method==="GET" && taskCompleteness) return json(await transaction(db=>checkTaskCompleteness(db,actorRequired(actor),idSchema.parse(taskCompleteness[1]))));
   const taskShots=path.match(/^\/staff\/inspection-tasks\/([a-f0-9-]{36})\/shots$/i);
@@ -924,6 +933,9 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   const manual=path.match(/^\/orders\/([a-f0-9-]{36})\/manual-quote-request$/i);
   if(method==="POST" && manual) return extraWrite(req,path,actor,z.object({revision:revSchema,reason:z.string().trim().min(4).max(1200)}),
     (db,a,b)=>requestManualQuote(db,a,idSchema.parse(manual[1]),b.revision,b.reason));
+  const orderInstruction=path.match(/^\/orders\/([a-f0-9-]{36})\/inspection-instructions$/i);
+  if(method==="POST"&&orderInstruction) return extraWrite(req,path,actor,orderInstructionRequest,
+    (db,a,b)=>requestOrderInstruction(db,a,idSchema.parse(orderInstruction[1]),b.body),201);
   if(method==="GET" && path==="/me/cases") {
     const query=customerCaseQuery.parse(Object.fromEntries(url.searchParams));
     return json(await transaction(db=>customerCaseHistory(db,actorRequired(actor),query)));
