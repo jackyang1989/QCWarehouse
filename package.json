@@ -9,7 +9,7 @@
     "check": "tsc --noEmit",
     "db:migrate": "node --env-file-if-exists=.env scripts/migrate.mjs",
     "db:demo": "node --env-file-if-exists=.env --import tsx scripts/demo.ts",
-    "test:integration": "node --env-file-if-exists=.env --import tsx --test tests/workflow.test.mts",
+    "test:integration": "node --env-file-if-exists=.env --import tsx --test --test-concurrency=1 tests/workflow.test.mts tests/admin-workbench.test.mts tests/round5-payments-ocr.test.mts",
     "worker": "node --env-file-if-exists=.env --import tsx scripts/worker.ts",
     "integrations:check": "node --env-file-if-exists=.env --import tsx scripts/integration-preflight.ts"
   },

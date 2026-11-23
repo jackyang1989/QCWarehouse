@@ -2,7 +2,7 @@ import Stripe from "stripe";
 import { pool, transaction, type DB } from "../db";
 import { appOrigin, requireCustomerActive, requireStaffMfa } from "./auth";
 import { Problem, audit, code, event, guard, hash, idempotent, isDemo, lock, one, organization, role, uuid, type Actor } from "./common";
-import { stripeSettings, stripeSettingsFromDb } from "./integrations";
+import { stripeCheckoutMode, stripeSettings, stripeSettingsFromDb, stripeSettlementCredentials } from "./integrations";
 import { activatePaidOrder, readyOrder } from "./orders";
 import { applyScopePositionsAndAdditions, computeOrderRefundStage, type ScopeAddition } from "./operations";
 import { inspectionScopePath } from "./portal-routes";
@@ -45,8 +45,12 @@ function stripeFromSettings(settings: { key?: string; mode: string | null; webho
   return new Stripe(key, { timeout: 10000, maxNetworkRetries: 1 });
 }
 export async function scheduleCheckoutExpirations() {
-  const settings = await stripeSettingsFromDb(pool);
-  if(isDemo()||!settings.enabled||!settings.key||!settings.webhook||!settings.mode||(settings.mode==="live"&&!settings.liveEnabled))return false;
+  if(isDemo())return false;
+  const prefixes:string[]=[];
+  for(const mode of ["test","live"] as const) {
+    if((await stripeSettlementCredentials(pool,mode)).key)prefixes.push(`cs_${mode}_%`);
+  }
+  if(!prefixes.length)return false;
   return transaction(async db=>{
     await lock(db,checkoutExpirySchedulingLock);
     const result=await db.query(`insert into outbox_events(type,payload,next_attempt_at)
@@ -54,9 +58,9 @@ export async function scheduleCheckoutExpirations() {
       from payments p join charge_items c on c.id=p.charge_item_id
       left join inspection_quotes i on i.id=c.inspection_quote_id left join dispatch_quote_versions d on d.id=c.dispatch_quote_id
       left join storage_quotes s on s.id=c.storage_quote_id
-      where p.provider='stripe' and p.state='requires_payment' and p.provider_ref like $1
+      where p.provider='stripe' and p.state='requires_payment' and p.provider_ref like any($1::text[])
         and not exists(select 1 from outbox_events j where j.type='payment.checkout_expire' and j.payload->>'payment_id'=p.id::text)
-      order by coalesce(i.expires_at,d.expires_at,s.expires_at),p.id limit 100`,[`cs_${settings.mode}_%`]);
+      order by coalesce(i.expires_at,d.expires_at,s.expires_at),p.id limit 100`,[prefixes]);
     return Boolean(result.rowCount);
   });
 }
@@ -69,14 +73,16 @@ export async function expireCheckout(db:DB,pid:string) {
     left join inspection_quotes i on i.id=c.inspection_quote_id left join dispatch_quote_versions d on d.id=c.dispatch_quote_id
     left join storage_quotes s on s.id=c.storage_quote_id where p.id=$1 for update of p`,[pid]);
   if(p.state!=="requires_payment")return;
-  const stripeSettingsResolved=await stripeSettingsFromDb(db);
-  const {mode}=stripeSettingsResolved;
-  guard(!isDemo()&&p.provider==="stripe"&&mode&&p.provider_ref?.startsWith(`cs_${mode}_`),
+  const mode=stripeCheckoutMode(p.provider_ref);
+  guard(!isDemo()&&p.provider==="stripe"&&mode,
     "CHECKOUT_MODE_MISMATCH","The checkout does not match the configured payment environment.",503);
   const sessionExpiry=Number(p.provider_data?.requested_checkout_expires_at);
   guard(p.voided_at||p.quote_expired||(Number.isFinite(sessionExpiry)&&sessionExpiry*1000<=Date.now()),
     "CHECKOUT_NOT_DUE","This checkout has not reached its expiration deadline.",409);
-  const api=stripeFromSettings(stripeSettingsResolved),session=await api.checkout.sessions.retrieve(p.provider_ref);
+  const {key}=await stripeSettlementCredentials(db,mode);
+  guard(key,"STRIPE_UNAVAILABLE","Credentials for the original Stripe payment environment are unavailable.",503);
+  const api=new Stripe(key,{timeout:10000,maxNetworkRetries:1});
+  const session=await api.checkout.sessions.retrieve(p.provider_ref);
   guard(session.id===p.provider_ref&&session.metadata?.payment_id===pid&&session.metadata.charge_item_id===p.charge_item_id&&
     session.metadata.org_id===p.org_id&&session.amount_total===p.expected_amount&&session.currency==="usd"&&session.livemode===(mode==="live"),
     "PAYMENT_MISMATCH","The provider session could not be matched to the charge.",409);
@@ -97,11 +103,12 @@ export async function chargeReceipt(actor:Actor,id:string) {
     from charge_items c left join payments p on p.id=c.applied_payment_id and p.charge_item_id=c.id
       and p.provider='stripe' and p.state in ('succeeded','partially_refunded','refunded')
     where c.id=$1 and c.org_id=$2`,[id,org]);
-  const {key,mode}=await stripeSettingsFromDb(pool);
   const intentId=payment.intent_id;
-  guard(payment.id&&intentId&&intentId.startsWith("pi_")&&/^cs_(live|test)_/.test(payment.provider_ref??""),
+  const mode=stripeCheckoutMode(payment.provider_ref);
+  guard(payment.id&&intentId&&intentId.startsWith("pi_")&&mode,
     "RECEIPT_NOT_AVAILABLE","There is no Stripe receipt for this charge.",404);
-  guard(key&&mode&&payment.provider_ref?.startsWith(`cs_${mode}_`)&&!isDemo(),
+  const {key}=await stripeSettlementCredentials(pool,mode);
+  guard(key&&!isDemo(),
     "RECEIPT_UNAVAILABLE","The Stripe receipt is currently unavailable. Try again or contact Support.",503);
   const api=new Stripe(key,{httpClient:Stripe.createFetchHttpClient(),timeout:10000,maxNetworkRetries:1});
   let intent:Stripe.PaymentIntent;
@@ -369,13 +376,22 @@ export async function demoPay(db:DB,actor:Actor,id:string) {
   return {state:"paid",...(p.order_number?{order_number:p.order_number}:{}),...(p.scope_revision_id?{scope_revision_id:p.scope_revision_id}:{})};
 }
 export async function verifyStripe(raw:string,signature:string) {
-  const {webhook,mode}=await stripeSettingsFromDb(pool);
-  guard(webhook && mode && !isDemo(),"STRIPE_UNAVAILABLE","Stripe webhooks are unavailable.",503);
-  let event:Stripe.Event;
-  try { event=Stripe.webhooks.constructEvent(raw,signature,webhook); }
-  catch { guard(false,"SIGNATURE_INVALID","Webhook signature is invalid.",401); }
-  guard(event.livemode===(mode==="live"),"PAYMENT_MODE_MISMATCH","Webhook does not match the configured Stripe mode.",400);
-  return event;
+  guard(!isDemo(),"STRIPE_UNAVAILABLE","Stripe webhooks are unavailable.",503);
+  let hasSecret=false;
+  let verifiedWrongMode=false;
+  for(const mode of ["test","live"] as const) {
+    const {webhook}=await stripeSettlementCredentials(pool,mode);
+    if(!webhook)continue;
+    hasSecret=true;
+    let event:Stripe.Event;
+    try {event=Stripe.webhooks.constructEvent(raw,signature,webhook);}
+    catch {continue;}
+    if(event.livemode===(mode==="live"))return event;
+    verifiedWrongMode=true;
+  }
+  guard(hasSecret,"STRIPE_UNAVAILABLE","Stripe webhooks are unavailable.",503);
+  guard(!verifiedWrongMode,"PAYMENT_MODE_MISMATCH","Webhook does not match the Stripe signing environment.",400);
+  throw new Problem("SIGNATURE_INVALID","Webhook signature is invalid.",401);
 }
 function rejectedPaymentAmount() {
   return {rejection:new Problem("PAYMENT_AMOUNT_MISMATCH","Callback amount does not match the charge snapshot.",409)};
@@ -395,6 +411,10 @@ export async function stripeEvent(db:DB,e:Stripe.Event) {
     const pid=s.metadata?.payment_id;
     if(pid && /^[0-9a-f-]{36}$/i.test(pid)) {
       const p=await one(db,`select p.*,c.org_id,c.inspection_quote_id from payments p join charge_items c on c.id=p.charge_item_id where p.id=$1`,[pid]);
+      const mode=stripeCheckoutMode(s.id);
+      guard(p.provider==="stripe"&&mode&&(mode==="live")===e.livemode&&
+        (!p.provider_data?.checkout_mode||p.provider_data.checkout_mode===mode),
+        "PAYMENT_MODE_MISMATCH","Payment does not match the Stripe attempt environment.",400);
       guard(p.charge_item_id===s.metadata?.charge_item_id && p.org_id===s.metadata?.org_id && (!p.provider_ref || p.provider_ref===s.id),
         "PAYMENT_MISMATCH","Payment does not match the accepted charge.");
       if(p.amount_cents!==s.amount_total || s.currency!=="usd") {
@@ -644,7 +664,7 @@ export async function executeRefund(db:DB,id:string) {
     await db.query("update refunds set notes=coalesce(notes,'Approved for manual finance execution') where id=$1",[id]);
     return;
   }
-  const r=await one(db,`select r.*,p.provider_data from refunds r join payments p on p.id=r.payment_id where r.id=$1 for update of r`,[id]);
+  const r=await one(db,`select r.*,p.provider_data,p.provider_ref payment_reference from refunds r join payments p on p.id=r.payment_id where r.id=$1 for update of r`,[id]);
   if(r.state!=="approved" || r.provider_ref) return;
   if(isDemo() && r.provider_data.demo) {
     await db.query("update refunds set state='succeeded',provider_ref=$2 where id=$1",[id,"demo_refund_"+id]);
@@ -652,7 +672,11 @@ export async function executeRefund(db:DB,id:string) {
     await audit(db,null,"refund_executed","refunds",id,{payment_id:r.payment_id,amount_cents:r.amount_cents,provider_ref:"demo_refund_"+id});
     return;
   }
-  const result=await stripeFromSettings(await stripeSettingsFromDb(db)).refunds.create({payment_intent:r.provider_data.payment_intent,amount:r.amount_cents,metadata:{refund_id:id}},{idempotencyKey:id});
+  const mode=stripeCheckoutMode(r.payment_reference);
+  guard(mode&&!isDemo(),"PAYMENT_MODE_MISMATCH","The original Stripe payment environment could not be verified.",503);
+  const {key}=await stripeSettlementCredentials(db,mode);
+  guard(key,"STRIPE_UNAVAILABLE","Credentials for the original Stripe payment environment are unavailable.",503);
+  const result=await new Stripe(key,{timeout:10000,maxNetworkRetries:1}).refunds.create({payment_intent:r.provider_data.payment_intent,amount:r.amount_cents,metadata:{refund_id:id}},{idempotencyKey:id});
   const nextState=result.status==="succeeded"?"succeeded":result.status==="failed"?"failed":"approved";
   await db.query("update refunds set provider_ref=$2,state=$3 where id=$1",[id,result.id,nextState]);
   if(nextState==="succeeded") {

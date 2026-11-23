@@ -1,5 +1,5 @@
 import type { DB } from "../db";
-import { audit, code, event, extractReceivingCode, guard, hash, isDemo, lock, one, organization, packageCode, revision, role, uuid, type Actor } from "./common";
+import { audit, code, event, guard, hash, isDemo, lock, one, organization, packageCode, resolveReceivingProfile, revision, role, uuid, type Actor } from "./common";
 import { requireCustomerActive } from "./auth";
 import { demoWarehouseAddressZh, usableWarehouseAddressSql } from "./demo-fixtures";
 import { isPdfBytes, processImageBytes, validatePdfBytes } from "./media";
@@ -625,12 +625,7 @@ export async function bindUnmatchedPackageOwner(
   input:{revision:number;receiving_code:string;evidence_ids:string[];reason:string}
 ) {
   role(actor,"receiver","warehouse_admin","support","super_admin");
-  const extractedRec=extractReceivingCode(input.receiving_code);
-  const profile=await one<{user_id:string;org_id:string;receiving_code:string}>(
-    db,
-    "select user_id,org_id,receiving_code from customer_receiving_profiles where replace(upper(receiving_code),'-','')=replace(upper($1),'-','')",
-    [extractedRec]
-  );
+  const profile=await resolveReceivingProfile(db,input.receiving_code);
   await lock(db,"org:"+profile.org_id);
   const pkg=await one(db,"select * from packages where id=$1 for update",[packageId]);
   revision(pkg.revision,input.revision);

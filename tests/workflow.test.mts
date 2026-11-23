@@ -29,7 +29,9 @@ const {workOnce}=await import("../packages/core/worker");
 const {syncTrackingOnce}=await import("../packages/core/logistics");
 const {encryptSecret,decryptSecret,passwordHash}=await import("../packages/core/auth");
 const {businessDeadline}=await import("../packages/core/orders");
-const {sampleCode:newSampleCode}=await import("../packages/core/common");
+// Use a separate range from generated five-digit production-style codes.
+let fixtureSampleSequence=10_000_000;
+const newSampleCode=()=>`S${fixtureSampleSequence++}`;
 
 before(async()=>{
   const actual=await pool.query<{name:string}>("select current_database() name");
@@ -3606,6 +3608,21 @@ test("intake quarantine, half-unpacking, suit components, post-pay & cross-order
   }
   const claim=await submitOwnership(c),competing=await submitOwnership(other);
 
+  const otherProfile=await other.fetch("/me/receiving-address");
+  const legacyCode=registration.receiving_code.replace(/^QCW/,"QCW-");
+  await pool.query("update customer_receiving_profiles set receiving_code=$2 where user_id=$1",[otherProfile.user_id,legacyCode]);
+  try {
+    const legacyLabel=`@${legacyCode}@`;
+    const ambiguous=await receiving.fetch(`/staff/packages/${unmPkg1.id}/bind-owner`,{
+      revision:unmPkg1.revision,receiving_code:legacyLabel,evidence_ids:[await receiving.photo("label_photo")],
+      reason:"Ambiguous fixture receiving label must never assign an owner",
+    },"POST",409);
+    assert.equal(ambiguous.error.code,"AMBIGUOUS_RECEIVING_CODE");
+    await receiving.fetch("/staff/scan/"+encodeURIComponent(legacyLabel),undefined,"GET",409);
+    assert.equal((await pool.query("select org_id from packages where id=$1",[unmPkg1.id])).rows[0].org_id,null);
+  } finally {
+    await pool.query("update customer_receiving_profiles set receiving_code=$2 where user_id=$1",[otherProfile.user_id,otherProfile.receiving_code]);
+  }
   const bound=await receiving.fetch(`/staff/packages/${unmPkg1.id}/bind-owner`,{
     revision:unmPkg1.revision,
     receiving_code:registration.receiving_code,
@@ -7670,6 +7687,19 @@ test("Checkout deadlines persist across response loss, expire remotely with reco
   sessions.get(first.attempt_id).status="complete";
   await pool.query("select pg_sleep(greatest(0,extract(epoch from max(expires_at)-clock_timestamp()))+.02) from inspection_quotes where id=any($1::uuid[])",[cases.map(entry=>entry.quote.id)]);
   sessions.get(third.attempt_id).status="complete";
+  const lateEvent={id:"evt_reconciled_late_"+randomUUID(),object:"event",type:"checkout.session.completed",livemode:false,
+    created:Math.floor(Date.now()/1000),data:{object:{...sessions.get(third.attempt_id),created:paidBeforeDeadline,
+      payment_status:"paid",payment_intent:"pi_fixture_"+third.attempt_id}}};
+  for(const prototype of new Set([Stripe,CommonJsStripe].map(Client=>Object.getPrototypeOf(new Client("sk_test_fixture").events)))) {
+    t.mock.method(prototype,"list",async()=>({data:[lateEvent],has_more:false}));
+  }
+  const {rows:[provider]}=await pool.query("select enabled,environment from integration_providers where provider_key='stripe'");
+  await pool.query("update integration_providers set enabled=false,environment='live' where provider_key='stripe'");
+  try {
+  const reconcile=await admin.fetch("/staff/finance/stripe/reconcile",{});
+  assert.equal(reconcile.reconciled,1);
+  assert.equal((await c.fetch(`/orders/${cases[2].draft.id}`)).state,"awaiting_payment");
+  assert.equal((await pool.query("select state from payments where id=$1",[first.attempt_id])).rows[0].state,"requires_payment");
   let failed=false;
   for(let attempt=0;attempt<20&&!failed;attempt++)try{await workOnce();}catch{failed=true;}
   assert(failed);assert.equal(sessions.get(second.attempt_id).status,"expired");
@@ -7699,6 +7729,9 @@ test("Checkout deadlines persist across response loss, expire remotely with reco
   const bill=(await c.fetch(`/me/desk?include_items=0&include_activity=0&charge=${cases[2].charge}`)).bills[0];assert.equal(bill.state,"processing");
   await c.fetch(path(cases[1]),body(cases[1]),"POST",409);
   assert.equal((await pool.query("select count(*)::int n from expected_items e join order_lines l on l.id=e.order_line_id where l.order_id=$1",[cases[2].draft.id])).rows[0].n,0);
+  } finally {
+    await pool.query("update integration_providers set enabled=$1,environment=$2 where provider_key='stripe'",[provider.enabled,provider.environment]);
+  }
 });
 
 test("expected product lines batch (50 units / 6 SKUs), unconfirmed evidence guard, media isolation, and 50 vs 47 parcel discrepancy",async()=>{
@@ -7715,6 +7748,18 @@ test("expected product lines batch (50 units / 6 SKUs), unconfirmed evidence gua
   form.set("photo",new Blob([new Uint8Array(rawImg)],{type:"image/png"}),"po-1688.png");
   const uploaded=await c.fetch("/me/media",form,"POST",201);
   assert(uploaded.id && uploaded.sha256);
+
+  // This fixture starts after extraction. The Round 5 suite exercises the actual OCR process.
+  const {rows:[job]}=await pool.query(`insert into ocr_jobs(org_id,media_id,file_sha256,file_mime,provider_key,state)
+    values($1,$2,$3,'image/png','paddle_ocr','needs_review') returning id`,[registration.org_id,uploaded.id,uploaded.sha256]);
+  const {rows:[candidate]}=await pool.query(`insert into ocr_candidates(job_id,org_id,item_name)
+    values($1,$2,'Extracted fixture') returning id`,[job.id,registration.org_id]);
+  const confirmPath=`/me/ocr/jobs/${job.id}/confirm`;
+  const confirmation={candidate_ids:[candidate.id],edits:[{candidate_id:candidate.id,patch:{item_name:"Checked fixture",quantity:2}}]};
+  await other.fetch(confirmPath,confirmation,"POST",403);
+  const confirmed=await c.fetch(confirmPath,confirmation);
+  assert.equal(confirmed.confirmed_candidates[0].item_name,"Checked fixture");
+  assert.equal(confirmed.confirmed_candidates[0].quantity,2);
 
   const waybill="SF"+randomUUID().replaceAll("-","").slice(0,10).toUpperCase();
   const unconfirmedDraft=await c.fetch("/orders",{lines:[{

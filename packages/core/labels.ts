@@ -3,7 +3,7 @@ import sharp from "sharp";
 import { z } from "zod";
 import type { DB } from "../db";
 import { appOrigin } from "./auth";
-import { audit, extractReceivingCode, guard, one, role, uuid, type Actor } from "./common";
+import { audit, extractReceivingCode, guard, one, resolveReceivingProfile, role, uuid, type Actor } from "./common";
 import { lookup, waybill } from "./intake";
 
 export const labelSizeEnum = z.enum(["standard_80x50", "compact_50x30", "shelf_100x60"]);
@@ -1054,22 +1054,15 @@ export async function scanWarehouseCode(db: DB, actor: Actor, rawCode: string, c
 
   const extractedRec = extractReceivingCode(code);
   if (/^QCW-?[A-Z0-9-]{4,16}$/i.test(extractedRec)) {
-    const cust = (
-      await db.query<{ user_id: string; receiving_code: string; display_name: string | null }>(
-        `select crp.user_id, crp.receiving_code, u.display_name
-         from customer_receiving_profiles crp join users u on u.id = crp.user_id
-         where replace(upper(crp.receiving_code),'-','') = replace(upper($1),'-','')`,
-        [extractedRec]
-      )
-    ).rows[0];
-    guard(cust, "NOT_FOUND", "Customer receiving code not found.", 404);
+    const cust=await resolveReceivingProfile(db,extractedRec);
     const canAdminCustomer = actor.roles.some(r => ["super_admin", "support", "finance"].includes(r));
+    const displayName=canAdminCustomer?(await one<{display_name:string|null}>(db,"select display_name from users where id=$1",[cust.user_id])).display_name:null;
     const canIntakeRead = actor.roles.some(r => ["receiver", "warehouse_admin", "super_admin"].includes(r));
     return {
       kind: "customer" as const,
       code: cust.receiving_code,
       receiving_code: cust.receiving_code,
-      summary: `客户专属收件码 ${cust.receiving_code}${canAdminCustomer && cust.display_name ? " (" + cust.display_name + ")" : ""}`,
+      summary: `客户专属收件码 ${cust.receiving_code}${displayName ? " (" + displayName + ")" : ""}`,
       link: canAdminCustomer ? `/admin/customers/${cust.user_id}` : (canIntakeRead ? "/wh/packages" : null),
       allowed_actions: canAdminCustomer ? ["open_customer"] : (canIntakeRead ? ["open_packages"] : []),
     };

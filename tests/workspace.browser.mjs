@@ -4,6 +4,7 @@ import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import sharp from "sharp";
+import { PDFDocument, StandardFonts } from "pdf-lib";
 
 sharp.cache(false);
 function sampleCode() {
@@ -130,6 +131,68 @@ async function captureWizard(page, name, heading, viewportOnly=false) {
   await page.setViewportSize({width:1440,height:1000});
 }
 
+async function fillProductLine(page,index,fields) {
+  const name=page.getByLabel(`Line ${index} product name`,{exact:true});
+  if(!await name.count())await page.locator("#step3b-add-line-btn").click();
+  for(const [field,value] of Object.entries(fields))
+    await page.getByLabel(`Line ${index} ${field}`,{exact:true}).fill(String(value));
+  return name;
+}
+
+async function verifyOcrConfirmation({page,call,errors}) {
+  await page.goto("/orders/new");
+  await page.getByRole("radio",{name:/Apparel.*Available now/}).waitFor();
+  await nextStep(page);await nextStep(page);
+  const pdf=await PDFDocument.create(),font=await pdf.embedFont(StandardFonts.Helvetica),sheet=pdf.addPage([612,792]);
+  for(const [i,line] of [
+    "1688 Packing List Order No: 2026112199990001",
+    "Supplier: Guangzhou Knitwear Co",
+    "Tracking: ZT7588812345678",
+    "Heavyweight Tee Black XL SKU:TEE-101-BLK Qty: 4 $12.50",
+  ].entries())sheet.drawText(line,{x:40,y:730-i*24,size:12,font});
+  const jobPath="/api/v1/me/ocr/jobs",jobs=url=>url.pathname===jobPath;
+  const waitForJob=()=>page.waitForResponse(r=>jobs(new URL(r.url()))&&r.request().method()==="POST"&&r.status()===201);
+  const first=waitForJob();
+  await page.locator("#step3a-evidence-upload").setInputFiles({
+    name:"ocr-fixture.pdf",mimeType:"application/pdf",buffer:Buffer.from(await pdf.save()),
+  });
+  const initial=await (await first).json();
+  const confirm=page.getByRole("button",{name:"Confirm Selected & Add to Order",exact:true});
+  await confirm.waitFor();
+  const rerun=waitForJob();
+  await page.getByRole("button",{name:"Retry OCR",exact:true}).click();
+  const rerunResponse=await rerun,job=await rerunResponse.json();
+  assert.equal(rerunResponse.request().postDataJSON().force_rerun,true);
+  assert.notEqual(job.job.id,initial.job.id);
+  await confirm.waitFor();
+  await page.locator(".candidate-queue").getByPlaceholder("Product name",{exact:true}).first().fill("Customer verified tee");
+  const match=`**/api/v1/me/ocr/jobs/${job.job.id}/confirm`;
+  await page.route(match,route=>route.fulfill({status:422,json:{error:{code:"FIXTURE_FAILURE",message:"Please try confirming again."}}}),{times:1});
+  await confirm.click();
+  await page.getByRole("alert").filter({hasText:"Please try confirming again."}).waitFor();
+  assert.equal(await page.locator(".candidate-queue").getByPlaceholder("Product name",{exact:true}).first().inputValue(),"Customer verified tee");
+  assert.equal(await page.getByLabel("Line 1 product name",{exact:true}).count(),0);
+  const keys=[];
+  await page.route(match,async route=>{
+    keys.push(route.request().headers()["idempotency-key"]);
+    if(keys.length>1)return route.continue();
+    const stored=await route.fetch({maxRetries:0});assert.equal(stored.status(),200);
+    await route.abort("connectionreset");
+  });
+  await confirm.click();
+  await page.getByRole("alert").filter({hasText:/Connection interrupted/}).waitFor();
+  await confirm.click();
+  await page.getByText(/Confirmed 1 line/).waitFor();
+  assert.equal(keys.length,2);assert.equal(keys[0],keys[1]);
+  assert.equal(await page.getByLabel("Line 1 product name",{exact:true}).inputValue(),"Customer verified tee");
+  assert.equal(await page.getByLabel("Line 2 product name",{exact:true}).count(),0);
+  const stored=await call("/me/ocr/jobs/"+job.job.id);
+  assert.equal(stored.candidates.filter(row=>row.status==="confirmed").length,1);
+  assert.equal(stored.candidates.find(row=>row.status==="confirmed").item_name,"Customer verified tee");
+  assert.deepEqual(errors,[]);
+  console.log("PASS actual OCR rerun, confirmation validation preserves fields, lost response replays once, and confirmed line matches database");
+}
+
 async function verifyDraftRecovery({context,page,call}, unrelated) {
   await page.goto("/orders/new");
   await page.getByRole("radio",{name:/Apparel.*Available now/}).waitFor();
@@ -143,8 +206,9 @@ async function verifyDraftRecovery({context,page,call}, unrelated) {
     initialDraft=await response.json();
     await route.abort("connectionreset");
   },{times:1});
-  const product=page.getByLabel(/Product name/);
-  await product.fill("Original request with no response");
+  const product=await fillProductLine(page,1,{
+    "product name":"Original request with no response",color:"Black",size:"M",quantity:3,
+  });
   await page.getByRole("button",{name:"Save Draft",exact:true}).click();
   await page.getByRole("alert").filter({hasText:/Connection interrupted/}).waitFor();
   assert(initialDraft);
@@ -156,7 +220,7 @@ async function verifyDraftRecovery({context,page,call}, unrelated) {
   await page.getByText(new RegExp(`Draft ${initialDraft.public_no} saved`)).waitFor();
   const path="/orders/"+initialDraft.id;
   let saved=await call(path);
-  assert.equal(saved.lines[0].attributes.name,"Edited before reconnecting");
+  assert.equal(saved.lines[0].attributes.expected_lines[0].product_name,"Edited before reconnecting");
   assert.deepEqual((await call("/me/orders?state=draft")).rows.map(row=>row.id),[initialDraft.id]);
   await unrelated.call(path,{status:404});
 
@@ -431,7 +495,7 @@ async function verifyMultiServiceScopes({page,call,errors},other) {
   await page.reload();
   await ready(page,/Step 1/);
   await nextStep(page);
-  await page.getByLabel("Inspection template").selectOption("leggings");
+  await page.getByLabel(/inspection template/i).selectOption("leggings");
   await nextStep(page);
   await ready(page,/Step 3/);
   assert.equal(await page.getByLabel(/Product name/).inputValue(),"");
@@ -2172,6 +2236,7 @@ try {
   const customer = await session(resumeMatrix?process.env.QCW_BROWSER_FIXTURE_EMAIL:undefined,false,resumeMatrix);
   const other = await session(resumeMatrix?process.env.QCW_BROWSER_INVENTORY_EMAIL:undefined,false,resumeMatrix);
   if(resumeMatrix) await verifyWorkspaceViews(customer,other);
+  else if(process.env.QCW_BROWSER_OCR_CONFIRM_ONLY==="1") await verifyOcrConfirmation(customer);
   else if(process.env.QCW_BROWSER_PARCELS_ONLY==="1") await verifyParcelPagination(customer,other);
   else if(process.env.QCW_BROWSER_PAYMENT_ACTIONS_ONLY==="1") await verifyInspectionPaymentActions(customer,other);
   else if(process.env.QCW_BROWSER_BILLING_ONLY==="1") await verifyBillingHistory(customer,other);
@@ -2224,16 +2289,13 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
   await page.getByRole("radio",{name:/Product Inspection/}).getByText(`From ${formattedPrice} / item`,{exact:true}).waitFor();
   if(process.env.QCW_BROWSER_NEW_CUSTOMER_ONLY==="1") await captureWizard(page,"new-inspection",/Step 1/);
   await nextStep(page);
-  await page.getByLabel("Inspection template").selectOption("leggings");
+  await page.getByLabel(/inspection template/i).selectOption("leggings");
   await captureWizard(page,"wizard-configure",/Step 2/);
   await nextStep(page);
-  await page.getByLabel(/Product name/).fill("QA leggings");
-  await page.getByLabel(/Default supplier/).fill("Supplier A");
-  await page.getByLabel("Item 2 supplier").fill("Supplier B");
-  await page.getByLabel(/Default color/).fill("Black");
   const declaredWaybills=Array.from({length:2},()=>"SF"+randomUUID().slice(0,8).toUpperCase());
-  for(const [index,waybill] of declaredWaybills.entries()) await page.getByLabel(`Item ${index+1} waybill`).fill(waybill);
-  assert.equal(await page.getByLabel("Item 2 color").inputValue(),"Black");
+  await fillProductLine(page,1,{"product name":"QA leggings",supplier:"Supplier A",color:"Black",size:"M",quantity:1,waybill:declaredWaybills[0]});
+  await fillProductLine(page,2,{"product name":"QA leggings",supplier:"Supplier B",color:"Black",size:"M",quantity:2,waybill:declaredWaybills[1]});
+  assert.equal(await page.getByLabel("Line 2 color",{exact:true}).inputValue(),"Black");
   await captureWizard(page,"wizard-items",/Step 3/);
   await nextStep(page);
   await ready(page,/Step 4/);
@@ -2271,7 +2333,7 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
     else await page.getByRole("button",{name:"Retry quote"}).click();
     await page.getByRole("alert").filter({hasText:code==="timeout"?/quote request timed out/:new RegExp("Test quote failure "+code)}).waitFor({timeout:20000});
     assert.equal(await page.getByRole("button",{name:/Continue to Payment/}).isDisabled(),true);
-    assert.equal(await page.getByRole("button",{name:/Confirm quote and pay/}).count(),0);
+    assert.equal(await page.getByRole("button",{name:/Confirm quote (?:and|&) pay/i}).count(),0);
     assert.equal(await page.locator(".wizard-summary-body").getByText("Awaiting quote").count(),1);
   }
   const quoteResponse = page.waitForResponse(response=>response.url().endsWith("/quotes")&&response.request().method()==="POST"&&response.status()===201);
@@ -2293,11 +2355,11 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
   await ready(page,/Step 6/);
   await captureWizard(page,"wizard-payment",/Step 6/);
   await page.setViewportSize({width:375,height:1000});
-  await page.getByRole("button",{name:/Confirm quote and pay/}).dblclick();
+  await page.getByRole("button",{name:/Confirm quote (?:and|&) pay/i}).dblclick();
   await page.waitForURL("**/checkout/demo/*");
   const attemptId = new URL(page.url()).pathname.split("/").at(-1);
   await page.getByRole("button",{name:"Confirm test payment"}).waitFor();
-  await captureWizard(page,"test-checkout",/Test checkout/);
+  await captureWizard(page,"test-checkout",/Test checkout/i);
   await page.setViewportSize({width:375,height:1000});
   await page.getByRole("button",{name:"Confirm test payment"}).click();
   await page.waitForURL("**/orders/"+orderNumber);
@@ -2308,7 +2370,7 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
   assert.equal((await call("/checkout/demo/"+attemptId,{body:{}})).order_number,orderNumber);
   await page.goto("/actions");
   const registrationAction=page.getByRole("row").filter({hasText:orderNumber});
-  await registrationAction.getByRole("link",{name:"Open"}).click();
+  await registrationAction.getByRole("link",{name:/Take action/}).click();
   await page.waitForURL(`**/orders/${orderNumber}/parcels`);
   const declaredTracking=page.getByLabel("Use a tracking number declared in this order");
   const sf=(await call("/carriers")).carriers.find(carrier=>carrier.code==="sf");
@@ -2357,7 +2419,7 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
   await page.waitForURL("**/account/billing?charge="+chargeId+"#charge-"+chargeId);
   const chargeAnchor=page.locator("#charge-"+chargeId);
   const focusedBill=page.getByRole("row").filter({has:chargeAnchor});
-  await focusedBill.getByText("Test payment confirmed").waitFor();
+  await focusedBill.getByText("Demo checkout confirmed",{exact:true}).waitFor();
   await page.waitForFunction(id=>document.activeElement?.id===id,"charge-"+chargeId);
   await captureWizard(page,"billing-focused-charge","Billing");
   await other.page.goto("/account/billing?charge="+chargeId);
@@ -2390,7 +2452,7 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
   const proof=await sharp({create:{width:40,height:40,channels:3,background:"#126a70"}}).png().toBuffer();
   await page.locator('input[type="file"][name="photo"]').setInputFiles({name:"fixture.png",mimeType:"image/png",buffer:proof});
   await page.getByRole("button",{name:"Submit case"}).click();
-  const caseLink=page.getByRole("link",{name:/^C-/}).first();
+  const caseLink=page.getByRole("link",{name:/^C-?\d|^C-/}).first();
   await caseLink.click();
   await page.getByRole("link",{name:"Parcel "+trackingNo}).waitFor();
   const caseData=await call("/cases/"+new URL(page.url()).pathname.split("/").at(-1));

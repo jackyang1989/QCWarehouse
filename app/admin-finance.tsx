@@ -112,7 +112,7 @@ export function AdminPaymentsWorkbench({ demo = false, actor }: { demo?: boolean
                 setChannelNotice({
                   tone: res.ok ? "success" : "warning",
                   text: res.configured
-                    ? `Stripe 主动对账完成：核查 ${res.checked} 笔，补单激活 ${res.reconciled} 笔。`
+                    ? `Stripe 已核查 ${res.checked} 笔，处理 ${res.reconciled} 笔付款事件，${res.still_pending} 笔仍待核对。`
                     : `Stripe 主动对账未执行实时拉取（未配置 Secret Key，待核会话 ${res.checked} 笔）。`,
                 });
                 reloadAll();

@@ -38,6 +38,22 @@ export function stripeSettings() {
   };
 }
 
+export function stripeCheckoutMode(reference:unknown) {
+  if(typeof reference!=="string")return null;
+  return reference.startsWith("cs_live_")?"live":reference.startsWith("cs_test_")?"test":null;
+}
+
+export async function stripeSettlementCredentials(db: Pick<import("../db").DB,"query">, mode:"live"|"test") {
+  const {resolveProviderSecret}=await import("./integrations-admin");
+  const environment=mode==="live"?"live":"sandbox";
+  const [key,webhook]=await Promise.all([
+    resolveProviderSecret(db,"stripe",environment,"secret_key"),
+    resolveProviderSecret(db,"stripe",environment,"webhook_secret"),
+  ]);
+  const keyPattern=mode==="live"?/^(sk|rk)_live_\S+$/:/^(sk|rk)_test_\S+$/;
+  return {key:key&&keyPattern.test(key)?key:undefined,webhook:webhook&&/^whsec_\S+$/.test(webhook)?webhook:undefined};
+}
+
 export async function stripeSettingsFromDb(db: Pick<import("../db").DB, "query">) {
   const env = stripeSettings();
   const providerRow = (
@@ -125,8 +141,8 @@ export function signInMethods() {
 }
 export type SignInMethods = ReturnType<typeof signInMethods>;
 
-export function integrationPreflight() {
-  const demo = isDemo(), stripe = stripeSettings(), mail = postmarkSettings(), tracking = trackingSettings();
+export function integrationPreflight(stripe:ReturnType<typeof stripeSettings>&{enabled?:boolean}=stripeSettings()) {
+  const demo = isDemo(), mail = postmarkSettings(), tracking = trackingSettings();
   function oidcStatus(provider: OidcProvider) {
     const {configured,callback}=oidcSettings(provider);
     return {configured,callback};
@@ -134,7 +150,7 @@ export function integrationPreflight() {
   return {
     demo, google: oidcStatus("google"), microsoft: oidcStatus("microsoft"),
     stripe: {mode: stripe.mode, webhookConfigured: !!stripe.webhook, liveEnabled: stripe.liveEnabled,
-      checkoutConfigured: !demo && !!stripe.webhook && (stripe.mode === "test" || stripe.mode === "live" && stripe.liveEnabled)},
+      checkoutConfigured: !demo && stripe.enabled!==false && !!stripe.key && !!stripe.webhook && (stripe.mode === "test" || stripe.mode === "live" && stripe.liveEnabled)},
     postmark: {configured: !!(mail.token && mail.from), testToken: mail.testToken, enabled: mail.enabled},
     kuaidi100: {queryConfigured: !!(tracking.key && tracking.customer), httpsCallbackConfigured: !!tracking.callbackBase,
       subscribeConfigured: !!(tracking.key && tracking.callbackBase), workerEnabled: !demo && !!(tracking.key && (tracking.customer || tracking.callbackBase))},

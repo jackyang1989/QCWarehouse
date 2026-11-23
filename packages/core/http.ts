@@ -1347,11 +1347,6 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
       notes:z.string().trim().max(1000).optional(),
     }),(db,a,b)=>executeManualRefund(db,a,hash(getCookie(req,"session")),idSchema.parse(manualRefundExec[1]),b));
   }
-  if(method==="POST" && path==="/staff/finance/stripe/reconcile") {
-    return extraWrite(req,path,actor,z.object({}),
-      (db,a)=>reconcileStripeStatus(db,a,hash(getCookie(req,"session"))));
-  }
-
   // Customer & Admin OCR Endpoints
   if(method==="GET" && path==="/me/ocr/jobs") {
     const ordId=url.searchParams.get("order_id")?idSchema.parse(url.searchParams.get("order_id")):undefined;
@@ -1402,11 +1397,6 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     return extraWrite(req,path,actor,z.object({quantities:z.array(z.number().int().min(1).max(9999)).min(2).max(20)}),
       (db,a,b)=>splitOcrCandidate(db,a,idSchema.parse(meOcrSplit[1]),b.quantities));
   }
-  const meOcrConfirm=path.match(/^\/me\/ocr\/jobs\/([a-f0-9-]{36})\/confirm$/i);
-  if(method==="POST" && meOcrConfirm) {
-    return extraWrite(req,path,actor,z.object({candidate_ids:z.array(idSchema).min(1).max(100)}),
-      (db,a,b)=>confirmOcrCandidates(db,a,idSchema.parse(meOcrConfirm[1]),b.candidate_ids));
-  }
   if(method==="GET" && path==="/staff/admin/ocr/jobs") {
     return json({jobs:await transaction(db=>adminListOcrJobs(db,actorRequired(actor)))});
   }
@@ -1436,6 +1426,8 @@ async function dispatch(db:DB,actor:Actor,id:string,op:string,b:Record<string,an
   if(op==="getQuotePolicy") {role(actor,"super_admin");return quotePolicy(db);}
   if(op==="saveQuotePolicy") return saveQuotePolicy(db,actor,quotePolicyInput.parse(b),hash(getCookie(req,"session")));
   switch(op) {
+    case "confirmOcrCandidates": return confirmOcrCandidates(db,actor,id,b.candidate_ids,b.edits);
+    case "reconcileStripeStatus": return reconcileStripeStatus(db,actor,hash(getCookie(req,"session")));
     case "listIntakeClaims": {
       const page=z.coerce.number().int().min(1).max(10000).parse(new URL(req.url).searchParams.get("page")??1);
       return customerIntakeClaims(db,actor,page);
@@ -1539,7 +1531,9 @@ export async function handle(req:Request,path:string) {
     }
     return json(await transaction(db=>{
       const run=()=>dispatch(db,a,args[0]??"",op.operationId,data,req);
-      return key?idempotent(db,a.id+":"+req.method+":"+path,key,data,run):run();
+      const scope=op.operationId==="confirmOcrCandidates"||op.operationId==="reconcileStripeStatus"
+        ?a.id+":"+path:a.id+":"+req.method+":"+path;
+      return key?idempotent(db,scope,key,data,run):run();
     }),status);
   } catch(e) {
     if(e instanceof Problem) {

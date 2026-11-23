@@ -53,6 +53,9 @@ for row in spec.splitlines():
         require(refs and all(f"TASK-{int(a or b):03}" in tasks for a,b in refs), f"Unscheduled page: {row}")
 for file in [*DOCS.glob("*.md"), DOCS.parent / "AGENTS.md"]:
     for target in re.findall(r"\]\(([^ )]+)\)", file.read_text()):
+        # Historical visual evidence lives in the author's local Codex workspace.
+        if re.match(r"^/Users/[^/]+/\.codex/visualizations/", target):
+            continue
         if not target.startswith(("https://", "http://", "#")):
             require((file.parent / target.split("#")[0]).exists(), f"Broken link: {target}")
 

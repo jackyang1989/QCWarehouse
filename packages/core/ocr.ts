@@ -968,10 +968,14 @@ export async function splitOcrCandidate(db: DB, actor: Actor, candidateId: strin
   return { created_candidate_ids: createdIds, ...(await getOcrJobRaw(db, src.job_id)) };
 }
 
-export async function confirmOcrCandidates(db: DB, actor: Actor, jobId: string, candidateIds: string[]) {
+export async function confirmOcrCandidates(db: DB, actor: Actor, jobId: string, candidateIds: string[],
+  edits: {candidate_id:string; patch:Parameters<typeof updateOcrCandidate>[3]}[] = [],
+) {
   const org = organization(actor);
   const uniqueIds = [...new Set(candidateIds)];
   guard(uniqueIds.length >= 1, "NO_CANDIDATES_SELECTED", "Select at least one candidate row to confirm.", 422);
+  guard(new Set(edits.map(edit=>edit.candidate_id)).size===edits.length&&edits.every(edit=>uniqueIds.includes(edit.candidate_id)),
+    "INVALID_CANDIDATE_EDITS","Edit only the candidates selected for confirmation.",422);
 
   const job = await one<{ id: string; org_id: string | null; media_id: string | null }>(
     db,
@@ -986,7 +990,7 @@ export async function confirmOcrCandidates(db: DB, actor: Actor, jobId: string, 
       status: string;
       item_name: string;
       quantity: number;
-    }>("select id, status, item_name, quantity from ocr_candidates where job_id=$1 and id = any($2::uuid[]) for update", [
+    }>("select id, status, item_name, quantity from ocr_candidates where job_id=$1 and id = any($2::uuid[]) order by id for update", [
       jobId,
       uniqueIds,
     ])
@@ -995,6 +999,14 @@ export async function confirmOcrCandidates(db: DB, actor: Actor, jobId: string, 
 
   for (const r of rows) {
     guard(["pending", "confirmed"].includes(r.status), "CANDIDATE_NOT_CONFIRMABLE", "Rejected or superseded candidates cannot be confirmed.", 409);
+  }
+  for(const edit of edits) {
+    const result=await updateOcrCandidate(db,actor,edit.candidate_id,edit.patch);
+    const row=rows.find(r=>r.id===edit.candidate_id)!;
+    row.item_name=String(result.candidate.item_name);
+    row.quantity=Number(result.candidate.quantity);
+  }
+  for (const r of rows) {
     guard(r.item_name.trim().length > 0 && r.quantity >= 1, "CANDIDATE_INCOMPLETE", "Each confirmed item needs a name and quantity >= 1.", 422);
   }
 

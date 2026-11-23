@@ -1,7 +1,7 @@
 import Stripe from "stripe";
 import { audit, event, guard, idempotent, lock, one, organization, role, uuid, type Actor, isDemo } from "./common";
 import { requireCustomerActive, requireStaffMfa } from "./auth";
-import { stripeSettingsFromDb } from "./integrations";
+import { stripeCheckoutMode, stripeSettingsFromDb, stripeSettlementCredentials } from "./integrations";
 import {
   assertSafeExternalUrl,
   ensureIntegrationProvidersSeeded,
@@ -235,11 +235,12 @@ export async function requestPaypalManualInvoice(
   guard(!expiresAt || new Date(expiresAt).getTime() > Date.now(), "QUOTE_EXPIRED", "This quote has expired. Generate a fresh quote first.", 409);
 
   const existingStripeProcessing = (
-    await db.query("select 1 from payments where charge_item_id=$1 and provider<>'paypal_manual' and state='processing' limit 1", [
+    await db.query(`select 1 from payments where charge_item_id=$1 and provider='stripe'
+      and (state='processing' or (state='requires_payment' and (provider_ref is not null or provider_data ? 'checkout_params'))) limit 1`, [
       chargeItemId,
     ])
   ).rowCount;
-  guard(!existingStripeProcessing, "PAYMENT_PROCESSING", "A Stripe payment attempt is already processing for this charge.", 409);
+  guard(!existingStripeProcessing, "PAYMENT_PROCESSING", "An existing Stripe checkout must finish or expire before switching payment methods.", 409);
 
   await db.query(
     `update payments
@@ -947,80 +948,70 @@ export async function reconcileStripeStatus(db: DB, actor: Actor, sessionHash: s
   role(actor, "finance", "super_admin");
   await requireStaffMfa(db, actor, sessionHash, 15);
   const settings = await stripeSettingsFromDb(db);
-  const modePrefix = settings.mode ? `cs_${settings.mode}_%` : "cs_%";
-  const pending = (
-    await db.query<{
-      id: string;
-      provider_ref: string;
-      state: string;
-      amount_cents: number;
-      currency: string;
-      charge_item_id: string;
-      org_id: string;
-    }>(
-      `select p.id, p.provider_ref, p.state, p.amount_cents, p.currency, p.charge_item_id, c.org_id
-       from payments p join charge_items c on c.id = p.charge_item_id
-       where p.provider = 'stripe' and p.state in ('requires_payment','processing') and p.provider_ref like $1
-       order by p.updated_at desc
-       limit 25`,
-      [modePrefix.replace(/([_])/g, "\\$1").replace(/\\\\%$/, "%") === modePrefix ? modePrefix : modePrefix],
-    )
-  ).rows;
+  const pending = (await db.query<{
+    id:string; provider_ref:string; amount_cents:number; currency:string; charge_item_id:string; org_id:string;
+  }>(`
+    select p.id,p.provider_ref,p.amount_cents,p.currency,p.charge_item_id,c.org_id
+    from payments p join charge_items c on c.id=p.charge_item_id
+    where p.provider='stripe' and p.state in ('requires_payment','processing') and p.provider_ref ~ '^cs_(test|live)_'
+    order by p.updated_at desc limit 25
+  `)).rows;
+  const events=new Map<string,Stripe.Event>();
+  const errors:string[]=[];
+  let configured=false;
+  let reconciled=0;
 
-  if (!settings.key || !settings.mode || !settings.enabled) {
-    await recordIntegrationEvent(db, {
-      provider_key: "stripe",
-      environment: settings.environment,
-      event_kind: "payment_sync",
-      status: "warn",
-      summary: `Reconciliation skipped live Stripe lookup (${pending.length} pending sessions): Stripe key/mode unavailable or channel disabled.`,
-      actor_id: actor.id,
-    });
-    return {
-      ok: false,
-      configured: false,
-      environment: settings.environment,
-      checked: pending.length,
-      reconciled: 0,
-      still_pending: pending.length,
-      errors: ["Stripe secret_key/mode is not active in Vault or environment."],
-    };
-  }
-
-  const client = new Stripe(settings.key, { timeout: 15000, maxNetworkRetries: 1 });
-  let reconciled = 0;
-  const errors: string[] = [];
-
-  for (const row of pending) {
+  for(const mode of isDemo()?[]:["test","live"] as const) {
+    const {key}=await stripeSettlementCredentials(db,mode);
+    if(!key) {
+      if(pending.some(row=>stripeCheckoutMode(row.provider_ref)===mode))
+        errors.push(`Credentials for pending ${mode} payments are unavailable.`);
+      continue;
+    }
+    configured=true;
+    const references=new Set(pending.filter(row=>stripeCheckoutMode(row.provider_ref)===mode).map(row=>row.provider_ref));
+    if(!references.size)continue;
+    const client=new Stripe(key,{timeout:10000,maxNetworkRetries:1});
+    let cursor:string|undefined;
     try {
-      const session = await client.checkout.sessions.retrieve(row.provider_ref);
-      if (session.payment_status === "paid") {
-        const expectedLive = settings.mode === "live";
-        if (
-          session.id !== row.provider_ref ||
-          session.livemode !== expectedLive ||
-          session.amount_total !== row.amount_cents ||
-          session.currency?.toLowerCase() !== row.currency.toLowerCase() ||
-          session.metadata?.payment_id !== row.id ||
-          session.metadata?.charge_item_id !== row.charge_item_id ||
-          session.metadata?.org_id !== row.org_id
-        ) {
-          errors.push(`${row.id}: Stripe session metadata, livemode, currency, or amount mismatch`);
-          continue;
+      for(let page=0;page<3;page++) {
+        const result:Stripe.ApiList<Stripe.Event>=await client.events.list({
+          types:["checkout.session.completed","checkout.session.async_payment_succeeded"],
+          limit:100,starting_after:cursor,
+        });
+        for(const event of result.data) {
+          const session=event.data.object as Stripe.Checkout.Session;
+          if((event.type==="checkout.session.completed"||event.type==="checkout.session.async_payment_succeeded")&&
+            event.livemode===(mode==="live")&&session.livemode===event.livemode&&
+            session.payment_status==="paid"&&references.has(session.id)&&Number.isSafeInteger(event.created)&&event.created>0) {
+            const previous=events.get(session.id);
+            if(!previous||event.created<previous.created)events.set(session.id,event);
+          }
         }
-        await applyPayment(
-          db,
-          row.id,
-          session.id,
-          { payment_intent: typeof session.payment_intent === "string" ? session.payment_intent : null, reconciled: true },
-          session.created || Math.floor(Date.now() / 1000),
-        );
-        reconciled++;
+        cursor=result.data.at(-1)?.id;
+        if(!cursor||!result.has_more)break;
       }
-    } catch (err) {
-      errors.push(`${row.id}: ${err instanceof Error ? err.message.slice(0, 120) : "lookup error"}`);
+    } catch(error) {
+      errors.push(`Could not read Stripe ${mode} payment events: ${error instanceof Error?error.message.slice(0,120):"lookup error"}`);
     }
   }
+
+  for(const row of pending.sort((a,b)=>a.org_id.localeCompare(b.org_id)||a.id.localeCompare(b.id))) {
+    const event=events.get(row.provider_ref);
+    if(!event)continue; // No verified completion time. Leave the signed webhook able to settle the payment.
+    const session=event.data.object as Stripe.Checkout.Session;
+    if(session.amount_total!==row.amount_cents||session.currency?.toLowerCase()!==row.currency.toLowerCase()||
+      session.metadata?.payment_id!==row.id||session.metadata?.charge_item_id!==row.charge_item_id||session.metadata?.org_id!==row.org_id) {
+      errors.push(`${row.id}: Stripe payment event does not match the charge`);
+      continue;
+    }
+    await applyPayment(db,row.id,session.id,{
+      payment_intent:typeof session.payment_intent==="string"?session.payment_intent:null,
+      reconciled:true,stripe_event_id:event.id,
+    },event.created);
+    reconciled++;
+  }
+  if(!configured)errors.push("Stripe credentials are unavailable for reconciliation.");
 
   await recordIntegrationEvent(db, {
     provider_key: "stripe",
@@ -1040,7 +1031,7 @@ export async function reconcileStripeStatus(db: DB, actor: Actor, sessionHash: s
 
   return {
     ok: errors.length === 0,
-    configured: true,
+    configured,
     environment: settings.environment,
     checked: pending.length,
     reconciled,

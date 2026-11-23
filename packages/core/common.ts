@@ -41,6 +41,19 @@ export function extractReceivingCode(raw: string): string {
   }
   return trimmed.toUpperCase();
 }
+export const receivingCodeKey = (raw:string) => extractReceivingCode(raw).replace(/-/g, "");
+export async function findReceivingProfiles(db:Pick<DB,"query">, raw:string) {
+  return (await db.query<{user_id:string;org_id:string;receiving_code:string}>(
+    "select user_id,org_id,receiving_code from customer_receiving_profiles where replace(upper(receiving_code),'-','')=$1 limit 2",
+    [receivingCodeKey(raw)],
+  )).rows;
+}
+export async function resolveReceivingProfile(db:Pick<DB,"query">, raw:string) {
+  const matches=await findReceivingProfiles(db,raw);
+  guard(matches.length>0,"NOT_FOUND","Customer receiving code not found.",404);
+  guard(matches.length===1,"AMBIGUOUS_RECEIVING_CODE","This receiving code matches more than one customer. Verify parcel ownership before binding.",409);
+  return matches[0];
+}
 export const receivingCode = (digits = 5) => numericCode("QCW", digits);
 export const orderCode = (extraDigits = 0) =>
   `QW${shanghaiYYMMDD()}${randomInt(10 ** (2 + extraDigits), 10 ** (3 + extraDigits))}`;

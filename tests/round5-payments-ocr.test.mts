@@ -734,10 +734,17 @@ test("Round 5 Self-Hosted PaddleOCR, PDF Evidence & Multi-Tenant Worker (20 Scen
     const job = await customer.fetch(`/me/ocr/jobs/${jobId}`);
     const pending = job.candidates.filter((c: any) => c.status === "pending");
     await customer.fetch(`/me/ocr/candidates/${pending[1].id}`, { status: "rejected" });
-    await customer.fetch(`/me/ocr/jobs/${jobId}/confirm`, { candidate_ids: [pending[1].id] }, "POST", 409);
+    const path=`/me/ocr/jobs/${jobId}/confirm`;
+    const edits=[{candidate_id:pending[0].id,patch:{item_name:"Customer checked product name"}}];
+    await customer.fetch(path,{candidate_ids:[pending[0].id,pending[1].id],edits},"POST",409);
+    const unchanged=await customer.fetch(`/me/ocr/jobs/${jobId}`);
+    assert.equal(unchanged.candidates.find(c=>c.id===pending[0].id).item_name,pending[0].item_name);
 
-    const conf = await customer.fetch(`/me/ocr/jobs/${jobId}/confirm`, { candidate_ids: [pending[0].id] });
+    const key=randomUUID(),body={candidate_ids:[pending[0].id],edits};
+    const conf=await customer.fetch(path,body,"POST",200,key);
     assert.equal(conf.confirmed_candidates[0].status, "confirmed");
+    assert.equal(conf.confirmed_candidates[0].item_name,edits[0].patch.item_name);
+    assert.deepEqual(await customer.fetch(path,body,"POST",200,key),conf);
     // Retrying a job with confirmed candidates is blocked (P1-4 fix)
     await customer.fetch(`/me/ocr/jobs/${jobId}/retry`, {}, "POST", 409);
     const postOrders = (await pool.query<{ n: number }>("select count(*)::int n from orders")).rows[0].n;
@@ -749,6 +756,9 @@ test("Round 5 Self-Hosted PaddleOCR, PDF Evidence & Multi-Tenant Worker (20 Scen
     const dupJob = await customer.fetch("/me/ocr/jobs", { media_id: dupMediaId, execute_now: true }, "POST", 201);
     assert.equal(dupJob.deduplicated, true);
     assert.ok(dupJob.candidates.length >= 2);
+    const rerun=await customer.fetch("/me/ocr/jobs",{media_id:dupMediaId,execute_now:true,force_rerun:true},"POST",201);
+    assert.notEqual(rerun.job.id,dupJob.job.id);
+    assert.ok(rerun.candidates.some(row=>row.status==="pending"));
   });
 
   await t.test("O14: Org daily OCR quota limit enforced cleanly (429 OCR_QUOTA_EXCEEDED)", async () => {

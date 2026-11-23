@@ -36,6 +36,16 @@ docker compose exec -T db createdb -U qcwarehouse qcw_test
 
 在 `.env` 设置 `TEST_DATABASE_URL=postgres://qcwarehouse:qcwarehouse@localhost:5432/qcw_test`，运行 `npm run test:integration`。测试用独立数据库，自动迁移并写入演示数据。箱包和家居模板仅在测试数据库激活。数据库关系用例须在已迁移、未写入演示数据的空库执行 `psql -v ON_ERROR_STOP=1 -f docs/contracts/verify.sql`。
 
+部署 OCR Worker 或运行完整集成套件前，使用 Python 3.11 或 3.12 创建虚拟环境。Web 进程与 Worker 都须在其 `PATH` 中找到该环境的 `python3`。三个集成套件串行运行，每套都会重建指定的独立测试库。
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r scripts/ocr-requirements.txt
+python3 scripts/ocr_engine.py --health
+npm run test:integration
+```
+
 集成测试对核心 OpenAPI 逐操作校验成功响应和覆盖到的错误响应。新增核心操作时须有可执行的成功用例。仓库的 [Core contract 检查](.github/workflows/core-contract.yml) 在 main 更新或 PR 时使用临时 PostgreSQL 实例执行同一套校验。
 
 ## 外部服务联调

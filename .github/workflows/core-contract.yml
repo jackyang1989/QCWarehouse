@@ -47,6 +47,11 @@ jobs:
         run: |
           DATABASE_URL="$TEST_DATABASE_URL" npm run db:migrate
           psql "$TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f docs/contracts/verify.sql
+      - name: Install the OCR runtime
+        run: |
+          python3 -m venv "$RUNNER_TEMP/qcw-ocr"
+          "$RUNNER_TEMP/qcw-ocr/bin/python" -m pip install -r scripts/ocr-requirements.txt
+          echo "$RUNNER_TEMP/qcw-ocr/bin" >> "$GITHUB_PATH"
       - run: npm run test:integration
       - run: npm run build
       - run: npm run check

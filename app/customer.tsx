@@ -1199,6 +1199,8 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
 
   const [activeOcrBbox,setActiveOcrBbox]=useState<{evId:string;rect:[number,number,number,number]}|null>(null);
 
+  const ocrConfirmAttempt=useRef<{fingerprint:string;key:string}|null>(null);
+
   function mapOcrJobToCandidates(evId:string,fileName:string,job:Row,cands:Row[]):ExtractedCandidateLine[] {
     return cands.map((c:Row)=>({
       id:String(c.id),
@@ -1234,17 +1236,19 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
     }));
   }
 
-  async function enrichEvidenceWithOcr(evId:string,mediaId:string,fileName:string) {
+  async function enrichEvidenceWithOcr(evId:string,mediaId:string,fileName:string,forceRerun=false) {
     try {
-      const res=await request("/me/ocr/jobs","POST",{media_id:mediaId,execute_now:true});
+      const res=await request("/me/ocr/jobs","POST",{media_id:mediaId,execute_now:true,...(forceRerun?{force_rerun:true}:{})});
       const job:Row=res.job??{};
       const rawCands:Row[]=Array.isArray(res.candidates)?res.candidates:[];
-      const mapped=mapOcrJobToCandidates(evId,fileName,job,rawCands);
+      const mapped=mapOcrJobToCandidates(evId,fileName,job,rawCands.filter(c=>c.status==="pending"));
       const summary:Row=job.parsed_summary??{};
       const warnings:string[]=Array.isArray(job.warnings)?job.warnings:[];
       setPurchaseEvidences(prev=>prev.map(x=>{
         if(x.id!==evId) return x;
         const ok=job.state==="completed"||job.state==="needs_review";
+        if(!ok)return {...x,extraction_status:x.candidates.length?"needs_confirmation":"failed",
+          extraction_note:`OCR failed (${job.error_code??"ERROR"}): ${job.error_message??"Use + Transcribe Row or Paste Order fallback."}`};
         return {
           ...x,
           ocr_job_id:job.id,
@@ -1256,19 +1260,17 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
           platform_source:summary.platform?String(summary.platform):x.platform_source,
           supplier_alias:summary.supplier_name?String(summary.supplier_name):x.supplier_alias,
           purchase_order_ref:summary.platform_order_no?String(summary.platform_order_no):x.purchase_order_ref,
-          extraction_status:ok&&mapped.length>0?"needs_confirmation":ok?"manual_only":"failed",
-          extraction_note:ok
-            ?mapped.length>0
+          extraction_status:mapped.length>0?"needs_confirmation":"manual_only",
+          extraction_note:mapped.length>0
               ?`Auto-OCR (${job.provider_key}, ${Math.round(Number(job.confidence??0)*100)}% conf, ${job.latency_ms??0}ms) extracted ${mapped.length} candidate item(s). Review, edit or merge/split rows before confirming.`
-              :`Auto-OCR completed (${job.provider_key}), but no complete product lines were isolated. Inspect raw text or transcribe rows manually.`
-            :`OCR failed (${job.error_code??"ERROR"}): ${job.error_message??"Use + Transcribe Row or Paste Order fallback."}`,
-          candidates:mapped.length>0?mapped:x.candidates,
+              :`Auto-OCR completed (${job.provider_key}), but no complete product lines were isolated. Inspect raw text or transcribe rows manually.`,
+          candidates:mapped,
         };
       }));
     } catch(err) {
       setPurchaseEvidences(prev=>prev.map(x=>x.id===evId?{
         ...x,
-        extraction_status:"failed",
+        extraction_status:x.candidates.length?"needs_confirmation":"failed",
         extraction_note:`Auto-OCR unavailable (${err instanceof Error?err.message:"error"}). Use + Transcribe Row or Paste Order fallback.`,
       }:x));
     }
@@ -1483,8 +1485,10 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
 
   async function retryEvidenceOcr(ev:PurchaseEvidenceItem) {
     if(!ev.media_id) return;
-    setPurchaseEvidences(prev=>prev.map(x=>x.id===ev.id?{...x,extraction_status:"extracting",extraction_note:"Re-running OCR extraction…"}:x));
-    await enrichEvidenceWithOcr(ev.id,ev.media_id,ev.file_name);
+    await runWizard("Re-running OCR…",async()=>{
+      setPurchaseEvidences(prev=>prev.map(x=>x.id===ev.id?{...x,extraction_status:"extracting",extraction_note:"Re-running OCR extraction…"}:x));
+      await enrichEvidenceWithOcr(ev.id,ev.media_id!,ev.file_name,true);
+    });
   }
 
   async function mergeSelectedOcrRows(ev:PurchaseEvidenceItem) {
@@ -1535,14 +1539,15 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
     if(cand.ocr_candidate_id) {
       try {
         await request(`/me/ocr/candidates/${cand.ocr_candidate_id}`,"POST",{status:"rejected"});
-      } catch {
-        // continue updating UI
+      } catch(error) {
+        setWizardError(error instanceof Error?error.message:"Could not reject the candidate. Try again.");
+        return;
       }
     }
     setPurchaseEvidences(prev=>prev.map(x=>x.id===ev.id?{...x,candidates:x.candidates.filter(c=>c.id!==cand.id)}:x));
   }
 
-  function confirmEvidenceCandidates(evidenceId:string) {
+  async function confirmEvidenceCandidates(evidenceId:string) {
     const ev=purchaseEvidences.find(item=>item.id===evidenceId);
     if(!ev) return;
     const chosen=ev.candidates.filter(c=>c.selected);
@@ -1555,51 +1560,65 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
       setWizardError(`Complete missing fields (${missingLineFields(incomplete).join(", ")}) on checked candidate rows before confirming.`);
       return;
     }
-    const serverCandIds=chosen.map(c=>c.ocr_candidate_id).filter((cid):cid is string=>Boolean(cid));
-    if(ev.ocr_job_id&&serverCandIds.length>0) {
-      void (async()=>{
-        for(const c of chosen) {
-          if(c.ocr_candidate_id&&c.edited_by_user) {
-            await request(`/me/ocr/candidates/${c.ocr_candidate_id}`,"POST",{
-              item_name:c.product_name.trim(),
-              sku_code:c.sku_code.trim()||null,
-              color:c.color_declared.trim()||null,
-              size:c.size_label.trim()||null,
-              quantity:Math.max(1,Math.floor(Number(c.quantity)||1)),
-              supplier_name:c.supplier_alias.trim()||null,
-            }).catch(()=>undefined);
-          }
-        }
-        await request(`/me/ocr/jobs/${ev.ocr_job_id}/confirm`,"POST",{candidate_ids:serverCandIds}).catch(()=>undefined);
-      })();
-    }
-    const confirmedLines:ExpectedProductLine[]=chosen.map((c,idx)=>({
-      id:`EL-${Date.now().toString(36)}-${idx}-${Math.random().toString(36).slice(2,5)}`,
-      sku_code:c.sku_code.trim(),
-      product_name:c.product_name.trim(),
-      color_declared:c.color_declared.trim(),
-      size_label:c.size_label.trim(),
-      quantity:Math.max(1,Math.floor(Number(c.quantity)||1)),
-      supplier_alias:(c.supplier_alias||ev.supplier_alias||supplierRef).trim(),
-      purchase_order_ref:(c.purchase_order_ref||ev.purchase_order_ref||"").trim(),
-      unit_price_note:c.unit_price_note,
-      tracking_no:normalizeTrackingCode(c.tracking_no),
-      carrier_code:c.carrier_code,
-      carton_no:c.carton_no,
-      inspection_note:c.inspection_note,
-      evidence_ids:ev.media_id?[ev.media_id]:[],
-      source_file_name:c.source_file_name??ev.file_name,
-      edited_by_user:Boolean(c.edited_by_user),
-      source_kind:ev.media_id?"evidence_extract":"paste",
-    }));
-    setPurchaseEvidences(prev=>prev.map(item=>item.id===evidenceId?{
-      ...item,
-      extraction_status:"confirmed",
-      extraction_note:`Confirmed ${confirmedLines.length} line(s) (${sumExpectedLineQuantity(confirmedLines)} units) into expected order lines.`,
-      candidates:[],
-    }:item));
-    applyExpectedLinesUpdate([...expectedLines,...confirmedLines]);
-    setWizardError("");
+    await runWizard("Confirming product lines…",async()=>{
+      const serverRows=chosen.filter(c=>c.ocr_candidate_id);
+      if(serverRows.length) {
+        if(!ev.ocr_job_id)throw new Error("Reload the evidence before confirming these OCR rows.");
+        const body={
+          candidate_ids:serverRows.map(c=>c.ocr_candidate_id!),
+          edits:serverRows.map(c=>({
+            candidate_id:c.ocr_candidate_id!,
+            patch:{
+              item_name:c.product_name.trim(),sku_code:c.sku_code.trim()||null,
+              color:c.color_declared.trim()||null,size:c.size_label.trim()||null,
+              quantity:Number(c.quantity),supplier_name:c.supplier_alias.trim()||null,
+              tracking_no:normalizeTrackingCode(c.tracking_no)||null,
+              platform_order_no:c.purchase_order_ref?.trim()||null,
+              unit_price_text:c.unit_price_note?.trim()||null,
+            },
+          })),
+        };
+        const path=`/me/ocr/jobs/${ev.ocr_job_id}/confirm`;
+        const fingerprint=JSON.stringify([path,body]);
+        if(ocrConfirmAttempt.current?.fingerprint!==fingerprint)
+          ocrConfirmAttempt.current={fingerprint,key:crypto.randomUUID()};
+        const result=await request(path,"POST",body,ocrConfirmAttempt.current.key,AbortSignal.timeout(20000)).catch(error=>{
+          if(error instanceof Error&&error.name==="TimeoutError")throw new Error("Confirmation timed out. Retry to check the same request.");
+          throw error;
+        });
+        const confirmed=new Set((result.confirmed_candidates as Row[]).map(row=>row.id));
+        if(!body.candidate_ids.every(id=>confirmed.has(id)))
+          throw new Error("The server did not confirm all selected rows. Try again.");
+        ocrConfirmAttempt.current=null;
+      }
+      const confirmedLines:ExpectedProductLine[]=chosen.map((c,idx)=>({
+        id:`EL-${Date.now().toString(36)}-${idx}-${Math.random().toString(36).slice(2,5)}`,
+        sku_code:c.sku_code.trim(),
+        product_name:c.product_name.trim(),
+        color_declared:c.color_declared.trim(),
+        size_label:c.size_label.trim(),
+        quantity:Math.max(1,Math.floor(Number(c.quantity)||1)),
+        supplier_alias:(c.supplier_alias||ev.supplier_alias||supplierRef).trim(),
+        purchase_order_ref:(c.purchase_order_ref||ev.purchase_order_ref||"").trim(),
+        unit_price_note:c.unit_price_note,
+        tracking_no:normalizeTrackingCode(c.tracking_no),
+        carrier_code:c.carrier_code,
+        carton_no:c.carton_no,
+        inspection_note:c.inspection_note,
+        evidence_ids:ev.media_id?[ev.media_id]:[],
+        source_file_name:c.source_file_name??ev.file_name,
+        edited_by_user:Boolean(c.edited_by_user),
+        source_kind:ev.media_id?"evidence_extract":"paste",
+      }));
+      setPurchaseEvidences(prev=>prev.map(item=>item.id===evidenceId?{
+        ...item,
+        extraction_status:"confirmed",
+        extraction_note:`Confirmed ${confirmedLines.length} line(s) (${sumExpectedLineQuantity(confirmedLines)} units) into expected order lines.`,
+        candidates:[],
+      }:item));
+      applyExpectedLinesUpdate([...expectedLines,...confirmedLines]);
+      setWizardError("");
+    });
   }
 
   function discardEvidenceQueue(evidenceId:string,removeEntireEvidence:boolean) {
@@ -2880,6 +2899,7 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
               :`0 confirmed lines · ${clampedQty} ${clampedQty===1?"Unit":"Units"} commissioned`}
           </Tag>}
         >
+          <fieldset disabled={Boolean(busyMessage)} style={{display:"contents"}}>
           {serviceKind==="reference_match"&&(
             <div className="line-note" data-testid="golden-sample-step3-context" style={{marginBottom:12}}>
               <strong>Golden Sample Matching Scope:</strong> Declare only the <strong>{clampedQty} incoming candidate unit{clampedQty===1?"":"s"}</strong> below (1–10+ incoming candidate items will be compared against 1 vaulted reference sample).
@@ -4017,6 +4037,7 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
                 onClick={()=>setItemPage(firstItemIndex/rowsPerPage+1)}>Next items</button>
             </div>}
           </>}
+          </fieldset>
         </Panel>}
 
         {step===3&&<Panel
@@ -4350,7 +4371,7 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
             <div className="row between flexwrap" style={{marginBottom:6}}>
               <div className="label">APPLICABLE PLATFORM POLICIES &amp; SERVICE BOUNDARIES</div>
               <Tag tone={allConsentsChecked?"green":"yellow"}>
-                Acknowledgements completed: {(policyAccepted?1:0)+Object.keys(acknowledged).filter(k=>consents[k]).length} / 6 (1 platform policy acceptance + 5 service disclosures)
+                Acknowledgements: {(policyAccepted?1:0)+Object.keys(acknowledged).filter(k=>consents[k]).length} / 6
               </Tag>
             </div>
             <div className="actions" style={{margin:0}}>

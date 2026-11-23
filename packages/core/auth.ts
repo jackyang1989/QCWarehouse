@@ -3,7 +3,7 @@ import * as oidc from "openid-client";
 import { pepper, seal, unseal } from "./crypto";
 import { oidcSettings, postmarkSettings, type OidcProvider } from "./integrations";
 import { pool, transaction, type DB } from "../db";
-import { Problem, audit, code, event, guard, hash, isDemo, lock, one, organization, receivingCode, role, uuid, type Actor } from "./common";
+import { Problem, audit, code, event, findReceivingProfiles, guard, hash, isDemo, lock, one, organization, receivingCode, role, uuid, type Actor } from "./common";
 import { demoTermsVersion, demoWarehouseAddressZh, usableWarehouseAddressSql } from "./demo-fixtures";
 
 const token = () => randomBytes(32).toString("base64url");
@@ -294,8 +294,10 @@ export async function completeRegistration(secret:string,browser:string,termsIds
     await db.query("insert into organizations(id,name) values($1,$2)",[orgId,"Personal workspace"]);
     await db.query("insert into memberships(user_id,org_id) values($1,$2)",[userId,orgId]);
     let assignedCode = "";
+    await lock(db,"receiving-code-allocation");
     for (let attempt = 0; attempt < 10; attempt++) {
       const candidate = receivingCode();
+      if((await findReceivingProfiles(db,candidate)).length)continue;
       const inserted = await db.query(
         "insert into customer_receiving_profiles(user_id,org_id,receiving_code) values($1,$2,$3) on conflict (receiving_code) do nothing returning receiving_code",
         [userId, orgId, candidate],

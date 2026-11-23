@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { DB } from "../db";
 import { requireCustomerActive } from "./auth";
 import { audit, code, event, guard, hash, lock, one, organization, revision, role, uuid, type Actor } from "./common";
-import { integrationPreflight } from "./integrations";
+import { integrationPreflight, stripeSettingsFromDb } from "./integrations";
 import { demoTermsVersion, demoWarehouseAddressZh } from "./demo-fixtures";
 import { savePhoto } from "./intake";
 import { activatePaidOrder, orderItemReadiness, priceSchema, readyOrder, templateSchema } from "./orders";
@@ -1649,7 +1649,7 @@ export async function configureLegalEntity(
 
 export async function evaluateLaunchReadiness(db:DB,actor:Actor) {
   role(actor,"super_admin","warehouse_admin","support","finance");
-  const preflight=integrationPreflight();
+  const preflight=integrationPreflight(await stripeSettingsFromDb(db));
   const counts=await one<{
     default_address_count:number;
     published_terms_kinds:number;
@@ -1725,7 +1725,7 @@ export async function evaluateLaunchReadiness(db:DB,actor:Actor) {
     no_exhausted_jobs:counts.exhausted_jobs===0,
     oidc_configured:Boolean(preflight.google.configured && preflight.microsoft.configured),
     postmark_live:Boolean(preflight.postmark.enabled),
-    stripe_live:Boolean(preflight.stripe.mode==="live" && preflight.stripe.webhookConfigured && preflight.stripe.liveEnabled),
+    stripe_live:preflight.stripe.mode==="live"&&preflight.stripe.checkoutConfigured,
     kuaidi100_live:Boolean(preflight.kuaidi100.queryConfigured && preflight.kuaidi100.httpsCallbackConfigured),
   };
   const missingGates=Object.entries(gates)
