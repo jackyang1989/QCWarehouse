@@ -486,6 +486,7 @@ paths:
     post:
       operationId: adviseParcel
       summary: 允许零订单登记或关联多个本人订单
+      description: 登记时的本人订单关联用于物流追溯和仓库核对，可保留已发布报告的原单关系（例如 T47 的迟到剔除件）。登记不确认实收，也不改变订单状态或质检范围。已有包裹的客户自助关联使用单独的 link-order 状态规则。
       security:
       - cookieSession: []
       parameters:
