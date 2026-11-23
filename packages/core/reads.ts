@@ -623,7 +623,7 @@ export async function customerNotifications(db:DB,actor:Actor,unread=false,befor
       when 'orders' then n.template like 'order.%'
       when 'reports' then n.template like 'report.%'
       when 'parcels' then n.template like 'package.%' or n.template like 'tracking.%' or n.template like 'shipment.%' or n.template='reference.sealed'
-      when 'billing' then n.template like 'payment.%' or n.template like '%.quoted' or n.template='quote.offered'
+      when 'billing' then n.template like 'payment.%' or n.template like 'refund.%' or n.template like '%.quoted' or n.template='quote.offered'
       when 'support' then n.template like 'ticket.%' or n.template like 'incident.%' or n.template in ('email.delivery_failed','account.registered')
       else true end
     and ($4::uuid is null or (coalesce(n.created_at,'-infinity'),n.id)<(
@@ -1438,49 +1438,89 @@ export async function staffOrderDetail(db:DB,actor:Actor,publicNo:string) {
     dispositions,tickets,blocks,activity,shipments};
 }
 
-export async function reconcileFinance(db:DB,actor:Actor,includeTest=true) {
+export async function reconcileFinance(db:DB,actor:Actor,includeTest=true,filters?:{query:string;purpose:string;page?:number}) {
   role(actor,...staffAccess.finance);
-  const {rows}=await db.query<{
+  type ChargeRow={
     charge_item_id:string;purpose:string;amount_cents:number;currency:string;
-    state:string;paid_cents:number;refunded_cents:number;batch_id:string|null;
+    state:string;paid_cents:number;refunded_cents:number;pending_refund_cents:number;batch_id:string|null;
     inspection_order_id:string|null;inspection_order_no:string|null;is_test:boolean;
     receiving_code:string|null;applied_payment_id:string|null;
     allocations:{order_id:string;public_no:string;amount_cents:number}[];
-  }>(
-    `select c.id charge_item_id,c.purpose,c.amount_cents,c.currency,
+    balance_cents:number;
+  };
+  const limit=filters?.page?50:400;
+  const result=await one<{summary:{
+    inspection_paid_cents:number;dispatch_paid_cents:number;storage_paid_cents:number;paid_cents:number;
+    refunded_cents:number;pending_refund_cents:number;unallocated_dispatch_cents:number;all_balanced:boolean
+  };rows:ChargeRow[]}>(db,
+    `with charges as (
+      select c.id charge_item_id,c.purpose,c.amount_cents,c.currency,
             case when c.voided_at is not null then 'void'
                  when c.applied_payment_id is not null or c.free_authorization is not null then 'paid'
                  else 'open' end state,
-            coalesce((select p.amount_cents from payments p where p.id=c.applied_payment_id and p.state in ('succeeded','partially_refunded','refunded')),0)::int paid_cents,
-            coalesce((select sum(r.amount_cents)::int from refunds r join payments p on p.id=r.payment_id where p.charge_item_id=c.id and r.state in ('approved','succeeded')),0)::int refunded_cents,
+            coalesce(cash.paid_cents,0)::int paid_cents,
+            coalesce(refunds.succeeded_cents,0)::int refunded_cents,
+            coalesce(refunds.pending_cents,0)::int pending_refund_cents,
             dq.batch_id,
             iq.order_id inspection_order_id,
             io.public_no inspection_order_no,
             coalesce(io.is_test,false) is_test,
             crp.receiving_code,
             c.applied_payment_id,
-            coalesce((
-              select jsonb_agg(jsonb_build_object('order_id',a.order_id,'public_no',o.public_no,'amount_cents',a.amount_cents) order by o.public_no)
-              from charge_allocations a join orders o on o.id=a.order_id
-              where a.charge_id=c.id
-            ),'[]'::jsonb) allocations
+            coalesce(iq.accepted_at,dq.accepted_at,sq.accepted_at) posted_at,
+            case when c.purpose='inspection' then 0 else c.amount_cents-coalesce(alloc.total,0) end balance_cents,
+            coalesce(alloc.rows,'[]'::jsonb) allocations
      from charge_items c
      left join customer_receiving_profiles crp on crp.org_id=c.org_id
      left join inspection_quotes iq on iq.id=c.inspection_quote_id
      left join orders io on io.id=iq.order_id
      left join dispatch_quote_versions dq on dq.id=c.dispatch_quote_id
      left join storage_quotes sq on sq.id=c.storage_quote_id
-     where ($1::boolean or coalesce(io.is_test,false)=false)
-     order by c.id desc limit 400`,
-    [includeTest]
+    left join lateral(
+      select sum(${paymentGrossCents}) paid_cents from payments p
+      where p.charge_item_id=c.id and p.state in ('succeeded','partially_refunded','refunded')
+    ) cash on true
+    left join lateral(
+      select sum(r.amount_cents) filter(where r.state='succeeded') succeeded_cents,
+             sum(r.amount_cents) filter(where r.state='approved') pending_cents
+      from refunds r join payments p on p.id=r.payment_id where p.charge_item_id=c.id
+    ) refunds on true
+    left join lateral(
+      select sum(a.amount_cents) total,
+        jsonb_agg(jsonb_build_object('order_id',a.order_id,'public_no',o.public_no,'amount_cents',a.amount_cents)
+          order by o.public_no) rows
+      from charge_allocations a join orders o on o.id=a.order_id where a.charge_id=c.id
+    ) alloc on true
+     where ($1::boolean or not (coalesce(io.is_test,false) or exists(
+       select 1 from payments p where p.charge_item_id=c.id and
+       (p.provider_ref ~ '^(demo_|cs_test_)'
+        or p.provider_data->>'checkout_mode'='test' or p.provider<>'stripe' and p.environment='sandbox')
+     )))
+    ), page as (
+      select x.* from charges x
+      where ($2::text='all' or x.purpose=$2) and ($3::text='' or
+        strpos(upper(coalesce(x.receiving_code,'')),$3)>0 or strpos(upper(coalesce(x.inspection_order_no,'')),$3)>0
+        or exists(select 1 from jsonb_array_elements(x.allocations) a where strpos(upper(a->>'public_no'),$3)>0))
+      order by posted_at desc nulls last,charge_item_id desc limit $4 offset $5
+    ) select (select jsonb_build_object(
+      'inspection_paid_cents',coalesce(sum(paid_cents) filter(where purpose='inspection'),0),
+      'dispatch_paid_cents',coalesce(sum(paid_cents) filter(where purpose='dispatch'),0),
+      'storage_paid_cents',coalesce(sum(paid_cents) filter(where purpose='storage'),0),
+      'paid_cents',coalesce(sum(paid_cents),0),
+      'refunded_cents',coalesce(sum(refunded_cents),0),
+      'pending_refund_cents',coalesce(sum(pending_refund_cents),0),
+      'unallocated_dispatch_cents',coalesce(sum(balance_cents) filter(where purpose='dispatch' and state='paid'),0),
+      'all_balanced',coalesce(bool_and(balance_cents>=0),true)
+    ) from charges) summary,
+    (select coalesce(jsonb_agg(page order by posted_at desc nulls last,charge_item_id desc),'[]'::jsonb) from page) rows`,
+    [includeTest,filters?.purpose??"all",filters?.query.toUpperCase()??"",limit+1,((filters?.page??1)-1)*limit]
   );
 
-  const items=rows.map(r=>{
+  const items=result.rows.slice(0,limit).map(r=>{
     const allocs=r.purpose==="inspection" && r.inspection_order_id && r.inspection_order_no
       ?[{order_id:r.inspection_order_id,public_no:r.inspection_order_no,amount_cents:r.amount_cents}]
       :(r.allocations??[]);
-    const allocatedCents=allocs.reduce((n,a)=>n+Number(a.amount_cents),0);
-    const unallocatedCents=r.amount_cents-allocatedCents;
+    const allocatedCents=r.amount_cents-r.balance_cents;
     const netCents=r.paid_cents-r.refunded_cents;
     return {
       charge_id:r.charge_item_id,
@@ -1495,36 +1535,27 @@ export async function reconcileFinance(db:DB,actor:Actor,includeTest=true) {
       state:r.state,
       paid_cents:r.paid_cents,
       refunded_cents:r.refunded_cents,
+      pending_refund_cents:r.pending_refund_cents,
       net_cents:netCents,
       batch_id:r.batch_id,
       allocations:allocs,
       allocated_cents:allocatedCents,
-      unallocated_cents:unallocatedCents,
-      allocation_balanced:allocatedCents+unallocatedCents===r.amount_cents && unallocatedCents>=0,
+      unallocated_cents:r.balance_cents,
+      allocation_balanced:r.balance_cents>=0,
     };
   });
 
-  const inspectionPaid=items.filter(x=>x.purpose==="inspection").reduce((n,x)=>n+x.paid_cents,0);
-  const dispatchPaid=items.filter(x=>x.purpose==="dispatch").reduce((n,x)=>n+x.paid_cents,0);
-  const storagePaid=items.filter(x=>x.purpose==="storage").reduce((n,x)=>n+x.paid_cents,0);
-  const refundedTotal=items.reduce((n,x)=>n+x.refunded_cents,0);
-  const netReceived=items.reduce((n,x)=>n+x.net_cents,0);
+  const netReceived=result.summary.paid_cents-result.summary.refunded_cents;
   const summary={
-    inspection_cents:inspectionPaid,
-    inspection_paid_cents:inspectionPaid,
-    dispatch_cents:dispatchPaid,
-    dispatch_paid_cents:dispatchPaid,
-    storage_cents:storagePaid,
-    storage_paid_cents:storagePaid,
-    paid_cents:items.reduce((n,x)=>n+x.paid_cents,0),
-    refunded_cents:refundedTotal,
+    ...result.summary,
+    inspection_cents:result.summary.inspection_paid_cents,
+    dispatch_cents:result.summary.dispatch_paid_cents,
+    storage_cents:result.summary.storage_paid_cents,
     net_cents:netReceived,
     net_received_cents:netReceived,
-    unallocated_dispatch_cents:items.filter(x=>x.purpose==="dispatch"&&x.state==="paid").reduce((n,x)=>n+x.unallocated_cents,0),
-    all_balanced:items.every(x=>x.allocation_balanced),
   };
 
-  return {summary,rows:items};
+  return {summary,rows:items,has_more:result.rows.length>limit};
 }
 
 export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;limit?:number}={}) {
@@ -1567,7 +1598,7 @@ export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;l
             ), array[]::text[]) service_codes,
             coalesce((select sum(ol.quantity)::int from order_lines ol where ol.order_id=o.id),0)::int sample_count,
             coalesce((
-              select sum(p.amount_cents)::int
+              select sum(${paymentGrossCents})::int
               from inspection_quotes iq
               join charge_items c on c.inspection_quote_id=iq.id and c.purpose='inspection' and c.voided_at is null
               join payments p on p.id=c.applied_payment_id and p.state in ('succeeded','partially_refunded','refunded')
@@ -1577,8 +1608,8 @@ export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;l
               select sum(r.amount_cents)::int
               from inspection_quotes iq
               join charge_items c on c.inspection_quote_id=iq.id and c.purpose='inspection'
-              join payments p on p.charge_item_id=c.id
-              join refunds r on r.payment_id=p.id and r.state in ('approved','succeeded')
+              join payments p on p.id=c.applied_payment_id
+              join refunds r on r.payment_id=p.id and r.state='succeeded'
               where iq.order_id=o.id
             ),0)::int inspection_refunded_cents,
             coalesce((

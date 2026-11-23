@@ -1250,14 +1250,14 @@ export function AdminFinanceAnalytics({ demo = false }: { demo?: boolean }) {
   const [limit, setLimit] = useState(50);
   const [orderSearch, setOrderSearch] = useState("");
   const [purposeFilter, setPurposeFilter] = useState("all");
+  const [chargePage,setChargePage]=useState(1);
 
-  const recon = useLoad(`/staff/admin/reconciliation?include_test=${includeTest ? "1" : "0"}`);
+  const recon=useLoad("/staff/admin/reconciliation?"+new URLSearchParams({
+    include_test:includeTest?"1":"0",q:orderSearch.trim(),purpose:purposeFilter,page:String(chargePage),
+  }));
   const ledger = useLoad(`/staff/admin/finance/ledger?include_test=${includeTest ? "1" : "0"}&limit=${limit}`);
   const summary = recon.data?.summary;
-  const rows: Row[] = (recon.data?.rows ?? []).filter((r: Row) =>
-    (purposeFilter === "all" || r.purpose === purposeFilter) &&
-    (!orderSearch.trim() || String(r.order_public_no ?? "").toUpperCase().includes(orderSearch.trim().toUpperCase()) || String(r.receiving_code ?? "").toUpperCase().includes(orderSearch.trim().toUpperCase()))
-  );
+  const rows:Row[]=recon.data?.rows??[];
   const ld = ledger.data;
   const ldOrders: Row[] = (ld?.orders ?? []).filter((o: Row) =>
     !orderSearch.trim() || o.public_no.toUpperCase().includes(orderSearch.trim().toUpperCase()) || String(o.receiving_code ?? "").toUpperCase().includes(orderSearch.trim().toUpperCase())
@@ -1288,11 +1288,11 @@ export function AdminFinanceAnalytics({ demo = false }: { demo?: boolean }) {
       <div className="admin-toolbar">
         <label>
           订单 / 客户收件码过滤
-          <input type="search" value={orderSearch} onChange={e => setOrderSearch(e.target.value)} placeholder="例如 QW-... 或 QCW-..." />
+          <input type="search" value={orderSearch} maxLength={80} onChange={e=>{setOrderSearch(e.target.value);setChargePage(1);}} placeholder="订单号或客户收件码" />
         </label>
         <label>
           费用类型筛选
-          <select value={purposeFilter} onChange={e => setPurposeFilter(e.target.value)}>
+          <select value={purposeFilter} onChange={e=>{setPurposeFilter(e.target.value);setChargePage(1);}}>
             <option value="all">全部收费类型</option>
             <option value="inspection">质检服务费</option>
             <option value="dispatch">发运代收运费</option>
@@ -1303,14 +1303,15 @@ export function AdminFinanceAnalytics({ demo = false }: { demo?: boolean }) {
           账本统计样本上限
           <select value={String(limit)} onChange={e => setLimit(Number(e.target.value))}>
             <option value="30">最近 30 单</option>
+            <option value="50">最近 50 单</option>
             <option value="100">最近 100 单</option>
             <option value="200">最近 200 单</option>
           </select>
         </label>
         <div className="actions">
           <label className="check" style={{ margin: 0 }}>
-            <input type="checkbox" checked={includeTest} onChange={e => setIncludeTest(e.target.checked)} />
-            <span>包含测试订单 (is_test=true)</span>
+            <input type="checkbox" checked={includeTest} onChange={e=>{setIncludeTest(e.target.checked);setChargePage(1);}} />
+            <span>包含测试交易</span>
           </label>
           <button type="button" className="button sm" onClick={() => { recon.reload(); ledger.reload(); }}>刷新</button>
         </div>
@@ -1337,6 +1338,7 @@ export function AdminFinanceAnalytics({ demo = false }: { demo?: boolean }) {
             <span>全渠道净收款（扣减退款后）</span>
             <strong><Money cents={summary.net_received_cents ?? 0} align="left" /></strong>
             <small>总实收 <Money cents={summary.paid_cents ?? 0} align="left" /> · 已退 <Money cents={summary.refunded_cents ?? 0} align="left" /></small>
+            {(summary.pending_refund_cents??0)>0&&<small>已批准待结算 <Money cents={summary.pending_refund_cents} align="left" /></small>}
           </div>
         </div>
       )}
@@ -1393,8 +1395,9 @@ export function AdminFinanceAnalytics({ demo = false }: { demo?: boolean }) {
         </Panel>
       )}
 
-      <Panel title="收费项分摊与收支勾稽明细" subtitle="核对每笔收费单的应收、实收、退款及跨单分摊余额，支持下钻至支付详情或订单详情。">
-        <Table
+      <Panel title="收费项分摊与收支勾稽明细" subtitle="按订单或收件码筛选明细。上方总额统计当前环境的全部收费项。">
+        {!recon.data&&!recon.error&&<p role="status">正在加载收费明细…</p>}
+        {recon.data&&<Table
           headers={["收费编号", "类型", "客户", "原订单 / 分摊订单", "应收金额", "实收", "已退款", "净额", "状态", "关联支付单"]}
           rows={rows.map(r => [
             <CopyId key="id" value={r.charge_item_id} />,
@@ -1411,13 +1414,20 @@ export function AdminFinanceAnalytics({ demo = false }: { demo?: boolean }) {
             </div>,
             <Money key="a" cents={r.amount_cents} currency={r.currency} />,
             <Money key="p" cents={r.paid_cents} currency={r.currency} />,
-            <Money key="rf" cents={r.refunded_cents} currency={r.currency} mutedZero />,
+            <div key="rf" className="cell-stack"><Money cents={r.refunded_cents} currency={r.currency} mutedZero />
+              {(r.pending_refund_cents??0)>0&&<small>待结算 <Money cents={r.pending_refund_cents} currency={r.currency} align="left" /></small>}
+            </div>,
             <Money key="nt" cents={r.net_cents} currency={r.currency} />,
             <BizTag key="st" dict={PAYMENT_STATE_ZH} value={r.state} />,
             r.payment_id ? <Link key="pay" className="button sm nowrap" href={`/admin/payments/${r.payment_id}`}>{r.payment_display_ref}</Link> : "—",
           ])}
           empty="当前筛选条件下暂无收费分摊记录。"
-        />
+        />}
+        {(chargePage>1||recon.data?.has_more)&&<nav className="actions" aria-label="收费明细分页">
+          <button type="button" className="button sm" disabled={chargePage===1} onClick={()=>setChargePage(page=>page-1)}>上一页</button>
+          <span>第 {chargePage} 页</span>
+          <button type="button" className="button sm" disabled={!recon.data?.has_more} onClick={()=>setChargePage(page=>page+1)}>下一页</button>
+        </nav>}
       </Panel>
     </>
   );

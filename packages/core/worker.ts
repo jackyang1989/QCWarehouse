@@ -11,7 +11,7 @@ import { eligibleManualQuoteOrderSql } from "./orders";
 import { pendingDispatchQuote, pendingStorageQuote } from "./dispatch";
 import type { DB } from "../db";
 
-const businessEvents=["payment.checkout_expire","account.registered","report.render","refund.approved","ocr.extract","package.received","order.ready","order.identity_mismatch","order.cancelled","order.held","order.resumed","dispatch.quoted","storage.quoted","quote.offered","shipment.handed_over","shipment.return_received","payment.confirmed","report.published","report.amended","ticket.reply","tracking.exception_opened","reference.sealed","incident.resolved"];
+const businessEvents=["payment.checkout_expire","account.registered","report.render","refund.approved","refund.succeeded","refund.failed","ocr.extract","package.received","order.ready","order.identity_mismatch","order.cancelled","order.held","order.resumed","dispatch.quoted","storage.quoted","quote.offered","shipment.handed_over","shipment.return_received","payment.confirmed","report.published","report.amended","ticket.reply","tracking.exception_opened","reference.sealed","incident.resolved"];
 const maxJobAttempts=10;
 
 function eventDedupeKey(j:{id:string;type:string;payload:Record<string,unknown>}):string {
@@ -29,6 +29,9 @@ function eventDedupeKey(j:{id:string;type:string;payload:Record<string,unknown>}
       return j.payload?.order_id?`order.cancelled:${j.payload.order_id}`:`outbox:${j.id}`;
     case "payment.confirmed":
       return j.payload?.charge_id?`payment.confirmed:${j.payload.charge_id}`:`outbox:${j.id}`;
+    case "refund.succeeded":
+    case "refund.failed":
+      return j.payload?.refund_id?`${j.type}:${j.payload.refund_id}`:`outbox:${j.id}`;
     case "quote.offered":
     case "dispatch.quoted":
     case "storage.quoted":
@@ -100,6 +103,14 @@ export async function workOnce() {
           j.payload={...j.payload,quote_id:current?.id};
         }
         let deliver=j.type!=="reference.sealed"&&(j.type!=="quote.offered"||Boolean(j.payload.quote_id));
+        if(j.type==="refund.succeeded"||j.type==="refund.failed") {
+          const result=(await db.query(`select c.id charge_id,q.order_id from refunds r
+            join payments p on p.id=r.payment_id join charge_items c on c.id=p.charge_item_id
+            left join inspection_quotes q on q.id=c.inspection_quote_id
+            where r.id=$1 and r.state=$2 for update of r`,[j.payload.refund_id,j.type.slice(7)])).rows[0];
+          deliver=Boolean(result);
+          if(result)j.payload={refund_id:j.payload.refund_id,...result};
+        }
         if(j.payload.quote_id&&(j.type==="dispatch.quoted"||j.type==="storage.quoted")) {
           const source=j.type==="dispatch.quoted"?`dispatch_quote_versions q join dispatch_batches b on b.id=q.batch_id where ${pendingDispatchQuote}`:
             `storage_quotes q join disposition_requests d on d.id=q.disposition_id where ${pendingStorageQuote}`;

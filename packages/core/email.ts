@@ -28,6 +28,16 @@ export function renderEmailContent(template: string, orderPublicNo: string | nul
         subject: `${prefix}Parcel received at QC Warehouse${ref}`,
         text: `Your parcel${ref} has been checked in at the warehouse. Open ${orderPublicNo ? `${origin}/orders/${orderPublicNo}/parcels` : `${origin}/parcels`} to review its status.`,
       };
+    case "refund.succeeded":
+      return {
+        subject:`${prefix}Refund processed${ref}`,
+        text:`Your payment provider has processed a refund${ref}. Check your original payment method and review the refund in ${origin}/account/billing.`,
+      };
+    case "refund.failed":
+      return {
+        subject:`${prefix}Refund requires follow-up${ref}`,
+        text:`Your payment provider could not complete a refund${ref}. QC Warehouse will review the result. You can view its status at ${origin}/account/billing.`,
+      };
     case "order.ready":
     case "samples_ready":
       return {

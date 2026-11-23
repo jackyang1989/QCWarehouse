@@ -437,6 +437,61 @@ export async function verifyStripe(raw:string,signature:string) {
 function rejectedPaymentAmount() {
   return {rejection:new Problem("PAYMENT_AMOUNT_MISMATCH","Callback amount does not match the charge snapshot.",409)};
 }
+
+function stripeRefundState(status:Stripe.Refund["status"]) {
+  switch(status) {
+    case "succeeded": return "succeeded";
+    case "failed":
+    case "canceled": return "failed";
+    case "pending":
+    case "requires_action": return "approved";
+    default: return null;
+  }
+}
+
+async function reconcileStripeRefund(db:DB,refund:Stripe.Refund,live:boolean) {
+  const intent=typeof refund.payment_intent==="string"?refund.payment_intent:refund.payment_intent?.id;
+  const state=stripeRefundState(refund.status);
+  if(!intent||!state)return;
+  const p=(await db.query<{id:string;org_id:string;provider_ref:string;currency:string;amount_cents:number;order_id:string|null}>(`
+    select p.id,c.org_id,p.provider_ref,p.currency,p.amount_cents,q.order_id
+    from payments p join charge_items c on c.id=p.charge_item_id
+    left join inspection_quotes q on q.id=c.inspection_quote_id
+    where p.provider='stripe' and p.provider_data->>'payment_intent'=$1`,[intent])).rows[0];
+  if(!p)return;
+  const mode=stripeCheckoutMode(p.provider_ref);
+  guard(mode&&(mode==="live")===live&&refund.currency===p.currency.toLowerCase()&&
+    Number.isSafeInteger(refund.amount)&&refund.amount>0&&refund.amount<=p.amount_cents,
+    "REFUND_MISMATCH","The refund does not match the original Stripe payment.",409);
+  await lock(db,"org:"+p.org_id);
+  const current=(await db.query<{id:string;payment_id:string;provider_ref:string|null;amount_cents:number;state:string}>(`
+    select id,payment_id,provider_ref,amount_cents,state from refunds
+    where provider_ref=$1 or (payment_id=$2 and id::text=$3 and source='platform'
+      and state in ('approved','succeeded','failed'))
+    order by (provider_ref=$1) desc nulls last limit 1 for update`,
+  [refund.id,p.id,refund.metadata?.refund_id??""])).rows[0];
+  if(current) {
+    guard(current.payment_id===p.id&&current.amount_cents===refund.amount&&
+      (!current.provider_ref||current.provider_ref===refund.id),
+      "REFUND_MISMATCH","The refund does not match the approved refund record.",409);
+    // Pending snapshots can arrive after a terminal result. A returned refund is terminal for this provider reference.
+    if(current.state==="failed"||current.state==="succeeded"&&state==="approved"||
+      current.state===state&&current.provider_ref)return;
+    await db.query("update refunds set provider_ref=$2,state=$3,revision=revision+1 where id=$1",[current.id,refund.id,state]);
+    await recordRefundOutcome(db,current.id,p.id,state);
+    return;
+  }
+  const added=(await db.query<{id:string}>(`insert into refunds(id,payment_id,source,amount_cents,reason,state,provider_ref)
+    values($1,$2,'provider_dashboard',$3,'Stripe dashboard',$4,$5) on conflict do nothing returning id`,
+  [uuid(),p.id,refund.amount,state,refund.id])).rows[0];
+  if(!added)return;
+  await db.query(`insert into tickets(id,public_no,org_id,order_id,category,subject,details)
+    values($1,$2,$3,$4,'payment_refund','Reconcile Stripe dashboard refund',$5)`,
+  [uuid(),code("PAY-"),p.org_id,p.order_id,{payment_id:p.id,refund_id:added.id,provider_ref:refund.id,
+    amount_cents:refund.amount,source:"provider_dashboard"}]);
+  await recordRefundOutcome(db,added.id,p.id,state);
+}
+
 export async function stripeEvent(db:DB,e:Stripe.Event) {
   const inserted=await db.query(`insert into payment_events(id,provider,event_id,type,payload) values($1,'stripe',$2,$3,$4)
     on conflict(provider,event_id) do nothing`,[uuid(),e.id,e.type,e]);
@@ -538,40 +593,8 @@ export async function stripeEvent(db:DB,e:Stripe.Event) {
         }
       }
     }
-  } else if(e.type==="refund.created" || e.type==="refund.updated") {
-    const r=e.data.object;
-    const intent=typeof r.payment_intent==="string"?r.payment_intent:r.payment_intent?.id;
-    const p=(await db.query<{id:string;org_id:string;inspection_quote_id:string|null}>(
-      `select p.id,c.org_id,c.inspection_quote_id from payments p join charge_items c on c.id=p.charge_item_id
-       where p.provider_data->>'payment_intent'=$1`,
-      [intent]
-    )).rows[0];
-    if(p) {
-      await lock(db,"org:"+p.org_id);
-      const state=r.status==="succeeded"?"succeeded":["failed","canceled"].includes(r.status??"")?"failed":"approved";
-      const updated=await db.query(`update refunds set provider_ref=$2,state=$3 where payment_id=$4 and amount_cents=$5
-        and (id::text=$1 or provider_ref=$2) and state in ('approved','succeeded','failed') and (state!='succeeded' or $3='succeeded')`,
-        [r.metadata?.refund_id??"",r.id,state,p.id,r.amount]);
-      if(!updated.rowCount) {
-        await db.query(`insert into refunds(id,payment_id,source,amount_cents,reason,state,provider_ref)
-          values($1,$2,'provider_dashboard',$3,'Stripe dashboard',$4,$5) on conflict do nothing`,[uuid(),p.id,r.amount,state,r.id]);
-        const orderId=p.inspection_quote_id
-          ?(await db.query<{order_id:string}>("select order_id from inspection_quotes where id=$1",[p.inspection_quote_id])).rows[0]?.order_id??null
-          :null;
-        const existingTicket=(await db.query(
-          "select 1 from tickets where org_id=$1 and category='payment_refund' and details->>'provider_ref'=$2",
-          [p.org_id,r.id]
-        )).rowCount;
-        if(!existingTicket) {
-          await db.query(
-            `insert into tickets(id,public_no,org_id,order_id,category,subject,details)
-             values($1,$2,$3,$4,'payment_refund','Reconcile Stripe dashboard refund',$5)`,
-            [uuid(),code("PAY-"),p.org_id,orderId,{payment_id:p.id,provider_ref:r.id,amount_cents:r.amount,source:"provider_dashboard"}]
-          );
-        }
-      }
-      if(state==="succeeded") await syncPaymentRefundState(db,p.id);
-    }
+  } else if(e.type==="refund.created"||e.type==="refund.updated"||e.type==="refund.failed") {
+    await reconcileStripeRefund(db,e.data.object,e.livemode);
   }
   await db.query("update payment_events set processed_at=now() where provider='stripe' and event_id=$1",[e.id]);
   return {received:true};
@@ -651,18 +674,33 @@ export async function refundRequest(db:DB,actor:Actor,pid:string,cents:number,re
   await audit(db,actor,"request_refund","refunds",r.refund_id);
   return r;
 }
-export async function syncPaymentRefundState(db:DB,paymentId:string) {
+async function syncPaymentRefundState(db:DB,paymentId:string) {
   const row=(await db.query<{amount_cents:number;state:string;refunded_cents:number}>(
     `select ${paymentGrossCents} amount_cents,p.state,
        coalesce((select sum(r.amount_cents)::int from refunds r where r.payment_id=p.id and r.state='succeeded'),0) refunded_cents
      from payments p where p.id=$1 for update of p`,
     [paymentId]
   )).rows[0];
-  if(!row || !["succeeded","partially_refunded","refunded"].includes(row.state) || row.refunded_cents<=0) return;
-  const nextState=row.refunded_cents>=row.amount_cents?"refunded":"partially_refunded";
+  if(!row||!refundableStates.includes(row.state))return;
+  const nextState=row.refunded_cents===0?"succeeded":row.refunded_cents>=row.amount_cents?"refunded":"partially_refunded";
   if(nextState!==row.state) {
     await db.query("update payments set state=$2,updated_at=now() where id=$1",[paymentId,nextState]);
   }
+}
+
+export async function recordRefundOutcome(db:DB,refundId:string,paymentId:string,state:string) {
+  if(state!=="succeeded"&&state!=="failed")return;
+  await syncPaymentRefundState(db,paymentId);
+  if(state==="failed") {
+    await db.query(`insert into tickets(id,public_no,org_id,order_id,category,subject,details)
+      select $2,$3,c.org_id,q.order_id,'payment_refund','Review failed payment refund',
+        jsonb_build_object('refund_id',r.id,'payment_id',p.id,'provider_ref',r.provider_ref)
+      from refunds r join payments p on p.id=r.payment_id join charge_items c on c.id=p.charge_item_id
+      left join inspection_quotes q on q.id=c.inspection_quote_id
+      where r.id=$1 and not exists(select 1 from tickets k where k.org_id=c.org_id and k.category='payment_refund'
+        and k.state not in ('resolved','closed') and k.details->>'refund_id'=r.id::text)`,[refundId,uuid(),code("PAY-")]);
+  }
+  await event(db,"refund."+state,{refund_id:refundId});
 }
 
 export async function refundApprove(db:DB,actor:Actor,id:string,rev:number,sessionHash:string,note?:string) {
@@ -701,16 +739,19 @@ export async function refundReject(db:DB,actor:Actor,id:string,rev:number,reason
   return {refund_id:id,state:"rejected"};
 }
 export async function executeRefund(db:DB,id:string) {
-  const pre=(await db.query<{provider:string;channel:string}>("select p.provider, r.channel from refunds r join payments p on p.id=r.payment_id where r.id=$1",[id])).rows[0];
-  if(pre && pre.provider!=="stripe") {
+  const pre=await one<{provider:string;org_id:string}>(db,`select p.provider,c.org_id from refunds r
+    join payments p on p.id=r.payment_id join charge_items c on c.id=p.charge_item_id where r.id=$1`,[id]);
+  await lock(db,"org:"+pre.org_id);
+  if(pre.provider!=="stripe") {
     await db.query("update refunds set notes=coalesce(notes,'Approved for manual finance execution') where id=$1",[id]);
     return;
   }
-  const r=await one(db,`select r.*,p.provider_data,p.provider_ref payment_reference from refunds r join payments p on p.id=r.payment_id where r.id=$1 for update of r`,[id]);
+  const r=await one(db,`select r.*,p.provider_data,p.currency,p.provider_ref payment_reference
+    from refunds r join payments p on p.id=r.payment_id where r.id=$1 for update of r`,[id]);
   if(r.state!=="approved" || r.provider_ref) return;
   if(isDemo() && r.provider_data.demo) {
-    await db.query("update refunds set state='succeeded',provider_ref=$2 where id=$1",[id,"demo_refund_"+id]);
-    await syncPaymentRefundState(db,r.payment_id);
+    await db.query("update refunds set state='succeeded',provider_ref=$2,revision=revision+1 where id=$1",[id,"demo_refund_"+id]);
+    await recordRefundOutcome(db,id,r.payment_id,"succeeded");
     await audit(db,null,"refund_executed","refunds",id,{payment_id:r.payment_id,amount_cents:r.amount_cents,provider_ref:"demo_refund_"+id});
     return;
   }
@@ -718,11 +759,16 @@ export async function executeRefund(db:DB,id:string) {
   guard(mode&&!isDemo(),"PAYMENT_MODE_MISMATCH","The original Stripe payment environment could not be verified.",503);
   const {key}=await stripeSettlementCredentials(db,mode);
   guard(key,"STRIPE_UNAVAILABLE","Credentials for the original Stripe payment environment are unavailable.",503);
-  const result=await new Stripe(key,{timeout:10000,maxNetworkRetries:1}).refunds.create({payment_intent:r.provider_data.payment_intent,amount:r.amount_cents,metadata:{refund_id:id}},{idempotencyKey:id});
-  const nextState=result.status==="succeeded"?"succeeded":result.status==="failed"?"failed":"approved";
-  await db.query("update refunds set provider_ref=$2,state=$3 where id=$1",[id,result.id,nextState]);
+  const intent=r.provider_data?.payment_intent;
+  guard(typeof intent==="string"&&intent.startsWith("pi_"),"PAYMENT_REFERENCE_MISSING","The original Stripe payment reference is unavailable.",409);
+  const result=await new Stripe(key,{timeout:10000,maxNetworkRetries:1}).refunds.create({payment_intent:intent,amount:r.amount_cents,metadata:{refund_id:id}},{idempotencyKey:id});
+  const nextState=stripeRefundState(result.status);
+  guard(result.id&&nextState&&result.amount===r.amount_cents&&result.currency===r.currency.toLowerCase()&&
+    (typeof result.payment_intent==="string"?result.payment_intent:result.payment_intent?.id)===intent,
+    "REFUND_MISMATCH","The provider response does not match the approved refund.",409);
+  await db.query("update refunds set provider_ref=$2,state=$3,revision=revision+1 where id=$1",[id,result.id,nextState]);
+  await recordRefundOutcome(db,id,r.payment_id,nextState);
   if(nextState==="succeeded") {
-    await syncPaymentRefundState(db,r.payment_id);
     await audit(db,null,"refund_executed","refunds",id,{payment_id:r.payment_id,amount_cents:r.amount_cents,provider_ref:result.id});
   }
 }

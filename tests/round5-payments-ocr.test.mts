@@ -676,6 +676,14 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
       acknowledgements:{scope_notice:true,samples_not_batch:true,seller_refund_is_mine:true,no_certification:true,restricted_items:true},
     });
     assert.notEqual(renewed.charge.charge_item_id,late.chargeId);
+    for(let count=0;count<300&&await workOnce();count++){ /* drain refund notices */ }
+    const refundNotices=(await customer.fetch("/me/notifications?category=billing")).rows;
+    assert.equal(refundNotices.filter((notice:{template:string;charge_id:string})=>
+      notice.template==="refund.succeeded"&&notice.charge_id===late.chargeId).length,1);
+    const lateCash=(await admin.fetch("/staff/admin/reconciliation")).rows.find((row:{charge_item_id:string})=>row.charge_item_id===late.chargeId);
+    assert.equal(lateCash.paid_cents,5800);
+    assert.equal(lateCash.refunded_cents,5800);
+    assert.equal(lateCash.net_cents,0);
 
     // Restore paypal_manual default disabled state
     await admin.fetch("/staff/admin/integrations/paypal_manual", {

@@ -1046,7 +1046,10 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   }
   if(method==="GET" && path==="/staff/admin/reconciliation") {
     const includeTest=url.searchParams.get("include_test")!=="0" && url.searchParams.get("test")!=="production";
-    return json(await transaction(db=>reconcileFinance(db,actorRequired(actor),includeTest)));
+    const query=z.string().trim().max(80).parse(url.searchParams.get("q")??"");
+    const purpose=z.enum(["all","inspection","dispatch","storage"]).parse(url.searchParams.get("purpose")??"all");
+    const page=z.coerce.number().int().min(1).max(10000).optional().parse(url.searchParams.get("page")??undefined);
+    return json(await transaction(db=>reconcileFinance(db,actorRequired(actor),includeTest,{query,purpose,page})));
   }
   if(method==="GET" && path==="/staff/admin/finance/ledger") {
     const includeTest=url.searchParams.get("include_test")==="1" || url.searchParams.get("test")==="all";

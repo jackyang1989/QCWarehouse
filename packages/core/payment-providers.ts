@@ -10,7 +10,7 @@ import {
   type EnvMode,
   type ProviderRow,
 } from "./integrations-admin";
-import { applyPayment, syncPaymentRefundState } from "./payments";
+import { applyPayment, recordRefundOutcome } from "./payments";
 import type { DB } from "../db";
 
 export interface CustomerPaymentChannelDTO {
@@ -916,6 +916,9 @@ export async function executeManualRefund(
   await requireStaffMfa(db, actor, sessionHash, 15);
   const ref = input.manual_refund_ref.trim().toUpperCase();
   guard(ref.length >= 4 && ref.length <= 128, "INVALID_REFUND_REF", "Provide a valid external refund transaction reference.", 422);
+  const owner=await one<{org_id:string}>(db,`select c.org_id from refunds r join payments p on p.id=r.payment_id
+    join charge_items c on c.id=p.charge_item_id where r.id=$1`,[refundId]);
+  await lock(db,"org:"+owner.org_id);
 
   const row = await one<{
     id: string;
@@ -956,7 +959,7 @@ export async function executeManualRefund(
     [refundId, row.provider, ref, input.evidence_media_id ?? null, actor.id, input.notes?.trim() || null],
   );
 
-  await syncPaymentRefundState(db, row.payment_id);
+  await recordRefundOutcome(db,refundId,row.payment_id,"succeeded");
   const updatedPay = await one<{ state: string }>(db, "select state from payments where id=$1", [row.payment_id]);
   const nextPayState = updatedPay.state;
 
@@ -966,7 +969,6 @@ export async function executeManualRefund(
     manual_refund_ref: ref,
     amount_cents: row.amount_cents,
   });
-  await event(db, "refund.succeeded", { refund_id: refundId, payment_id: row.payment_id, channel: row.provider });
   await recordIntegrationEvent(db, {
     provider_key: row.provider === "paypal_manual" ? "paypal_manual" : "stripe",
     environment: row.environment,

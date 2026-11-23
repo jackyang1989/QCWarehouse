@@ -5045,6 +5045,7 @@ test("Stocktake, warehouse incident compensation, stage refunds, dispute freezes
     [oBefore.id]
   )).rows[0];
 
+  await pool.query("update payments set provider_ref=$2 where id=$1",[oBeforePayRow.id,"cs_test_refund_"+randomUUID()]);
   setFixtureEnv(t,{QCW_DEMO:"0",STRIPE_SECRET_KEY:"sk_test_fixture",STRIPE_WEBHOOK_SECRET:"whsec_fixture"});
   function sendStripeWebhook(payload:object) {
     const body=JSON.stringify(payload);
@@ -5073,6 +5074,44 @@ test("Stocktake, warehouse incident compensation, stage refunds, dispute freezes
   assert.equal(dashRefRow.rowCount,1);
   assert.equal(dashRefRow.rows[0].source,"provider_dashboard");
   assert.equal(dashRefRow.rows[0].state,"succeeded");
+  async function refundUpdate(ref:string,status:string,type="refund.updated",eventId="evt_ref_"+randomUUID()) {
+    const response=await sendStripeWebhook({id:eventId,object:"event",livemode:false,type,
+      data:{object:{id:ref,payment_intent:oBeforePayRow.provider_payment_intent_id,amount:100,currency:"usd",status}}});
+    assert.equal(response.status,200);
+  }
+  await refundUpdate(extRefundId,"pending");
+  assert.equal((await pool.query("select state from refunds where provider_ref=$1",[extRefundId])).rows[0].state,"succeeded");
+  assert.equal((await pool.query("select count(*)::int n from tickets where details->>'provider_ref'=$1",[extRefundId])).rows[0].n,1);
+  const pendingRef="re_pending_"+randomUUID();
+  await refundUpdate(pendingRef,"pending","refund.created");
+  const {rows:[originalCash]}=await pool.query("select charge_item_id,amount_cents from payments where id=$1",[oBeforePayRow.id]);
+  const reconcilePath="/staff/admin/reconciliation";
+  const cash=(await admin.fetch(reconcilePath)).rows.find((r:{charge_item_id:string})=>r.charge_item_id===originalCash.charge_item_id);
+  assert.equal(cash.paid_cents,originalCash.amount_cents);
+  assert.equal(cash.refunded_cents,100);
+  assert.equal(cash.pending_refund_cents,100);
+  assert.equal(cash.net_cents,originalCash.amount_cents-100);
+  assert(!(await admin.fetch(reconcilePath+"?include_test=0")).rows.some((r:{charge_item_id:string})=>r.charge_item_id===originalCash.charge_item_id));
+  const failedEventId="evt_ref_failed_"+randomUUID();
+  await refundUpdate(extRefundId,"failed","refund.failed",failedEventId);
+  await refundUpdate(extRefundId,"failed","refund.failed",failedEventId);
+  await refundUpdate(extRefundId,"succeeded");
+  assert.equal((await pool.query("select state from payments where id=$1",[oBeforePayRow.id])).rows[0].state,"succeeded");
+  const failedRefund=(await pool.query("select id,state from refunds where provider_ref=$1",[extRefundId])).rows[0];
+  assert.equal(failedRefund.state,"failed");
+  await refundUpdate(pendingRef,"succeeded");
+  await refundUpdate(pendingRef,"pending");
+  const successfulRefund=(await pool.query("select id,state from refunds where provider_ref=$1",[pendingRef])).rows[0];
+  assert.equal(successfulRefund.state,"succeeded");
+  assert.equal((await pool.query("select state from payments where id=$1",[oBeforePayRow.id])).rows[0].state,"partially_refunded");
+  process.env.QCW_DEMO="1";
+  try { for(let count=0;count<500&&await workOnce();count++){ /* drain notification jobs */ } }
+  finally {process.env.QCW_DEMO="0";}
+  const notices=await c.fetch("/me/notifications?category=billing");
+  assert(notices.rows.some((n:{template:string;charge_id:string})=>n.template==="refund.failed"&&n.charge_id===originalCash.charge_item_id));
+  const relevant=(await pool.query(`select template,payload->>'refund_id' refund_id from notifications
+    where payload->>'refund_id'=any($1::text[]) order by template`,[[failedRefund.id,successfulRefund.id]])).rows;
+  assert.deepEqual(relevant,[{template:"refund.failed",refund_id:failedRefund.id},{template:"refund.succeeded",refund_id:successfulRefund.id}]);
 
   // T35: Stripe charge.dispute.created freezes dispatch batch packing/handover and places linked order on_hold
   const disputeId="dp_test_"+randomUUID().slice(0,8);
@@ -7598,7 +7637,7 @@ test("billing uses business dates and resolves a historical charge within the ow
   await pool.query(`with quoted as (
     insert into inspection_quotes(order_id,revision,line_snapshot,terms_snapshot,amount_cents,currency,accepted_at,expires_at)
     select q.order_id,1000-i,q.line_snapshot,q.terms_snapshot,q.amount_cents,q.currency,now()-i*interval '1 day',now()-i*interval '1 day'+interval '30 minutes'
-    from inspection_quotes q cross join generate_series(1,205) i where q.id=$1 returning *
+    from inspection_quotes q cross join generate_series(1,405) i where q.id=$1 returning *
   )
   insert into charge_items(org_id,purpose,inspection_quote_id,amount_cents,currency,snapshot,voided_at)
     select $2,'inspection',id,amount_cents,currency,jsonb_build_object('order_id',order_id,'quote_revision',revision),expires_at
@@ -7616,6 +7655,12 @@ test("billing uses business dates and resolves a historical charge within the ow
   assert.deepEqual(selected[0].order_numbers,[draft.public_no]);
   assert.equal(selected[0].state,"void");
   assert.deepEqual((await other.fetch(focus)).bills,[]);
+  const finance=await staffLogin("admin");
+  const cashPath="/staff/admin/reconciliation?purpose=inspection&q="+encodeURIComponent(draft.public_no);
+  const beforeCash=await finance.fetch(cashPath+"&page=1");
+  assert.equal(beforeCash.rows.length,50);
+  assert.equal(beforeCash.has_more,true);
+  assert(!beforeCash.rows.some((r:{charge_item_id:string})=>r.charge_item_id===historical));
 
   const paymentId=randomUUID();
   await pool.query(`insert into payments(id,charge_item_id,provider,amount_cents,state,idempotency_key)
@@ -7630,7 +7675,7 @@ test("billing uses business dates and resolves a historical charge within the ow
   assert.equal(firstPage.bills.length,20);
   assert.equal(firstPage.refunds.length,20);
   assert.deepEqual(firstPage.bills.map(row=>row.charge_item_id),regular.slice(0,20).map(row=>row.charge_item_id));
-  const finalPage=await c.fetch(history+"&charge_page=11&refund_page=2");
+  const finalPage=await c.fetch(history+"&charge_page=21&refund_page=2");
   assert.equal(finalPage.has_more_charges,false);
   assert.equal(finalPage.has_more_refunds,false);
   assert.equal(finalPage.bills.length,5);
@@ -7645,6 +7690,15 @@ test("billing uses business dates and resolves a historical charge within the ow
   const foreignPage=await other.fetch(focus+"&charge_page=1&refund_page=2");
   assert.deepEqual(foreignPage.bills,[]);
   assert.deepEqual(foreignPage.refunds,[]);
+  const currentCash=await finance.fetch(cashPath+"&page=1");
+  const historicalCash=await finance.fetch(cashPath+"&page=9");
+  assert.equal(currentCash.summary.paid_cents-beforeCash.summary.paid_cents,quote.amount_cents);
+  assert.equal(currentCash.summary.refunded_cents-beforeCash.summary.refunded_cents,21);
+  assert.deepEqual(currentCash.summary,historicalCash.summary);
+  assert.equal(historicalCash.has_more,false);
+  assert.equal(historicalCash.rows.length,5);
+  assert.equal(historicalCash.rows.at(-1).charge_item_id,historical);
+  assert.equal(historicalCash.rows.at(-1).net_cents,quote.amount_cents-21);
   await c.fetch(history+"&charge_page=0",undefined,"GET",422);
 });
 

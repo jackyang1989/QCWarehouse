@@ -12,6 +12,8 @@ const noticeTitles:Record<string,string>={
   "report.published":"Your inspection report is ready",
   "report.amended":"An updated report has been published",
   "payment.confirmed":"Payment confirmed",
+  "refund.succeeded":"Your refund was processed",
+  "refund.failed":"Your refund requires follow-up",
   "package.received":"The warehouse received your parcel",
   "order.ready":"Your items are ready for inspection",
   "order.held":"Order placed on hold for confirmation",
