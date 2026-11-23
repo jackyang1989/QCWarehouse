@@ -4,7 +4,7 @@ import { currentTerms, requireCustomerActive, requireTerms } from "./auth";
 import { audit, code, event, guard, isDemo, lock, one, orderCode, organization, revision, role, unresolvedQuotePayment, uuid, type Actor } from "./common";
 import { inboundParcelOrders, inboundShortageConfirmed, orderAttributedParcelItems, orderInboundRegistration, orderQuotes, orderShipments } from "./fulfillment-reads";
 import { scopeSupplementForOrder } from "./scope-payment";
-import { itemHandlingHoldSql } from "./storage";
+import { customerItemHandlingHoldSql } from "./storage";
 import { newQuoteValidity } from "./quote-policy";
 import { itemInspectionStageSql } from "./inspection-stage";
 import { skuNoteLimit } from "./order-note-limits";
@@ -925,7 +925,7 @@ export async function orderDetail(db:DB,actor:Actor,id:string) {
   const rows=(await db.query(`select e.id,e.position,e.declared_fields,e.in_scope,l.id as order_line_id,l.quantity,so.title,st.code service,
     w.id item_id,w.code,w.identity_state,w.condition_state,w.custody_state,w.storage_until,pkg.code package_code,
     ${itemInspectionStageSql} inspection_stage,
-    ${itemHandlingHoldSql} handling_hold,
+    ${customerItemHandlingHoldSql} handling_hold,
     (select max(p.ends_at) from storage_periods p where p.item_id=w.id) paid_storage_until,
     (select jsonb_build_object('id',d.id,'action',d.action,'state',d.state,
       'awaiting_batch',d.action<>'retain' and not exists(select 1 from dispatch_batch_items bi where bi.disposition_id=d.id and bi.released_at is null))

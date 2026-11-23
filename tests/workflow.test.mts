@@ -3746,6 +3746,20 @@ test("intake quarantine, half-unpacking, suit components, post-pay & cross-order
   // order2 had 1 item and was already paid -> enters queued once!
   const o2Detail=await c.fetch(`/orders/${order2.id}`);
   assert.equal(o2Detail.state,"queued");
+  const componentId=batch2.item_ids[0];
+  const componentBefore=(await pool.query("select revision,location_id,identity_state,condition_state from warehouse_items where id=$1",[componentId])).rows[0];
+  await receiving.fetch(`/staff/items/${componentId}/quarantine`,{revision:componentBefore.revision,reason:"Fixture: one component needs isolation."});
+  try {
+    const listed=(await c.fetch("/me/items")).items.find((item:{item_id:string})=>item.item_id===mainItem1Id);
+    assert.deepEqual(listed.allowed_actions,[]);
+    const inventory=(await c.fetch("/me/inventory")).rows;
+    assert.equal(inventory.find((item:{item_id:string})=>item.item_id===mainItem1Id).handling_hold,"quarantine");
+    assert.equal((await c.fetch(`/orders/${order2.id}`)).items[0].handling_hold,"quarantine");
+    assert.equal(inventory.find((item:{item_id:string})=>item.item_id===mainItem2Id).handling_hold,null);
+  } finally {
+    await pool.query("update warehouse_items set location_id=$2,identity_state=$3,condition_state=$4 where id=$1",
+      [componentId,componentBefore.location_id,componentBefore.identity_state,componentBefore.condition_state]);
+  }
 
   // 4. TASK-170 & T107: Zero-order uncommissioned item return to seller (mainItem2Id has no inspection order)
   const disp=await c.fetch(`/me/items/${mainItem2Id}/dispositions`,{
@@ -5183,6 +5197,9 @@ test("Stocktake, warehouse incident compensation, stage refunds, dispute freezes
     }},
   });
   assert.equal(dispCreatedRes.status,200);
+  const resolvePath=`/staff/disputes/${disputeId}/resolve`;
+  const disputeRow=async()=>(await admin.fetch("/staff/admin/desk")).disputes.find((row:{provider_dispute_id:string})=>row.provider_dispute_id===disputeId);
+  assert.equal((await disputeRow()).can_review,false);
 
   // Order oMain is now on_hold due to payment_dispute
   const oMainFrozen=await c.fetch(`/orders/${oMain.id}`);
@@ -5216,6 +5233,7 @@ test("Stocktake, warehouse incident compensation, stage refunds, dispute freezes
     }},
   });
   assert.equal(dispClosedRes.status,200);
+  assert.equal((await disputeRow()).can_review,true);
   async function staleDispute() {
     return sendStripeWebhook({id:"evt_stale_dispute_"+randomUUID(),livemode:false,type:"charge.dispute.created",created:1999,
       data:{object:{id:disputeId,payment_intent:payRow.provider_payment_intent_id,status:"needs_response"}}});
@@ -5232,11 +5250,16 @@ test("Stocktake, warehouse incident compensation, stage refunds, dispute freezes
   assert.equal(stillBlockedErr.error.code,"SHIPMENT_BLOCKED","Closed dispute must remain frozen until staff review (T35)");
 
   // Staff explicitly resolves the payment dispute and releases freeze
-  const resolvedDisp=await admin.fetch(`/staff/disputes/${disputeId}/resolve`,{
+  const maintainReason="Channel review is complete; keep the hold while accounting checks the dispute entry.";
+  await admin.fetch(resolvePath,{decision:"maintain_hold",reason:maintainReason});
+  assert.equal((await disputeRow()).staff_note,maintainReason);
+  assert.equal((await c.fetch(`/orders/${oMain.id}`)).state,"on_hold");
+  const resolvedDisp=await admin.fetch(resolvePath,{
     decision:"release_freeze",
     reason:"Dispute won in Stripe; releasing shipment and order freeze",
   });
   assert.equal(resolvedDisp.state,"resolved_by_staff");
+  assert.equal((await disputeRow()).can_review,false);
   assert.equal((await staleDispute()).status,200);
   assert.equal((await pool.query("select state from payment_disputes where provider_id=$1",[disputeId])).rows[0].state,"resolved_by_staff");
 

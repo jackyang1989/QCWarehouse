@@ -24,6 +24,8 @@ export const itemQuarantineSql=`(w.identity_state='quarantined' or w.condition_s
    and (part.identity_state='quarantined' or part.condition_state='restricted')
 ))`;
 
+export const customerItemHandlingHoldSql=`coalesce(${itemHandlingHoldSql},case when ${itemQuarantineSql} then 'quarantine' end)`;
+
 export async function assertItemsOutsideQuarantine(db:DB,itemIds:string[],errorCode:string) {
   const blocked=await db.query(`select 1 from warehouse_items w where w.id=any($1::uuid[]) and ${itemQuarantineSql} limit 1`,[itemIds]);
   guard(!blocked.rowCount,errorCode,"A quarantined or restricted item requires warehouse review.");

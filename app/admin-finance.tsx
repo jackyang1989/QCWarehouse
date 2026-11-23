@@ -563,19 +563,25 @@ export function AdminPaymentsWorkbench({ demo = false, actor }: { demo?: boolean
               <Money key="a" cents={dp.amount_cents} currency={dp.currency} />,
               <Tag key="s" tone={dp.status === "resolved_by_staff" ? "green" : "red"}>{dp.status === "resolved_by_staff" ? "已人工核销" : dp.status}</Tag>,
               stamp(dp.evidence_due_at, true),
-              dp.status === "resolved_by_staff"
-                ? <span>{dp.staff_decision === "release_freeze" ? "已解冻订单与发运" : "维持人工冻结"} · {dp.staff_note ?? ""}</span>
-                : (
-                  <div className="actions">
-                    <Action sm run={async () => {
-                      const note = window.prompt("填写争议关闭核验依据并解冻订单：", "Stripe dispute resolved in favor of merchant");
-                      if (!note || note.trim().length < 2) return;
-                      await request(`/staff/disputes/${encodeURIComponent(dp.provider_dispute_id)}/resolve`, "POST", { decision: "release_freeze", reason: note.trim() });
-                      disputes.reload();
-                      reload();
-                    }}>解冻恢复</Action>
-                  </div>
-                ),
+              <div key="review" className="cell-stack">
+                {dp.staff_decision&&<span>{dp.staff_decision==="release_freeze"?"上次复核：解除冻结":"上次复核：维持冻结"} · {dp.staff_note}</span>}
+                {dp.can_review?<details>
+                  <summary>复核争议</summary>
+                  <Form key={dp.updated_at} idempotent label="保存复核决定" run={async(f,key)=>{
+                    await request(`/staff/disputes/${encodeURIComponent(dp.provider_dispute_id)}/resolve`,"POST",{
+                      decision:text(f,"decision"),reason:text(f,"reason").trim(),
+                    },key);
+                    reloadAll();
+                  }}>
+                    <label>复核决定<select name="decision" defaultValue="" required>
+                      <option value="" disabled>选择复核决定</option>
+                      <option value="maintain_hold">维持冻结</option>
+                      <option value="release_freeze">解除冻结</option>
+                    </select></label>
+                    <label>核验依据（必填）<textarea name="reason" required minLength={2} maxLength={1000}/></label>
+                  </Form>
+                </details>:dp.status!=="resolved_by_staff"?<small>等待渠道结案后复核</small>:null}
+              </div>,
             ])}
           />
         </Panel>

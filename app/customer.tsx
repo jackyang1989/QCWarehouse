@@ -6954,7 +6954,7 @@ function FulfillmentQuote({quote,onUpdate,onOpenBatch,focused=false}:{quote:Row;
 }
 
 const handlingStates=["report_ready","action_pending","cancelled","closed"];
-const handlingHoldLabel:Record<string,string>={stocktake:"Warehouse inventory check in progress",incident:"Warehouse incident under review"};
+const handlingHoldLabel:Record<string,string>={stocktake:"Warehouse inventory check in progress",incident:"Warehouse incident under review",quarantine:"Item held for warehouse verification"};
 function canChooseHandling(item:Row) {
   if(item.identity_state==="quarantined") return false;
   if(item.identity_state==="pending"&&item.order_no&&!handlingStates.includes(item.order_state)) return false;

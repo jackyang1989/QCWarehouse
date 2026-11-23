@@ -409,6 +409,10 @@ export async function applyPayment(db:DB,pid:string,providerRef:string,details:o
 
 const closedDisputeStates=new Set(["won","lost","warning_closed","prevented"]);
 
+export function isProviderDisputeClosed(state:string) {
+  return closedDisputeStates.has(state);
+}
+
 async function acceptDisputeEvent(db:DB,event:Stripe.Event,dispute:Stripe.Dispute,paymentId:string) {
   const current=(await db.query<{state:string;payment_id:string}>(
     "select state,payment_id from payment_disputes where provider_id=$1 for update",[dispute.id])).rows[0];
@@ -422,7 +426,7 @@ async function acceptDisputeEvent(db:DB,event:Stripe.Event,dispute:Stripe.Disput
   const duplicateOpening=event.type==="charge.dispute.created"&&previous.created!==null&&event.created===previous.created;
   const appeal=dispute.status.startsWith("appeal_")&&Number.isSafeInteger(event.created)&&previous.created!==null&&event.created>previous.created;
   if(stale||duplicateOpening||current.state==="resolved_by_staff"&&!appeal||
-    (closedDisputeStates.has(current.state)&&!closedDisputeStates.has(dispute.status)&&!appeal))return {accepted:false,freeze:false};
+    (isProviderDisputeClosed(current.state)&&!isProviderDisputeClosed(dispute.status)&&!appeal))return {accepted:false,freeze:false};
   return {accepted:true,freeze:current.state==="resolved_by_staff"&&appeal};
 }
 export async function demoPay(db:DB,actor:Actor,id:string) {
@@ -650,7 +654,7 @@ export async function resolvePaymentDispute(
     [providerId]
   );
   guard(
-    closedDisputeStates.has(d.state)||d.state==="resolved_by_staff",
+    isProviderDisputeClosed(d.state)||d.state==="resolved_by_staff",
     "DISPUTE_STILL_OPEN",
     "Wait for the provider dispute to close before resolving the freeze."
   );
