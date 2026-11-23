@@ -1215,6 +1215,7 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
       if(chargeId && a.kind==="customer") {
         active_attempt=(await db.query(
           `select p.id, p.provider, p.state, p.manual_state, p.external_invoice_no, p.invoice_url, p.payer_email,
+                  p.state in ('succeeded','partially_refunded','refunded') and c.applied_payment_id is distinct from p.id reconciliation_required,
                   p.provider_data->>'customer_reported_paid_at' customer_reported_at,
                   p.provider_data->>'customer_reported_tx_ref' customer_reported_tx_ref
            from payments p join charge_items c on c.id=p.charge_item_id
@@ -1320,6 +1321,7 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     return extraWrite(req,path,actor,z.object({
       external_transaction_id:z.string().trim().min(4).max(128),
       received_amount_cents:z.number().int().positive(),
+      received_at:z.iso.datetime({offset:true}).optional(),
       fee_amount_cents:z.number().int().min(0).optional(),
       payer_email:z.string().email().optional(),
       evidence_media_id:idSchema.optional(),
@@ -1332,6 +1334,7 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
       decision:z.enum(["approve","reject"]),
       note:z.string().trim().max(1000).optional(),
       accept_overpayment:z.boolean().optional(),
+      expected_recorded_at:z.iso.datetime({offset:true}).optional(),
     }),(db,a,b)=>verifyPaypalManualPayment(db,a,hash(getCookie(req,"session")),idSchema.parse(ppVerify[1]),b));
   }
   const ppCancel=path.match(/^\/staff\/finance\/paypal-invoices\/([a-f0-9-]{36})\/cancel$/i);

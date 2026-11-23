@@ -227,11 +227,11 @@ async function runGoogleVisionOcr(
     const texts = pages.map((p) => p.fullTextAnnotation?.text?.trim() ?? "").filter(Boolean);
     const fullText = texts.join("\n");
     const lines = fullText.split(/\r?\n/).filter((l) => l.trim());
-    const blocks: OcrRawBlock[] = lines.map((line, i) => ({
+    const blocks: OcrRawBlock[] = lines.map(line => ({
       page: 1,
       text: line.trim(),
       confidence: 0.9,
-      bbox: [0.05, Number((i / Math.max(1, lines.length)).toFixed(4)), 0.95, Number(((i + 0.9) / Math.max(1, lines.length)).toFixed(4))],
+      bbox:null,
     }));
     const unitCost = Number(provider.config?.unit_price_per_1k_usd ?? 1.5) / 1000;
     return {

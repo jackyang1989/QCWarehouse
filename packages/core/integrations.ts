@@ -141,6 +141,11 @@ export function signInMethods() {
 }
 export type SignInMethods = ReturnType<typeof signInMethods>;
 
+export function stripeCheckoutReady(stripe:ReturnType<typeof stripeSettings>&{enabled?:boolean}) {
+  return !isDemo()&&stripe.enabled!==false&&!!stripe.key&&!!stripe.webhook&&
+    (stripe.mode==="test"||stripe.mode==="live"&&stripe.liveEnabled);
+}
+
 export function integrationPreflight(stripe:ReturnType<typeof stripeSettings>&{enabled?:boolean}=stripeSettings()) {
   const demo = isDemo(), mail = postmarkSettings(), tracking = trackingSettings();
   function oidcStatus(provider: OidcProvider) {
@@ -150,7 +155,7 @@ export function integrationPreflight(stripe:ReturnType<typeof stripeSettings>&{e
   return {
     demo, google: oidcStatus("google"), microsoft: oidcStatus("microsoft"),
     stripe: {mode: stripe.mode, webhookConfigured: !!stripe.webhook, liveEnabled: stripe.liveEnabled,
-      checkoutConfigured: !demo && stripe.enabled!==false && !!stripe.key && !!stripe.webhook && (stripe.mode === "test" || stripe.mode === "live" && stripe.liveEnabled)},
+      checkoutConfigured:stripeCheckoutReady(stripe)},
     postmark: {configured: !!(mail.token && mail.from), testToken: mail.testToken, enabled: mail.enabled},
     kuaidi100: {queryConfigured: !!(tracking.key && tracking.customer), httpsCallbackConfigured: !!tracking.callbackBase,
       subscribeConfigured: !!(tracking.key && tracking.callbackBase), workerEnabled: !demo && !!(tracking.key && (tracking.customer || tracking.callbackBase))},

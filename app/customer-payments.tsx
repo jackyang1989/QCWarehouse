@@ -9,6 +9,7 @@ export function CustomerMultiChannelPaymentPanel({
   amountCents,
   demo = false,
   latestAttempt,
+  paymentLocked=false,
   onStripePay,
   onUpdated,
 }: {
@@ -17,6 +18,7 @@ export function CustomerMultiChannelPaymentPanel({
   amountCents: number;
   demo?: boolean;
   latestAttempt?: Row | null;
+  paymentLocked?:boolean;
   onStripePay: (chargeId: string, quoteRevision: number) => Promise<void>;
   onUpdated?: () => void;
 }) {
@@ -31,11 +33,11 @@ export function CustomerMultiChannelPaymentPanel({
   const [notice, setNotice] = useState<string>("");
   const [err, setErr] = useState<string>("");
 
-  const activeManual =
-    localInvoice ??
-    (resolvedAttempt && resolvedAttempt.provider === "paypal_manual" && resolvedAttempt.state !== "canceled"
-      ? resolvedAttempt
-      : null);
+  const currentManual=resolvedAttempt?.provider==="paypal_manual"&&resolvedAttempt.state!=="canceled"?resolvedAttempt:null;
+  const activeManual=currentManual&&(!localInvoice||(currentManual.id??currentManual.payment_id)===localInvoice.payment_id)
+    ?currentManual:localInvoice;
+  const manualFinal=Boolean(activeManual&&["succeeded","partially_refunded","refunded"].includes(activeManual.state));
+  const locked=paymentLocked||Boolean(activeManual?.reconciliation_required);
   const showPaypalCard = Boolean(paypalChannel?.available || activeManual);
 
   async function requestPaypal() {
@@ -46,6 +48,7 @@ export function CustomerMultiChannelPaymentPanel({
         ...(payerEmail.trim() ? { payer_email: payerEmail.trim() } : {}),
       });
       setLocalInvoice(res);
+      channelsLoad.reload();
       setNotice(
         res.external_invoice_no
           ? `PayPal Invoice ${res.external_invoice_no} is active.`
@@ -69,18 +72,19 @@ export function CustomerMultiChannelPaymentPanel({
       </div>
 
       {err && <ErrorBlock error={err} />}
+      {channelsLoad.error&&<><ErrorBlock error={channelsLoad.error}/><button type="button" className="button sm" onClick={channelsLoad.reload}>Retry payment methods</button></>}
       {notice && <p role="status" className="notice">{notice}</p>}
 
       <div className="payment-channel-grid">
         <div className="card" style={{ padding: 14 }}>
           <div className="row between flexwrap" style={{ marginBottom: 6, gap: 6 }}>
             <strong>{stripeChannel?.label ?? "Card / Apple Pay / Google Pay (Stripe)"}</strong>
-            <Tag tone={stripeChannel?.available === false ? "yellow" : "green"}>
-              {stripeChannel?.badge ?? (demo ? "Sandbox / Demo" : "Recommended")}
+            <Tag tone={stripeChannel?.available ? "green" : "yellow"}>
+              {stripeChannel?.badge ?? (channelsLoad.error ? "Unavailable" : "Checking availability")}
             </Tag>
           </div>
           <p className="small muted" style={{ marginBottom: 10 }}>
-            {stripeChannel?.available === false
+            {!stripeChannel ? null : stripeChannel.available === false
               ? stripeChannel.unavailable_reason
               : demo
                 ? "Local sandbox checkout confirms immediately for workflow testing."
@@ -88,7 +92,7 @@ export function CustomerMultiChannelPaymentPanel({
           </p>
           <Action
             primary
-            disabled={stripeChannel ? !stripeChannel.available && !demo : false}
+            disabled={locked||!!channelsLoad.error||!stripeChannel?.available}
             run={async () => {
               setErr("");
               await onStripePay(chargeId, quoteRevision);
@@ -123,7 +127,7 @@ export function CustomerMultiChannelPaymentPanel({
                 />
               </label>
               <Action
-                disabled={paypalChannel ? !paypalChannel.available : false}
+                disabled={locked||!!channelsLoad.error||!paypalChannel?.available}
                 run={requestPaypal}
               >
                 Pay with PayPal Invoice
@@ -136,15 +140,15 @@ export function CustomerMultiChannelPaymentPanel({
               <div className="row between flexwrap">
                 <span className="small">
                   <strong>Invoice Status:</strong>{" "}
-                  <Tag tone={activeManual.manual_state === "verified" ? "green" : activeManual.manual_state === "underpaid" ? "red" : "blue"}>
-                    {String(activeManual.manual_state ?? activeManual.state)}
+                  <Tag tone={activeManual.reconciliation_required?"yellow":activeManual.manual_state === "verified" ? "green" : activeManual.manual_state === "underpaid" ? "red" : "blue"}>
+                    {activeManual.reconciliation_required?"Payment received · under review":String(activeManual.manual_state ?? activeManual.state)}
                   </Tag>
                 </span>
                 {activeManual.external_invoice_no && (
                   <code className="code mono-wrap">Invoice #{activeManual.external_invoice_no}</code>
                 )}
               </div>
-              {activeManual.invoice_url && (
+              {activeManual.invoice_url && !manualFinal && (
                 <p className="small">
                   PayPal Invoice Link:{" "}
                   <a href={activeManual.invoice_url} target="_blank" rel="noreferrer noopener" className="mono-wrap">
@@ -155,12 +159,12 @@ export function CustomerMultiChannelPaymentPanel({
               {activeManual.payer_email && (
                 <p className="small muted">Sent to PayPal email: <span className="mono">{activeManual.payer_email}</span></p>
               )}
-              {activeManual.customer_reported_at && (
+              {activeManual.customer_reported_at && !manualFinal && (
                 <p className="small">
                   Transfer note submitted ({activeManual.customer_reported_tx_ref ?? "pending TX ref"}) — awaiting independent Finance verification.
                 </p>
               )}
-              {activeManual.state !== "succeeded" && (
+              {!manualFinal && (
                 <Form
                   label="Report PayPal Invoice Paid (awaiting Finance verify)"
                   run={async (f) => {
@@ -176,7 +180,8 @@ export function CustomerMultiChannelPaymentPanel({
                       ...(text(f, "note") ? { note: text(f, "note") } : {}),
                       ...(evidenceMediaId ? { evidence_media_id: evidenceMediaId } : {}),
                     });
-                    setNotice("Submitted payment notification. Order activation occurs only after two-person Finance verification.");
+                    setNotice("Sent your payment details to Finance for independent review.");
+                    channelsLoad.reload();
                     onUpdated?.();
                   }}
                 >

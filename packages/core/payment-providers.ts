@@ -1,7 +1,7 @@
 import Stripe from "stripe";
 import { audit, event, guard, idempotent, lock, one, organization, role, uuid, type Actor, isDemo } from "./common";
 import { requireCustomerActive, requireStaffMfa } from "./auth";
-import { stripeCheckoutMode, stripeSettingsFromDb, stripeSettlementCredentials } from "./integrations";
+import { stripeCheckoutMode, stripeCheckoutReady, stripeSettingsFromDb, stripeSettlementCredentials } from "./integrations";
 import {
   assertSafeExternalUrl,
   ensureIntegrationProvidersSeeded,
@@ -43,9 +43,7 @@ export async function listCustomerPaymentChannels(db: DB): Promise<CustomerPayme
 
   for (const p of providers) {
     if (p.provider_key === "stripe") {
-      const liveBlocked = p.environment === "live" && !stripeCfg.liveEnabled && !isDemo();
-      const sandboxHasKey = Boolean(stripeCfg.key) || isDemo();
-      const available = p.enabled && !liveBlocked && (p.environment === "live" ? stripeCfg.liveEnabled : sandboxHasKey);
+      const available=p.enabled&&(isDemo()||stripeCheckoutReady(stripeCfg));
       out.push({
         provider_key: "stripe",
         label: "Card / Apple Pay / Google Pay (Stripe)",
@@ -56,11 +54,7 @@ export async function listCustomerPaymentChannels(db: DB): Promise<CustomerPayme
         badge: p.environment === "live" ? (available ? "Instant Checkout" : "Live Verification Pending") : "Sandbox / Instant",
         unavailable_reason: !p.enabled
           ? "Temporarily disabled by platform finance."
-          : liveBlocked
-            ? "HK Stripe KYC verified & ZA Bank linked; awaiting final Live Checkout & Webhook smoke check."
-            : !sandboxHasKey
-              ? "Stripe credentials not configured."
-              : null,
+          : available?null:"Stripe Checkout and payment confirmation are not ready in this environment.",
         instructions: null,
       });
       continue;
@@ -495,6 +489,7 @@ export async function recordPaypalManualReceipt(
   input: {
     external_transaction_id: string;
     received_amount_cents: number;
+    received_at?: string;
     fee_amount_cents?: number;
     payer_email?: string;
     evidence_media_id?: string;
@@ -517,9 +512,14 @@ export async function recordPaypalManualReceipt(
     amount_cents: number;
     expected_amount_cents: number | null;
     environment: EnvMode;
-  }>(db, "select id, provider, state, amount_cents, expected_amount_cents, environment from payments where id=$1 for update", [paymentId]);
+    created_at: Date;
+  }>(db, "select id, provider, state, amount_cents, expected_amount_cents, environment, created_at from payments where id=$1 for update", [paymentId]);
   guard(p.provider === "paypal_manual", "INVALID_PROVIDER", "Receipt recording applies only to paypal_manual.", 400);
   guard(!["succeeded", "partially_refunded", "refunded", "canceled"].includes(p.state), "PAYMENT_ALREADY_FINAL", "Payment is already settled or canceled.", 409);
+  const receivedAt=input.received_at===undefined?null:new Date(input.received_at);
+  if(receivedAt)guard(Number.isFinite(receivedAt.valueOf())&&receivedAt.valueOf()<=Date.now()&&
+    Math.floor(receivedAt.valueOf()/1000)>=Math.floor(p.created_at.valueOf()/1000),
+    "INVALID_RECEIVED_AT","Enter the PayPal receipt time between the invoice request and the present.",422);
 
   const dup = (
     await db.query<{ id: string }>(
@@ -558,6 +558,7 @@ export async function recordPaypalManualReceipt(
          state = 'processing',
          manual_state = $9,
          manual_notes = coalesce($10, manual_notes),
+         provider_data = (provider_data - 'paypal_received_at') || $11::jsonb,
          updated_at = now()
      where id = $1`,
     [
@@ -571,6 +572,7 @@ export async function recordPaypalManualReceipt(
       actor.id,
       manualState,
       input.notes?.trim() || null,
+      receivedAt?{paypal_received_at:receivedAt.toISOString()}:{},
     ],
   );
 
@@ -580,6 +582,7 @@ export async function recordPaypalManualReceipt(
     received_amount_cents: input.received_amount_cents,
     fee_amount_cents: feeCents,
     net_amount_cents: netCents,
+    received_at: receivedAt?.toISOString()??null,
     manual_state: manualState,
   });
 
@@ -599,6 +602,7 @@ export async function recordPaypalManualReceipt(
     received_amount_cents: input.received_amount_cents,
     fee_amount_cents: feeCents,
     net_amount_cents: netCents,
+    received_at: receivedAt?.toISOString()??null,
     manual_state: manualState,
     state: "processing",
   };
@@ -613,10 +617,14 @@ export async function verifyPaypalManualPayment(
     decision: "approve" | "reject";
     note?: string;
     accept_overpayment?: boolean;
+    expected_recorded_at?: string;
   },
 ) {
   role(actor, "finance", "super_admin");
   await requireStaffMfa(db, actor, sessionHash, 15);
+
+  const owner=await one<{org_id:string}>(db,`select c.org_id from payments p join charge_items c on c.id=p.charge_item_id where p.id=$1`,[paymentId]);
+  await lock(db,"org:"+owner.org_id);
 
   const p = await one<{
     id: string;
@@ -635,15 +643,12 @@ export async function verifyPaypalManualPayment(
     external_transaction_id: string | null;
     payer_email: string | null;
     recorded_by: string | null;
+    recorded_at: Date | null;
     provider_data: Record<string, unknown>;
   }>(db, "select * from payments where id=$1 for update", [paymentId]);
 
   guard(p.provider === "paypal_manual", "INVALID_PROVIDER", "Verification applies only to paypal_manual payments.", 400);
   guard(p.state !== "canceled", "PAYMENT_CANCELED", "Canceled invoice attempt cannot be verified.", 409);
-
-  if (p.state === "succeeded" && p.manual_state === "verified") {
-    return { payment_id: paymentId, state: "succeeded", manual_state: "verified", idempotent: true };
-  }
 
   guard(Boolean(p.recorded_by && p.external_transaction_id), "RECEIPT_NOT_RECORDED", "Record PayPal transaction ID and received amount before verification.", 409);
   guard(
@@ -652,6 +657,15 @@ export async function verifyPaypalManualPayment(
     "Separation of duties violation: the verifier must be a different finance/super_admin staff member than who recorded receipt.",
     403,
   );
+  const application=async()=>{
+    const {applied_payment_id}=await one<{applied_payment_id:string|null}>(db,"select applied_payment_id from charge_items where id=$1",[p.charge_item_id]);
+    return {applied:applied_payment_id===p.id,reconciliation_required:applied_payment_id!==p.id};
+  };
+  if (["succeeded","partially_refunded","refunded"].includes(p.state) && p.manual_state === "verified") {
+    return {payment_id:paymentId,state:p.state,manual_state:"verified",idempotent:true,...await application()};
+  }
+  guard(input.expected_recorded_at===undefined||p.recorded_at?.valueOf()===Date.parse(input.expected_recorded_at),
+    "RECEIPT_CHANGED","The receipt changed. Reload and review the current receipt before verifying.",409);
 
   if (input.decision === "reject") {
     const history = Array.isArray(p.provider_data?.rejected_history) ? (p.provider_data.rejected_history as unknown[]) : [];
@@ -664,6 +678,7 @@ export async function verifyPaypalManualPayment(
           rejected_by: actor.id,
           external_transaction_id: p.external_transaction_id,
           received_amount_cents: p.received_amount_cents,
+          received_at: p.provider_data.paypal_received_at??null,
           note: input.note?.trim() || "Rejected by finance verifier",
         },
       ],
@@ -679,7 +694,7 @@ export async function verifyPaypalManualPayment(
            state = 'requires_payment',
            manual_state = 'rejected',
            manual_notes = coalesce($2, manual_notes),
-           provider_data = $3::jsonb,
+           provider_data = $3::jsonb - 'paypal_received_at',
            updated_at = now()
        where id = $1`,
       [paymentId, input.note?.trim() || null, JSON.stringify(nextData)],
@@ -705,6 +720,10 @@ export async function verifyPaypalManualPayment(
     );
   }
 
+  const receivedAt=typeof p.provider_data.paypal_received_at==="string"?Date.parse(p.provider_data.paypal_received_at):NaN;
+  guard(Number.isFinite(receivedAt)&&receivedAt>0,"RECEIPT_TIME_REQUIRED","Record the PayPal receipt time before verification.",409);
+  const receivedTimestamp=new Date(receivedAt).toISOString();
+
   await db.query(
     `update payments
      set verified_by = $2,
@@ -728,6 +747,7 @@ export async function verifyPaypalManualPayment(
         external_invoice_no: p.external_invoice_no,
         external_transaction_id: p.external_transaction_id,
         received_amount_cents: received,
+        received_at: receivedTimestamp,
         verified_by: actor.id,
       }),
     ],
@@ -736,7 +756,7 @@ export async function verifyPaypalManualPayment(
   await db.query(
     `insert into payment_settlements (
        provider_transaction_id, payment_id, gross_minor, fee_minor, net_minor, currency, settled_at
-     ) values ($1, $2, $3, $4, $5, $6, now())
+     ) values ($1, $2, $3, $4, $5, $6, $7)
      on conflict (provider_transaction_id) do nothing`,
     [
       p.external_transaction_id!,
@@ -745,6 +765,7 @@ export async function verifyPaypalManualPayment(
       p.fee_amount_cents ?? 0,
       p.net_amount_cents ?? received,
       p.currency,
+      receivedTimestamp,
     ],
   );
 
@@ -759,26 +780,30 @@ export async function verifyPaypalManualPayment(
       received_amount_cents: received,
       verified_by: actor.id,
     },
-    Math.floor(Date.now() / 1000),
+    Math.floor(receivedAt / 1000),
   );
+
+  const result=await application();
 
   await audit(db, actor, "paypal_manual_verified", "payments", paymentId, {
     external_transaction_id: p.external_transaction_id,
     received_amount_cents: received,
     recorded_by: p.recorded_by,
     verified_by: actor.id,
+    received_at: receivedTimestamp,
+    ...result,
   });
 
   await recordIntegrationEvent(db, {
     provider_key: "paypal_manual",
     environment: p.environment,
     event_kind: "payment_sync",
-    status: "ok",
-    summary: `Verified & applied PayPal receipt ${p.external_transaction_id} ($${(received / 100).toFixed(2)}).`,
+    status: result.applied?"ok":"warn",
+    summary: `Verified PayPal receipt ${p.external_transaction_id} ($${(received / 100).toFixed(2)}); ${result.applied?"applied to charge":"requires reconciliation"}.`,
     actor_id: actor.id,
   });
 
-  return { payment_id: paymentId, state: "succeeded", manual_state: "verified", external_transaction_id: p.external_transaction_id };
+  return {payment_id:paymentId,state:"succeeded",manual_state:"verified",external_transaction_id:p.external_transaction_id,...result};
 }
 
 export async function cancelPaypalManualInvoice(
@@ -833,7 +858,9 @@ export async function listPaypalManualQueue(db: DB, actor: Actor) {
               p.currency, p.external_invoice_no, p.external_transaction_id, p.payer_email, p.invoice_url,
               p.evidence_media_id, p.issued_by, p.issued_at, p.recorded_by, p.recorded_at, p.verified_by, p.verified_at,
               p.manual_notes, p.provider_data, p.created_at, p.updated_at,
-              c.purpose, c.org_id, crp.receiving_code, cust.display_name customer_name, ue.original_email customer_email,
+              c.purpose, c.org_id, coalesce(c.applied_payment_id=p.id,false) applied,
+              p.provider_data->>'paypal_received_at' received_at,
+              crp.receiving_code, cust.display_name customer_name, ue.original_email customer_email,
               ib.display_name issued_by_name, rb.display_name recorded_by_name, vb.display_name verified_by_name,
               coalesce(iq_ord.public_no, (
                 select string_agg(distinct o2.public_no, ', ')

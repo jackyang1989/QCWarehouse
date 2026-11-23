@@ -2,7 +2,7 @@ export interface OcrRawBlock {
   page: number;
   text: string;
   confidence: number;
-  bbox: [number, number, number, number];
+  bbox: [number, number, number, number] | null;
   source?: string;
 }
 
@@ -118,9 +118,11 @@ function detectSku(text: string): string | null {
 /**
  * Group horizontally aligned OCR blocks into visual reading rows so table/column screenshots become line items.
  */
-function groupBlocksIntoRows(blocks: OcrRawBlock[]): Array<{ page: number; text: string; conf: number; bbox: [number, number, number, number] }> {
-  const sorted = [...blocks].sort((a, b) => a.page - b.page || a.bbox[1] - b.bbox[1] || a.bbox[0] - b.bbox[0]);
-  const rows: Array<{ page: number; parts: OcrRawBlock[]; yCenter: number }> = [];
+function groupBlocksIntoRows(blocks:OcrRawBlock[]): Array<{page:number;text:string;conf:number;bbox:OcrRawBlock["bbox"]}> {
+  type PositionedBlock=OcrRawBlock&{bbox:NonNullable<OcrRawBlock["bbox"]>};
+  const sorted=blocks.filter((block):block is PositionedBlock=>block.bbox!=null)
+    .sort((a,b)=>a.page-b.page||a.bbox[1]-b.bbox[1]||a.bbox[0]-b.bbox[0]);
+  const rows: Array<{ page: number; parts: PositionedBlock[]; yCenter: number }> = [];
 
   for (const blk of sorted) {
     const yc = (blk.bbox[1] + blk.bbox[3]) / 2;
@@ -134,7 +136,7 @@ function groupBlocksIntoRows(blocks: OcrRawBlock[]): Array<{ page: number; text:
     }
   }
 
-  return rows.map((row) => {
+  const positionedRows=rows.map((row) => {
     const parts = [...row.parts].sort((a, b) => a.bbox[0] - b.bbox[0]);
     const text = parts.map((p) => p.text).join("  ");
     const conf = Number((parts.reduce((acc, p) => acc + p.confidence, 0) / parts.length).toFixed(4));
@@ -146,6 +148,8 @@ function groupBlocksIntoRows(blocks: OcrRawBlock[]): Array<{ page: number; text:
     ];
     return { page: row.page, text, conf, bbox };
   });
+  const textRows=blocks.filter(block=>block.bbox==null).map(block=>({page:block.page,text:block.text,conf:block.confidence,bbox:null}));
+  return [...positionedRows,...textRows].sort((a,b)=>a.page-b.page);
 }
 
 function isMetadataOnlyLine(line: string): boolean {
@@ -203,11 +207,11 @@ export function parseOcrDocument(fullText: string, blocks: OcrRawBlock[], avgCon
   const docPrice = detectPrice(fullText);
   const docCurrency = docPrice?.currency ?? (/¥|￥|RMB|CNY|元/.test(fullText) ? "CNY" : /USD|\$/i.test(fullText) ? "USD" : null);
 
-  const groupedRows = blocks.length > 0 ? groupBlocksIntoRows(blocks) : rawLines.map((line, i) => ({
+  const groupedRows = blocks.length > 0 ? groupBlocksIntoRows(blocks) : rawLines.map(line => ({
     page: 1,
     text: line,
     conf: avgConfidence || 0.7,
-    bbox: [0.05, Math.min(0.9, i * 0.05), 0.95, Math.min(0.95, (i + 1) * 0.05)] as [number, number, number, number],
+    bbox:null,
   }));
 
   const candidates: ParsedCandidateRow[] = [];
@@ -273,7 +277,7 @@ export function parseOcrDocument(fullText: string, blocks: OcrRawBlock[], avgCon
         size: size ? rowConf : 0.45,
         quantity: hasQtyToken ? rowConf : 0.55,
       },
-      bbox: { page: row.page, rect: row.bbox },
+      bbox:row.bbox?{page:row.page,rect:row.bbox}:null,
       raw_excerpt: line.slice(0, 220),
     });
   }

@@ -153,7 +153,7 @@ async function buildScannedPdfFromPng(pngBytes: Buffer): Promise<Buffer> {
   return Buffer.from(await doc.save());
 }
 
-async function createSubmittedOpenOrder(cust: Client, tag: string) {
+async function createSubmittedOpenOrder(cust: Client, tag: string, validForSeconds?:number) {
   const cat = await cust.fetch("/catalog");
   const offer = cat.offers.find(
     (o: any) => o.sku_code === "apparel-inspection-1" || (o.service === "inspection" && o.rules?.unit_cents != null && (o.rules.maximum ?? 1) >= 2),
@@ -174,6 +174,9 @@ async function createSubmittedOpenOrder(cust: Client, tag: string) {
     201,
   );
   const quote = await cust.fetch(`/orders/${draft.id}/quotes`, { revision: draft.revision }, "POST", 201);
+  if(validForSeconds)await pool.query(
+    "update inspection_quotes set expires_at=date_trunc('second',clock_timestamp())+make_interval(secs=>$2) where id=$1",
+    [quote.id,validForSeconds]);
   const { terms } = await cust.fetch("/public/terms");
   const sub = await cust.fetch(`/orders/${draft.id}/submit`, {
     revision: draft.revision,
@@ -188,6 +191,11 @@ async function createSubmittedOpenOrder(cust: Client, tag: string) {
     },
   });
   return { orderId: draft.id, publicNo: draft.public_no, chargeId: sub.charge.charge_item_id, quoteRevision: quote.revision };
+}
+
+async function waitForInspectionQuoteExpiry(chargeId:string) {
+  await pool.query(`select pg_sleep(greatest(0,extract(epoch from q.expires_at-clock_timestamp()))+.02)
+    from inspection_quotes q join charge_items c on c.inspection_quote_id=q.id where c.id=$1`,[chargeId]);
 }
 
 test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios)", async (t) => {
@@ -277,6 +285,17 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
       lifecycle_state: "enabled",
       enabled: true,
     }, "POST", 409);
+
+    const secretPath="/staff/admin/integrations/stripe/secrets";
+    await admin.fetch(secretPath,{environment:"live",secret_name:"secret_key",secret_value:"sk_live_fixture_first_key"});
+    await admin.fetch(secretPath,{environment:"live",secret_name:"webhook_secret",secret_value:"whsec_fixture_first_signing_key"});
+    await admin.fetch("/staff/admin/integrations/stripe",{config:{live_checkout_verified:true,live_webhook_verified:true,live_payout_verified:true}});
+    await admin.fetch(secretPath,{environment:"live",secret_name:"secret_key",secret_value:"sk_live_fixture_rotated_key"});
+    const provider=(await admin.fetch("/staff/admin/integrations?domain=payment")).providers.find(p=>p.provider_key==="stripe");
+    assert.equal(provider.config.live_checkout_verified,false);
+    assert.equal(provider.config.live_payout_verified,false);
+    assert.equal(provider.config.live_webhook_verified,true);
+    await admin.fetch("/staff/admin/integrations/stripe",{environment:"live",lifecycle_state:"enabled",enabled:true},"POST",409);
   });
 
   await t.test("P06: Disabling Stripe blocks checkout; PayPal manual stays disabled by default until admin enables it", async () => {
@@ -382,7 +401,7 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
     assert.equal(ch.channels.some((c: any) => c.provider_key === "creem"), false);
   });
 
-  const ordPayPal = await createSubmittedOpenOrder(customer, "P13");
+  const ordPayPal = await createSubmittedOpenOrder(customer, "P13", 5);
   let ppPaymentId = "";
 
   await t.test("P13: When opt-in enabled, customer requests PayPal Manual Invoice idempotently without auto-activating order", async () => {
@@ -431,10 +450,12 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
     const ord2 = await createSubmittedOpenOrder(customer, "P15DUP");
     const pp2 = await customer.fetch(`/charges/${ord2.chargeId}/paypal-invoice`, {});
 
+    const recordedReceiptTime=new Date().toISOString();
     const rec = await finance.fetch(`/staff/finance/paypal-invoices/${ppPaymentId}/record-receipt`, {
       external_transaction_id: "9pp000111222",
       received_amount_cents: 5800,
       fee_amount_cents: 290,
+      received_at:recordedReceiptTime,
     });
     assert.equal(rec.manual_state, "receipt_recorded");
     assert.equal(rec.external_transaction_id, "9PP000111222");
@@ -467,6 +488,7 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
 
     const oRec = await finance.fetch(`/staff/finance/paypal-invoices/${ppUnder.payment_id}/record-receipt`, {
       external_transaction_id: "9OVERPAY001",
+      received_at:new Date().toISOString(),
       received_amount_cents: 6000,
     });
     assert.equal(oRec.manual_state, "overpaid");
@@ -481,12 +503,15 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
   await t.test("P17: Separation of Duties blocks self-verification; independent super_admin verify activates order via applyPayment", async () => {
     await finance.fetch(`/staff/finance/paypal-invoices/${ppPaymentId}/verify`, { decision: "approve" }, "POST", 403);
 
+    await waitForInspectionQuoteExpiry(ordPayPal.chargeId);
     const verified = await admin.fetch(`/staff/finance/paypal-invoices/${ppPaymentId}/verify`, {
       decision: "approve",
       note: "Independent SoD verification passed",
     });
     assert.equal(verified.state, "succeeded");
     assert.equal(verified.manual_state, "verified");
+    assert.equal(verified.applied,true);
+    assert.equal(verified.reconciliation_required,false);
 
     const ordState = await customer.fetch(`/orders/${ordPayPal.orderId}`);
     assert.equal(ordState.state, "awaiting_samples");
@@ -496,6 +521,38 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
     assert.equal(payDetail.charge.is_applied_payment, true);
     const dbPay = (await pool.query<{ recorded_by: string; verified_by: string }>("select recorded_by, verified_by from payments where id=$1", [ppPaymentId])).rows[0];
     assert.ok(dbPay.recorded_by && dbPay.verified_by && dbPay.recorded_by !== dbPay.verified_by);
+  });
+
+  await t.test("Late and unverified PayPal receipt times do not apply charges", async()=>{
+    const order=await createSubmittedOpenOrder(customer,"P17-LATE",3);
+    const {payment_id:pid}=await customer.fetch(`/charges/${order.chargeId}/paypal-invoice`,{});
+    const path=`/staff/finance/paypal-invoices/${pid}`,receipt={external_transaction_id:"PP-ISOLATED-LATE",received_amount_cents:5800};
+    await finance.fetch(path+"/record-receipt",{...receipt,received_at:new Date(Date.now()+60000).toISOString()},"POST",422);
+    await finance.fetch(path+"/record-receipt",receipt);
+    const absent=await admin.fetch(path+"/verify",{decision:"approve"},"POST",409);
+    assert.equal(absent.error.code,"RECEIPT_TIME_REQUIRED");
+    await waitForInspectionQuoteExpiry(order.chargeId);
+    const received_at=new Date().toISOString();
+    await finance.fetch(path+"/record-receipt",{...receipt,received_at});
+    const old=await admin.fetch(path+"/verify",{decision:"approve",expected_recorded_at:"2000-01-01T00:00:00Z"},"POST",409);
+    assert.equal(old.error.code,"RECEIPT_CHANGED");
+    const result=await admin.fetch(path+"/verify",{decision:"approve"});
+    assert.equal(result.state,"succeeded");
+    assert.equal(result.applied,false);
+    assert.equal(result.reconciliation_required,true);
+    assert.equal((await customer.fetch("/orders/"+order.orderId)).state,"awaiting_payment");
+    const channels=await customer.fetch("/me/payment-channels?charge_id="+order.chargeId);
+    assert.equal(channels.active_attempt.reconciliation_required,true);
+    const repeated=await admin.fetch(path+"/verify",{decision:"approve"});
+    assert.equal(repeated.applied,false);
+    assert.equal(repeated.reconciliation_required,true);
+    assert.equal((await pool.query("select count(*)::int n from tickets where details->>'payment_id'=$1",[pid])).rows[0].n,1);
+    const {rows:[settlement]}=await pool.query("select settled_at from payment_settlements where payment_id=$1",[pid]);
+    assert.equal(settlement.settled_at.toISOString(),received_at);
+    const queue=await finance.fetch("/staff/finance/paypal-invoices");
+    const row=queue.rows.find(r=>r.id===pid);
+    assert.equal(row.applied,false);
+    assert.equal(row.received_at,received_at);
   });
 
   await t.test("P18: Reject resets recorder for re-entry; cancel marks canceled and blocks verify", async () => {
@@ -642,6 +699,7 @@ test("Round 5 Self-Hosted PaddleOCR, PDF Evidence & Multi-Tenant Worker (20 Scen
     const jobRes = await customer.fetch("/me/ocr/jobs", { media_id: mediaId, execute_now: true }, "POST", 201);
     assert.equal(jobRes.job.state === "completed" || jobRes.job.state === "needs_review", true);
     assert.ok(jobRes.candidates.length >= 2);
+    assert.ok(jobRes.candidates.some(c=>Array.isArray(c.bbox?.rect)));
   });
 
   await t.test("O05: PDF rejected for intake_outer, encrypted PDF, corrupt PDF & >10 page PDF", async () => {
@@ -799,6 +857,8 @@ test("Round 5 Self-Hosted PaddleOCR, PDF Evidence & Multi-Tenant Worker (20 Scen
     const pdfJob = await customer.fetch("/me/ocr/jobs", { media_id: pdfId, execute_now: true }, "POST", 201);
     assert.equal(pdfJob.job.state === "completed" || pdfJob.job.state === "needs_review", true);
     assert.ok(String(pdfJob.job.raw_text).includes("TEE-101-BLK"));
+    assert.ok(pdfJob.candidates.length>0);
+    assert.ok(pdfJob.candidates.every(c=>c.bbox==null));
   });
 
   await t.test("O18: Admin OCR job list endpoint requires staff privileges and returns job metrics", async () => {

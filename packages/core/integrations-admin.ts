@@ -818,8 +818,8 @@ export async function saveProviderSecret(
   const cipher = seal(trimmed);
 
   const existing = (
-    await db.query<{ id: string; key_version: number }>(
-      `select id, key_version from integration_secrets
+    await db.query<{ id: string; key_version: number; ciphertext:Buffer }>(
+      `select id, key_version, ciphertext from integration_secrets
        where provider_key=$1 and environment=$2 and secret_name=$3 and status='active'
        for update`,
       [input.provider_key, input.environment, input.secret_name],
@@ -842,6 +842,11 @@ export async function saveProviderSecret(
   }
 
   const nextVersion = maxVer + 1;
+  const reverifyStripe=input.provider_key==="stripe"&&input.environment==="live"&&
+    (!existing||unseal(existing.ciphertext)!==trimmed);
+  const invalidatedChecks=reverifyStripe?(input.secret_name==="secret_key"
+    ?{live_checkout_verified:false,live_payout_verified:false}
+    :{live_webhook_verified:false}):{};
   const secretId = uuid();
   await db.query(
     `insert into integration_secrets (
@@ -853,9 +858,13 @@ export async function saveProviderSecret(
   await db.query(
     `update integration_providers
      set lifecycle_state = case when lifecycle_state = 'disabled' then 'configured' else lifecycle_state end,
+         config = config || $3::jsonb,
+         health_status = case when $4 and environment='live' then 'unknown' else health_status end,
+         last_checked_at = case when $4 and environment='live' then null else last_checked_at end,
+         last_check_summary = case when $4 and environment='live' then null else last_check_summary end,
          updated_by=$2, updated_at=now()
      where provider_key=$1`,
-    [input.provider_key, actor.id],
+    [input.provider_key, actor.id,invalidatedChecks,reverifyStripe],
   );
 
   await recordIntegrationEvent(db, {

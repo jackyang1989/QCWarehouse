@@ -506,6 +506,7 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
   const desk=useLoad("/me/desk?include_activity=0");
   const receiving=useLoad("/me/receiving-address");
   const paymentChannels=useLoad("/me/payment-channels");
+  const stripeChannel=(paymentChannels.data?.channels??[]).find((c:Row)=>c.provider_key==="stripe");
   const paypalManualAvailable=Boolean((paymentChannels.data?.channels??[]).find((c:Row)=>c.provider_key==="paypal_manual")?.available);
   const terms=useLoad("/public/terms");
   const carriers=useLoad("/carriers");
@@ -4464,7 +4465,10 @@ export function NewOrder({customerId,demo=false}:{customerId:string;demo?:boolea
                 />
               ) : (
                 <div className="actions" style={{flexWrap:"wrap",gap:10}}>
-                  <button type="button" className="button primary" disabled={Boolean(busyMessage)} onClick={()=>startPayment("stripe")}>
+                  {paymentChannels.error?<><ErrorBlock error={paymentChannels.error}/><button type="button" onClick={paymentChannels.reload}>Retry payment methods</button></>:
+                    !paymentChannels.data?<small role="status">Checking payment methods…</small>:
+                    !stripeChannel?.available?<small role="status">{stripeChannel?.unavailable_reason??"Stripe Checkout is unavailable."}</small>:null}
+                  <button type="button" className="button primary" disabled={Boolean(busyMessage)||!!paymentChannels.error||!stripeChannel?.available} onClick={()=>startPayment("stripe")}>
                     {busyMessage?"Opening checkout…":"Confirm quote & pay with Stripe "+usd(serverQuote!.amount_cents)}
                   </button>
                   {paypalManualAvailable&&(
@@ -5053,6 +5057,7 @@ export function OrderView({number,section,demo=false}:{number:string;section?:Or
               quoteRevision={payment.data.charge.quote_revision}
               amountCents={payment.data.charge.amount_cents}
               demo={demo}
+              paymentLocked={paymentState==="processing"}
               onStripePay={continuePayment}
               onUpdated={refreshPayment}
             />

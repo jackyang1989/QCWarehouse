@@ -157,16 +157,13 @@ def extract_pdf(path: Path, max_pages: int) -> dict[str, Any]:
             native_text = (reader.pages[idx].extract_text() or "").strip()
             lines = [ln.strip() for ln in native_text.splitlines() if ln.strip()]
             if len("".join(lines)) >= 35:
-                step = 1.0 / max(1, len(lines))
-                for li, ln in enumerate(lines):
-                    y0 = round(li * step, 4)
-                    y1 = round(min(1.0, (li + 0.9) * step), 4)
+                for ln in lines:
                     blocks.append(
                         {
                             "page": page_num,
                             "text": ln,
                             "confidence": 0.97,
-                            "bbox": [0.04, y0, 0.96, y1],
+                            "bbox": None,
                             "source": "pdf_native_text",
                         }
                     )
