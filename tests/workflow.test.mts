@@ -7273,8 +7273,20 @@ test("customer workspace binds the reviewed checklist, preserves notes and pagin
   const wrongGarment=await c.fetch("/orders",{lines:[{...line,attributes:{garment_type:"tops"}}]},"POST",422);
   assert.equal(wrongGarment.error.code,"INCOMPATIBLE_SAMPLES");
 
-  const created=await c.fetch("/orders",{lines:[line]},"POST",201);
+  const maxNote="缝".repeat(500);
+  const longNote=maxNote+"边";
+  const invalidCreate=await c.fetch("/orders",{lines:[line],customer_notes:longNote},"POST",422);
+  assert.equal(invalidCreate.error.code,"INVALID_REQUEST");
+  assert.match(invalidCreate.error.message,/customer_notes.*500/);
+  const created=await c.fetch("/orders",{lines:[line],customer_notes:maxNote},"POST",201);
   const path="/orders/"+created.id;
+  const invalidEdit=await c.fetch(path,{revision:created.revision,lines:[line],customer_notes:longNote},"PATCH",422);
+  assert.equal(invalidEdit.error.code,"INVALID_REQUEST");
+  assert.match(invalidEdit.error.message,/customer_notes.*500/);
+  const unchanged=await c.fetch(path);
+  assert.equal(unchanged.customer_notes,maxNote);
+  assert.equal(unchanged.revision,created.revision);
+  await other.fetch(path,{revision:created.revision,lines:[line],customer_notes:"Other customer"},"PATCH",404);
   const written=await c.fetch(path,{revision:created.revision,lines:[line],customer_notes:"Check the waist seam."},"PATCH");
   assert.equal((await c.fetch(path)).customer_notes,"Check the waist seam.");
   const cleared=await c.fetch(path,{revision:written.revision,lines:[line],customer_notes:""},"PATCH");
@@ -7294,6 +7306,8 @@ test("customer workspace binds the reviewed checklist, preserves notes and pagin
   assert.equal(paid.order_number,created.public_no);
   const order=await c.fetch(path);
   assert.equal(order.state,"awaiting_samples");
+  const submittedEdit=await c.fetch(path,{revision:order.revision,lines:[line],customer_notes:"Late change"},"PATCH",409);
+  assert.equal(submittedEdit.error.code,"ORDER_NOT_EDITABLE");
   assert.equal(order.items.length,30);
   assert.equal(new Set(order.items.map((item:{id:string})=>item.id)).size,30);
   assert.equal(order.items[1].declared_fields.tracking_no,"ZTO1234567");
