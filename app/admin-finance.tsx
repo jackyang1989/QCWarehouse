@@ -38,6 +38,12 @@ import {
   USER_STATUS_ZH,
 } from "./admin-labels";
 
+function formatBalanceAmount(amount:number|string,currency:string) {
+  const formatter=new Intl.NumberFormat("zh-CN",{style:"currency",currency,currencyDisplay:"code"});
+  const decimals=currency==="ISK"||currency==="UGX"?2:formatter.resolvedOptions().maximumFractionDigits??2;
+  return formatter.format(Number(amount)/10**decimals);
+}
+
 function FinanceSubNav({ active }: { active: "payments" | "refunds" | "finance" }) {
   return (
     <div className="actions" style={{ marginBottom: 14 }}>
@@ -766,13 +772,22 @@ export function AdminPaymentDetail({ id, demo = false }: { id: string; demo?: bo
                 />
                 {recon?.settlement ? (
                   <dl className="admin-kv-grid" style={{ marginTop: 12 }}>
-                    <div className="admin-kv-item"><dt>渠道结算毛额</dt><dd><Money cents={recon.settlement.gross_minor} currency={recon.settlement.currency?.toUpperCase()} align="left" /></dd></div>
-                    <div className="admin-kv-item"><dt>渠道手续费</dt><dd><Money cents={recon.settlement.fee_minor} currency={recon.settlement.currency?.toUpperCase()} align="left" /></dd></div>
-                    <div className="admin-kv-item"><dt>净结算到账</dt><dd><Money cents={recon.settlement.net_minor} currency={recon.settlement.currency?.toUpperCase()} align="left" /></dd></div>
-                    <div className="admin-kv-item"><dt>结算时间</dt><dd>{stamp(recon.settlement.settled_at, true)}</dd></div>
+                    <div className="admin-kv-item"><dt>渠道结算毛额</dt><dd>{formatBalanceAmount(recon.settlement.gross_minor,recon.settlement.currency.toUpperCase())}</dd></div>
+                    <div className="admin-kv-item"><dt>渠道手续费</dt><dd>{formatBalanceAmount(recon.settlement.fee_minor,recon.settlement.currency.toUpperCase())}</dd></div>
+                    <div className="admin-kv-item"><dt>{p.provider==="stripe"?"Stripe 余额净额":"渠道净结算金额"}</dt><dd>{formatBalanceAmount(recon.settlement.net_minor,recon.settlement.currency.toUpperCase())}</dd></div>
+                    <div className="admin-kv-item"><dt>{p.provider==="stripe"?"Stripe 余额可用时间":"凭证到账时间"}</dt>
+                      <dd>{recon.settlement.settled_at?stamp(recon.settlement.settled_at,true):"等待渠道余额可用"}</dd>
+                    </div>
+                    {recon.settlement.exchange_rate&&<div className="admin-kv-item"><dt>渠道汇兑率</dt>
+                      <dd>{recon.settlement.exchange_rate} <small>（渠道最小货币单位）</small></dd>
+                    </div>}
+                    <div className="admin-kv-item"><dt>渠道流水编号</dt><dd><CopyId value={recon.settlement.provider_transaction_id}/></dd></div>
                   </dl>
                 ) : (
-                  <p className="muted" style={{ marginTop: 10 }}>当前尚未记录外部渠道结算手续费流水（<code>payment_settlements</code>），渠道净额与手续费以真实接入 Stripe 结算报表为准。</p>
+                  <p className="muted" style={{ marginTop: 10 }}>{recon?.settlement_job?.last_error?
+                    "结算同步异常，等待管理员重试。":
+                    p.provider==="stripe"&&["succeeded","partially_refunded","refunded"].includes(p.state)&&!p.is_demo_tx?
+                    "等待 Stripe 提供可核对的结算流水。":"暂无渠道结算流水。"}</p>
                 )}
               </div>
               <div>
@@ -1348,7 +1363,11 @@ export function AdminFinanceAnalytics({ demo = false }: { demo?: boolean }) {
           <div className="metric-strip" style={{ marginBottom: 14 }}>
             <div className="metric"><span>质检净收入</span><strong><Money cents={ld.summary.net_inspection_cents} align="left" /></strong><small>实收扣减退款</small></div>
             <div className="metric"><span>估算工时成本（费率模型）</span><strong><Money cents={ld.summary.total_labor_cost_cents} align="left" /></strong><small>总工时 {(ld.summary.total_inspection_seconds / 60).toFixed(1)} 分钟</small></div>
-            <div className="metric"><span>订单估算贡献毛利</span><strong><Money cents={ld.summary.total_contribution_cents} align="left" /></strong><small>{ld.summary.recomputable_balanced ? "账本加总勾稽一致" : "勾稽差异告警"}</small></div>
+            <div className="metric"><span>订单估算贡献毛利</span><strong><Money cents={ld.summary.total_contribution_cents} align="left" /></strong>
+              <small>已记录渠道手续费 <Money cents={ld.summary.channel_fee_cents??0} align="left"/></small>
+              {(ld.summary.orders_pending_stripe_settlement??0)>0&&<small>{ld.summary.orders_pending_stripe_settlement} 单待 Stripe 结算</small>}
+              {!ld.summary.recomputable_balanced&&<small>勾稽差异告警</small>}
+            </div>
             <div className="metric"><span>渠道流水对账率</span><strong>{ld.summary.all_channel_reconciled ? "全部齐备" : "存在待补凭据"}</strong><small>{ld.summary.include_test ? "含测试单" : "已隔离测试单"}</small></div>
           </div>
 
@@ -1371,7 +1390,7 @@ export function AdminFinanceAnalytics({ demo = false }: { demo?: boolean }) {
           <details className="card" style={{ marginTop: 14 }} open={ldOrders.length <= 20}>
             <summary>查看单笔订单收入、退款与估算毛利明细 ({ldOrders.length} 单)</summary>
             <Table
-              headers={["订单编号", "客户", "状态", "品类/服务", "件数", "应收报价", "实收质检", "退款", "质检净收", "代收运费", "估算工时(估)", "贡献毛利", "渠道对账"]}
+              headers={["订单编号", "客户", "状态", "品类/服务", "件数", "应收报价", "实收质检", "退款", "质检净收", "代收运费", "估算工时(估)", "渠道手续费", "贡献毛利", "渠道对账"]}
               rows={ldOrders.map((o: Row) => [
                 <div key="n" className="cell-stack">
                   <Link className="code nowrap" href={`/admin/orders/${o.public_no}`}>{o.public_no}</Link>
@@ -1387,6 +1406,9 @@ export function AdminFinanceAnalytics({ demo = false }: { demo?: boolean }) {
                 <Money key="n2" cents={o.net_inspection_cents} />,
                 <Money key="d" cents={o.pass_through_shipping_cents} mutedZero />,
                 <span key="l" className="nowrap"><Money cents={o.labor_cost_cents} align="left" /> <Tag tone="outline">估</Tag></span>,
+                <div key="fee" className="cell-stack"><Money cents={o.channel_fee_cents??0} mutedZero/>
+                  {o.stripe_settlement_pending_count>0&&<small>Stripe 待结算</small>}
+                </div>,
                 <Money key="co" cents={o.contribution_cents} />,
                 <Tag key="ch" tone={o.channel_reconciled ? "green" : "red"}>{o.channel_reconciled ? "已齐备" : "待核对"}</Tag>,
               ])}

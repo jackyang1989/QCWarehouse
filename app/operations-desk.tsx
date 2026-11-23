@@ -17,6 +17,7 @@ const EMAIL_STATE_ZH:Record<string,{label:string;tone:"green"|"yellow"|"red"|"bl
 
 const jobNames:Record<string,string>={
   "report.render":"生成报告 PDF","refund.approved":"执行已审批退款","payment.checkout_expire":"关闭到期付款会话",
+  "payment.stripe_settlement":"同步 Stripe 余额流水",
   "report.published":"报告发布通知","report.amended":"报告修订通知","ticket.reply":"客服回复通知",
   "account.registered":"注册后续处理","package.received":"实收入仓通知","order.ready":"开检准备通知",
   "order.cancelled":"取消检查通知","dispatch.quoted":"发运报价通知","quote.offered":"人工报价通知",
@@ -26,6 +27,7 @@ const jobSafetyNotes:Record<string,string>={
   "report.render":"幂等安全：基于已锁定的报告版本快照重新渲染 PDF 并校验 SHA-256，不会修改检查数据。",
   "refund.approved":"幂等安全：使用退款单固定幂等键调用渠道原路退款，已成功退款不会重复扣款。",
   "payment.checkout_expire":"幂等安全：仅关闭未入账的过期结账会话，已确认付款不受影响。",
+  "payment.stripe_settlement":"按原环境只读查询 Stripe 流水，已导入的渠道流水不会重复入账。",
 };
 export function OperationsDesk() {
   const {data,error,reload}=useLoad("/staff/admin/jobs");

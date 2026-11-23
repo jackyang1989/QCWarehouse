@@ -5,6 +5,7 @@ import { taskDetail } from "./inspection";
 import { computeOrderRefundStage } from "./operations";
 import { hasStaffAccess, staffAccess } from "./staff-access";
 import { incidentAwaitingCustomer } from "./storage";
+import { stripeSettlementJob } from "./stripe-settlements";
 
 function maskEmailForStaff(actor: Actor, originalEmail: string | null, normalizedEmail: string | null) {
   const email = originalEmail ?? normalizedEmail;
@@ -344,6 +345,11 @@ export async function adminPaymentDetail(db: DB, actor: Actor, id: string) {
     [id]
   )).rows[0] ?? null;
 
+  const settlementJob=p.provider==="stripe"&&String(p.provider_ref??"").startsWith("cs_")?(await db.query(
+    `select attempts,last_error,next_attempt_at,processed_at from outbox_events
+     where type=$2 and payload->>'payment_id'=$1 order by id desc limit 1`,[id,stripeSettlementJob]
+  )).rows[0]??null:null;
+
   const allocations = (await db.query(
     `select a.order_id, o.public_no, o.state order_state, a.amount_cents
      from charge_allocations a join orders o on o.id = a.order_id
@@ -538,6 +544,7 @@ export async function adminPaymentDetail(db: DB, actor: Actor, id: string) {
       status: reconciliationStatus,
       notes: reconNotes,
       settlement,
+      settlement_job:settlementJob,
       allocations,
       disputes,
       related_tickets: relatedTickets,

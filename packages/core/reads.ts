@@ -1582,6 +1582,8 @@ export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;l
     inspection_seconds:number;
     provider_refs:string[];
     anomaly_count:number;
+    channel_fee_cents:number;
+    stripe_settlement_pending_count:number;
   }>(
     `select o.id,
             o.public_no,
@@ -1659,8 +1661,33 @@ export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;l
               join charge_items c on c.inspection_quote_id=iq.id
               join payments p on p.charge_item_id=c.id
               where iq.order_id=o.id and p.state in ('amount_mismatch','disputed','late_payment')
-            ),0)::int anomaly_count
+            ),0)::int anomaly_count,
+            fees.channel_fee_cents,fees.stripe_settlement_pending_count
      from orders o
+     left join lateral(
+       select coalesce(sum(
+         round(cost.usd_cents*a.allocated_through/nullif(a.amount_cents,0))-
+         round(cost.usd_cents*(a.allocated_through-a.allocated_here)/nullif(a.amount_cents,0))
+       ),0)::int channel_fee_cents,
+       count(*) filter(where p.provider='stripe' and p.provider_ref ~ '^cs_(test|live)_'
+         and coalesce(p.provider_data->>'demo','false')<>'true' and s.settled_at is null)::int stripe_settlement_pending_count
+       from (
+         select c.applied_payment_id,c.amount_cents,c.amount_cents allocated_here,c.amount_cents allocated_through
+         from inspection_quotes q join charge_items c on c.inspection_quote_id=q.id and c.voided_at is null
+         where q.order_id=o.id
+         union all
+         select c.applied_payment_id,c.amount_cents,ca.amount_cents,
+           (select sum(prior.amount_cents) from charge_allocations prior where prior.charge_id=c.id and prior.order_id<=o.id)
+         from charge_allocations ca join charge_items c on c.id=ca.charge_id and c.voided_at is null
+         where ca.order_id=o.id and c.purpose in ('storage','dispatch')
+       ) a join payments p on p.id=a.applied_payment_id and p.state in ('succeeded','partially_refunded','refunded')
+       left join lateral(
+         select s.* from payment_settlements s where s.payment_id=p.id
+         order by s.settled_at desc nulls last,s.provider_transaction_id limit 1
+       ) s on true
+       cross join lateral(select case when upper(s.currency)='USD' then s.fee_minor::numeric
+         when s.exchange_rate>0 then round(s.fee_minor/s.exchange_rate) end usd_cents) cost
+     ) fees on true
      where ($1::boolean or coalesce(o.is_test,false)=false)
        and o.state<>'draft'
      order by o.created_at desc,o.id desc
@@ -1671,7 +1698,7 @@ export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;l
   const orders=orderRows.map(r=>{
     const netInspectionCents=r.inspection_paid_cents-r.inspection_refunded_cents;
     const laborCostCents=Math.round((r.inspection_seconds/3600)*hourlyLaborCents);
-    const contributionCents=netInspectionCents+r.storage_allocated_cents-laborCostCents;
+    const contributionCents=netInspectionCents+r.storage_allocated_cents-laborCostCents-r.channel_fee_cents;
     const hasPaid=r.inspection_paid_cents>0||r.pass_through_shipping_cents>0||r.storage_allocated_cents>0;
     const channelReconciled=r.anomaly_count===0&&(!hasPaid||r.provider_refs.length>0);
     return {
@@ -1696,6 +1723,8 @@ export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;l
       inspection_minutes:Number((r.inspection_seconds/60).toFixed(2)),
       labor_cost_cents:laborCostCents,
       labor_cost_estimated:true,
+      channel_fee_cents:r.channel_fee_cents,
+      stripe_settlement_pending_count:r.stripe_settlement_pending_count,
       contribution_cents:contributionCents,
       provider_refs:r.provider_refs,
       channel_reconciled:channelReconciled,
@@ -1710,6 +1739,7 @@ export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;l
     inspection_seconds:number;
     net_inspection_cents:number;
     labor_cost_cents:number;
+    channel_fee_cents:number;
     contribution_cents:number;
   }>();
   for(const row of orders) {
@@ -1722,6 +1752,7 @@ export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;l
       inspection_seconds:0,
       net_inspection_cents:0,
       labor_cost_cents:0,
+      channel_fee_cents:0,
       contribution_cents:0,
     };
     cur.order_count+=1;
@@ -1729,6 +1760,7 @@ export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;l
     cur.inspection_seconds+=row.inspection_seconds;
     cur.net_inspection_cents+=row.net_inspection_cents;
     cur.labor_cost_cents+=row.labor_cost_cents;
+    cur.channel_fee_cents+=row.channel_fee_cents;
     cur.contribution_cents+=row.contribution_cents;
     groupMap.set(key,cur);
   }
@@ -1744,6 +1776,7 @@ export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;l
   const sumStorageAllocated=orders.reduce((n,r)=>n+r.storage_allocated_cents,0);
   const sumInspectionSeconds=orders.reduce((n,r)=>n+r.inspection_seconds,0);
   const sumLaborCost=orders.reduce((n,r)=>n+r.labor_cost_cents,0);
+  const sumChannelFee=orders.reduce((n,r)=>n+r.channel_fee_cents,0);
   const sumContribution=orders.reduce((n,r)=>n+r.contribution_cents,0);
 
   const summary={
@@ -1759,10 +1792,12 @@ export async function orderLedger(db:DB,actor:Actor,opts:{includeTest?:boolean;l
     storage_allocated_cents:sumStorageAllocated,
     total_inspection_seconds:sumInspectionSeconds,
     total_labor_cost_cents:sumLaborCost,
+    channel_fee_cents:sumChannelFee,
+    orders_pending_stripe_settlement:orders.filter(r=>r.stripe_settlement_pending_count>0).length,
     total_contribution_cents:sumContribution,
     recomputable_balanced:
       sumNetInspection===sumInspectionPaid-sumInspectionRefunded &&
-      sumContribution===sumNetInspection+sumStorageAllocated-sumLaborCost,
+      sumContribution===sumNetInspection+sumStorageAllocated-sumLaborCost-sumChannelFee,
     all_channel_reconciled:orders.every(r=>r.channel_reconciled),
   };
 
@@ -1793,6 +1828,8 @@ export async function orderLedgerCsv(db:DB,actor:Actor,opts:{includeTest?:boolea
     "contribution_cents",
     "channel_reconciled",
     "provider_refs",
+    "channel_fee_cents",
+    "pending_stripe_settlement",
   ];
   const lines=[headers.join(",")];
   for(const r of ledger.orders) {
@@ -1813,6 +1850,8 @@ export async function orderLedgerCsv(db:DB,actor:Actor,opts:{includeTest?:boolea
       r.contribution_cents,
       r.channel_reconciled?"1":"0",
       r.provider_refs.join("|"),
+      r.channel_fee_cents,
+      r.stripe_settlement_pending_count>0?"1":"0",
     ].map(csvCell).join(","));
   }
   const s=ledger.summary;
@@ -1833,6 +1872,8 @@ export async function orderLedgerCsv(db:DB,actor:Actor,opts:{includeTest?:boolea
     s.total_contribution_cents,
     s.all_channel_reconciled?"1":"0",
     "",
+    s.channel_fee_cents,
+    s.orders_pending_stripe_settlement,
   ].map(csvCell).join(","));
   return lines.join("\n")+"\n";
 }

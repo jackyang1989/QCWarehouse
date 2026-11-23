@@ -4713,6 +4713,21 @@ test("TASK-086..100 & TASK-160: per-item dispositions, shipping rates & calculat
   assert.equal(dispatchReconRow.allocations.length,2,"Two order allocations (o1 and o2)");
   assert.ok(dispatchReconRow.unallocated_cents>0,"Zero-order item share is tracked in unallocated_cents");
   assert.equal(dispatchReconRow.allocated_cents+dispatchReconRow.unallocated_cents,dispatchReconRow.amount_cents);
+  const includedOrderIds=new Set(dispatchReconRow.allocations.map((allocation:{order_id:string})=>allocation.order_id));
+  async function allocatedFee() {
+    const ledger=await admin.fetch("/staff/admin/finance/ledger?include_test=1&limit=30");
+    const attributed=ledger.orders.filter((row:{order_id:string})=>includedOrderIds.has(row.order_id));
+    assert.equal(attributed.length,2);
+    return attributed.reduce((sum:number,row:{channel_fee_cents:number})=>sum+row.channel_fee_cents,0);
+  }
+  const feesBefore=await allocatedFee();
+  const fee=101;
+  await pool.query(`insert into payment_settlements(provider_transaction_id,payment_id,gross_minor,fee_minor,net_minor,currency,settled_at)
+    select $2,id,amount_cents,$3::bigint,amount_cents-$3::bigint,'USD',now() from payments where id=$1`,
+  [chk2.attempt_id,"txn_split_fee_fixture_"+randomUUID(),fee]);
+  assert.equal(await allocatedFee()-feesBefore,
+    Math.round(fee*dispatchReconRow.allocated_cents/dispatchReconRow.amount_cents),
+    "Order allocation totals match the recorded fee share without counting the unallocated parcel");
 });
 
 test("Stocktake, warehouse incident compensation, stage refunds, dispute freezes, and order closure (TASK-171, TASK-101..110, TASK-157, T33..T35, T52..T53, T102..T103)",async t=>{

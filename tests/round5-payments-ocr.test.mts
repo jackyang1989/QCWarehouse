@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import sharp from "sharp";
+import Stripe from "stripe";
 
 const target = process.env.TEST_DATABASE_URL;
 assert(target, "Set TEST_DATABASE_URL to an isolated qcw_test database.");
@@ -33,6 +35,7 @@ const { paypalAutoAdapter } = await import("../packages/core/payment-providers")
 const { parseOcrDocument } = await import("../packages/core/ocr-parser");
 const { addEmailOtpIdentity } = await import("../packages/core/auth");
 const { receivingCode } = await import("../packages/core/common");
+const { scheduleStripeSettlements, stripeSettlementJob } = await import("../packages/core/stripe-settlements");
 
 before(async () => {
   const actual = await pool.query<{ name: string }>("select current_database() name");
@@ -696,6 +699,108 @@ test("Round 5 Integrations, Vault Secrets & Multi-Channel Payments (20 Scenarios
     const rec = await finance.fetch("/staff/finance/stripe/reconcile", {});
     assert.equal(rec.ok, false);
     assert.equal(rec.configured, false);
+  });
+
+  await t.test("Stripe balance import waits, verifies ownership, retries and stores native amounts and USD cost once",async t=>{
+    const order=await createSubmittedOpenOrder(customer,"stripe-balance");
+    const attempt=await customer.fetch(`/charges/${order.chargeId}/checkout`,{quote_revision:order.quoteRevision});
+    await customer.fetch("/checkout/demo/"+attempt.attempt_id,{});
+    assert.equal((await customer.fetch("/orders/"+order.orderId)).state,"awaiting_samples");
+    const paymentId=attempt.attempt_id;
+    const intentId="pi_settlement_fixture";
+    const chargeId="ch_settlement_fixture";
+    const txId="txn_settlement_fixture";
+    const {rows:[payment]}=await pool.query(`select p.amount_cents,p.currency,c.org_id from payments p
+      join charge_items c on c.id=p.charge_item_id where p.id=$1`,[paymentId]);
+    await pool.query(`update payments set provider_ref='cs_test_settlement_fixture',
+      provider_data=provider_data-'demo'||jsonb_build_object('payment_intent',$2::text,'checkout_mode','test') where id=$1`,
+    [paymentId,intentId]);
+    await admin.fetch("/staff/admin/integrations/stripe/secrets",{
+      environment:"sandbox",secret_name:"secret_key",secret_value:"sk_test_fixture_balance_import",
+    });
+    await admin.fetch("/staff/admin/integrations/stripe",{enabled:false,lifecycle_state:"disabled"});
+    assert.equal(await scheduleStripeSettlements(),false,"Demo workers do not query the external provider");
+
+    const nowSeconds=Math.floor(Date.now()/1000);
+    const balance={
+      id:txId,source:chargeId,type:"charge",status:"pending",available_on:nowSeconds+86400,
+      currency:"hkd",exchange_rate:7.8,amount:Math.round(payment.amount_cents*7.8),fee:1950,
+      net:Math.round(payment.amount_cents*7.8)-1950,
+    };
+    let remoteBalance:object|string|null=null;
+    const CommonJsStripe:typeof Stripe=createRequire(import.meta.url)("stripe");
+    const clients=[Stripe,CommonJsStripe].map(Api=>new Api("sk_test_fixture_balance_import"));
+    for(const intents of new Set(clients.map(api=>Object.getPrototypeOf(api.paymentIntents)))) {
+      t.mock.method(intents,"retrieve",async(id:string,options:Stripe.PaymentIntentRetrieveParams)=>{
+        assert.equal(id,intentId);
+        assert.deepEqual(options.expand,["latest_charge.balance_transaction"]);
+        return {id:intentId,status:"succeeded",livemode:false,amount_received:payment.amount_cents,currency:"usd",
+          metadata:{payment_id:paymentId,charge_item_id:order.chargeId,org_id:payment.org_id},latest_charge:{
+            id:chargeId,paid:true,livemode:false,amount:payment.amount_cents,currency:"usd",payment_intent:intentId,
+            balance_transaction:remoteBalance,
+          }};
+      });
+    }
+    for(const transactions of new Set(clients.map(api=>Object.getPrototypeOf(api.balanceTransactions)))) {
+      t.mock.method(transactions,"retrieve",async(id:string)=>{
+        assert.equal(id,txId);
+        return {...balance,status:"available",available_on:nowSeconds};
+      });
+    }
+    process.env.QCW_DEMO="0";
+    try {
+      assert.deepEqual((await Promise.all([scheduleStripeSettlements(),scheduleStripeSettlements()])).sort(),[false,true]);
+      const {rows:[job]}=await pool.query("select id from outbox_events where type=$1 and payload->>'payment_id'=$2",[stripeSettlementJob,paymentId]);
+      const jobState=async()=>(await pool.query(`select attempts,last_error,processed_at,next_attempt_at>now() deferred
+        from outbox_events where id=$1`,[job.id])).rows[0];
+      async function due() {
+        await pool.query("update outbox_events set next_attempt_at=now() where id=$1",[job.id]);
+      }
+      async function drain() {
+        for(let n=0;n<30&&await workOnce();n++) { /* drain existing business jobs */ }
+      }
+      await drain();
+      assert.deepEqual(await jobState(),{attempts:0,last_error:null,processed_at:null,deferred:true});
+      assert.equal((await pool.query("select id from payments where id=$1 and state='succeeded'",[paymentId])).rowCount,1);
+      assert.equal((await pool.query("select 1 from payment_settlements where payment_id=$1",[paymentId])).rowCount,0);
+
+      remoteBalance={...balance,source:"ch_unrelated_fixture"};
+      await due();
+      await assert.rejects(()=>drain(),{code:"STRIPE_SETTLEMENT_MISMATCH"});
+      assert.equal((await jobState()).attempts,1);
+      assert.equal((await admin.fetch("/staff/admin/payments/"+paymentId)).reconciliation.settlement_job.last_error,"STRIPE_SETTLEMENT_MISMATCH");
+      await admin.fetch("/staff/admin/jobs/"+job.id+"/retry",{attempts:1,reason:"Retry verified Stripe settlement after source mismatch."});
+      remoteBalance=balance;
+      await drain();
+      const pending=(await admin.fetch("/staff/admin/payments/"+paymentId)).reconciliation.settlement;
+      assert.equal(pending.currency,"HKD");
+      assert.equal(Number(pending.fee_minor),1950);
+      assert.equal(Number(pending.net_minor),balance.net);
+      assert.equal(pending.settled_at,null);
+      assert.equal((await jobState()).attempts,0);
+      const ledger=async()=>(await admin.fetch("/staff/admin/finance/ledger?include_test=1&limit=30"))
+        .orders.find((row:{order_id:string})=>row.order_id===order.orderId);
+      assert.equal((await ledger()).channel_fee_cents,250);
+      assert.equal((await ledger()).stripe_settlement_pending_count,1);
+
+      remoteBalance=txId;
+      await due();
+      await drain();
+      const ready=(await admin.fetch("/staff/admin/payments/"+paymentId)).reconciliation.settlement;
+      assert.equal(ready.settled_at,new Date(nowSeconds*1000).toISOString());
+      assert.equal(Number(ready.exchange_rate),7.8);
+      assert(await jobState().then(row=>row.processed_at));
+      assert.equal(await scheduleStripeSettlements(),false);
+      assert.equal((await pool.query("select count(*)::int n from payment_settlements where payment_id=$1",[paymentId])).rows[0].n,1);
+      const settled=await ledger();
+      assert.equal(settled.stripe_settlement_pending_count,0);
+      assert.equal(settled.contribution_cents,settled.net_inspection_cents+settled.storage_allocated_cents-
+        settled.labor_cost_cents-settled.channel_fee_cents);
+      assert.equal((await customer.fetch("/orders/"+order.orderId)).state,"awaiting_samples");
+      await customer.fetch("/staff/admin/payments/"+paymentId,undefined,"GET",403);
+    } finally {
+      process.env.QCW_DEMO="1";
+    }
   });
 });
 

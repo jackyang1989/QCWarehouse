@@ -133,6 +133,19 @@ export async function expireCheckout(db:DB,pid:string) {
   await db.query("update payments set state='canceled',updated_at=now() where id=$1",[pid]);
   await audit(db,null,"checkout_expired","payments",pid,{provider_ref:session.id});
 }
+export function verifiedStripeCharge(intent:Stripe.PaymentIntent,expected:{
+  intentId:string;paymentId:string;chargeId:string;orgId:string;currency:string;amountCents:number;mode:"test"|"live";
+}) {
+  const charge=intent.latest_charge;
+  const metadata=intent.metadata;
+  return intent.id===expected.intentId&&intent.status==="succeeded"&&intent.livemode===(expected.mode==="live")&&
+    intent.amount_received===expected.amountCents&&intent.currency===expected.currency.toLowerCase()&&
+    metadata?.payment_id===expected.paymentId&&metadata.charge_item_id===expected.chargeId&&metadata.org_id===expected.orgId&&
+    charge&&typeof charge==="object"&&charge.paid&&charge.livemode===intent.livemode&&
+    charge.amount===intent.amount_received&&charge.currency===intent.currency&&charge.payment_intent===intent.id
+    ?charge:null;
+}
+
 export async function chargeReceipt(actor:Actor,id:string) {
   const org=organization(actor);
   const payment=await one<{id:string|null;intent_id:string|null;amount_cents:number;currency:string;provider_ref:string|null}>(pool,`
@@ -154,15 +167,11 @@ export async function chargeReceipt(actor:Actor,id:string) {
   } catch {
     throw new Problem("RECEIPT_UNAVAILABLE","The Stripe receipt is currently unavailable. Try again or contact Support.",503);
   }
-  const charge=intent.latest_charge;
-  const receipt=charge&&typeof charge==="object"?charge.receipt_url:null;
-  const metadata=intent.metadata;
-  guard(intent.id===payment.intent_id&&intent.status==="succeeded"&&intent.livemode===(mode==="live")&&
-    intent.amount_received===payment.amount_cents&&intent.currency===payment.currency.toLowerCase()&&
-    metadata?.payment_id===payment.id&&metadata.charge_item_id===id&&metadata.org_id===org&&
-    charge&&typeof charge==="object"&&charge.paid&&charge.livemode===intent.livemode&&
-    charge.amount===intent.amount_received&&charge.currency===intent.currency&&
-    charge.payment_intent===intent.id&&receipt?.startsWith("https://pay.stripe.com/receipts/"),
+  const charge=verifiedStripeCharge(intent,{
+    intentId,paymentId:payment.id,chargeId:id,orgId:org,currency:payment.currency,amountCents:payment.amount_cents,mode,
+  });
+  const receipt=charge?.receipt_url;
+  guard(receipt?.startsWith("https://pay.stripe.com/receipts/"),
     "RECEIPT_UNAVAILABLE","The Stripe receipt could not be verified. Contact Support if the issue persists.",503);
   return {receipt_url:receipt};
 }
