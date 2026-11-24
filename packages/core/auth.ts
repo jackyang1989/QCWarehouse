@@ -342,49 +342,92 @@ async function providerConfig(provider:OidcProvider) {
   const config=await oidc.discovery(new URL(issuer),clientId,clientSecret);
   return {config,callback};
 }
-export async function startProvider(provider:OidcProvider,browser:string,returnPath:string|null,link?:{userId:string;sessionHash:string}) {
+type ProviderLink = { userId:string; sessionHash:string; confirmFor?:OidcProvider; confirmedBy?:string };
+const securityReturnPath="/account/security";
+
+export async function startProvider(provider:OidcProvider,browser:string,returnPath:string|null,link?:ProviderLink) {
   const {config,callback}=await providerConfig(provider);
   const verifier=oidc.randomPKCECodeVerifier(),state=oidc.randomState(),nonce=oidc.randomNonce();
   await pool.query(`insert into auth_transactions(state_digest,provider,intent,initiator_user_id,browser_binding_hash,nonce_digest,verifier_ciphertext,return_path,expires_at)
     values($1,$2,$3,$4,$5,$6,$7,$8,now()+interval '10 minutes')`,
-    [hash(state),provider,link?"link":"signin",link?.userId??null,hash(browser),hash(nonce),seal(JSON.stringify({verifier,nonce,sessionHash:link?.sessionHash})),returnPath]);
+    [hash(state),provider,link?.confirmFor?"link_confirmation":link?"link":"signin",link?.userId??null,hash(browser),hash(nonce),
+      seal(JSON.stringify({verifier,nonce,sessionHash:link?.sessionHash,confirmFor:link?.confirmFor,confirmedBy:link?.confirmedBy})),returnPath]);
   return oidc.buildAuthorizationUrl(config,{
     redirect_uri:callback,scope:"openid email profile",
     state,nonce,code_challenge:await oidc.calculatePKCECodeChallenge(verifier),code_challenge_method:"S256",
+    ...(link?{prompt:"select_account"}:{}),
   }).href;
 }
+
+async function requireActiveLinkSession(db:DB,actor:Actor,sessionHash:string) {
+  const active=(await db.query(`select s.id from sessions s join users u on u.id=s.user_id
+    where s.token_hash=$1 and s.user_id=$2 and s.kind='customer' and s.revoked_at is null
+      and s.expires_at>now() and s.auth_version=u.auth_version and u.status in ('active','restricted')
+    for share of s`,[sessionHash,actor.id])).rowCount;
+  guard(active,"LINK_SESSION_EXPIRED","Your session changed. Start linking again from account settings.",403);
+}
+
 export async function finishProvider(provider:OidcProvider,url:URL,browser:string,actor:Actor|null,sessionHash:string) {
   const state=url.searchParams.get("state") ?? "";
   const tx=await one<{verifier_ciphertext:Buffer;return_path:string|null;intent:string;initiator_user_id:string|null}>(pool as unknown as DB,`update auth_transactions set consumed_at=now()
-    where state_digest=$1 and provider=$2 and intent in ('signin','link') and browser_binding_hash=$3 and consumed_at is null and expires_at>now()
+    where state_digest=$1 and provider=$2 and intent in ('signin','link','link_confirmation')
+      and browser_binding_hash=$3 and consumed_at is null and expires_at>now()
     returning verifier_ciphertext,return_path,intent,initiator_user_id`,[hash(state),provider,hash(browser)]);
   const next=tx.return_path;
-  const link=tx.intent==="link";
+  const link=tx.intent==="link"||tx.intent==="link_confirmation";
   if(url.searchParams.has("error")) return {state:link?"link_cancelled" as const:"cancelled" as const,next};
   try {
     if(link) {
-      const binding=JSON.parse(unseal(tx.verifier_ciphertext));
+      const binding=JSON.parse(unseal(tx.verifier_ciphertext)) as Partial<ProviderLink>;
       guard(actor?.kind==="customer"&&actor.id===tx.initiator_user_id&&binding.sessionHash===sessionHash,
         "AUTH_TRANSACTION_INVALID","Restart linking from account settings.",403);
-      const verified=await verifyOidcClaims(provider,url,state,tx.verifier_ciphertext);
+      const verified=await verifyOidcClaims(provider,url,state,tx.verifier_ciphertext,true);
+      if(tx.intent==="link_confirmation") {
+        const target=binding.confirmFor;
+        guard(target&&target!==provider,"AUTH_TRANSACTION_INVALID","Start linking again from account settings.",403);
+        const confirmed=await transaction(async db=>{
+          await requireActiveLinkSession(db,actor,sessionHash);
+          const identity=await findIdentityAccount(db,verified);
+          guard(identity?.id===actor.id&&identity.identity_status==="active",
+            "LINK_WRONG_ACCOUNT","Choose the sign-in account already linked to this workspace.",403);
+          await audit(db,actor,"confirm_provider_link","auth_identities",identity.identity_id,{target});
+          return identity.identity_id;
+        });
+        const authorization_url=await startProvider(target,browser,securityReturnPath,
+          {userId:actor.id,sessionHash,confirmedBy:confirmed});
+        return {state:"link_continue" as const,authorization_url,next};
+      }
       await transaction(async db=>{
         const linked=await attachExternalIdentity(db,actor.id,verified);
-        await requireCustomerReauth(db,actor,sessionHash);
+        if(binding.confirmedBy) {
+          await requireActiveLinkSession(db,actor,sessionHash);
+          const source=(await db.query(`select id from auth_identities where id=$1 and user_id=$2
+            and provider<>$3 and provider in ('google','microsoft') and status='active'`,
+          [binding.confirmedBy,actor.id,provider])).rowCount;
+          guard(source,"LINK_WRONG_ACCOUNT","The sign-in method used to confirm this change is no longer linked.",403);
+        } else {
+          await requireCustomerReauth(db,actor,sessionHash);
+        }
         await audit(db,actor,"link_identity","auth_identities",linked.id,{provider});
       });
-      return {state:"linked" as const,next:next??"/account/security"};
+      return {state:"linked" as const,provider,next:next??securityReturnPath};
     }
     const result=await verifyProviderIdentity(provider,url,browser,state,tx.verifier_ciphertext);
     return {...result,next};
   } catch(error) {
-    if(link) return {state:error instanceof Problem&&error.code==="IDENTITY_ALREADY_LINKED"?"link_conflict" as const:"link_failed" as const,next};
+    if(link) {
+      if(error instanceof Problem&&error.code==="IDENTITY_ALREADY_LINKED") return {state:"link_conflict" as const,next};
+      if(error instanceof Problem&&error.code==="LINK_WRONG_ACCOUNT") return {state:"link_wrong_account" as const,next};
+      return {state:"link_failed" as const,next};
+    }
     return {state:error instanceof Problem&&error.code==="IDENTITY_LINK_REQUIRED"?"link_required" as const:"failed" as const,next};
   }
 }
 
-async function verifyOidcClaims(provider:OidcProvider,url:URL,state:string,encrypted:Buffer):Promise<Identity & {emailVerified:boolean}> {
+async function verifyOidcClaims(provider:OidcProvider,url:URL,state:string,encrypted:Buffer,verifySignature=false):Promise<Identity & {emailVerified:boolean}> {
   const {verifier,nonce}=JSON.parse(unseal(encrypted));
   const {config,callback}=await providerConfig(provider);
+  if(verifySignature) oidc.enableNonRepudiationChecks(config);
   const redirect=new URL(callback+url.search);
   const result=await oidc.authorizationCodeGrant(config,redirect,{pkceCodeVerifier:verifier,expectedState:state,expectedNonce:nonce,idTokenExpected:true});
   const claims=result.claims();
@@ -556,16 +599,26 @@ export async function attachExternalIdentity(db:DB,userId:string,identity:Identi
 export async function linkProviderIdentity(
   db:DB,actor:Actor,sessionHash:string,browser:string,provider:OidcProvider,input:{challenge_id?:string;code?:string}
 ) {
-  await requireCustomerReauth(db,actor,sessionHash);
   if(input.challenge_id && input.code) {
+    await requireCustomerReauth(db,actor,sessionHash);
     const c=await consumeChallengeCode(db,input.challenge_id,input.code,browser,"link",actor.id);
     guard(c.verified_identity && c.verified_identity.provider===provider,"AUTH_TRANSACTION_INVALID","Verified provider identity missing for link.",422);
     const linked=await attachExternalIdentity(db,actor.id,c.verified_identity);
     await audit(db,actor,"link_identity","auth_identities",linked.id,{provider});
     return linked;
   }
-  const url=await startProvider(provider,browser,"/account/security",{userId:actor.id,sessionHash});
-  return {provider,authorization_url:url};
+  organization(actor);
+  const link={userId:actor.id,sessionHash};
+  try {
+    await requireCustomerReauth(db,actor,sessionHash);
+  } catch(error) {
+    if(!(error instanceof Problem)||error.code!=="AUTH_REAUTH_REQUIRED") throw error;
+    const source:OidcProvider=provider==="microsoft"?"google":"microsoft";
+    const bound=(await db.query("select 1 from auth_identities where user_id=$1 and provider=$2 and status='active'",[actor.id,source])).rowCount;
+    if(!bound||!oidcSettings(source).configured) throw error;
+    return {provider,authorization_url:await startProvider(source,browser,securityReturnPath,{...link,confirmFor:provider})};
+  }
+  return {provider,authorization_url:await startProvider(provider,browser,securityReturnPath,link)};
 }
 
 export async function unlinkIdentity(db:DB,actor:Actor,identityId:string,sessionHash:string) {

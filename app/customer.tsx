@@ -6784,12 +6784,15 @@ function ProfilePreferences() {
 
 function AccountSecurity({receivingCode}:{receivingCode:string}) {
   const router=useRouter();
-  const oauth=useSearchParams().get("oauth");
+  const search=useSearchParams();
+  const oauth=search.get("oauth");
+  const linked=search.get("linked");
   const stamp=useWorkspaceStamp();
   const identities=useLoad("/me/identities");
   const sessions=useLoad("/me/sessions");
   const methods=useLoad("/auth/providers");
-  const [reauthChallenge,setReauthChallenge]=useState<{challenge_id:string;demo_code?:string}>();
+  const [pendingLink,setPendingLink]=useState<"google"|"microsoft">();
+  const [reauthChallenge,setReauthChallenge]=useState<{challenge_id:string;demo_code?:string;email?:string}>();
   const [backupChallenge,setBackupChallenge]=useState<{email:string;challenge_id:string;demo_code?:string}>();
   const [editingBackup,setEditingBackup]=useState(false);
   const [backupSaved,setBackupSaved]=useState(false);
@@ -6803,6 +6806,7 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
   const primary=emails.find(e=>e.is_primary);
   const primaryEmail=primary?.original_email??"—";
   const backup=emails.find(e=>!e.is_primary&&e.login_enabled&&e.verified_at);
+  const linkedProviders=activeIdentities.filter(identity=>identity.provider==="google"||identity.provider==="microsoft");
   const mailAvailable=methods.data?.email||methods.data?.demo;
   const verifyDestination=backup&&<label>Send a code to<select name="verification_email_id" required>
     {primary?.verified_at&&<option value={primary.id}>{primaryEmail} (primary)</option>}
@@ -6810,7 +6814,30 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
   </select></label>;
   const linkMessage=oauth==="link_cancelled"?"Sign-in method linking was cancelled. You can try again here.":
     oauth==="link_conflict"?"This sign-in method is already linked to another account.":
-    oauth==="link_failed"?"We couldn't link that sign-in method. Verify your identity and try again.":"";
+    oauth==="link_wrong_account"?"Choose the account that is already linked to this workspace, then try again.":
+    oauth==="link_failed"?"We couldn't complete the connection. Start again below.":"";
+  function linkUrl(provider:"google"|"microsoft") {
+    return request("/me/identities/"+provider+"/link","POST",{}).then(result=>{
+      if(!result.authorization_url) throw new Error("Couldn't open the sign-in provider. Try again.");
+      location.assign(result.authorization_url);
+    });
+  }
+  const verifyByEmail=reauthChallenge?<div className="code-step">
+    {reauthChallenge.email&&<p>Enter the code sent to <strong>{reauthChallenge.email}</strong>.</p>}
+    {reauthChallenge.demo_code&&<p>Test code: <strong className="code">{reauthChallenge.demo_code}</strong></p>}
+    <Form key={reauthChallenge.challenge_id} label={pendingLink?"Verify and continue":"Confirm verification code"} run={async f=>{
+      await request("/auth/reauth/verify","POST",{challenge_id:reauthChallenge.challenge_id,code:text(f,"code")});
+      setReauthChallenge(undefined);refreshAll();
+      if(pendingLink)await linkUrl(pendingLink);
+    }}>
+      <label>Verification code<input name="code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" required/></label>
+    </Form>
+    <button className="button" type="button" onClick={()=>setReauthChallenge(undefined)}>Choose email or request another code</button>
+  </div>:<Form label="Send verification code" run={async f=>{
+    const emailId=text(f,"verification_email_id")||undefined;
+    const challenge=await request("/auth/reauth/start","POST",{email_id:emailId});
+    setReauthChallenge({...challenge,email:(emailId?emails.find(e=>e.id===emailId):primary)?.original_email});
+  }}>{verifyDestination}</Form>;
   if(identities.error||sessions.error) return <><h1>Sign-in methods &amp; security</h1>
     <ErrorBlock error={identities.error||sessions.error}/><button type="button" onClick={refreshAll}>Retry security</button></>;
   if(!info||!sessions.data) return <><h1>Sign-in methods &amp; security</h1><p role="status">Loading account security…</p></>;
@@ -6820,31 +6847,42 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
         <h1>Sign-in methods &amp; security</h1>
         <p className="muted">Manage linked sign-in methods, primary contact email, active device sessions, and account status. Your permanent receiving code <span className="code">{receivingCode}</span> never changes.</p>
       </div>
-      {info?.reauthenticated?<Tag>Reauthenticated</Tag>:<Tag>Standard session</Tag>}
     </div>
     {info?.status==="restricted"&&<div className="notice" role="alert"><strong>Account restricted:</strong> New orders, payments, and outbound instructions are temporarily paused while your existing orders and support cases remain accessible.</div>}
-    <Panel id="verify-identity" title="Verify your identity">
-      <p className="muted">Verify before changing sign-in methods, email addresses, or device access. Verification lasts 10 minutes.</p>
-      {info?.reauthenticated?<p className="notice" role="status">Your session is verified for sensitive security actions.</p>:
-        reauthChallenge?<div className="code-step">
-          {reauthChallenge.demo_code&&<p>Test code: <strong className="code">{reauthChallenge.demo_code}</strong></p>}
-          <Form key={reauthChallenge.challenge_id} label="Confirm verification code" run={async f=>{
-            await request("/auth/reauth/verify","POST",{challenge_id:reauthChallenge.challenge_id,code:text(f,"code")});
-            setReauthChallenge(undefined);refreshAll();
-          }}>
-            <Field name="code" label="6-digit verification code"/>
-          </Form>
-          <button className="button" type="button" onClick={()=>setReauthChallenge(undefined)}>Choose email or request another code</button>
-        </div>:mailAvailable?
-        <Form label="Send verification code" run={async f=>{
-          setReauthChallenge(await request("/auth/reauth/start","POST",{email_id:text(f,"verification_email_id")||undefined}));
-        }}>{verifyDestination}</Form>:
-        <p className="muted" role="status">{methods.data||methods.error?"Email verification is currently unavailable.":"Checking email verification availability…"}</p>}
+    <Panel id="linked-sign-in" title="Sign-in methods" subtitle="Connect a second account to keep access if your usual sign-in stops working.">
+      {linkMessage&&<p className="notice" role="status">{linkMessage}</p>}
+      {(linked==="google"||linked==="microsoft")&&linkedProviders.some(i=>i.provider===linked)&&
+        <p className="notice ok" role="status">{linked==="google"?"Google":"Microsoft"} is linked. You can use it to sign in to this workspace.</p>}
+      <Table headers={["Method","Email","Connected","Last used",""]} rows={activeIdentities.map(i=>[
+        i.provider==="email_otp"?(i.email===backup?.original_email?"Backup email":"Email verification code"):i.provider==="google"?"Google":"Microsoft",
+        i.email??"—",
+        stamp(i.linked_at),
+        stamp(i.last_authenticated_at),
+        activeIdentities.length>1&&info.reauthenticated?<Action run={async()=>{
+          await request("/me/identities/"+i.id,"DELETE",{});refreshAll();
+        }}>Remove</Action>:null
+      ])} empty="No active sign-in methods found."/>
+      {pendingLink?<div className="code-step">
+        <p>Confirm your email to continue connecting {pendingLink==="google"?"Google":"Microsoft"}.</p>
+        {verifyByEmail}
+        <button className="button" type="button" onClick={()=>{setPendingLink(undefined);setReauthChallenge(undefined);}}>Cancel</button>
+      </div>:<div className="actions">
+        {(["google","microsoft"] as const).filter(p=>methods.data?.[p]&&!linkedProviders.some(i=>i.provider===p)).map(provider=>
+          <Action key={provider} primary run={async()=>{
+            try{
+              await linkUrl(provider);
+            }catch(error){
+              if(!(error instanceof RequestError)||error.code!=="AUTH_REAUTH_REQUIRED")throw error;
+              if(!mailAvailable)throw new Error("Email verification is unavailable. A connected sign-in account is needed to verify this change.");
+              setPendingLink(provider);setReauthChallenge(undefined);
+            }
+          }}>Link {provider==="google"?"Google":"Microsoft"}</Action>)}
+      </div>}
     </Panel>
-    <Panel title="Backup email" subtitle="Add an email you can access if your primary email stops working. Use it on the sign-in page to get back into this account.">
+    <Panel title="Backup email" subtitle="Receive sign-in codes at a different email address.">
       {backup&&<p><strong>{backup.original_email}</strong> <Tag>Verified</Tag></p>}
-      {!mailAvailable?<p className="muted small">Backup email setup requires email verification.</p>:
-        !info.reauthenticated?<p className="small"><a href="#verify-identity">Verify your identity</a> to {backup?"change":"add"} your backup email.</p>:
+      {!mailAvailable?<p className="muted small">{backup?"Email codes are temporarily unavailable.":"No backup email is set up. Email codes are temporarily unavailable."} {linkedProviders.length>0&&<a href="#linked-sign-in">Manage backup sign-in methods</a>}</p>:
+        !info.reauthenticated?<a className="button" href="#verify-identity">{backup?"Verify to change backup email":"Verify to add backup email"}</a>:
         backupChallenge?<div className="code-step">
           <p>Code sent to <strong>{backupChallenge.email}</strong>.</p>
           {backupChallenge.demo_code&&<p>Test code: <strong className="code">{backupChallenge.demo_code}</strong></p>}
@@ -6865,31 +6903,15 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
         </Form>}
       {backupSaved&&<p className="notice ok" role="status">Your backup email is ready to use for sign-in.</p>}
     </Panel>
-    <Panel title="Linked sign-in methods">
-      {linkMessage&&<p className="notice" role="status">{linkMessage}</p>}
-      <Table headers={["Provider","Identifier","Linked","Last used",""]} rows={activeIdentities.map(i=>[
-        i.provider==="email_otp"?(i.email===backup?.original_email?"Backup email":"Email verification code"):i.provider==="google"?"Google":"Microsoft",
-        <span>{i.email??"—"}</span>,
-        stamp(i.linked_at),
-        stamp(i.last_authenticated_at),
-        activeIdentities.length>1?<Action disabled={!info.reauthenticated} run={async()=>{
-          await request("/me/identities/"+i.id,"DELETE",{});refreshAll();
-        }}>Remove</Action>:<small className="muted">Last sign-in method</small>
-      ])} empty="No active sign-in methods found."/>
-      <div className="actions">
-        {(["google","microsoft"] as const).filter(p=>methods.data?.[p]&&!activeIdentities.some(i=>i.provider===p)).map(provider=>
-          <Action key={provider} disabled={!info.reauthenticated} run={async()=>{
-            const res=await request("/me/identities/"+provider+"/link","POST",{});
-            if(!res.authorization_url) throw new Error("Couldn't open the sign-in provider. Try again.");
-            location.assign(res.authorization_url);
-          }}>Link {provider==="google"?"Google":"Microsoft"}</Action>)}
-      </div>
-      {!info.reauthenticated&&<p className="small"><a href="#verify-identity">Verify your identity</a> to add or remove a sign-in method.</p>}
-    </Panel>
+    {mailAvailable&&!pendingLink&&<Panel id="verify-identity" title="Verify for account changes">
+      {info.reauthenticated?<p className="notice" role="status">Verified. You can update your email or remove a sign-in method.</p>:
+        <><p className="muted">Request a code before changing your email or removing a sign-in method.</p>{verifyByEmail}</>}
+    </Panel>}
     <Panel title="Primary contact &amp; sign-in email">
       <p>Current primary email: <strong>{primaryEmail}</strong></p>
       <p className="muted small">{backup?"You can verify the change using either email already on this account.":<>If you lose access to this email, use another linked sign-in method or <Link href="/account/recovery">request account recovery</Link>.</>}</p>
-      {emailChange?<div className="code-step">
+      {!mailAvailable?<p className="muted small">Changing your primary email requires email codes. Email codes are temporarily unavailable.</p>:
+      emailChange?<div className="code-step">
         <p>Check <strong>{emailChange.verification_email}</strong> and <strong>{emailChange.new_email}</strong> for the two codes.</p>
         {(emailChange.current_demo_code||emailChange.new_demo_code)&&<p className="small">
           Current code: <span className="code">{emailChange.current_demo_code}</span> · New code: <span className="code">{emailChange.new_demo_code}</span>
@@ -6907,7 +6929,8 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
           <Field name="new_code" label="Code sent to new email"/>
         </Form>
         <button type="button" onClick={()=>setEmailChange(undefined)}>Cancel email change</button>
-      </div>:<Form label="Send verification codes" disabled={!mailAvailable||!info.reauthenticated} run={async f=>{
+      </div>:!info.reauthenticated?<a className="button" href="#verify-identity">Verify to change primary email</a>:
+      <Form label="Send verification codes" run={async f=>{
         const newEmail=text(f,"new_email");
         const res=await request("/me/email-change/request","POST",{new_email:newEmail,verification_email_id:text(f,"verification_email_id")||undefined});
         setEmailChange({new_email:newEmail,...res});

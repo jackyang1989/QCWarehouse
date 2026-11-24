@@ -241,8 +241,9 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
       if(oid[2]==="start") return redirect(await startProvider(provider,browser,next),[cookie("qcw_browser",browser,3600),clear]);
       const result=await finishProvider(provider,url,browser,actor,hash(getCookie(req,"session")));
       const destination=customerDestination(result.next);
-      if(result.state==="linked") return redirect(destination??"/account/security",[clear]);
-      if(result.state==="link_failed"||result.state==="link_cancelled"||result.state==="link_conflict") {
+      if(result.state==="link_continue") return redirect(result.authorization_url,[clear]);
+      if(result.state==="linked") return redirect("/account/security?linked="+result.provider,[clear]);
+      if(result.state==="link_failed"||result.state==="link_cancelled"||result.state==="link_conflict"||result.state==="link_wrong_account") {
         return redirect("/account/security?oauth="+result.state,[clear]);
       }
       if(!("secret" in result)) {

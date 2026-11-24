@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto";
 import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
 import sharp from "sharp";
@@ -65,6 +65,7 @@ class Client {
       const match=c.match(/^([^=]+)=([^;]*)/);
       if(match)this.jar.set(match[1],match[2]);
     }
+    if(response.status===303&&expected===303) return {location:response.headers.get("location")};
     if(response.headers.get("content-type")?.startsWith("application/pdf")) {
       assert.equal(response.status,expected,path);
       return {pdf:Buffer.from(await response.arrayBuffer()),disposition:response.headers.get("content-disposition")};
@@ -3316,6 +3317,86 @@ test("bilingual tracking freshness, out-of-order callbacks, manual translation r
     revision:curTracker.revision,carrier_code:"sf",tracking_no:staffWaybill,reason:"Verified physical SF label over ZTO sticker.",
   });
   assert.equal(staffCorrected.tracking_no,staffWaybill);
+});
+
+test("Microsoft linking confirms the current Google identity and signs in to the original account without email",async t=>{
+  const {c,registration,email}=await signCustomer();
+  const {c:another}=await signCustomer();
+  const {attachExternalIdentity}=await import("../packages/core/auth");
+  const googleIssuer="https://accounts.google.com";
+  const microsoftOrigin="https://login.microsoftonline.com";
+  const personalTenant="9188040d-6c67-4c5b-b112-36a304b66dad";
+  const googleIdentity={provider:"google",issuer:googleIssuer,subject:"google-"+randomUUID(),email};
+  await transaction(db=>attachExternalIdentity(db,registration.user_id,googleIdentity));
+
+  const env={QCW_DEMO:"0",EMAIL_FROM:undefined,GOOGLE_CLIENT_ID:"google-fixture",
+    GOOGLE_CLIENT_SECRET:"google-fixture-secret",MICROSOFT_CLIENT_ID:"microsoft-fixture",
+    MICROSOFT_CLIENT_SECRET:"microsoft-fixture-secret"};
+  for(const [key,value] of Object.entries(env)) {
+    const previous=process.env[key];
+    t.after(()=>{if(previous===undefined)delete process.env[key];else process.env[key]=previous;});
+    if(value===undefined)delete process.env[key];else process.env[key]=value;
+  }
+  const {privateKey,publicKey}=generateKeyPairSync("rsa",{modulusLength:2048});
+  const keys=[{...publicKey.export({format:"jwk"}),kid:"fixture-key",alg:"RS256",use:"sig"}];
+  const tokens=new Map<string,string>();
+  t.mock.method(globalThis,"fetch",async(input:RequestInfo|URL,init?:RequestInit)=>{
+    const url=new URL(String(input));
+    const google=url.origin===googleIssuer;
+    assert(google||url.origin===microsoftOrigin,"External network is disabled in this fixture.");
+    if(url.pathname.endsWith("/.well-known/openid-configuration")) return Response.json({
+      issuer:google?googleIssuer:microsoftOrigin+"/"+personalTenant+"/v2.0",
+      authorization_endpoint: url.origin+(google?"/o/oauth2/v2/auth":"/consumers/oauth2/v2.0/authorize"),
+      token_endpoint:url.origin+"/token",jwks_uri:url.origin+"/keys",id_token_signing_alg_values_supported:["RS256"],
+    });
+    if(url.pathname==="/keys")return Response.json({keys});
+    assert.equal(url.pathname,"/token");
+    const code=new URLSearchParams(String(init?.body)).get("code");
+    const id_token=tokens.get(code??"");
+    assert(id_token);
+    return Response.json({access_token:"fixture-access",token_type:"Bearer",id_token});
+  });
+  const grant=(url:URL,subject:string,overrides:Record<string,unknown>={})=>{
+    const google=url.origin===googleIssuer;
+    const now=Math.floor(Date.now()/1000);
+    const encode=(data:object)=>Buffer.from(JSON.stringify(data)).toString("base64url");
+    const jwt=[encode({alg:"RS256",kid:"fixture-key"}),encode({
+      sub:subject,iat:now,exp:now+600,nonce:url.searchParams.get("nonce"),email,
+      iss:google?googleIssuer:microsoftOrigin+"/"+personalTenant+"/v2.0",
+      aud:google?"google-fixture":"microsoft-fixture",...(google?{email_verified:true}:{tid:personalTenant}),...overrides,
+    })].join(".");
+    const code=randomUUID();
+    tokens.set(code,jwt+"."+sign("sha256",Buffer.from(jwt),privateKey).toString("base64url"));
+    return "/auth/"+(google?"google":"microsoft")+"/callback?"+new URLSearchParams({code,state:url.searchParams.get("state")!});
+  };
+  const start=async()=>new URL((await c.fetch("/me/identities/microsoft/link",{})).authorization_url);
+  assert.equal((await c.fetch("/auth/providers")).email,false);
+  await another.fetch("/me/identities/microsoft/link",{},"POST",403);
+  const wrong=await start();
+  assert.equal(wrong.origin,googleIssuer);
+  assert.equal(wrong.searchParams.get("prompt"),"select_account");
+  const rejected=await c.fetch(grant(wrong,"unlinked-google-subject"),undefined,"GET",303);
+  assert.equal(rejected.location,"/account/security?oauth=link_wrong_account");
+  const badNonce=await start();
+  assert.equal((await c.fetch(grant(badNonce,googleIdentity.subject,{nonce:"incorrect"}),undefined,"GET",303)).location,
+    "/account/security?oauth=link_failed");
+
+  const confirmation=grant(await start(),googleIdentity.subject);
+  await another.fetch(confirmation,undefined,"GET",303);
+  const next=await c.fetch(confirmation,undefined,"GET",303);
+  assert.equal(new URL(next.location).origin,microsoftOrigin);
+  assert.equal((await c.fetch("/me/identities")).reauthenticated,false);
+
+  const msSubject="microsoft-"+randomUUID();
+  const targetCallback=grant(new URL(next.location),msSubject);
+  assert.equal((await c.fetch(targetCallback,undefined,"GET",303)).location,"/account/security?linked=microsoft");
+  assert.equal((await c.fetch("/me/identities")).identities.filter((i:{provider:string})=>i.provider==="microsoft").length,1);
+  assert.match((await c.fetch(targetCallback,undefined,"GET",303)).location,/oauth=failed/);
+
+  const relogin=new Client();
+  const login=(await relogin.fetch("/auth/microsoft/start",undefined,"GET",303)).location;
+  assert.equal((await relogin.fetch(grant(new URL(login),msSubject),undefined,"GET",303)).location,"/account");
+  assert.equal((await relogin.fetch("/me/receiving-address")).receiving_code,registration.receiving_code);
 });
 
 test("verified backup email signs in to the original account and can replace an inaccessible primary email",async()=>{
