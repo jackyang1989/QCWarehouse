@@ -80,7 +80,7 @@ async function session(db: DB, userId: string, kind: Actor["kind"], mfa = false)
     [uuid(),kind,hash(secret),interval,mfa,userId]);
   return secret;
 }
-type Identity = { provider: string; issuer: string; subject: string; email: string };
+type Identity = { provider: string; issuer: string; subject: string; email: string; providerEmail?: string };
 type IdentityAccount = { id:string; identity_id:string; status:string; staff:boolean; identity_status:string };
 async function findIdentityAccount(db: DB, {provider,issuer,subject,email}: Identity) {
   return (await db.query<IdentityAccount>(`select u.id,i.id identity_id,u.status,i.status identity_status,
@@ -114,16 +114,16 @@ async function signInIdentity(db: DB, identity: Identity, browser: string, allow
     guard(current?.id===account.id,"ACCOUNT_UNAVAILABLE","This account is unavailable.",403);
     requireActiveIdentity(current);
     guard(!current.staff || (allowDemoStaff && isDemo() && email.endsWith("@qcw.test")), "STAFF_LOGIN_REQUIRED", "Use the staff sign-in page.",403);
-    await db.query(`update auth_identities set last_authenticated_at=now()
-      where id=$1`,[current.identity_id]);
+    await db.query(`update auth_identities set last_authenticated_at=now(),provider_email=coalesce($2,provider_email)
+      where id=$1`,[current.identity_id,identity.providerEmail??null]);
     return { state: "signed_in" as const, secret: await session(db,account.id,account.staff ? "staff" : "customer", !!account.staff), kind: account.staff ? "staff" : "customer" };
   }
   // Provider email is never used to attach a new identity to an existing account.
   const existing = (await db.query("select 1 from user_emails where normalized_email=$1 and login_enabled",[email])).rowCount;
   guard(!existing,"IDENTITY_LINK_REQUIRED","Sign in using your existing method to link a new identity.");
   const secret = token();
-  await db.query(`insert into pending_registrations(token_hash,email,provider,issuer,subject,browser_hash,expires_at)
-    values($1,$2,$3,$4,$5,$6,now()+interval '20 minutes')`,[hash(secret),email,provider,issuer,subject,hash(browser)]);
+  await db.query(`insert into pending_registrations(token_hash,email,provider,issuer,subject,browser_hash,expires_at,provider_email)
+    values($1,$2,$3,$4,$5,$6,now()+interval '20 minutes',$7)`,[hash(secret),email,provider,issuer,subject,hash(browser),identity.providerEmail??null]);
   return {state:"onboarding" as const,secret,kind:"customer"};
 }
 export type OtpPurpose = "signin" | "register" | "link" | "change_email" | "change_email_new" | "backup_email" | "recovery" | "recovery_status" | "reauth";
@@ -283,7 +283,7 @@ export async function updateCustomerPreferences(db:DB,actor:Actor,input:Partial<
 export async function completeRegistration(secret:string,browser:string,termsIds:string[]) {
   return transaction(async db=>{
     const tokenHash=hash(secret);
-    const pending = await one<Identity & {completed_user_id:string|null}>(db,`select * from pending_registrations
+    const pending = await one<Identity & {completed_user_id:string|null}>(db,`select *,provider_email as "providerEmail" from pending_registrations
       where token_hash=$1 and browser_hash=$2 and expires_at>now() for update`,[tokenHash,hash(browser)]);
     await lockIdentity(db,pending);
     if(pending.provider!=="email_otp") await lock(db,"email:"+pending.email);
@@ -322,7 +322,8 @@ export async function completeRegistration(secret:string,browser:string,termsIds
       values($1,$2::text,($2::text)::citext,now(),true,true) returning id`,[userId,pending.email]);
     await addEmailOtpIdentity(db,userId,email.id);
     if (pending.provider!=="email_otp") {
-      await db.query("insert into auth_identities(user_id,provider,issuer,subject,status,linked_at) values($1,$2,$3,$4,'active',now())",[userId,pending.provider,pending.issuer,pending.subject]);
+      await db.query(`insert into auth_identities(user_id,provider,issuer,subject,status,linked_at,provider_email)
+        values($1,$2,$3,$4,'active',now(),$5)`,[userId,pending.provider,pending.issuer,pending.subject,pending.providerEmail??null]);
     }
     await db.query("insert into account_consents(user_id,terms_version_id,accepted_at,source) select $1,unnest($2::uuid[]),now(),'registration'",[userId,termsIds]);
     await db.query("update pending_registrations set completed_user_id=$2 where token_hash=$1",[tokenHash,userId]);
@@ -342,54 +343,80 @@ async function providerConfig(provider:OidcProvider) {
   const config=await oidc.discovery(new URL(issuer),clientId,clientSecret);
   return {config,callback};
 }
-type ProviderLink = { userId:string; sessionHash:string; confirmFor?:OidcProvider; confirmedBy?:string };
+type ProviderAction = { userId:string; sessionHash:string; confirmFor?:OidcProvider; confirmedBy?:string; refreshIdentityId?:string };
 const securityReturnPath="/account/security";
 
-export async function startProvider(provider:OidcProvider,browser:string,returnPath:string|null,link?:ProviderLink) {
+export async function startProvider(provider:OidcProvider,browser:string,returnPath:string|null,action?:ProviderAction) {
   const {config,callback}=await providerConfig(provider);
   const verifier=oidc.randomPKCECodeVerifier(),state=oidc.randomState(),nonce=oidc.randomNonce();
+  const intent=action?.refreshIdentityId?"account_email":action?.confirmFor?"link_confirmation":action?"link":"signin";
   await pool.query(`insert into auth_transactions(state_digest,provider,intent,initiator_user_id,browser_binding_hash,nonce_digest,verifier_ciphertext,return_path,expires_at)
     values($1,$2,$3,$4,$5,$6,$7,$8,now()+interval '10 minutes')`,
-    [hash(state),provider,link?.confirmFor?"link_confirmation":link?"link":"signin",link?.userId??null,hash(browser),hash(nonce),
-      seal(JSON.stringify({verifier,nonce,sessionHash:link?.sessionHash,confirmFor:link?.confirmFor,confirmedBy:link?.confirmedBy})),returnPath]);
+    [hash(state),provider,intent,action?.userId??null,hash(browser),hash(nonce),
+      seal(JSON.stringify({verifier,nonce,...action})),returnPath]);
   return oidc.buildAuthorizationUrl(config,{
     redirect_uri:callback,scope:"openid email profile",
     state,nonce,code_challenge:await oidc.calculatePKCECodeChallenge(verifier),code_challenge_method:"S256",
-    ...(link?{prompt:"select_account"}:{}),
+    ...(action?{prompt:"select_account"}:{}),
   }).href;
 }
 
-async function requireActiveLinkSession(db:DB,actor:Actor,sessionHash:string) {
+async function requireActiveProviderSession(db:DB,actor:Actor,sessionHash:string) {
   const active=(await db.query(`select s.id from sessions s join users u on u.id=s.user_id
     where s.token_hash=$1 and s.user_id=$2 and s.kind='customer' and s.revoked_at is null
       and s.expires_at>now() and s.auth_version=u.auth_version and u.status in ('active','restricted')
     for share of s`,[sessionHash,actor.id])).rowCount;
-  guard(active,"LINK_SESSION_EXPIRED","Your session changed. Start linking again from account settings.",403);
+  guard(active,"LINK_SESSION_EXPIRED","Your session changed. Start again from account settings.",403);
+}
+
+export async function startProviderAccountRefresh(db:DB,actor:Actor,sessionHash:string,browser:string,identityId:string) {
+  organization(actor);
+  const {provider}=await one<{provider:OidcProvider}>(db,`select provider from auth_identities
+    where id=$1 and user_id=$2 and status='active' and provider in ('google','microsoft')`,[identityId,actor.id]);
+  return {authorization_url:await startProvider(provider,browser,securityReturnPath,{userId:actor.id,sessionHash,refreshIdentityId:identityId})};
 }
 
 export async function finishProvider(provider:OidcProvider,url:URL,browser:string,actor:Actor|null,sessionHash:string) {
   const state=url.searchParams.get("state") ?? "";
   const tx=await one<{verifier_ciphertext:Buffer;return_path:string|null;intent:string;initiator_user_id:string|null}>(pool as unknown as DB,`update auth_transactions set consumed_at=now()
-    where state_digest=$1 and provider=$2 and intent in ('signin','link','link_confirmation')
+    where state_digest=$1 and provider=$2 and intent in ('signin','link','link_confirmation','account_email')
       and browser_binding_hash=$3 and consumed_at is null and expires_at>now()
     returning verifier_ciphertext,return_path,intent,initiator_user_id`,[hash(state),provider,hash(browser)]);
   const next=tx.return_path;
   const link=tx.intent==="link"||tx.intent==="link_confirmation";
+  const refresh=tx.intent==="account_email";
+  if(refresh&&url.searchParams.has("error"))return {state:"account_refresh_cancelled" as const,next};
   if(url.searchParams.has("error")) return {state:link?"link_cancelled" as const:"cancelled" as const,next};
   try {
-    if(link) {
-      const binding=JSON.parse(unseal(tx.verifier_ciphertext)) as Partial<ProviderLink>;
+    if(link||refresh) {
+      const binding=JSON.parse(unseal(tx.verifier_ciphertext)) as Partial<ProviderAction>;
       guard(actor?.kind==="customer"&&actor.id===tx.initiator_user_id&&binding.sessionHash===sessionHash,
         "AUTH_TRANSACTION_INVALID","Restart linking from account settings.",403);
       const verified=await verifyOidcClaims(provider,url,state,tx.verifier_ciphertext,true);
+      if(refresh) {
+        await transaction(async db=>{
+          await one(db,"select id from users where id=$1 for update",[actor.id]);
+          await requireActiveProviderSession(db,actor,sessionHash);
+          const identity=await findIdentityAccount(db,verified);
+          guard(identity?.id===actor.id&&identity.identity_id===binding.refreshIdentityId&&identity.identity_status==="active",
+            "LINK_WRONG_ACCOUNT","Choose the account shown in your sign-in methods.",403);
+          if(verified.providerEmail) {
+            await db.query("update auth_identities set provider_email=$2 where id=$1",[identity.identity_id,verified.providerEmail]);
+            await audit(db,actor,"refresh_provider_account","auth_identities",identity.identity_id,{provider});
+          }
+        });
+        return {state:verified.providerEmail?"account_refreshed" as const:"account_email_unavailable" as const,next};
+      }
       if(tx.intent==="link_confirmation") {
         const target=binding.confirmFor;
         guard(target&&target!==provider,"AUTH_TRANSACTION_INVALID","Start linking again from account settings.",403);
         const confirmed=await transaction(async db=>{
-          await requireActiveLinkSession(db,actor,sessionHash);
+          await one(db,"select id from users where id=$1 for update",[actor.id]);
+          await requireActiveProviderSession(db,actor,sessionHash);
           const identity=await findIdentityAccount(db,verified);
           guard(identity?.id===actor.id&&identity.identity_status==="active",
             "LINK_WRONG_ACCOUNT","Choose the sign-in account already linked to this workspace.",403);
+          if(verified.providerEmail)await db.query("update auth_identities set provider_email=$2 where id=$1",[identity.identity_id,verified.providerEmail]);
           await audit(db,actor,"confirm_provider_link","auth_identities",identity.identity_id,{target});
           return identity.identity_id;
         });
@@ -400,7 +427,7 @@ export async function finishProvider(provider:OidcProvider,url:URL,browser:strin
       await transaction(async db=>{
         const linked=await attachExternalIdentity(db,actor.id,verified);
         if(binding.confirmedBy) {
-          await requireActiveLinkSession(db,actor,sessionHash);
+          await requireActiveProviderSession(db,actor,sessionHash);
           const source=(await db.query(`select id from auth_identities where id=$1 and user_id=$2
             and provider<>$3 and provider in ('google','microsoft') and status='active'`,
           [binding.confirmedBy,actor.id,provider])).rowCount;
@@ -415,6 +442,7 @@ export async function finishProvider(provider:OidcProvider,url:URL,browser:strin
     const result=await verifyProviderIdentity(provider,url,browser,state,tx.verifier_ciphertext);
     return {...result,next};
   } catch(error) {
+    if(refresh) return {state:error instanceof Problem&&error.code==="LINK_WRONG_ACCOUNT"?"link_wrong_account" as const:"account_refresh_failed" as const,next};
     if(link) {
       if(error instanceof Problem&&error.code==="IDENTITY_ALREADY_LINKED") return {state:"link_conflict" as const,next};
       if(error instanceof Problem&&error.code==="LINK_WRONG_ACCOUNT") return {state:"link_wrong_account" as const,next};
@@ -438,7 +466,9 @@ async function verifyOidcClaims(provider:OidcProvider,url:URL,state:string,encry
       "PROVIDER_IDENTITY_INVALID","Use a personal Microsoft account.",400);
   }
   const email=typeof claims.email==="string" ? claims.email.trim().toLowerCase() : "";
-  return {provider,issuer:claims.iss,subject:claims.sub,email,emailVerified:claims.email_verified===true};
+  const providerEmail=[email,claims.preferred_username].find((value):value is string=>
+    typeof value==="string"&&value.length<=320&&/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value));
+  return {provider,issuer:claims.iss,subject:claims.sub,email,providerEmail,emailVerified:claims.email_verified===true};
 }
 
 async function verifyProviderIdentity(provider:OidcProvider,url:URL,browser:string,state:string,encrypted:Buffer) {
@@ -563,7 +593,7 @@ export async function listIdentities(db:DB,actor:Actor,sessionHash:string) {
   const user=await one<{status:string;display_name:string|null}>(db,"select status,display_name from users where id=$1",[actor.id]);
   const sess=(await db.query<{reauth_ok:boolean}>(`select coalesce(reauth_at>now()-interval '10 minutes',false) reauth_ok
     from sessions where token_hash=$1 and user_id=$2 and revoked_at is null`,[sessionHash,actor.id])).rows[0];
-  const identities=(await db.query(`select i.id,i.provider,i.issuer,i.status,i.linked_at,i.last_authenticated_at,e.original_email as email
+  const identities=(await db.query(`select i.id,i.provider,i.issuer,i.status,i.linked_at,i.last_authenticated_at,i.provider_email,e.original_email as email
     from auth_identities i left join user_emails e on e.id=i.email_id
     where i.user_id=$1 and i.status='active' order by i.linked_at asc`,[actor.id])).rows;
   const emails=(await db.query(`select id,original_email,normalized_email::text as normalized_email,verified_at,is_primary,login_enabled,delivery_state
@@ -581,15 +611,16 @@ export async function attachExternalIdentity(db:DB,userId:string,identity:Identi
   )).rows[0];
   if(existing) {
     guard(existing.user_id===userId,"IDENTITY_ALREADY_LINKED","This sign-in method cannot be linked to this account.",409);
-    await db.query("update auth_identities set status='active',linked_at=now(),last_authenticated_at=now() where id=$1",[existing.id]);
+    await db.query(`update auth_identities set status='active',linked_at=now(),last_authenticated_at=now(),
+      provider_email=coalesce($2,provider_email) where id=$1`,[existing.id,identity.providerEmail??null]);
     await db.query("insert into account_security_events(user_id,actor_id,identity_id,kind,outcome,request_id) values($1,$1,$2,'identity_linked','succeeded',$3)",
       [userId,existing.id,uuid()]);
     return {id:existing.id,provider:identity.provider,status:"active"};
   }
   const inserted=await one<{id:string}>(db,
-    `insert into auth_identities(user_id,provider,issuer,subject,status,linked_at,last_authenticated_at)
-     values($1,$2,$3,$4,'active',now(),now()) returning id`,
-    [userId,identity.provider,identity.issuer,identity.subject]
+    `insert into auth_identities(user_id,provider,issuer,subject,status,linked_at,last_authenticated_at,provider_email)
+     values($1,$2,$3,$4,'active',now(),now(),$5) returning id`,
+    [userId,identity.provider,identity.issuer,identity.subject,identity.providerEmail??null]
   );
   await db.query("insert into account_security_events(user_id,actor_id,identity_id,kind,outcome,request_id) values($1,$1,$2,'identity_linked','succeeded',$3)",
     [userId,inserted.id,uuid()]);

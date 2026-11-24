@@ -3388,15 +3388,37 @@ test("Microsoft linking confirms the current Google identity and signs in to the
   assert.equal((await c.fetch("/me/identities")).reauthenticated,false);
 
   const msSubject="microsoft-"+randomUUID();
-  const targetCallback=grant(new URL(next.location),msSubject);
+  const msEmail="microsoft-"+randomUUID()+"@qcw.test";
+  const targetCallback=grant(new URL(next.location),msSubject,{email:undefined,preferred_username:msEmail});
   assert.equal((await c.fetch(targetCallback,undefined,"GET",303)).location,"/account/security?linked=microsoft");
-  assert.equal((await c.fetch("/me/identities")).identities.filter((i:{provider:string})=>i.provider==="microsoft").length,1);
+  const methods=await c.fetch("/me/identities");
+  const microsoft=methods.identities.find((i:{provider:string})=>i.provider==="microsoft");
+  assert.equal(microsoft.provider_email,msEmail);
+  assert.equal(methods.identities.find((i:{provider:string})=>i.provider==="google").provider_email,email);
+  assert.equal(methods.emails.length,1);
+  assert.equal(methods.emails[0].original_email,email);
   assert.match((await c.fetch(targetCallback,undefined,"GET",303)).location,/oauth=failed/);
+
+  // Existing links without a saved display email can refresh the same identity.
+  await pool.query("update auth_identities set provider_email=null where id=$1",[microsoft.id]);
+  const refreshPath="/me/identities/"+microsoft.id+"/refresh-account";
+  await another.fetch(refreshPath,{},"POST",404);
+  const refresh=async()=>new URL((await c.fetch(refreshPath,{})).authorization_url);
+  assert.equal((await c.fetch(grant(await refresh(),"wrong-microsoft"),undefined,"GET",303)).location,
+    "/account/security?oauth=link_wrong_account");
+  const validRefresh=grant(await refresh(),msSubject,{email:msEmail});
+  assert.equal((await c.fetch(validRefresh,undefined,"GET",303)).location,"/account/security?oauth=account_refreshed");
+  const refreshed=await c.fetch("/me/identities");
+  assert.equal(refreshed.identities.find((i:{id:string})=>i.id===microsoft.id).provider_email,msEmail);
+  assert.equal(refreshed.reauthenticated,false);
+  assert.equal(refreshed.emails.length,1);
 
   const relogin=new Client();
   const login=(await relogin.fetch("/auth/microsoft/start",undefined,"GET",303)).location;
-  assert.equal((await relogin.fetch(grant(new URL(login),msSubject),undefined,"GET",303)).location,"/account");
+  const updatedEmail="new-"+msEmail;
+  assert.equal((await relogin.fetch(grant(new URL(login),msSubject,{email:updatedEmail}),undefined,"GET",303)).location,"/account");
   assert.equal((await relogin.fetch("/me/receiving-address")).receiving_code,registration.receiving_code);
+  assert.equal((await relogin.fetch("/me/identities")).identities.find((i:{id:string})=>i.id===microsoft.id).provider_email,updatedEmail);
 });
 
 test("verified backup email signs in to the original account and can replace an inaccessible primary email",async()=>{

@@ -5,7 +5,7 @@ import addFormats from "ajv-formats";
 import { parse } from "yaml";
 import { z } from "zod";
 import { transaction, pool, type DB } from "../db";
-import { actorFrom, appOrigin, closeCustomerAccount, completeRegistration, confirmBackupEmail, confirmEmailChange, cookie, csrfCookie, csrfTokenFor, currentTerms, customerPreferences, decideAccountRecovery, demoSwitchAccount, executeAccountRecovery, finishProvider, getCookie, linkProviderIdentity, listIdentities, listSessions, pendingProvider, publicPolicy, readAccountRecoveryStatus, readRecoveryProgress, reportDownloadSignature, reportShareToken, requestAccountRecovery, requestBackupEmail, requestEmailChange, revokeOtherSessions, revokeSession, runOtpVerification, staffSignIn, staffUpdateUserRoles, staffUpdateUserStatus, startCustomerReauth, startOtp, startProvider, unlinkIdentity, updateCustomerPreferences, verifyCsrfToken, verifyCustomerReauth, verifyOtp, verifyReportDownload } from "./auth";
+import { actorFrom, appOrigin, closeCustomerAccount, completeRegistration, confirmBackupEmail, confirmEmailChange, cookie, csrfCookie, csrfTokenFor, currentTerms, customerPreferences, decideAccountRecovery, demoSwitchAccount, executeAccountRecovery, finishProvider, getCookie, linkProviderIdentity, listIdentities, listSessions, pendingProvider, publicPolicy, readAccountRecoveryStatus, readRecoveryProgress, reportDownloadSignature, reportShareToken, requestAccountRecovery, requestBackupEmail, requestEmailChange, revokeOtherSessions, revokeSession, runOtpVerification, staffSignIn, staffUpdateUserRoles, staffUpdateUserStatus, startCustomerReauth, startOtp, startProvider, startProviderAccountRefresh, unlinkIdentity, updateCustomerPreferences, verifyCsrfToken, verifyCustomerReauth, verifyOtp, verifyReportDownload } from "./auth";
 import { Problem, audit, guard, hash, idempotent, isDemo, one, organization, role, uuid, type Actor } from "./common";
 import { integrationPreflight, signInMethods } from "./integrations";
 import { failedJobs, retryFailedJob } from "./worker";
@@ -243,6 +243,7 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
       const destination=customerDestination(result.next);
       if(result.state==="link_continue") return redirect(result.authorization_url,[clear]);
       if(result.state==="linked") return redirect("/account/security?linked="+result.provider,[clear]);
+      if(result.state.startsWith("account_")) return redirect("/account/security?oauth="+result.state,[clear]);
       if(result.state==="link_failed"||result.state==="link_cancelled"||result.state==="link_conflict"||result.state==="link_wrong_account") {
         return redirect("/account/security?oauth="+result.state,[clear]);
       }
@@ -330,6 +331,15 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const body=z.union([z.object({challenge_id:idSchema,code:z.string().regex(/^\d{6}$/)}),z.strictObject({})]).parse(await input(req));
     const result=await runOtpVerification(db=>idempotent(db,a.id+":"+path,key,body,
       ()=>linkProviderIdentity(db,a,hash(getCookie(req,"session")),browser,provider,body)));
+    return json(result,200,[cookie("qcw_browser",browser,3600)]);
+  }
+  const refreshIdentityRoute=path.match(/^\/me\/identities\/([a-f0-9-]{36})\/refresh-account$/i);
+  if(method==="POST" && refreshIdentityRoute) {
+    csrf(req);
+    const actorForRefresh=actorRequired(actor);
+    const identityId=idSchema.parse(refreshIdentityRoute[1]);
+    const browser=browserKey(req);
+    const result=await transaction(db=>startProviderAccountRefresh(db,actorForRefresh,hash(getCookie(req,"session")),browser,identityId));
     return json(result,200,[cookie("qcw_browser",browser,3600)]);
   }
   const deleteIdentityRoute=path.match(/^\/me\/identities\/([a-f0-9-]{36})$/i);

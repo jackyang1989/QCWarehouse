@@ -1257,4 +1257,6 @@ CREATE TABLE IF NOT EXISTS ocr_candidates (
 
 CREATE INDEX IF NOT EXISTS ocr_candidates_job_idx ON ocr_candidates(job_id, sort_index);
 
+ALTER TABLE auth_identities ADD COLUMN provider_email varchar(320);
+
 COMMIT;

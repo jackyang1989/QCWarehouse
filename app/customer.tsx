@@ -6786,7 +6786,6 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
   const router=useRouter();
   const search=useSearchParams();
   const oauth=search.get("oauth");
-  const linked=search.get("linked");
   const stamp=useWorkspaceStamp();
   const identities=useLoad("/me/identities");
   const sessions=useLoad("/me/sessions");
@@ -6808,6 +6807,15 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
   const backup=emails.find(e=>!e.is_primary&&e.login_enabled&&e.verified_at);
   const linkedProviders=activeIdentities.filter(identity=>identity.provider==="google"||identity.provider==="microsoft");
   const mailAvailable=methods.data?.email||methods.data?.demo;
+  const availableProviders=linkedProviders.filter(identity=>methods.data?.[identity.provider]);
+  const emailSignIns=activeIdentities.filter(identity=>identity.provider==="email_otp");
+  const primarySignIn=emailSignIns.find(identity=>identity.email===primaryEmail);
+  const backupSignIn=emailSignIns.find(identity=>identity.email===backup?.original_email);
+  const signInNames=[...new Set(availableProviders.map(i=>i.provider==="google"?"Google":"Microsoft"))];
+  const hasEmailBackup=Boolean(mailAvailable&&backupSignIn);
+  const backupStatus=signInNames.length===2?"Backup sign-in is ready. Use Google or Microsoft to access this workspace.":
+    hasEmailBackup&&(signInNames.length>0||primarySignIn)?"Backup sign-in is ready. You can also use a code sent to your backup email.":
+    "Connect a second account to keep access if your usual sign-in stops working.";
   const verifyDestination=backup&&<label>Send a code to<select name="verification_email_id" required>
     {primary?.verified_at&&<option value={primary.id}>{primaryEmail} (primary)</option>}
     <option value={backup.id}>{backup.original_email} (backup)</option>
@@ -6815,7 +6823,16 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
   const linkMessage=oauth==="link_cancelled"?"Sign-in method linking was cancelled. You can try again here.":
     oauth==="link_conflict"?"This sign-in method is already linked to another account.":
     oauth==="link_wrong_account"?"Choose the account that is already linked to this workspace, then try again.":
-    oauth==="link_failed"?"We couldn't complete the connection. Start again below.":"";
+    oauth==="link_failed"?"We couldn't complete the connection. Start again below.":
+    oauth==="account_refreshed"?"Linked account email updated.":
+    oauth==="account_email_unavailable"?"The provider did not share an email address for this account.":
+    oauth==="account_refresh_failed"?"Couldn't read the linked account email. Try again.":
+    oauth==="account_refresh_cancelled"?"Updating the linked account email was cancelled.":"";
+  function removeSignIn(identity:Row|undefined) {
+    return identity&&activeIdentities.length>1&&info?.reauthenticated?<Action run={async()=>{
+      await request("/me/identities/"+identity.id,"DELETE",{});refreshAll();
+    }}>{identity.provider==="email_otp"?"Remove email sign-in":"Remove"}</Action>:null;
+  }
   function linkUrl(provider:"google"|"microsoft") {
     return request("/me/identities/"+provider+"/link","POST",{}).then(result=>{
       if(!result.authorization_url) throw new Error("Couldn't open the sign-in provider. Try again.");
@@ -6849,19 +6866,16 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
       </div>
     </div>
     {info?.status==="restricted"&&<div className="notice" role="alert"><strong>Account restricted:</strong> New orders, payments, and outbound instructions are temporarily paused while your existing orders and support cases remain accessible.</div>}
-    <Panel id="linked-sign-in" title="Sign-in methods" subtitle="Connect a second account to keep access if your usual sign-in stops working.">
+    <Panel id="linked-sign-in" title="Sign-in methods" subtitle={backupStatus}>
       {linkMessage&&<p className="notice" role="status">{linkMessage}</p>}
-      {(linked==="google"||linked==="microsoft")&&linkedProviders.some(i=>i.provider===linked)&&
-        <p className="notice ok" role="status">{linked==="google"?"Google":"Microsoft"} is linked. You can use it to sign in to this workspace.</p>}
-      <Table headers={["Method","Email","Connected","Last used",""]} rows={activeIdentities.map(i=>[
-        i.provider==="email_otp"?(i.email===backup?.original_email?"Backup email":"Email verification code"):i.provider==="google"?"Google":"Microsoft",
-        i.email??"—",
-        stamp(i.linked_at),
-        stamp(i.last_authenticated_at),
-        activeIdentities.length>1&&info.reauthenticated?<Action run={async()=>{
-          await request("/me/identities/"+i.id,"DELETE",{});refreshAll();
-        }}>Remove</Action>:null
-      ])} empty="No active sign-in methods found."/>
+      <Table headers={["Method","Connected account",""]} rows={linkedProviders.map(i=>[
+        <strong>{i.provider==="google"?"Google":"Microsoft"}</strong>,
+        i.provider_email??(methods.data?.[i.provider]?<Action sm run={async()=>{
+          const result=await request("/me/identities/"+i.id+"/refresh-account","POST",{});
+          location.assign(result.authorization_url);
+        }}>Show account email</Action>:<span className="muted">Email unavailable</span>),
+        removeSignIn(i),
+      ])} empty="No Google or Microsoft account is connected."/>
       {pendingLink?<div className="code-step">
         <p>Confirm your email to continue connecting {pendingLink==="google"?"Google":"Microsoft"}.</p>
         {verifyByEmail}
@@ -6879,38 +6893,13 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
           }}>Link {provider==="google"?"Google":"Microsoft"}</Action>)}
       </div>}
     </Panel>
-    <Panel title="Backup email" subtitle="Receive sign-in codes at a different email address.">
-      {backup&&<p><strong>{backup.original_email}</strong> <Tag>Verified</Tag></p>}
-      {!mailAvailable?<p className="muted small">{backup?"Email codes are temporarily unavailable.":"No backup email is set up. Email codes are temporarily unavailable."} {linkedProviders.length>0&&<a href="#linked-sign-in">Manage backup sign-in methods</a>}</p>:
-        !info.reauthenticated?<a className="button" href="#verify-identity">{backup?"Verify to change backup email":"Verify to add backup email"}</a>:
-        backupChallenge?<div className="code-step">
-          <p>Code sent to <strong>{backupChallenge.email}</strong>.</p>
-          {backupChallenge.demo_code&&<p>Test code: <strong className="code">{backupChallenge.demo_code}</strong></p>}
-          <Form label="Verify backup email" idempotent run={async(f,key)=>{
-            await request("/me/backup-email/confirm","POST",{challenge_id:backupChallenge.challenge_id,code:text(f,"code")},key);
-            setBackupChallenge(undefined);setEditingBackup(false);setBackupSaved(true);refreshAll();
-          }}>
-            <label>Verification code<input name="code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" required/></label>
-          </Form>
-          <button className="button" type="button" onClick={()=>setBackupChallenge(undefined)}>Change email or request another code</button>
-        </div>:backup&&!editingBackup?<button className="button" type="button" onClick={()=>{setBackupSaved(false);setEditingBackup(true);}}>Change backup email</button>:
-        <Form label="Send code to backup email" run={async f=>{
-          const email=text(f,"email");
-          const challenge=await request("/me/backup-email/request","POST",{email});
-          setBackupChallenge({email,...challenge});
-        }}>
-          <Field name="email" label="Backup email address" type="email" required/>
-        </Form>}
-      {backupSaved&&<p className="notice ok" role="status">Your backup email is ready to use for sign-in.</p>}
-    </Panel>
     {mailAvailable&&!pendingLink&&<Panel id="verify-identity" title="Verify for account changes">
       {info.reauthenticated?<p className="notice" role="status">Verified. You can update your email or remove a sign-in method.</p>:
         <><p className="muted">Request a code before changing your email or removing a sign-in method.</p>{verifyByEmail}</>}
     </Panel>}
-    <Panel title="Primary contact &amp; sign-in email">
-      <p>Current primary email: <strong>{primaryEmail}</strong></p>
-      <p className="muted small">{backup?"You can verify the change using either email already on this account.":<>If you lose access to this email, use another linked sign-in method or <Link href="/account/recovery">request account recovery</Link>.</>}</p>
-      {!mailAvailable?<p className="muted small">Changing your primary email requires email codes. Email codes are temporarily unavailable.</p>:
+    <Panel title="Email addresses">
+      <p>Primary email <strong>{primaryEmail}</strong> {removeSignIn(primarySignIn)}</p>
+      {!mailAvailable?<p className="muted small">Email sign-in codes and email changes are temporarily unavailable.</p>:
       emailChange?<div className="code-step">
         <p>Check <strong>{emailChange.verification_email}</strong> and <strong>{emailChange.new_email}</strong> for the two codes.</p>
         {(emailChange.current_demo_code||emailChange.new_demo_code)&&<p className="small">
@@ -6938,6 +6927,30 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
         <Field name="new_email" label="New primary email address" type="email"/>
         {verifyDestination}
       </Form>}
+    {(mailAvailable||backup)&&<div className="top-gap">
+      <h3>Backup email for codes</h3>
+      {backup&&<p><strong>{backup.original_email}</strong> <Tag>Verified</Tag> {removeSignIn(backupSignIn)}</p>}
+      {mailAvailable&&(!info.reauthenticated?<a className="button" href="#verify-identity">{backup?"Verify to change backup email":"Verify to add backup email"}</a>:
+        backupChallenge?<div className="code-step">
+          <p>Code sent to <strong>{backupChallenge.email}</strong>.</p>
+          {backupChallenge.demo_code&&<p>Test code: <strong className="code">{backupChallenge.demo_code}</strong></p>}
+          <Form label="Verify backup email" idempotent run={async(f,key)=>{
+            await request("/me/backup-email/confirm","POST",{challenge_id:backupChallenge.challenge_id,code:text(f,"code")},key);
+            setBackupChallenge(undefined);setEditingBackup(false);setBackupSaved(true);refreshAll();
+          }}>
+            <label>Verification code<input name="code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" required/></label>
+          </Form>
+          <button className="button" type="button" onClick={()=>setBackupChallenge(undefined)}>Change email or request another code</button>
+        </div>:backup&&!editingBackup?<button className="button" type="button" onClick={()=>{setBackupSaved(false);setEditingBackup(true);}}>Change backup email</button>:
+        <Form label="Send code to backup email" run={async f=>{
+          const email=text(f,"email");
+          const challenge=await request("/me/backup-email/request","POST",{email});
+          setBackupChallenge({email,...challenge});
+        }}>
+          <Field name="email" label="Backup email address" type="email" required/>
+        </Form>)}
+      {backupSaved&&<p className="notice ok" role="status">Your backup email is ready to use for sign-in.</p>}
+    </div>}
     </Panel>
     <Panel title="Active device sessions">
       <Table headers={["Session","Created","Last active","Expires",""]} rows={(sessions.data?.sessions??[]).map((s:Row)=>[
