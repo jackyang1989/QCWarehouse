@@ -2426,8 +2426,8 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
   await other.page.getByText("This charge is unavailable.").waitFor();
   assert.equal(await other.page.locator("#charge-"+chargeId).count(),0);
 
-  await page.goto("/account/security");
-  await page.getByLabel("Display name").fill("Browser fixture name");
+  await page.goto("/account");
+  await page.getByLabel("Profile name").fill("Browser fixture name");
   await page.getByLabel("Display time zone").fill("Pacific/Honolulu");
   await page.getByRole("button",{name:"Save display preferences"}).click();
   await page.getByText("Display preferences saved.").waitFor();
@@ -2438,7 +2438,7 @@ async function verifyWorkspace(customer,other,profile,otherProfile) {
   }).format(new Date(createdAt));
   await page.goto("/orders/"+orderNumber);
   await page.getByText(displayed,{exact:true}).first().waitFor();
-  await page.goto("/account/security");
+  await page.goto("/account");
   await page.waitForFunction(()=>document.querySelector('input[name="timezone"]')?.value==="Pacific/Honolulu");
 
   const trackingNo="SF"+randomUUID().slice(0,8).toUpperCase();

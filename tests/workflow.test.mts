@@ -3318,6 +3318,66 @@ test("bilingual tracking freshness, out-of-order callbacks, manual translation r
   assert.equal(staffCorrected.tracking_no,staffWaybill);
 });
 
+test("verified backup email signs in to the original account and can replace an inaccessible primary email",async()=>{
+  const {c,registration,email}=await signCustomer();
+  const {c:other,email:otherEmail}=await signCustomer();
+  const backup="backup-"+randomUUID()+"@qcw.test";
+  const replacement="backup-"+randomUUID()+"@qcw.test";
+  const reauth=async(client:Client,emailId?:string)=>{
+    const proof=await client.fetch("/auth/reauth/start",{email_id:emailId},"POST",202);
+    await client.fetch("/auth/reauth/verify",{challenge_id:proof.challenge_id,code:proof.demo_code});
+  };
+  await c.fetch("/me/backup-email/request",{email:backup},"POST",403);
+  await reauth(c);
+  await reauth(other);
+  await c.fetch("/me/backup-email/request",{email},"POST",409);
+  await c.fetch("/me/backup-email/request",{email:otherEmail},"POST",409);
+  const proof=await c.fetch("/me/backup-email/request",{email:backup},"POST",202);
+  const input={challenge_id:proof.challenge_id,code:proof.demo_code};
+  const wrongCode=proof.demo_code==="000000"?"000001":"000000";
+  await c.fetch("/me/backup-email/confirm",{...input,code:wrongCode},"POST",400);
+  assert.equal((await pool.query("select attempts from verification_challenges where id=$1",[proof.challenge_id])).rows[0].attempts,1);
+  await other.fetch("/me/backup-email/confirm",input,"POST",400);
+  await c.fetch("/auth/otp/verify",input,"POST",400);
+  const otherProof=await other.fetch("/me/backup-email/request",{email:backup},"POST",202);
+  const key=randomUUID();
+  assert.equal((await c.fetch("/me/backup-email/confirm",input,"POST",200,key)).backup_email,backup);
+  await c.fetch("/me/backup-email/confirm",input,"POST",200,key);
+  await c.fetch("/me/backup-email/confirm",input,"POST",400);
+  await other.fetch("/me/backup-email/confirm",{challenge_id:otherProof.challenge_id,code:otherProof.demo_code},"POST",409);
+
+  const backupDevice=new Client();
+  assert.equal((await backupDevice.login(backup.toUpperCase())).state,"signed_in");
+  assert.equal((await backupDevice.fetch("/me/receiving-address")).receiving_code,registration.receiving_code);
+  const linked=await backupDevice.fetch("/me/identities");
+  const backupId=linked.emails.find((row:{original_email:string})=>row.original_email===backup).id;
+  const foreignEmailId=(await other.fetch("/me/identities")).emails[0].id;
+  await backupDevice.fetch("/auth/reauth/start",{email_id:foreignEmailId},"POST",409);
+  await reauth(backupDevice,backupId);
+  const nextEmail="primary-"+randomUUID()+"@qcw.test";
+  const change=await backupDevice.fetch("/me/email-change/request",{new_email:nextEmail,verification_email_id:backupId},"POST",202);
+  assert.equal(change.verification_email,backup);
+  await backupDevice.fetch("/me/email-change/confirm",{
+    current_challenge_id:change.current_challenge_id,current_code:change.current_demo_code,
+    new_challenge_id:change.new_challenge_id,new_code:change.new_demo_code,
+  });
+  await c.fetch("/me",undefined,"GET",401);
+  const nextDevice=new Client();
+  assert.equal((await nextDevice.login(nextEmail)).state,"signed_in");
+  assert.equal((await nextDevice.fetch("/me/receiving-address")).receiving_code,registration.receiving_code);
+  assert((await nextDevice.fetch("/me/identities")).emails.some((row:{id:string;login_enabled:boolean})=>row.id===backupId&&row.login_enabled));
+  assert.equal((await new Client().login(email)).state,"onboarding");
+
+  const replacementOtp=await backupDevice.fetch("/me/backup-email/request",{email:replacement},"POST",202);
+  await backupDevice.fetch("/me/backup-email/confirm",{challenge_id:replacementOtp.challenge_id,code:replacementOtp.demo_code});
+  await nextDevice.fetch("/me",undefined,"GET",401);
+  const updated=await backupDevice.fetch("/me/identities");
+  assert.deepEqual(updated.emails.filter((row:{is_primary:boolean;login_enabled:boolean})=>!row.is_primary&&row.login_enabled)
+    .map((row:{original_email:string})=>row.original_email),[replacement]);
+  await pool.query("update verification_challenges set expires_at=now()-interval '2 hours' where target_email=$1",[backup]);
+  assert.equal((await new Client().login(backup)).state,"onboarding");
+});
+
 test("account security, identity linking, email change, dual-control recovery, restriction/closure, and payment email deep links (TASK-167, TASK-168, TASK-050)",async()=>{
   const admin=await staffLogin("admin");
   const {c,registration,terms,email}=await signCustomer();
@@ -3419,6 +3479,7 @@ test("account security, identity linking, email change, dual-control recovery, r
   const recoveryClient=new Client();
   const recoveryEmail="recovered-"+randomUUID()+"@qcw.test";
   const recOtp=await recoveryClient.fetch("/auth/otp/request",{email:recoveryEmail,purpose:"recovery"},"POST",202);
+  await recoveryClient.fetch("/auth/recovery/status",{challenge_id:recOtp.challenge_id,code:recOtp.demo_code},"POST",400);
   const recSubmitted=await recoveryClient.fetch("/auth/recovery/request",{
     challenge_id:recOtp.challenge_id,
     code:recOtp.demo_code,
@@ -3431,6 +3492,27 @@ test("account security, identity linking, email change, dual-control recovery, r
     "/auth/recovery/status?"+new URLSearchParams({request_id:recSubmitted.request_id,token:recSubmitted.status_token})
   );
   assert.equal(statusOpen.state,"pending_review");
+
+  // An unauthenticated customer can return on a new device with the verified new inbox.
+  const progressClient=new Client();
+  const progressOtp=await progressClient.fetch("/auth/otp/request",{email:recoveryEmail,purpose:"recovery_status"},"POST",202);
+  const progressBody={challenge_id:progressOtp.challenge_id,code:progressOtp.demo_code};
+  await recoveryClient.fetch("/auth/recovery/status",progressBody,"POST",400);
+  const wrongCode=progressOtp.demo_code==="000000"?"000001":"000000";
+  await progressClient.fetch("/auth/recovery/status",{...progressBody,code:wrongCode},"POST",400);
+  const attemptCount=await pool.query("select attempts from verification_challenges where id=$1",[progressOtp.challenge_id]);
+  assert.equal(attemptCount.rows[0].attempts,1);
+  await progressClient.fetch("/auth/otp/verify",progressBody,"POST",400);
+  const progress=await progressClient.fetch("/auth/recovery/status",progressBody);
+  assert.equal(progress.requests.length,1);
+  assert.equal(progress.requests[0].state,"pending_review");
+  assert.deepEqual(Object.keys(progress.requests[0]).sort(),["execute_after","reference","state","submitted_at"]);
+  await progressClient.fetch("/auth/recovery/status",progressBody,"POST",400);
+  await progressClient.fetch("/me",undefined,"GET",401);
+  const otherInbox="other-"+randomUUID()+"@qcw.test";
+  const otherOtp=await progressClient.fetch("/auth/otp/request",{email:otherInbox,purpose:"recovery_status"},"POST",202);
+  const otherProgress=await progressClient.fetch("/auth/recovery/status",{challenge_id:otherOtp.challenge_id,code:otherOtp.demo_code});
+  assert.deepEqual(otherProgress.requests,[]);
 
   // Support staff performs first-stage review
   const step1=await supportStaff.fetch(`/staff/account-recoveries/${recSubmitted.request_id}/approve`,{

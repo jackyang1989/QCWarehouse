@@ -55,6 +55,9 @@ export function PublicInquiry() {
             <p style={{ marginBottom: 18 }}>
               Ask pre-order questions about apparel checkpoints, request custom batch pricing for 100+ items, inquire about planned product categories, or connect with support regarding an active order.
             </p>
+            <p>
+              Email support at <a href="mailto:support@qcwarehouse.com">support@qcwarehouse.com</a>.
+            </p>
             <div className="row flexwrap" style={{ gap: 10 }}>
               <Link className="button primary" href="/orders/new">
                 Start Self-Serve Order →

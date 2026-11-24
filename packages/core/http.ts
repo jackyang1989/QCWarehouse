@@ -5,7 +5,7 @@ import addFormats from "ajv-formats";
 import { parse } from "yaml";
 import { z } from "zod";
 import { transaction, pool, type DB } from "../db";
-import { actorFrom, appOrigin, closeCustomerAccount, completeRegistration, confirmEmailChange, cookie, csrfCookie, csrfTokenFor, currentTerms, customerPreferences, decideAccountRecovery, demoSwitchAccount, executeAccountRecovery, finishProvider, getCookie, linkProviderIdentity, listIdentities, listSessions, pendingProvider, publicPolicy, readAccountRecoveryStatus, reportDownloadSignature, reportShareToken, requestAccountRecovery, requestEmailChange, revokeOtherSessions, revokeSession, staffSignIn, staffUpdateUserRoles, staffUpdateUserStatus, startCustomerReauth, startOtp, startProvider, unlinkIdentity, updateCustomerPreferences, verifyCsrfToken, verifyCustomerReauth, verifyOtp, verifyReportDownload } from "./auth";
+import { actorFrom, appOrigin, closeCustomerAccount, completeRegistration, confirmBackupEmail, confirmEmailChange, cookie, csrfCookie, csrfTokenFor, currentTerms, customerPreferences, decideAccountRecovery, demoSwitchAccount, executeAccountRecovery, finishProvider, getCookie, linkProviderIdentity, listIdentities, listSessions, pendingProvider, publicPolicy, readAccountRecoveryStatus, readRecoveryProgress, reportDownloadSignature, reportShareToken, requestAccountRecovery, requestBackupEmail, requestEmailChange, revokeOtherSessions, revokeSession, runOtpVerification, staffSignIn, staffUpdateUserRoles, staffUpdateUserStatus, startCustomerReauth, startOtp, startProvider, unlinkIdentity, updateCustomerPreferences, verifyCsrfToken, verifyCustomerReauth, verifyOtp, verifyReportDownload } from "./auth";
 import { Problem, audit, guard, hash, idempotent, isDemo, one, organization, role, uuid, type Actor } from "./common";
 import { integrationPreflight, signInMethods } from "./integrations";
 import { failedJobs, retryFailedJob } from "./worker";
@@ -239,9 +239,12 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const next=oid[2]==="start"?customerDestination(url.searchParams.get("next")):null;
     try {
       if(oid[2]==="start") return redirect(await startProvider(provider,browser,next),[cookie("qcw_browser",browser,3600),clear]);
-      const result=await finishProvider(provider,url,browser);
+      const result=await finishProvider(provider,url,browser,actor,hash(getCookie(req,"session")));
       const destination=customerDestination(result.next);
       if(result.state==="linked") return redirect(destination??"/account/security",[clear]);
+      if(result.state==="link_failed"||result.state==="link_cancelled"||result.state==="link_conflict") {
+        return redirect("/account/security?oauth="+result.state,[clear]);
+      }
       if(!("secret" in result)) {
         return redirect(withDestination("/login?oauth="+result.state,destination),[clear]);
       }
@@ -254,13 +257,13 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   }
   if(method==="POST" && path==="/auth/otp/request") {
     csrf(req,"origin_only");
-    const {email,purpose}=z.object({email:emailSchema,purpose:z.enum(["signin","recovery","link"]).optional()}).parse(await input(req));
+    const {email,purpose}=z.object({email:emailSchema,purpose:z.enum(["signin","recovery","recovery_status","link"]).optional()}).parse(await input(req));
     const otpPurpose=purpose??"signin";
     if(otpPurpose==="link") csrf(req,"session");
     const browser=browserKey(req);
     let identity:ReturnType<typeof pendingProvider>;
     try {
-      identity=pendingProvider(getCookie(req,"qcw_provider"),email,browser);
+      if(otpPurpose==="signin"||otpPurpose==="link") identity=pendingProvider(getCookie(req,"qcw_provider"),email,browser);
     } catch (error) {
       if(!(error instanceof Problem)) throw error;
       return json({error:{code:error.code,message:error.message}},error.status,[cookie("qcw_provider","",0)]);
@@ -283,7 +286,8 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   if(method==="POST" && path==="/auth/reauth/start") {
     csrf(req);
     const browser=browserKey(req);
-    return json(await startCustomerReauth(actorRequired(actor),browser),202,[cookie("qcw_browser",browser,3600)]);
+    const {email_id}=z.object({email_id:idSchema.optional()}).parse(await input(req));
+    return json(await startCustomerReauth(actorRequired(actor),browser,email_id),202,[cookie("qcw_browser",browser,3600)]);
   }
   if(method==="POST" && path==="/auth/reauth/verify") {
     csrf(req);
@@ -300,8 +304,13 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
       previous_email:emailSchema,
       details:z.string().trim().min(4).max(2000),
     }).parse(await input(req));
-    return json(await transaction(db=>idempotent(db,"recovery:"+hash(browser),key,body,
+    return json(await runOtpVerification(db=>idempotent(db,"recovery:"+hash(browser),key,body,
       ()=>requestAccountRecovery(db,browser,body))),201,[cookie("qcw_browser",browser,3600)]);
+  }
+  if(method==="POST" && path==="/auth/recovery/status") {
+    csrf(req,"origin_only");
+    const body=z.object({challenge_id:idSchema,code:z.string().regex(/^\d{6}$/)}).parse(await input(req));
+    return json(await runOtpVerification(db=>readRecoveryProgress(db,getCookie(req,"qcw_browser"),body)));
   }
   if(method==="GET" && path==="/auth/recovery/status") {
     const requestId=idSchema.parse(url.searchParams.get("request_id"));
@@ -315,26 +324,47 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   if(method==="POST" && linkIdentityRoute) {
     const provider=linkIdentityRoute[1] as "google"|"microsoft";
     const browser=browserKey(req);
-    return extraWrite(req,path,actor,z.object({challenge_id:idSchema.optional(),code:z.string().regex(/^\d{6}$/).optional()}),
-      (db,a,b)=>linkProviderIdentity(db,a,hash(getCookie(req,"session")),browser,provider,b));
+    csrf(req);
+    const a=actorRequired(actor),key=idSchema.parse(req.headers.get("idempotency-key"));
+    const body=z.union([z.object({challenge_id:idSchema,code:z.string().regex(/^\d{6}$/)}),z.strictObject({})]).parse(await input(req));
+    const result=await runOtpVerification(db=>idempotent(db,a.id+":"+path,key,body,
+      ()=>linkProviderIdentity(db,a,hash(getCookie(req,"session")),browser,provider,body)));
+    return json(result,200,[cookie("qcw_browser",browser,3600)]);
   }
   const deleteIdentityRoute=path.match(/^\/me\/identities\/([a-f0-9-]{36})$/i);
   if(method==="DELETE" && deleteIdentityRoute) {
     return extraWrite(req,path,actor,z.object({}),
       (db,a)=>unlinkIdentity(db,a,idSchema.parse(deleteIdentityRoute[1]),hash(getCookie(req,"session"))));
   }
+  if(method==="POST" && path==="/me/backup-email/request") {
+    csrf(req);
+    const browser=browserKey(req);
+    const {email}=z.object({email:emailSchema}).parse(await input(req));
+    return json(await requestBackupEmail(actorRequired(actor),hash(getCookie(req,"session")),email,browser),202,[cookie("qcw_browser",browser,3600)]);
+  }
+  if(method==="POST" && path==="/me/backup-email/confirm") {
+    csrf(req);
+    const a=actorRequired(actor),key=idSchema.parse(req.headers.get("idempotency-key"));
+    const body=z.object({challenge_id:idSchema,code:z.string().regex(/^\d{6}$/)}).parse(await input(req));
+    return json(await runOtpVerification(db=>idempotent(db,a.id+":"+path,key,body,
+      ()=>confirmBackupEmail(db,a,hash(getCookie(req,"session")),getCookie(req,"qcw_browser"),body))));
+  }
   if(method==="POST" && path==="/me/email-change/request") {
     csrf(req);
     const browser=browserKey(req);
-    const {new_email}=z.object({new_email:emailSchema}).parse(await input(req));
-    return json(await requestEmailChange(actorRequired(actor),hash(getCookie(req,"session")),new_email,browser),202,[cookie("qcw_browser",browser,3600)]);
+    const {new_email,verification_email_id}=z.object({new_email:emailSchema,verification_email_id:idSchema.optional()}).parse(await input(req));
+    return json(await requestEmailChange(actorRequired(actor),hash(getCookie(req,"session")),new_email,browser,verification_email_id),202,[cookie("qcw_browser",browser,3600)]);
   }
   if(method==="POST" && path==="/me/email-change/confirm") {
     const browser=getCookie(req,"qcw_browser");
-    return extraWrite(req,path,actor,z.object({
+    csrf(req);
+    const a=actorRequired(actor),key=idSchema.parse(req.headers.get("idempotency-key"));
+    const body=z.object({
       current_challenge_id:idSchema,current_code:z.string().regex(/^\d{6}$/),
       new_challenge_id:idSchema,new_code:z.string().regex(/^\d{6}$/),
-    }),(db,a,b)=>confirmEmailChange(db,a,hash(getCookie(req,"session")),browser,b));
+    }).parse(await input(req));
+    return json(await runOtpVerification(db=>idempotent(db,a.id+":"+path,key,body,
+      ()=>confirmEmailChange(db,a,hash(getCookie(req,"session")),browser,body))));
   }
   if(method==="GET" && path==="/me/sessions") {
     return json(await transaction(db=>listSessions(db,actorRequired(actor),hash(getCookie(req,"session")))));

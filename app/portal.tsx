@@ -29,7 +29,7 @@ import { canOpenStaffPage, customerDestination, customerTabs, staffHome, staffTa
 
 import type { Actor } from "../packages/core/common";
 
-export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:string;target:string;route:PortalRoute;actor:Actor|null;demo?:boolean;timeZone?:string}) {
+export function Portal({path,target,route,actor:a,demo=false,timeZone,customerAccount}:{path:string;target:string;route:PortalRoute;actor:Actor|null;demo?:boolean;timeZone?:string;customerAccount?:string}) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const menuToggle=useRef<HTMLButtonElement>(null);
@@ -183,6 +183,10 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone}:{path:str
       </div>
       <span className="topspacer"/>
       <div className="header-right">
+        {!isStaff&&a.kind==="customer"&&<Link className="workspace-account" href="/account/security" aria-current={path==="/account/security"?"page":undefined}>
+          <strong title={customerAccount}>{customerAccount??"Account"}</strong>
+          <span>Sign-in methods &amp; security</span>
+        </Link>}
         {isStaff && staffRoleSummary && <Tag tone="blue">岗位：{staffRoleSummary}</Tag>}
         {isStaff && <QuickSwitch active={route.area as "customer"|"warehouse"|"admin"} actor={a} demo={demo}/>}
         {demo&&isStaff&&<Tag tone="outline">演示模式</Tag>}

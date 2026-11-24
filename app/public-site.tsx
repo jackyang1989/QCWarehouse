@@ -2234,6 +2234,56 @@ const LEGAL_TITLES: Record<string, string> = {
   report_notice: "Inspection Report Limitations",
 };
 
+function PolicyText({ id, content, showContents }: { id: string; content: string; showContents: boolean }) {
+  const introduction: string[] = [];
+  const sections: Array<{ title: string; paragraphs: string[] }> = [];
+  let paragraphs = introduction;
+
+  for (const block of content.replace(/\r\n/g, "\n").trim().split(/\n[\t ]*\n+/)) {
+    const heading = block.match(/^#{2,6}[\t ]+([^\n]+)(?:\n|$)/) ?? block.match(/^(\d+\.[\t ]+[^\n]+)$/);
+    if (heading) {
+      paragraphs = [];
+      sections.push({ title: heading[1].trim(), paragraphs });
+      const remainder = block.slice(heading[0].length);
+      if (remainder) paragraphs.push(remainder);
+    } else if (block) {
+      paragraphs.push(block);
+    }
+  }
+
+  const hasContents = showContents && sections.length > 1;
+  const sectionId = (index: number) => `policy-${id}-section-${index + 1}`;
+  const links = sections.map(({ title }, index) => (
+    <li key={sectionId(index)}><a href={`#${sectionId(index)}`}>{title}</a></li>
+  ));
+
+  return (
+    <div className={`policy-reading${hasContents ? " policy-reading-with-contents" : ""}`}>
+      {hasContents && (
+        <details className="policy-contents-mobile">
+          <summary>On this page</summary>
+          <nav aria-label="Policy sections"><ul>{links}</ul></nav>
+        </details>
+      )}
+      <div className="policy-article">
+        {introduction.map((paragraph, index) => <p className="policy-content" key={index}>{paragraph}</p>)}
+        {sections.map(({ title, paragraphs }, index) => (
+          <section className="policy-section" key={sectionId(index)} aria-labelledby={sectionId(index)}>
+            <h3 id={sectionId(index)} tabIndex={-1}>{title}</h3>
+            {paragraphs.map((paragraph, paragraphIndex) => <p className="policy-content" key={paragraphIndex}>{paragraph}</p>)}
+          </section>
+        ))}
+      </div>
+      {hasContents && (
+        <nav className="policy-contents-desktop" aria-label="Policy sections">
+          <p>On this page</p>
+          <ul>{links}</ul>
+        </nav>
+      )}
+    </div>
+  );
+}
+
 export function PublicLegal({ path }: { path: string }) {
   const kind = legalPages[path as keyof typeof legalPages];
   const query = useSearchParams();
@@ -2297,7 +2347,7 @@ export function PublicLegal({ path }: { path: string }) {
           <p className="muted small">
             Version {t.version} · Effective <time dateTime={t.effective_at}>{t.effective_at.slice(0, 10)} UTC</time>
           </p>
-          <div className="policy-content">{t.content_md}</div>
+          <PolicyText id={t.id} content={t.content_md} showContents={Boolean(kind)} />
         </Panel>
       ))}
     </>
