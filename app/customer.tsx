@@ -6811,11 +6811,6 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
   const primaryEmail=primary?.original_email??"—";
   const backup=emails.find(e=>!e.is_primary&&e.login_enabled&&e.verified_at);
   const linkedProviders=activeIdentities.filter(identity=>identity.provider==="google"||identity.provider==="microsoft");
-  const suggestedEmails=new Map<string,Row>();
-  for(const identity of linkedProviders) {
-    const email=identity.provider_email?.toLowerCase();
-    if(email&&email!==primary?.normalized_email&&email!==backup?.normalized_email) suggestedEmails.set(email,identity);
-  }
   const mailAvailable=methods.data?.email||methods.data?.demo;
   const availableProviders=linkedProviders.filter(identity=>methods.data?.[identity.provider]);
   const emailSignIns=activeIdentities.filter(identity=>identity.provider==="email_otp");
@@ -7035,12 +7030,6 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
           }}>
             <label>Backup email address<input name="email" type="email" autoComplete="email" maxLength={254}
               value={backupAddress} onChange={e=>setBackupAddress(e.target.value)} required/></label>
-            {suggestedEmails.size>0&&<div className="actions">
-              {[...suggestedEmails.values()].map(identity=><button key={identity.id} type="button" className="button sm"
-                onClick={()=>setBackupAddress(identity.provider_email)}>
-                Use {identity.provider==="google"?"Google":"Microsoft"} email
-              </button>)}
-            </div>}
             {backupRequestError&&<ErrorBlock error={backupRequestError}/>}
           </Form>}
           <button type="button" className="button" onClick={resetEmailEditor}>Cancel</button>
