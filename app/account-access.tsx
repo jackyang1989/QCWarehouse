@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState, type ReactNode } from "react";
+import { BRAND_NAME } from "../packages/core/brand";
 import type { SignInMethods } from "../packages/core/integrations";
 import { staffDestination, staffHome, withDestination } from "../packages/core/portal-routes";
 import { Brand } from "./chrome";
@@ -78,7 +79,7 @@ export function Login({staff,methods,next,verify,oauth}:{
   }
 
   return <section className="panel access-card" aria-labelledby="access-title">
-    <p className="eyebrow">{staff?"QCWarehouse 员工工作区":"QCWarehouse customer account"}</p>
+    <p className="eyebrow">{staff?`${BRAND_NAME} 员工工作区`:`${BRAND_NAME} customer account`}</p>
     <h1 id="access-title">{staff?"员工登录":"Sign in or create an account"}</h1>
     <p className="muted">{staff?"登录后进入已获授权的仓库或运营页面。":"Sign in to open your workspace. New customers get a personal warehouse receiving code after registration."}</p>
     {!staff&&next&&<p className="notice">You’ll return to your requested page after signing in.</p>}
@@ -213,7 +214,7 @@ export function AccountRecovery({emailAvailable}:{emailAvailable:boolean}) {
     </div>:<>
       <p className="muted">{checking?
         "Enter the email you used when you requested recovery. We'll send a verification code to that inbox so you can check your progress without signing in.":
-        "If you lost access to your Google, Microsoft, or email sign-in, use an email address you can open today. You can use an address you’ve never added to QCWarehouse. The verification code goes to this new inbox."}</p>
+        `If you lost access to your Google, Microsoft, or email sign-in, use an email address you can open today. You can use an address you’ve never added to ${BRAND_NAME}. The verification code goes to this new inbox.`}</p>
       {emailAvailable?<Form label="Send verification code" run={async f=>{
         const address=text(f,"target_email");
         setChallenge(await request("/auth/otp/request","POST",{email:address,purpose:checking?"recovery_status":"recovery"}));
@@ -236,7 +237,7 @@ export function Onboarding({next}:{next:string|null}) {
   const {data,error,reload}=useLoad("/public/terms");
   const terms=(data?.terms??[]).filter((t:{kind:string})=>t.kind==="terms"||t.kind==="privacy");
   return <section className="panel access-card" aria-labelledby="access-title">
-    <p className="eyebrow">QCWarehouse customer account</p>
+    <p className="eyebrow">{BRAND_NAME} customer account</p>
     <h1 id="access-title">Activate your receiving address</h1><p className="muted">Review the account terms to get your permanent receiving code.</p>
     {!data&&!error&&<p role="status">Loading account terms…</p>}
     {error&&<><ErrorBlock error={error}/><button type="button" onClick={reload}>Retry</button></>}

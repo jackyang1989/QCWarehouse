@@ -157,7 +157,7 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
   const groups=Object.values(filteredTasks.reduce((g:Record<string,Row[]>,t:Row)=>{(g[t.order_id]??=[]).push(t);return g;},{})) as Row[][];
   const heading={
     overview:["仓库总览","按登录员工岗位角色展示实时精确作业待办、签收催查、质检与出库队列。"],
-    intake:["收货入库","快递公司签收不等于 QCWarehouse 仓库实收。记录外箱、开箱照片与逐件实物后才能确认。"],
+    intake:["收货入库","快递公司签收不等于 QC Warehouse 仓库实收。记录外箱、开箱照片与逐件实物后才能确认。"],
     packages:["包裹详情","实物包裹与原始运单、入库事务分别保存。"],
     samples:["样品识别与建档","客户物件标识与委托明细独立管理，支持快速筛选与核身。"],
     inspection:["检查任务队列","按本人负责、未领取、QA退回与SLA超时分层派工，逐件检查与样品比较独立。"],
@@ -363,7 +363,7 @@ export function WarehouseDesk({path,actor,demo=false}:{path:string;actor:Row;dem
           </button>)}
         </div>
       </div>}
-      <section className="panel scan-panel" id="intake-waybill"><div className="section-heading"><span className="eyebrow">01 / 运单定位</span><h2>搜索卖家运单</h2><p className="muted">承运商签收不等于 QCWarehouse 实收。须核对外箱状况（完好/压扁/破损/水渍）并拍照留证。</p></div>
+      <section className="panel scan-panel" id="intake-waybill"><div className="section-heading"><span className="eyebrow">01 / 运单定位</span><h2>搜索卖家运单</h2><p className="muted">承运商签收不等于 QC Warehouse 实收。须核对外箱状况（完好/压扁/破损/水渍）并拍照留证。</p></div>
         <fieldset disabled={receiving} style={{display:"contents"}} onChange={()=>{setLookup(undefined);setLookupError("");setPackageId("");}}>
           <Form inline label="搜索" run={async f=>{
             await runTrackingLookup(text(f,"tracking"),text(f,"carrier"));

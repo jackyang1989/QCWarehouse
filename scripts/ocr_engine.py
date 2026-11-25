@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Self-hosted OCR engine for QCWarehouse using RapidOCR (ONNX PP-OCRv4), pypdf, and pypdfium2.
+Self-hosted OCR engine for QC Warehouse using RapidOCR (ONNX PP-OCRv4), pypdf, and pypdfium2.
 Runs locally without any external network call or China mainland ICP dependency.
 """
 

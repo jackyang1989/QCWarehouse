@@ -2,19 +2,39 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { BRAND_ASSETS, BRAND_NAME, BRAND_TAGLINE } from "../packages/core/brand";
 import { request } from "./ui";
 import type { Actor } from "../packages/core/common";
 
-export function Brand() {
-  return <Link className="wordmark" href="/" aria-label="QCWarehouse home">
-    <span className="mark" aria-hidden="true">
-      <svg viewBox="0 0 38 38" fill="none">
-        <path d="M19 3 33 11v16L19 35 5 27V11L19 3Z" fill="#e9effd" stroke="#2e50a2" strokeWidth="2.3"/>
-        <path d="M5 11l14 8 14-8M19 19v16" stroke="#2e50a2" strokeWidth="2.2"/>
-        <path d="m13 15 6-3.5 6 3.5v7L19 25.5 13 22v-7Z" fill="#2b63d9"/>
-      </svg>
-    </span>
-    <span>QCWarehouse</span>
+export function Brand({
+  variant = "default",
+  mode = "wordmark",
+  className,
+}: {
+  variant?: "default" | "white";
+  mode?: "wordmark" | "mark";
+  className?: string;
+} = {}) {
+  const isMark = mode === "mark";
+  const src = isMark
+    ? (variant === "white" ? BRAND_ASSETS.openQcWhite : BRAND_ASSETS.openQc)
+    : (variant === "white" ? BRAND_ASSETS.wordmarkWhite : BRAND_ASSETS.wordmark);
+  const width = isMark ? BRAND_ASSETS.iconSize : BRAND_ASSETS.width;
+  const height = isMark ? BRAND_ASSETS.iconSize : BRAND_ASSETS.height;
+  return <Link
+    className={`wordmark${isMark ? " wordmark-compact" : ""}${className ? ` ${className}` : ""}`}
+    href="/"
+    aria-label={`${BRAND_NAME} home`}
+  >
+    <img
+      className={isMark ? "brand-open-qc-img" : "brand-wordmark-img"}
+      src={src}
+      alt=""
+      width={width}
+      height={height}
+      decoding="sync"
+      loading="eager"
+    />
   </Link>;
 }
 
@@ -185,12 +205,12 @@ export function PublicFooter() {
     <div className="public-footer-inner">
       <div className="public-footer-grid">
         <div className="public-footer-brand">
-          <Brand/>
+          <Brand variant="white"/>
           <p className="public-footer-lead">
             Independent product inspection in China, supplier sample comparison, and post-inspection item routing for international e-commerce brands and small-batch buyers.
           </p>
           <p className="public-footer-boundary">
-            <strong>Service scope:</strong> QCWarehouse inspects and photographs physical samples at our China facility before international dispatch. We don&apos;t source or sell products, and factory AQL audits or laboratory certifications sit outside our scope.
+            <strong>Service scope:</strong> {BRAND_NAME} inspects and photographs physical samples at our China facility before international dispatch. We don&apos;t source or sell products, and factory AQL audits or laboratory certifications sit outside our scope.
           </p>
         </div>
         <div className="public-footer-col">
@@ -226,7 +246,7 @@ export function PublicFooter() {
         </div>
       </div>
       <div className="public-footer-bottom">
-        <span>© {new Date().getFullYear()} QCWarehouse · Independent Product Inspection in China</span>
+        <span>© {new Date().getFullYear()} {BRAND_NAME} · {BRAND_TAGLINE}</span>
         <div className="public-footer-meta">
           <Link href="/legal">All Policies</Link>
           <span aria-hidden="true">·</span>
@@ -241,7 +261,7 @@ export function PublicFooter() {
 
 export function SiteFooter() {
   return <footer className="site-footer">
-    <div><strong>QCWarehouse</strong> · Independent Product Inspection in China</div>
+    <div><strong>{BRAND_NAME}</strong> · {BRAND_TAGLINE}</div>
     <nav aria-label="Footer">
       <Link href="/faq">FAQ</Link>
       <Link href="/contact">Contact</Link>
@@ -255,7 +275,7 @@ export function SiteFooter() {
 export function InternalWorkspaceFooter({area,demo=false,timeZone="Asia/Shanghai"}:{area:"admin"|"warehouse";demo?:boolean;timeZone?:string}) {
   return <footer className="site-footer internal-footer">
     <div>
-      <strong>QCWarehouse {area==="admin"?"运营管理后台":"仓库作业工作台"}</strong>
+      <strong>{BRAND_NAME} {area==="admin"?"运营管理后台":"仓库作业工作台"}</strong>
       <span> · 时区 {timeZone} · 全操作实时写入不可变审计台账</span>
     </div>
     <div className="muted small">

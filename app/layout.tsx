@@ -1,19 +1,20 @@
 import type { Metadata } from "next";
 import "./styles.css";
 import "./marketing.css";
+import { BRAND_NAME } from "../packages/core/brand";
 import { publicSiteOrigin } from "./public-seo";
 
 export const metadata: Metadata = {
   metadataBase: new URL(publicSiteOrigin()),
   title: {
-    default: "Product Inspection & Sample Comparison in China | QCWarehouse",
-    template: "%s | QCWarehouse",
+    default: `Product Inspection & Sample Comparison in China | ${BRAND_NAME}`,
+    template: `%s | ${BRAND_NAME}`,
   },
   description:
     "China-based independent product inspection, supplier sample comparison, and Golden Sample matching for e-commerce brands and small-batch buyers. Inspect item by item before shipping internationally.",
   openGraph: {
     type: "website",
-    siteName: "QCWarehouse",
+    siteName: BRAND_NAME,
     locale: "en_US",
   },
 };

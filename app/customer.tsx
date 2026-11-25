@@ -155,10 +155,10 @@ export function Catalog({path}:{path:string}) {
   );
 
   return <>
-    <div className="breadcrumb"><Link href="/">QCWarehouse</Link> &nbsp; › &nbsp; <b>{pageTitle}</b></div>
+    <div className="breadcrumb"><Link href="/">QC Warehouse</Link> &nbsp; › &nbsp; <b>{pageTitle}</b></div>
     <section className="page-head">
       <div>
-        <p className="eyebrow">QCWAREHOUSE / INSPECTION</p>
+        <p className="eyebrow">QC WAREHOUSE / INSPECTION</p>
         <h1>{pageTitle}</h1>
         <p className="muted">{pageSub}</p>
       </div>
@@ -360,10 +360,10 @@ export function Legal({path}:{path:string}) {
   const terms:Row[]=data?.terms??[];
   const title=kind?legalTitles[kind]:"Terms & Privacy";
   return <>
-    <div className="breadcrumb"><Link href="/">QCWarehouse</Link> &nbsp; › &nbsp; <b>{title}</b></div>
+    <div className="breadcrumb"><Link href="/">QC Warehouse</Link> &nbsp; › &nbsp; <b>{title}</b></div>
     <div className="page-head">
       <div>
-        <p className="eyebrow">QCWAREHOUSE / POLICIES</p>
+        <p className="eyebrow">QC WAREHOUSE / POLICIES</p>
         <h1>{title}</h1>
         <p className="muted">Historical customer consents and the exact policy version at the point of order remain retrievable.</p>
       </div>
@@ -391,10 +391,10 @@ const customerSteps=[
 ];
 export function HowItWorks() {
   return <>
-    <div className="breadcrumb"><Link href="/">QCWarehouse</Link> &nbsp; › &nbsp; <b>How It Works</b></div>
+    <div className="breadcrumb"><Link href="/">QC Warehouse</Link> &nbsp; › &nbsp; <b>How It Works</b></div>
     <div className="page-head">
       <div>
-        <p className="eyebrow">QCWAREHOUSE / INSPECTION</p>
+        <p className="eyebrow">QC WAREHOUSE / INSPECTION</p>
         <h1>How It Works</h1>
         <p className="muted">A clear chain of custody from a seller’s parcel to a documented inspection report.</p>
       </div>
@@ -415,7 +415,7 @@ export function HowItWorks() {
       <div className="card-head"><div><h3>Who is responsible?</h3></div></div>
       <div className="tablewrap">
         <table className="tbl">
-          <thead><tr><th>Action</th><th>Customer</th><th>QCWarehouse</th></tr></thead>
+          <thead><tr><th>Action</th><th>Customer</th><th>QC Warehouse</th></tr></thead>
           <tbody>
             <tr><td>Purchase &amp; supplier payment</td><td><span className="tag blue">Responsible</span></td><td>Not provided</td></tr>
             <tr><td>Initial domestic shipment</td><td><span className="tag blue">Provide tracking</span></td><td>Track / receive</td></tr>
@@ -6638,7 +6638,7 @@ export function CustomerDesk({path,demo=false}:{path:string;demo?:boolean}) {
         <span>Page {chargePage}</span>
         {data.has_more_charges&&<Link className="button" href={billingPageHref("charge",chargePage+1)}>Next page</Link>}
       </nav>}
-    </Panel></div><div id="billing-refunds" className="billing-charge-anchor"><Panel title="Refunds" subtitle="Platform fee refunds issued by QCWarehouse. Seller refunds are handled on your seller's platform and are not shown here.">
+    </Panel></div><div id="billing-refunds" className="billing-charge-anchor"><Panel title="Refunds" subtitle="Platform fee refunds issued by QC Warehouse. Seller refunds are handled on your seller's platform and are not shown here.">
       <Table headers={["Requested","Purpose","Order","Reason","Channel / Ref","Amount","Status"]} rows={(data.refunds??[]).map((r:Row)=>{
         const isDemoRefund=r.source==="demo"||/^(demo_|re_test_)/.test(String(r.provider_ref??""));
         return [

@@ -980,7 +980,7 @@ export async function updateIntegrationProvider(
   await requireStaffMfa(db, actor, sessionHash, 15);
   await ensureIntegrationProvidersSeeded(db);
 
-  guard(input.requires_icp !== true, "ICP_POLICY_FORBIDDEN", "QCWarehouse does not support providers requiring China mainland ICP filing.", 400);
+  guard(input.requires_icp !== true, "ICP_POLICY_FORBIDDEN", "QC Warehouse does not support providers requiring China mainland ICP filing.", 400);
 
   const def = PROVIDER_MAP.get(providerKey);
   guard(def, "PROVIDER_NOT_FOUND", `Unknown provider '${providerKey}'.`, 404);

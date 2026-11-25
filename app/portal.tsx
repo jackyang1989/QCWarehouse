@@ -217,7 +217,7 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone,customerAc
               </>
             ) : (
               <>
-                <Link href="/">QCWarehouse</Link><span aria-hidden="true">›</span>
+                <Link href="/">QC Warehouse</Link><span aria-hidden="true">›</span>
                 {links[0][0]===normPath?<strong>{section}</strong>:<><Link href={links[0][0]}>{section}</Link>
                   {(currentLink||parentLink)&&<><span aria-hidden="true">›</span>{currentLink?<strong>{currentLink[1]}</strong>:<Link href={parentLink[0]}>{parentLink[1]}</Link>}</>}
                 </>}

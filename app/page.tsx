@@ -120,19 +120,19 @@ const PROCESS_STAGES = [
   },
   {
     step: "03",
-    owner: "QCWarehouse Intake",
+    owner: "QC Warehouse Intake",
     title: "Receive & Identify Each Item",
     body: "We verify physical parcel arrival independently of carrier scans, check carton condition, and tag every garment with a unique sample ID.",
   },
   {
     step: "04",
-    owner: "QCWarehouse Studio & QA",
+    owner: "QC Warehouse Studio & QA",
     title: "Inspect, Compare & Review",
     body: "Inspectors follow the approved category checklist, record flat tape measurements and defect photos, and publish an independently reviewed English report.",
   },
   {
     step: "05",
-    owner: "Your Instruction → QCWarehouse",
+    owner: "Your Instruction → QC Warehouse",
     title: "Return, Store or Forward",
     body: "Review the report online or by PDF, then issue item-by-item instructions to return to the seller, retain as a Golden Sample, or dispatch to your forwarder.",
   },
@@ -272,7 +272,7 @@ export default async function Home() {
                 <p className="pub-eyebrow">BUILT FOR OVERSEAS E-COMMERCE &amp; SMALL-BATCH BUYERS</p>
                 <h2 id="home-scenarios">What We Help You Do Before Goods Leave China</h2>
                 <p className="pub-lead">
-                  QCWarehouse is independent from your suppliers—we don&apos;t source or sell products, and we are not a 3PL warehouse or factory-floor AQL firm. Send the items you buy from Chinese sellers and get actionable evidence on every piece.
+                  QC Warehouse is independent from your suppliers—we don&apos;t source or sell products, and we are not a 3PL warehouse or factory-floor AQL firm. Send the items you buy from Chinese sellers and get actionable evidence on every piece.
                 </p>
               </div>
               <Link className="button" href="/how-it-works">
@@ -367,7 +367,7 @@ export default async function Home() {
                 <p className="pub-eyebrow">EVIDENCE-FIRST DELIVERABLES</p>
                 <h2 id="home-evidence">Inspection Evidence You Can Verify at a Glance</h2>
                 <p className="pub-lead">
-                  Instead of vague pass/fail opinions, QCWarehouse links every observation to item barcodes, metric tape-in-frame photos, coordinate-marked defects, and published report versions.
+                  Instead of vague pass/fail opinions, QC Warehouse links every observation to item barcodes, metric tape-in-frame photos, coordinate-marked defects, and published report versions.
                 </p>
               </div>
               <Link className="button primary" href="/report-guide">
@@ -596,7 +596,7 @@ export default async function Home() {
                 <p className="pub-eyebrow" style={{ color: "#93b8ff" }}>READY TO VERIFY YOUR NEXT SHIPMENT?</p>
                 <h2>Know What Arrived in China Before Paying International Freight.</h2>
                 <p>
-                  Create your free QCWarehouse account to get your dedicated China receiving address and permanent parcel code, configure your first sample comparison or small-batch inspection, and see documented measurements and photos before committing inventory overseas.
+                  Create your free QC Warehouse account to get your dedicated China receiving address and permanent parcel code, configure your first sample comparison or small-batch inspection, and see documented measurements and photos before committing inventory overseas.
                 </p>
               </div>
               <div className="pub-cta-actions">

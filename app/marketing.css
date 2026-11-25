@@ -1,5 +1,5 @@
 /* ==========================================================================
-   QCWarehouse — Public Marketing Website Styles (Scoped & Isolated)
+   QC Warehouse — Public Marketing Website Styles (Scoped & Isolated)
    Zero impact on .workspace, .workspace-sidebar, .workspace-main, or internal desks.
    ========================================================================== */
 
@@ -101,15 +101,10 @@ html:has(.public-top) {
     flex-direction: column;
     align-items: flex-start;
     justify-content: center;
-    gap: 2px;
+    gap: 4px;
   }
-  .public-top .wordmark {
-    font-size: 19px;
-    gap: 8px;
-  }
-  .public-top .mark svg {
-    width: 28px;
-    height: 28px;
+  .public-top .brand-wordmark-img {
+    width: 168px;
   }
   .public-top .workspace-context {
     max-width: none;
@@ -126,13 +121,8 @@ html:has(.public-top) {
     padding: 0 14px;
     gap: 8px;
   }
-  .public-top .wordmark {
-    font-size: 18.5px;
-    gap: 7px;
-  }
-  .public-top .mark svg {
-    width: 29px;
-    height: 29px;
+  .public-top .brand-wordmark-img {
+    width: 158px;
   }
   .public-top .workspace-context {
     display: none;
@@ -2085,11 +2075,8 @@ html:has(.public-top) {
   padding-bottom: 36px;
   border-bottom: 1px solid #1e3453;
 }
-.public-footer-brand .wordmark {
-  color: #ffffff;
-}
-.public-footer-brand .wordmark:hover {
-  color: #ffffff;
+.public-footer-brand .brand-wordmark-img {
+  width: 196px;
 }
 .public-footer-lead {
   color: #bdd0e8;
@@ -2325,13 +2312,8 @@ html:has(.public-top) {
     width: 38px;
     height: 38px;
   }
-  .public-top .wordmark {
-    font-size: 18px;
-    gap: 7px;
-  }
-  .public-top .mark svg {
-    width: 28px;
-    height: 28px;
+  .public-top .brand-wordmark-img {
+    width: clamp(114px, 34vw, 158px);
   }
   .public-top .public-header-actions {
     gap: 8px;

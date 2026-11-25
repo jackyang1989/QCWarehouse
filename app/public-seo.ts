@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { BRAND_ASSETS, BRAND_NAME } from "../packages/core/brand";
 import { orderSections, type PortalRoute } from "../packages/core/portal-routes";
 
 export function publicSiteOrigin(): string {
@@ -17,7 +18,7 @@ type RouteSeoConfig = {
 
 const PUBLIC_ROUTE_SEO: Record<string, RouteSeoConfig> = {
   "/": {
-    title: "Independent Product Inspection in China | QCWarehouse",
+    title: `Independent Product Inspection in China | ${BRAND_NAME}`,
     description:
       "Know what arrived, what was checked, and what to do next — before paying for international shipping. Individual sample & small-batch inspection, 2–3 supplier sample comparison, and Golden Sample matching in China.",
     ogImage: "/marketing/home-inspection-studio.webp",
@@ -25,7 +26,7 @@ const PUBLIC_ROUTE_SEO: Record<string, RouteSeoConfig> = {
   "/catalog": {
     title: "Inspection Services in China — Individual Sample, Small-Batch & Comparison",
     description:
-      "Compare QCWarehouse services in China: individual sample & small-batch Product Inspection (1–100+ items), side-by-side Sample Comparison (2–3 items), and Golden Sample Matching with measurements, photos & documented findings.",
+      `Compare ${BRAND_NAME} services in China: individual sample & small-batch Product Inspection (1–100+ items), side-by-side Sample Comparison (2–3 items), and Golden Sample Matching with measurements, photos & documented findings.`,
     ogImage: "/brand/inspection-hero.webp",
   },
   "/services/inspection": {
@@ -49,7 +50,7 @@ const PUBLIC_ROUTE_SEO: Record<string, RouteSeoConfig> = {
   "/categories": {
     title: "Supported Product Categories — Apparel Inspection Live Today",
     description:
-      "See what products QCWarehouse inspects today in China: approved templates for Tops & Knitwear, Leggings & Bottoms, Sports Bras & Activewear, plus planned and restricted category policies.",
+      `See what products ${BRAND_NAME} inspects today in China: approved templates for Tops & Knitwear, Leggings & Bottoms, Sports Bras & Activewear, plus planned and restricted category policies.`,
     ogImage: "/brand/inspection-hero.webp",
   },
   "/how-it-works": {
@@ -61,7 +62,7 @@ const PUBLIC_ROUTE_SEO: Record<string, RouteSeoConfig> = {
   "/report-guide": {
     title: "Sample Inspection Report — Measurements, Photos & Documented Findings",
     description:
-      "Explore an interactive demonstration QCWarehouse reviewed inspection report featuring metric tape photos, re-measurement logs, UI defect bounding boxes, side-by-side sample comparison, and scope boundaries.",
+      `Explore an interactive demonstration ${BRAND_NAME} reviewed inspection report featuring metric tape photos, re-measurement logs, UI defect bounding boxes, side-by-side sample comparison, and scope boundaries.`,
     ogImage: "/marketing/report-sample-a-chest-measure.webp",
   },
   "/pricing": {
@@ -79,33 +80,33 @@ const PUBLIC_ROUTE_SEO: Record<string, RouteSeoConfig> = {
   "/contact": {
     title: "Contact Inspection Support & Request Custom Scope",
     description:
-      "Ask QCWarehouse about apparel inspection scope, custom small-batch quantities (100+ items), category availability, or pre-order feasibility in China.",
+      `Ask ${BRAND_NAME} about apparel inspection scope, custom small-batch quantities (100+ items), category availability, or pre-order feasibility in China.`,
     ogImage: "/marketing/home-inspection-studio.webp",
   },
   "/legal": {
     title: "Terms, Privacy & Inspection Policies",
     description:
-      "Review QCWarehouse Terms of Service, Privacy Policy, Restricted Items Policy, and Inspection Report Limitations.",
+      `Review ${BRAND_NAME} Terms of Service, Privacy Policy, Restricted Items Policy, and Inspection Report Limitations.`,
   },
   "/legal/terms": {
     title: "Terms of Service",
     description:
-      "Versioned Terms of Service governing QCWarehouse physical receiving, product inspection, custody, domestic dispatch, and billing.",
+      `Versioned Terms of Service governing ${BRAND_NAME} physical receiving, product inspection, custody, domestic dispatch, and billing.`,
   },
   "/legal/privacy": {
     title: "Privacy Policy",
     description:
-      "How QCWarehouse collects, protects, and retains customer account data, supplier shipping records, and private inspection evidence.",
+      `How ${BRAND_NAME} collects, protects, and retains customer account data, supplier shipping records, and private inspection evidence.`,
   },
   "/legal/restricted-items": {
     title: "Restricted & Prohibited Items Policy",
     description:
-      "Items prohibited or restricted from delivery to the QCWarehouse China receiving center, including hazardous, regulated, and unapproved categories.",
+      `Items prohibited or restricted from delivery to the ${BRAND_NAME} China receiving center, including hazardous, regulated, and unapproved categories.`,
   },
   "/legal/report-notice": {
     title: "Inspection Report Scope & Limitations Notice",
     description:
-      "Important boundaries of QCWarehouse physical inspection reports: commissioned visual and dimensional observations vs laboratory testing, certification, and bulk factory audits.",
+      `Important boundaries of ${BRAND_NAME} physical inspection reports: commissioned visual and dimensional observations vs laboratory testing, certification, and bulk factory audits.`,
   },
 };
 
@@ -202,7 +203,7 @@ export function portalTitleForRoute(path: string, route?: PortalRoute): string {
     if (route.area === "warehouse") return "仓库作业中心";
     if (route.area === "admin") return "运营管理后台";
   }
-  return "QCWarehouse";
+  return BRAND_NAME;
 }
 
 export function metadataForPath(path: string, isPublicMarketing: boolean, route?: PortalRoute): Metadata {
@@ -227,10 +228,10 @@ export function metadataForPath(path: string, isPublicMarketing: boolean, route?
     },
     openGraph: {
       type: "website",
-      siteName: "QCWarehouse",
+      siteName: BRAND_NAME,
       locale: "en_US",
       url: canonicalUrl,
-      title: path === "/" ? seo.title : `${seo.title} | QCWarehouse`,
+      title: path === "/" ? seo.title : `${seo.title} | ${BRAND_NAME}`,
       description: seo.description,
       images: [
         {
@@ -243,7 +244,7 @@ export function metadataForPath(path: string, isPublicMarketing: boolean, route?
     },
     twitter: {
       card: "summary_large_image",
-      title: path === "/" ? seo.title : `${seo.title} | QCWarehouse`,
+      title: path === "/" ? seo.title : `${seo.title} | ${BRAND_NAME}`,
       description: seo.description,
       images: [ogImage],
     },
@@ -258,8 +259,9 @@ export function homeJsonLd() {
       {
         "@type": "Organization",
         "@id": `${origin}/#organization`,
-        name: "QCWarehouse",
+        name: BRAND_NAME,
         url: origin,
+        logo: `${origin}${BRAND_ASSETS.appIcon512}`,
         description:
           "China-based independent product inspection, supplier sample comparison, and post-inspection item handling service for international commercial buyers.",
         contactPoint: {

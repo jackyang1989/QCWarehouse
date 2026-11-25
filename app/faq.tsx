@@ -24,7 +24,7 @@ const FAQ_CATEGORIES: FaqCategory[] = [
         id: "multi-supplier",
         question: "Can I send items from multiple Chinese suppliers?",
         answer:
-          "Yes. You purchase directly from any combination of 1688, Alibaba, Taobao, or direct factories in China and have each seller ship domestically to your QCWarehouse receiving address with your personal receiving code. Register each seller’s carrier tracking number in your workspace so our intake team can match split parcels accurately.",
+          "Yes. You purchase directly from any combination of 1688, Alibaba, Taobao, or direct factories in China and have each seller ship domestically to your QC Warehouse receiving address with your personal receiving code. Register each seller’s carrier tracking number in your workspace so our intake team can match split parcels accurately.",
       },
       {
         id: "sourcing",
@@ -34,9 +34,9 @@ const FAQ_CATEGORIES: FaqCategory[] = [
       },
       {
         id: "receiving-address",
-        question: "How do I send items to the QCWarehouse China receiving center?",
+        question: "How do I send items to the QC Warehouse China receiving center?",
         answer:
-          "Create a free account to receive our China warehouse address and your permanent personal receiving code. Paste both into your supplier’s shipping details, then add the domestic courier tracking number to your order in QCWarehouse.",
+          "Create a free account to receive our China warehouse address and your permanent personal receiving code. Paste both into your supplier’s shipping details, then add the domestic courier tracking number to your order in QC Warehouse.",
       },
       {
         id: "missing-receiving-code",
@@ -78,7 +78,7 @@ const FAQ_CATEGORIES: FaqCategory[] = [
         id: "golden-sample",
         question: "Can you compare new items with my approved sample?",
         answer:
-          "Yes—through Golden Sample / Reference Matching. After an item has been inspected in QCWarehouse, you can request its conversion into a Golden Sample; our staff seals it inside secure reference sample storage. Future incoming samples can then be ordered under Reference Matching for direct physical side-by-side comparison.",
+          "Yes—through Golden Sample / Reference Matching. After an item has been inspected in QC Warehouse, you can request its conversion into a Golden Sample; our staff seals it inside secure reference sample storage. Future incoming samples can then be ordered under Reference Matching for direct physical side-by-side comparison.",
       },
       {
         id: "measurements",
@@ -90,11 +90,11 @@ const FAQ_CATEGORIES: FaqCategory[] = [
         id: "guarantee-boundaries",
         question: "Do you guarantee that the items meet my specifications or are 100% defect-free?",
         answer:
-          "No. QCWarehouse is an independent physical inspection service, not the manufacturer or an accredited laboratory. We document observable workmanship and flat measurements on the commissioned items received, and clearly state what was not tested (such as chemical fiber composition, wash shrinkage, safety certification, authenticity, or unreceived factory bulk stock).",
+          "No. QC Warehouse is an independent physical inspection service, not the manufacturer or an accredited laboratory. We document observable workmanship and flat measurements on the commissioned items received, and clearly state what was not tested (such as chemical fiber composition, wash shrinkage, safety certification, authenticity, or unreceived factory bulk stock).",
       },
       {
         id: "certification",
-        question: "Is a QCWarehouse report a laboratory test or compliance certificate?",
+        question: "Is a QC Warehouse report a laboratory test or compliance certificate?",
         answer:
           "No. Reports document non-destructive physical observations and dimensional checks at our receiving studio. Chemical composition, GSM cut-swatch tests, flammability, CPSIA/REACH compliance, and formal certifications require accredited third-party laboratories.",
       },
@@ -108,7 +108,7 @@ const FAQ_CATEGORIES: FaqCategory[] = [
         id: "before-deciding",
         question: "Can I see photos and measurements before deciding where items go?",
         answer:
-          "Yes—that is the core purpose of QCWarehouse. We publish your online English report and matching downloadable PDF (complete with metric tape photos, re-measurement logs, and red defect bounding boxes) first. You review the evidence and only then submit item-by-item return, storage, or forwarding instructions.",
+          "Yes—that is the core purpose of QC Warehouse. We publish your online English report and matching downloadable PDF (complete with metric tape photos, re-measurement logs, and red defect bounding boxes) first. You review the evidence and only then submit item-by-item return, storage, or forwarding instructions.",
       },
       {
         id: "fee-included",
@@ -144,17 +144,17 @@ const FAQ_CATEGORIES: FaqCategory[] = [
         id: "seller-returns",
         question: "Can you return defective items to the seller?",
         answer:
-          "Yes. First request return approval from your Chinese seller and obtain their domestic return address and recipient phone number. Submit those details in QCWarehouse, approve and pay the domestic return courier quote, and our team will pack the selected items, hand them to the courier, and record the outbound tracking number. Note that courier dispatch does not guarantee the seller will issue a merchandise refund.",
+          "Yes. First request return approval from your Chinese seller and obtain their domestic return address and recipient phone number. Submit those details in QC Warehouse, approve and pay the domestic return courier quote, and our team will pack the selected items, hand them to the courier, and record the outbound tracking number. Note that courier dispatch does not guarantee the seller will issue a merchandise refund.",
       },
       {
         id: "forwarding",
         question: "Do you arrange international shipping or customs clearance?",
         answer:
-          "QCWarehouse dispatches domestically within mainland China to your chosen international freight forwarder or consolidator warehouse (including your forwarder suite/member code) after you approve the domestic shipping quote. International air/sea linehaul and destination customs clearance are handled by your freight forwarder.",
+          "QC Warehouse dispatches domestically within mainland China to your chosen international freight forwarder or consolidator warehouse (including your forwarder suite/member code) after you approve the domestic shipping quote. International air/sea linehaul and destination customs clearance are handled by your freight forwarder.",
       },
       {
         id: "restricted-items",
-        question: "Which products are restricted from delivery to QCWarehouse?",
+        question: "Which products are restricted from delivery to QC Warehouse?",
         answer:
           "Hazardous materials, batteries/electronics, liquids, cosmetics, food, pressurized containers, counterfeit branded goods, and unapproved product categories must not be shipped to our facility. Review the Restricted Items Policy before ordering from suppliers.",
       },
@@ -225,7 +225,7 @@ export function FAQ() {
       />
 
       <div className="breadcrumb">
-        <Link href="/">QCWarehouse</Link>
+        <Link href="/">QC Warehouse</Link>
         <span aria-hidden="true">›</span>
         <strong>FAQ &amp; Buyer Help Center</strong>
       </div>

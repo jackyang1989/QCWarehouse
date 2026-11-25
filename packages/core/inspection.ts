@@ -1,6 +1,9 @@
+import fs from "node:fs";
+import path from "node:path";
 import { conditionMatches } from "./template-conditions";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import sharp from "sharp";
+import { BRAND_ASSETS, BRAND_NAME, BRAND_UPPERCASE } from "./brand";
 import { z } from "zod";
 import { orderOperationNotes } from "./order-operation-notes";
 import type { DB } from "../db";
@@ -1312,10 +1315,25 @@ type Snapshot={
 };
 async function renderPDF(db:DB,org:string,snapshot:Snapshot,version:number,amendReason?:string) {
   const doc=await PDFDocument.create(),font=await doc.embedFont(StandardFonts.Helvetica),bold=await doc.embedFont(StandardFonts.HelveticaBold);
-  doc.setTitle(`QC Warehouse ${snapshot.report_no}`);
+  doc.setTitle(`${BRAND_NAME} ${snapshot.report_no}`);
   const pages:ReturnType<typeof doc.addPage>[]=[];
   const newPage=()=>{const p=doc.addPage([595,842]);pages.push(p);return p;};
   let page=newPage(),y=790;
+  const wordmarkPath=path.join(process.cwd(),"public",BRAND_ASSETS.wordmark.replace(/^\//,""));
+  const embedWordmark=async()=>{
+    try{
+      if(!fs.existsSync(wordmarkPath))return false;
+      const logoImg=await doc.embedPng(fs.readFileSync(wordmarkPath));
+      const drawHeight=17;
+      const drawWidth=(logoImg.width/logoImg.height)*drawHeight;
+      page.drawImage(logoImg,{x:45,y:y-2,width:drawWidth,height:drawHeight});
+      page.drawText("| INSPECTION REPORT",{x:45+drawWidth+10,y:y+2,size:14,font:bold,color:rgb(0.01,0.07,0.16)});
+      y-=26;
+      return true;
+    }catch{
+      return false;
+    }
+  };
   const latin=(s:string)=>s
     .replace(/[\u2013\u2014]/g,"-")
     .replace(/[\u2018\u2019]/g,"'")
@@ -1395,7 +1413,9 @@ async function renderPDF(db:DB,org:string,snapshot:Snapshot,version:number,amend
     }
     y-=height+10;
   }
-  print("QC WAREHOUSE | INSPECTION REPORT",19,true);
+  if(!(await embedWordmark())) {
+    print(`${BRAND_UPPERCASE} | INSPECTION REPORT`,19,true);
+  }
   print(`${snapshot.report_no}   Version ${version}   Order ${snapshot.order_no}`,12);
   if(amendReason)print("Amendment: "+amendReason);
   print(snapshot.scope_notice||"Results relate to the inspected items and scope shown below.");y-=12;

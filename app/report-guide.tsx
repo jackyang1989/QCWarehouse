@@ -90,7 +90,7 @@ export function SampleReportPreview() {
   return (
     <figure className="report-artifact">
       <div className="report-ribbon">
-        <strong>▤ &nbsp; QCWarehouse · Sample Excerpt</strong>
+        <strong>▤ &nbsp; QC Warehouse · Sample Excerpt</strong>
         <span>DEMONSTRATION DATA</span>
       </div>
       <dl className="proof-data">
@@ -270,14 +270,14 @@ const ORIGINAL_PHOTO_EVIDENCE: LightboxItem[] = [
     code: "FRM-01 · FRONT OVERVIEW",
     title: "S39201 · Front Overview (Heather-Gray Crewneck, Size L)",
     src: "/marketing/report-sample-a-front.webp",
-    alt: "Overhead flat-lay front overview of Sample A heather-gray cotton crewneck T-shirt on the QCWarehouse inspection bench",
+    alt: "Overhead flat-lay front overview of Sample A heather-gray cotton crewneck T-shirt on the QC Warehouse inspection bench",
     caption: "Mandatory flat front frame linking Sample A to collar rib, cuffs, hem finish, and intake records.",
   },
   {
     code: "FRM-02 · BACK OVERVIEW",
     title: "S39201 · Back Overview & Half-Moon Yoke",
     src: "/marketing/report-sample-a-back.webp",
-    alt: "Overhead flat-lay back overview of Sample A heather-gray cotton crewneck T-shirt on the QCWarehouse inspection bench",
+    alt: "Overhead flat-lay back overview of Sample A heather-gray cotton crewneck T-shirt on the QC Warehouse inspection bench",
     caption: "Rear flat view captured on the identical garment, camera plane, and bench setup to confirm back jersey construction and hem finish.",
   },
   {
@@ -321,7 +321,7 @@ export function ReportGuide() {
   return (
     <>
       <div className="breadcrumb">
-        <Link href="/">QCWarehouse</Link>
+        <Link href="/">QC Warehouse</Link>
         <span aria-hidden="true">›</span>
         <strong>Sample Inspection Report</strong>
       </div>
@@ -374,7 +374,7 @@ export function ReportGuide() {
 
       {/* Honest Demonstration Disclosure */}
       <div className="line-note warning" style={{ marginBottom: 22 }} role="note">
-        <strong>Demonstration report — illustrative images and synthetic inspection data. Not an actual customer inspection.</strong> Sample IDs, parcel references, example readings (such as 55.1 cm chest width), supplier rows (Suppliers A/B/C), and illustrative photos demonstrate QCWarehouse’s report structure only; real client orders contain unaltered physical garment photographs and verified audit records.
+        <strong>Demonstration report — illustrative images and synthetic inspection data. Not an actual customer inspection.</strong> Sample IDs, parcel references, example readings (such as 55.1 cm chest width), supplier rows (Suppliers A/B/C), and illustrative photos demonstrate QC Warehouse’s report structure only; real client orders contain unaltered physical garment photographs and verified audit records.
       </div>
 
       {/* Full Printable Sample Report Sheet */}
@@ -383,7 +383,7 @@ export function ReportGuide() {
         <header className="pub-report-banner">
           <div>
             <div className="pub-eyebrow" style={{ color: "#93b8ff", marginBottom: 4 }}>
-              QCWAREHOUSE · INDEPENDENT PRODUCT INSPECTION IN CHINA
+              QC WAREHOUSE · INDEPENDENT PRODUCT INSPECTION IN CHINA
             </div>
             <h2>Apparel Sample Comparison &amp; Workmanship Report</h2>
             <p>
@@ -511,7 +511,7 @@ export function ReportGuide() {
           <p className="pub-eyebrow">05 · MEASUREMENT COMPARISON &amp; RE-MEASUREMENT LOG</p>
           <h3>Side-by-Side Flat Measurements &amp; Two-Pass Verification</h3>
           <p className="small muted" style={{ marginBottom: 12 }}>
-            When an observed measurement deviates beyond the buyer’s supplied tolerance or shows inter-pass variance above 0.3 cm, QCWarehouse’s workbench requires a second independent tape reading and logs both raw readings in the published snapshot.
+            When an observed measurement deviates beyond the buyer’s supplied tolerance or shows inter-pass variance above 0.3 cm, QC Warehouse’s workbench requires a second independent tape reading and logs both raw readings in the published snapshot.
           </p>
           <div className="tablewrap">
             <table className="tbl">
@@ -585,7 +585,7 @@ export function ReportGuide() {
                 How Approved Samples Become Your Retained Reference Benchmark
               </h4>
               <p style={{ color: "#22364f", fontSize: 13.5, lineHeight: 1.6, margin: 0 }}>
-                After reviewing a comparison or inspection report, you can instruct QCWarehouse to seal an approved item (for example, <span className="code">S39201</span>) inside secure reference sample storage. When your supplier ships a restock or pre-production piece weeks later, you order <strong>Golden Sample Matching</strong> so our inspector lays the sealed reference next to the incoming garment (<span className="code">S39208</span>) and records any dimensional or shade drift.
+                After reviewing a comparison or inspection report, you can instruct QC Warehouse to seal an approved item (for example, <span className="code">S39201</span>) inside secure reference sample storage. When your supplier ships a restock or pre-production piece weeks later, you order <strong>Golden Sample Matching</strong> so our inspector lays the sealed reference next to the incoming garment (<span className="code">S39208</span>) and records any dimensional or shade drift.
               </p>
               <div className="row flexwrap no-print" style={{ gap: 8, marginTop: 12 }}>
                 <Link className="button sm" href="/services/reference">
@@ -783,7 +783,7 @@ export function ReportGuide() {
             </table>
           </div>
           <p className="small muted" style={{ marginTop: 12, marginBottom: 0 }}>
-            <strong>Report limitation notice:</strong> QCWarehouse does not rank suppliers or make commercial pass/fail guarantees on unobserved bulk production. Merchandise refund eligibility for returned items remains subject to your purchase agreement with the seller.
+            <strong>Report limitation notice:</strong> QC Warehouse does not rank suppliers or make commercial pass/fail guarantees on unobserved bulk production. Merchandise refund eligibility for returned items remains subject to your purchase agreement with the seller.
           </p>
         </section>
 
@@ -806,7 +806,7 @@ export function ReportGuide() {
             </div>
           </div>
           <div className="line-note success" style={{ marginTop: 12, marginBottom: 16 }}>
-            Every reviewed inspection report version in QCWarehouse is locked as a permanent snapshot—online views and downloaded PDFs always render the exact same verified measurements, defect coordinates, and revision history without silent edits.
+            Every reviewed inspection report version in QC Warehouse is locked as a permanent snapshot—online views and downloaded PDFs always render the exact same verified measurements, defect coordinates, and revision history without silent edits.
           </div>
 
           <div className="row between flexwrap no-print" id="pdf-download" style={{ gap: 16, padding: 18, background: "#f8fafd", borderRadius: 12, border: "1px solid #e2ebf5" }}>

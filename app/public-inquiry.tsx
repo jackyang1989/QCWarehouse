@@ -42,7 +42,7 @@ export function PublicInquiry() {
   return (
     <>
       <div className="breadcrumb">
-        <Link href="/">QCWarehouse</Link>
+        <Link href="/">QC Warehouse</Link>
         <span aria-hidden="true">›</span>
         <strong>Contact &amp; Commercial Inquiries</strong>
       </div>
@@ -51,7 +51,7 @@ export function PublicInquiry() {
         <div className="pub-page-hero-split">
           <div>
             <p className="pub-eyebrow">COMMERCIAL INQUIRY &amp; SUPPORT DESK</p>
-            <h1>Contact QCWarehouse Inspection Support</h1>
+            <h1>Contact QC Warehouse Inspection Support</h1>
             <p style={{ marginBottom: 18 }}>
               Ask pre-order questions about apparel checkpoints, request custom batch pricing for 100+ items, inquire about planned product categories, or connect with support regarding an active order.
             </p>
@@ -104,7 +104,7 @@ export function PublicInquiry() {
 
       {topic === "existing" && (
         <div className="line-note" style={{ marginBottom: 18 }}>
-          <strong>Have an active QCWarehouse account?</strong> Signing in and opening a ticket from{" "}
+          <strong>Have an active QC Warehouse account?</strong> Signing in and opening a ticket from{" "}
           <Link href="/support"><strong>Customer Support</strong></Link> or{" "}
           <Link href="/orders"><strong>My Orders</strong></Link> attaches your order ID (<span className="code">QW-…</span>) and parcel records automatically for faster resolution. You may also submit the form below if you cannot access your account.
         </div>
@@ -242,7 +242,7 @@ export function PublicInquiry() {
                       />
                     </label>
                     <small>
-                      Submitted inquiries create a real tracked support ticket in QCWarehouse (up to 900 characters). Do not include passwords or payment card numbers.
+                      Submitted inquiries create a real tracked support ticket in QC Warehouse (up to 900 characters). Do not include passwords or payment card numbers.
                     </small>
                   </Form>
                 ) : (

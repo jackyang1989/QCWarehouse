@@ -122,17 +122,27 @@ small, .small { font-size: 12px; color: var(--muted); }
 .wordmark, .brand {
   display: inline-flex;
   align-items: center;
-  gap: 9px;
-  color: #10253d;
-  font-size: 21px;
-  font-weight: 820;
-  letter-spacing: -0.85px;
+  line-height: 0;
+  color: #031129;
   white-space: nowrap;
   flex-shrink: 0;
 }
-.wordmark:hover, .brand:hover { color: #10253d; text-decoration: none; }
-.mark { display: inline-grid; place-items: center; flex-shrink: 0; }
-.mark svg, .brand svg { width: 34px; height: 34px; }
+.wordmark:hover, .brand:hover { color: #031129; text-decoration: none; }
+.brand-wordmark-img {
+  display: block;
+  width: clamp(148px, 14vw, 184px);
+  height: auto;
+  max-width: 100%;
+  aspect-ratio: 1280 / 164;
+  object-fit: contain;
+}
+.brand-open-qc-img {
+  display: block;
+  width: 28px;
+  height: 28px;
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+}
 .workspace-brand { display: flex; align-items: center; gap: 11px; flex-shrink: 0; }
 .workspace-context, .brand-sub {
   color: #7b8da0;
@@ -1699,9 +1709,10 @@ button.option-card.disabled, .option-card.disabled {
 .access-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 70px; padding: 12px clamp(16px, 4vw, 48px); background: var(--white); border-bottom: 1px solid var(--border); }
 .access-header > a:last-child, .access-footer { font-size: 13px; }
 .access-main { width: min(100%, 540px); margin-inline: auto; padding: clamp(24px, 5vw, 60px) 16px 36px; }
-.access-card.panel { padding: clamp(22px, 4.5vw, 36px); box-shadow: 0 12px 34px rgba(23, 43, 72, 0.08); }
+.access-card.panel { padding: clamp(22px, 4.5vw, 36px); box-shadow: 0 12px 34px rgba(23, 43, 72, 0.08); min-width: 0; max-width: 100%; }
 .access-card h1 { font-size: clamp(1.55rem, 3.5vw, 2rem); }
 .access-card .form button { width: 100%; }
+.access-card .actions .button { white-space: normal; max-width: 100%; height: auto; min-height: 36px; padding-block: 8px; line-height: 1.35; text-align: left; }
 .access-card details { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
 .access-card summary { cursor: pointer; font-weight: 700; }
 .access-card details p { margin: 8px 0 0; }
@@ -2297,7 +2308,7 @@ button.option-card.disabled, .option-card.disabled {
 @media (max-width: 420px) {
   .workspace .workspace-top { gap: 6px; padding-inline: 12px; }
   .workspace .workspace-brand { gap: 6px; }
-  .workspace .workspace-brand .wordmark { font-size: 18px; }
+  .workspace .workspace-brand .brand-wordmark-img { width: clamp(118px, 36vw, 152px); }
 }
 
 .table-cell-label { display: none; }

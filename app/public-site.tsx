@@ -170,7 +170,7 @@ export function PublicServicesOverview() {
   return (
     <>
       <div className="breadcrumb">
-        <Link href="/">QCWarehouse</Link>
+        <Link href="/">QC Warehouse</Link>
         <span aria-hidden="true">›</span>
         <strong>Inspection Services</strong>
       </div>
@@ -182,7 +182,7 @@ export function PublicServicesOverview() {
             <p className="pub-eyebrow">01 · SERVICES OVERVIEW · CHINA RECEIVING CENTER</p>
             <h1>Independent Product Inspection &amp; Sample Comparison Services</h1>
             <p>
-              Ship supplier samples or small-batch inventory from any Chinese seller to QCWarehouse. Choose piece-by-piece inspection, 2–3 supplier sample comparison, or Golden Sample matching—then decide how each physical item should be routed.
+              Ship supplier samples or small-batch inventory from any Chinese seller to QC Warehouse. Choose piece-by-piece inspection, 2–3 supplier sample comparison, or Golden Sample matching—then decide how each physical item should be routed.
             </p>
             <div className="row flexwrap" style={{ gap: 10 }}>
               <Link className="button primary" href="/orders/new">
@@ -199,7 +199,7 @@ export function PublicServicesOverview() {
           <figure className="pub-page-hero-media ratio-wide" style={{ margin: 0 }}>
             <img
               src="/brand/inspection-hero.webp"
-              alt="QCWarehouse inspector wearing a navy uniform and white cotton gloves measuring a gray cotton top with a metric tape on an inspection table"
+              alt="QC Warehouse inspector wearing a navy uniform and white cotton gloves measuring a gray cotton top with a metric tape on an inspection table"
               width={1460}
               height={696}
               loading="eager"
@@ -402,7 +402,7 @@ export function PublicServicesOverview() {
           <figure className="pub-photo-box ratio-3-2">
             <img
               src="/marketing/service-item-inspection.webp"
-              alt="QCWarehouse inspector wearing white cotton gloves measuring a slate-blue cotton sweatshirt with a yellow metric tape beside a blank sample card"
+              alt="QC Warehouse inspector wearing white cotton gloves measuring a slate-blue cotton sweatshirt with a yellow metric tape beside a blank sample card"
               width={1350}
               height={900}
               loading="eager"
@@ -497,7 +497,7 @@ export function PublicServicesOverview() {
         <figure className="pub-photo-box ratio-3-2">
           <img
             src="/marketing/service-golden-matching.webp"
-            alt="QCWarehouse inspector in white cotton gloves comparing two identical dark navy sweatshirts side by side next to a clear protective storage zip bag"
+            alt="QC Warehouse inspector in white cotton gloves comparing two identical dark navy sweatshirts side by side next to a clear protective storage zip bag"
             width={1350}
             height={900}
             loading="eager"
@@ -535,7 +535,7 @@ export function PublicServicesOverview() {
           <figure className="pub-photo-box ratio-3-2">
             <img
               src="/marketing/service-reference-storage.webp"
-              alt="QCWarehouse sample archivist in white cotton gloves logging a tamper-sealed Golden Sample inside the dedicated multi-tier garment reference sample archive room"
+              alt="QC Warehouse sample archivist in white cotton gloves logging a tamper-sealed Golden Sample inside the dedicated multi-tier garment reference sample archive room"
               width={1200}
               height={900}
               loading="eager"
@@ -583,7 +583,7 @@ export function PublicServicesOverview() {
         </div>
         <div className="pub-boundary-grid">
           <div className="pub-boundary-box included">
-            <h3 style={{ color: "#0b816b" }}>Included in QCWarehouse Reports</h3>
+            <h3 style={{ color: "#0b816b" }}>Included in QC Warehouse Reports</h3>
             <ul className="pub-check-list">
               <li><b className="mark-ok">✓</b><span>Parcel arrival verification, carton condition notes, and unique barcode ID per garment</span></li>
               <li><b className="mark-ok">✓</b><span>Mandatory garment overview, care-label, and metric tape-in-frame measurement photos</span></li>
@@ -593,7 +593,7 @@ export function PublicServicesOverview() {
             </ul>
           </div>
           <div className="pub-boundary-box excluded">
-            <h3 style={{ color: "#b24046" }}>Outside QCWarehouse Service Scope</h3>
+            <h3 style={{ color: "#b24046" }}>Outside QC Warehouse Service Scope</h3>
             <ul className="pub-check-list">
               <li><b className="mark-no">✕</b><span><strong>No Laboratory or Chemical Testing:</strong> No fiber composition %, azo dyes, heavy metals, or destructive GSM cutting.</span></li>
               <li><b className="mark-no">✕</b><span><strong>No Full Product Safety or Regulatory Certification</strong> (CPSIA, REACH, CE, flammability).</span></li>
@@ -612,7 +612,7 @@ export function PublicServicesOverview() {
             <p className="pub-eyebrow">06 · ACTIVE APPAREL PACKAGES</p>
             <h2 id="packages-heading">Available Service Packages &amp; Templates</h2>
             <p className="pub-lead" style={{ fontSize: 14.5 }}>
-              Pulled live from QCWarehouse’s published service catalog. Choose a general apparel package or a dedicated subcategory template with tailored measurement landmarks.
+              Pulled live from QC Warehouse’s published service catalog. Choose a general apparel package or a dedicated subcategory template with tailored measurement landmarks.
             </p>
           </div>
           <Link className="button" href="/pricing">
@@ -726,7 +726,7 @@ const SERVICE_HERO_CONFIG = {
     title: "Product Inspection in China (1 to 100+ Items)",
     lead: "Send 1–3 prototype samples for detailed evaluation or 10–100+ small-batch stock garments for piece-by-piece screening at our China receiving center. Every physical unit gets its own barcode ID, approved template measurements, workmanship check, and documented photo proof.",
     image: "/marketing/service-item-inspection.webp",
-    imageAlt: "QCWarehouse inspector wearing white cotton gloves measuring a slate-blue cotton sweatshirt with a yellow metric tape and sample card",
+    imageAlt: "QC Warehouse inspector wearing white cotton gloves measuring a slate-blue cotton sweatshirt with a yellow metric tape and sample card",
     ratioClass: "",
     idealFor: "Detailed sample checks (1–3 prototypes) and small-batch inventory screening (10–100+ pcs) before international shipping.",
     quantities: "1–100 items self-serve online · 101–300 items via manual staff capacity quote.",
@@ -748,14 +748,14 @@ const SERVICE_HERO_CONFIG = {
   reference_match: {
     eyebrow: "SERVICE DETAIL · BENCHMARK CONSISTENCY",
     title: "Golden Sample & Reference Matching in China",
-    lead: "Keep your approved Golden Sample sealed in QCWarehouse’s secure reference sample storage and benchmark new pre-production or reorder samples directly against your physical standard.",
+    lead: "Keep your approved Golden Sample sealed in QC Warehouse’s secure reference sample storage and benchmark new pre-production or reorder samples directly against your physical standard.",
     image: "/marketing/service-golden-matching.webp",
     imageAlt: "Side-by-side comparison showing an approved navy Golden Sample beside a sealed clear storage sleeve and an incoming production sample",
     ratioClass: "",
     idealFor: "Repeat SKU reorders, new factory transitions, and pre-production approval against a signed-off prototype.",
     quantities: "1 incoming sample compared against 1 active retained Golden Sample per order line.",
     method: "Controlled retrieval of your sealed Golden Sample, side-by-side flat measurement delta check, visual shade/rib/stitching comparison, and resealing into storage.",
-    distinction: "Requires an active Golden Sample already stored in your QCWarehouse account (converted from a prior inspected item).",
+    distinction: "Requires an active Golden Sample already stored in your QC Warehouse account (converted from a prior inspected item).",
   },
 } as const;
 
@@ -783,7 +783,7 @@ export function PublicServiceDetail({
   return (
     <>
       <div className="breadcrumb">
-        <Link href="/">QCWarehouse</Link>
+        <Link href="/">QC Warehouse</Link>
         <span aria-hidden="true">›</span>
         <Link href="/catalog">Services</Link>
         <span aria-hidden="true">›</span>
@@ -861,7 +861,7 @@ export function PublicServiceDetail({
                 <figure className="pub-photo-box ratio-3-2">
                   <img
                     src="/marketing/service-reference-storage.webp"
-                    alt="QCWarehouse sample archivist in white cotton gloves logging a tamper-sealed Golden Sample inside the dedicated multi-tier garment reference sample archive room"
+                    alt="QC Warehouse sample archivist in white cotton gloves logging a tamper-sealed Golden Sample inside the dedicated multi-tier garment reference sample archive room"
                     width={1200}
                     height={900}
                     loading="eager"
@@ -947,7 +947,7 @@ export function PublicServiceDetail({
       </section>
 
       <div className="line-note" style={{ marginBottom: 24 }}>
-        <strong>Scope reminder:</strong> QCWarehouse checks commissioned visual and dimensional items on the received samples only. Laboratory chemical/fiber testing, wash durability, brand authenticity, and factory-wide AQL certification are not included.
+        <strong>Scope reminder:</strong> QC Warehouse checks commissioned visual and dimensional items on the received samples only. Laboratory chemical/fiber testing, wash durability, brand authenticity, and factory-wide AQL certification are not included.
       </div>
     </>
   );
@@ -979,7 +979,7 @@ const PLANNED_AND_RESTRICTED = [
     name: "Electronics & Battery Devices",
     status: "Restricted",
     tone: "red",
-    note: "Electrical safety, firmware, battery transport regulations, and functional load testing are outside QCWarehouse scope.",
+    note: "Electrical safety, firmware, battery transport regulations, and functional load testing are outside QC Warehouse scope.",
   },
   {
     name: "Toys & Children’s Regulated Goods",
@@ -1089,7 +1089,7 @@ export function PublicCategories() {
   return (
     <>
       <div className="breadcrumb">
-        <Link href="/">QCWarehouse</Link>
+        <Link href="/">QC Warehouse</Link>
         <span aria-hidden="true">›</span>
         <strong>Product Categories</strong>
       </div>
@@ -1100,7 +1100,7 @@ export function PublicCategories() {
             <p className="pub-eyebrow">SUPPORTED MERCHANDISE · WHAT CAN YOU INSPECT TODAY?</p>
             <h1>What Products Can You Inspect Today?</h1>
             <p style={{ marginBottom: 18 }}>
-              <strong>Apparel is open for orders today.</strong> Rather than claiming generic checks on every category, QCWarehouse launches a category only after dedicated templates, lighting, and flat-lay measurement benchmarks are active on our bench.
+              <strong>Apparel is open for orders today.</strong> Rather than claiming generic checks on every category, QC Warehouse launches a category only after dedicated templates, lighting, and flat-lay measurement benchmarks are active on our bench.
             </p>
             <div className="row flexwrap" style={{ gap: 10 }}>
               <Link className="button primary" href="/orders/new">
@@ -1235,7 +1235,7 @@ export function PublicCategories() {
               Categories Not Open for Checkout
             </h2>
             <p className="small muted" style={{ margin: 0, maxWidth: "70ch" }}>
-              Do not ship non-apparel goods to QCWarehouse without written operational confirmation. Footwear, bags, and home goods remain offline while gauges and handling SOPs are finalized.
+              Do not ship non-apparel goods to QC Warehouse without written operational confirmation. Footwear, bags, and home goods remain offline while gauges and handling SOPs are finalized.
             </p>
           </div>
           <Link className="button sm" href="/legal/restricted-items">
@@ -1329,7 +1329,7 @@ const JOURNEY_STEPS: JourneyStep[] = [
     weDo: "Generate your permanent China parcel code alongside our receiving hub address and lock your service quote.",
     outcome: "Ready-to-paste shipping recipient details and a structured checklist awaiting supplier parcels.",
     photo: "/marketing/workflow-create-order-ui.webp",
-    photoAlt: "Sanitized screenshot of the QCWarehouse Create an Inspection order interface showing service choices and estimated USD pricing",
+    photoAlt: "Sanitized screenshot of the QC Warehouse Create an Inspection order interface showing service choices and estimated USD pricing",
     uiCropTop: true,
   },
   {
@@ -1340,7 +1340,7 @@ const JOURNEY_STEPS: JourneyStep[] = [
     weDo: "Accept separate domestic parcels from one or multiple Chinese sellers—we don't source or sell products.",
     outcome: "Every incoming parcel tracking number pre-linked cleanly to your open order.",
     photo: "/marketing/scenes/hiw-02-supplier-dispatch.svg",
-    photoAlt: "Clean schematic showing three domestic supplier parcels routed with personal buyer receiving code to the QCWarehouse intake facility",
+    photoAlt: "Clean schematic showing three domestic supplier parcels routed with personal buyer receiving code to the QC Warehouse intake facility",
   },
   {
     num: "03",
@@ -1350,7 +1350,7 @@ const JOURNEY_STEPS: JourneyStep[] = [
     weDo: "Scan the domestic waybill at the dock, weigh incoming cartons, and photograph any exterior crushing or dampness.",
     outcome: "Timestamped arrival record confirming physical parcel custody inside the studio.",
     photo: "/marketing/workflow-parcel-receiving.webp",
-    photoAlt: "Warehouse intake operator scanning a domestic courier parcel waybill with a handheld barcode scanner at the QCWarehouse receiving bench",
+    photoAlt: "Warehouse intake operator scanning a domestic courier parcel waybill with a handheld barcode scanner at the QC Warehouse receiving bench",
   },
   {
     num: "04",
@@ -1380,7 +1380,7 @@ const JOURNEY_STEPS: JourneyStep[] = [
     weDo: "An independent QA reviewer verifies readings, checks defect coordinate boxes, translates bench notes into English, and locks the PDF.",
     outcome: "Reviewed English inspection report (locked version) and downloadable PDF ready for your buying decision.",
     photo: "/marketing/workflow-qa-review-ui.webp",
-    photoAlt: "Sanitized screenshot of the QCWarehouse QA review workbench verifying measurements, Chinese field notes, and English translations",
+    photoAlt: "Sanitized screenshot of the QC Warehouse QA review workbench verifying measurements, Chinese field notes, and English translations",
     uiCropTop: true,
   },
   {
@@ -1418,7 +1418,7 @@ const OPERATIONAL_RULES = [
   },
   {
     title: "6. Return dispatch does not guarantee seller refunds",
-    body: "You arrange return approval and obtain the return address from your seller; QCWarehouse ships the parcel domestically and records the return waybill, while merchandise refunds remain between you and the seller.",
+    body: "You arrange return approval and obtain the return address from your seller; QC Warehouse ships the parcel domestically and records the return waybill, while merchandise refunds remain between you and the seller.",
   },
 ] as const;
 
@@ -1426,7 +1426,7 @@ export function PublicHowItWorks() {
   return (
     <>
       <div className="breadcrumb">
-        <Link href="/">QCWarehouse</Link>
+        <Link href="/">QC Warehouse</Link>
         <span aria-hidden="true">›</span>
         <strong>How It Works</strong>
       </div>
@@ -1435,7 +1435,7 @@ export function PublicHowItWorks() {
         <div className="row between flexwrap" style={{ gap: 18 }}>
           <div>
             <p className="pub-eyebrow">PHYSICAL FULFILLMENT &amp; CUSTODY WORKFLOW</p>
-            <h1>How QCWarehouse Works—Step by Step</h1>
+            <h1>How QC Warehouse Works—Step by Step</h1>
             <p style={{ marginBottom: 0 }}>
               Follow all seven physical stages from creating an inspection commission and receiving your permanent parcel code to intake scanning, studio measurement, QA report lock, and item-by-item outbound dispatch.
             </p>
@@ -1471,7 +1471,7 @@ export function PublicHowItWorks() {
                   <dd>{st.youDo}</dd>
                 </div>
                 <div>
-                  <dt>QCWarehouse does</dt>
+                  <dt>QC Warehouse does</dt>
                   <dd>{st.weDo}</dd>
                 </div>
                 <div>
@@ -1534,7 +1534,7 @@ export function PublicHowItWorks() {
                 <th>Stage</th>
                 <th>You (Buyer)</th>
                 <th>Chinese Seller</th>
-                <th>QCWarehouse</th>
+                <th>QC Warehouse</th>
               </tr>
             </thead>
             <tbody>
@@ -1609,7 +1609,7 @@ export function PublicHowItWorks() {
               <dl>
                 <div><dt>You (Buyer)</dt><dd>{buyer}</dd></div>
                 <div><dt>Chinese Seller</dt><dd>{seller}</dd></div>
-                <div><dt>QCWarehouse</dt><dd>{qcw}</dd></div>
+                <div><dt>QC Warehouse</dt><dd>{qcw}</dd></div>
               </dl>
             </article>
           ))}
@@ -1736,7 +1736,7 @@ export function PublicPricing() {
   return (
     <>
       <div className="breadcrumb">
-        <Link href="/">QCWarehouse</Link>
+        <Link href="/">QC Warehouse</Link>
         <span aria-hidden="true">›</span>
         <strong>Pricing &amp; Fee Estimator</strong>
       </div>
@@ -1747,7 +1747,7 @@ export function PublicPricing() {
             <p className="pub-eyebrow">TRANSPARENT COMMERCIAL PRICING · USD</p>
             <h1>How Much Will I Pay, What Is Included, and What Costs Extra?</h1>
             <p style={{ marginBottom: 18 }}>
-              QCWarehouse charges a clear, upfront fee for physical inspection or sample comparison—with zero subscription fees. Because we don&apos;t source or sell products, our findings stay independent from your suppliers. Post-inspection domestic courier shipping and extended storage are billed separately only when you request them.
+              QC Warehouse charges a clear, upfront fee for physical inspection or sample comparison—with zero subscription fees. Because we don&apos;t source or sell products, our findings stay independent from your suppliers. Post-inspection domestic courier shipping and extended storage are billed separately only when you request them.
             </p>
             <div className="row flexwrap" style={{ gap: 10 }}>
               <Link className="button primary" href="/orders/new">
@@ -1878,7 +1878,7 @@ export function PublicPricing() {
           <p className="pub-eyebrow">SERVER-CONSISTENT FEE ESTIMATOR</p>
           <h2 id="calc-heading" className="pub-h2">Estimate Your Exact Inspection Fee</h2>
           <p className="pub-lead" style={{ fontSize: 14 }}>
-            Uses the same offer eligibility, unit/package billing rules, and manual-quote thresholds as QCWarehouse’s order checkout engine.
+            Uses the same offer eligibility, unit/package billing rules, and manual-quote thresholds as QC Warehouse’s order checkout engine.
           </p>
         </div>
 
@@ -2197,7 +2197,7 @@ export function PublicPricing() {
           <details className="faq-item">
             <summary>What does the “Pre-launch / Demo Rate” catalog notice mean?</summary>
             <p>
-              Displayed prices read live from the current catalog schedule carrying pre-launch / demo pricing flags. Whenever you place an order, QCWarehouse locks your verified service quote before Stripe checkout so fees never surprise you.
+              Displayed prices read live from the current catalog schedule carrying pre-launch / demo pricing flags. Whenever you place an order, QC Warehouse locks your verified service quote before Stripe checkout so fees never surprise you.
             </p>
           </details>
           <details className="faq-item">
@@ -2297,7 +2297,7 @@ export function PublicLegal({ path }: { path: string }) {
   return (
     <>
       <div className="breadcrumb">
-        <Link href="/">QCWarehouse</Link>
+        <Link href="/">QC Warehouse</Link>
         <span aria-hidden="true">›</span>
         <strong>{title}</strong>
       </div>
@@ -2305,7 +2305,7 @@ export function PublicLegal({ path }: { path: string }) {
       <section className="pub-page-hero" style={{ marginBottom: 20 }}>
         <div className="row between flexwrap" style={{ gap: 16 }}>
           <div>
-            <p className="pub-eyebrow">QCWAREHOUSE · VERSIONED LEGAL &amp; OPERATING POLICIES</p>
+            <p className="pub-eyebrow">QC WAREHOUSE · VERSIONED LEGAL &amp; OPERATING POLICIES</p>
             <h1 style={{ marginBottom: 8 }}>{title}</h1>
             <p style={{ marginBottom: 0 }}>
               Every customer order records the exact policy version accepted at checkout so historical terms and report scope notices remain auditable.
