@@ -357,13 +357,13 @@ export function Action({children,run,primary=false,disabled=false,sm=false,idemp
     try {await run(attempt.current);}catch(e){err(e instanceof Error?e.message:"Failed");}finally{inFlight.current=false;set(false);onSettled?.();}
   }}>{busy?"…":children}</button>{error&&<span className="notice error" role="alert">{error}</span>}</span>;
 }
-export function Form({children,run,label,inline=false,idempotent=false,disabled=false,clearErrorKey=0}:{children:ReactNode;run:(f:FormData,key?:string)=>Promise<unknown>;label:string;inline?:boolean;idempotent?:boolean;disabled?:boolean;clearErrorKey?:number}) {
+export function Form({children,run,label,inline=false,idempotent=false,disabled=false,submitDisabled=false,clearErrorKey=0}:{children:ReactNode;run:(f:FormData,key?:string)=>Promise<unknown>;label:string;inline?:boolean;idempotent?:boolean;disabled?:boolean;submitDisabled?:boolean;clearErrorKey?:number}) {
   const [busy,set]=useState(false),[error,err]=useState("");
   useEffect(()=>err(""),[clearErrorKey]);
   const inFlight=useRef(false),attempt=useRef<{fingerprint:string;key:string}|null>(null);
   async function submit(e:FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if(inFlight.current||disabled)return;
+    if(inFlight.current||disabled||submitDisabled)return;
     const fields=new FormData(e.currentTarget);
     inFlight.current=true;
     set(true);err("");
@@ -382,7 +382,7 @@ export function Form({children,run,label,inline=false,idempotent=false,disabled=
     finally{inFlight.current=false;set(false);}
   }
   return <form className={"form"+(inline?" inline-form":"")} onSubmit={submit}><fieldset disabled={busy||disabled} style={{display:"contents"}}>
-    {children}<button type="submit" className="button primary" disabled={busy||disabled}>{busy?"…":label}</button></fieldset>
+    {children}<button type="submit" className="button primary" disabled={busy||disabled||submitDisabled}>{busy?"…":label}</button></fieldset>
     {error&&<div className="notice error" role="alert">{error}</div>}</form>;
 }
 export function Field({label,name,type="text",value,required=true,min,max,step}:{label:string;name:string;type?:string;value?:string|number;required?:boolean;min?:number;max?:number;step?:number|string}) {

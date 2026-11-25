@@ -3481,6 +3481,72 @@ test("verified backup email signs in to the original account and can replace an 
   assert.equal((await new Client().login(backup)).state,"onboarding");
 });
 
+test("primary email promotion and removal require fresh codes and preserve account access",async()=>{
+  const {c,registration,email}=await signCustomer();
+  const backup="alternate-"+randomUUID()+"@qcw.test";
+  const reauth=await c.fetch("/auth/reauth/start",{},"POST",202);
+  await c.fetch("/auth/reauth/verify",{challenge_id:reauth.challenge_id,code:reauth.demo_code});
+  const enrolled=await c.fetch("/me/backup-email/request",{email:backup},"POST",202);
+  await c.fetch("/me/backup-email/confirm",{challenge_id:enrolled.challenge_id,code:enrolled.demo_code});
+
+  const device=new Client();
+  assert.equal((await device.login(backup)).state,"signed_in");
+  assert.equal((await device.fetch("/me/identities")).reauthenticated,false);
+  const promote=await device.fetch("/me/email-change/request",{new_email:backup},"POST",202);
+  assert.equal(promote.current_challenge_id,undefined);
+  assert.equal(promote.verification_email,backup);
+  const promotion={new_challenge_id:promote.new_challenge_id,new_code:promote.new_demo_code};
+  await c.fetch("/me/email-change/confirm",promotion,"POST",400);
+  await device.fetch("/me/email-change/confirm",promotion);
+  await device.fetch("/me/email-change/confirm",promotion,"POST",400);
+  await c.fetch("/me",undefined,"GET",401);
+  const identities=await device.fetch("/me/identities");
+  assert.equal(identities.emails.find((entry:{is_primary:boolean})=>entry.is_primary).original_email,backup);
+  const prior=identities.identities.find((entry:{email:string})=>entry.email===email);
+  const current=identities.identities.find((entry:{email:string})=>entry.email===backup);
+  assert(prior&&current);
+  const priorRoute=`/me/identities/${prior.id}`;
+  const currentRoute=`/me/identities/${current.id}`;
+  const primaryGuard=await device.fetch(currentRoute+"/removal-code",{},"POST",409);
+  assert.equal(primaryGuard.error.code,"PRIMARY_EMAIL_REQUIRED");
+  await device.fetch(priorRoute,{},"DELETE",403);
+  const priorEmailId=identities.emails.find((entry:{original_email:string})=>entry.original_email===email).id;
+  await device.fetch(priorRoute+"/removal-code",{verification_email_id:priorEmailId},"POST",409);
+  const removal=await device.fetch(priorRoute+"/removal-code",{},"POST",202);
+  assert.equal(removal.verification_email,backup);
+  const removalBody={challenge_id:removal.challenge_id,code:removal.demo_code};
+  const wrongCode=removal.demo_code==="000000"?"000001":"000000";
+  await device.fetch(priorRoute,{...removalBody,code:wrongCode},"DELETE",400);
+  await device.fetch("/auth/reauth/verify",removalBody,"POST",400);
+  const key=randomUUID();
+  await device.fetch(priorRoute,removalBody,"DELETE",200,key);
+  await device.fetch(priorRoute,removalBody,"DELETE",200,key);
+  await device.fetch(priorRoute,removalBody,"DELETE",404);
+  assert.equal((await device.fetch(currentRoute+"/removal-code",{},"POST",409)).error.code,"LAST_LOGIN_METHOD");
+  const returnDevice=new Client();
+  assert.equal((await returnDevice.login(backup)).state,"signed_in");
+  assert.equal((await returnDevice.fetch("/me/receiving-address")).receiving_code,registration.receiving_code);
+  assert.equal((await new Client().login(email)).state,"onboarding");
+});
+
+test("a connected email becomes primary after both mailboxes are verified",async()=>{
+  const {c,registration,email}=await signCustomer();
+  const target="microsoft-"+randomUUID()+"@qcw.test";
+  await pool.query(`insert into auth_identities(user_id,provider,issuer,subject,status,linked_at,provider_email)
+    values($1,'microsoft','https://login.microsoftonline.com/common/v2.0',$2,'active',now(),$3)`,[registration.user_id,randomUUID(),target]);
+  const proof=await c.fetch("/me/email-change/request",{new_email:target},"POST",202);
+  assert.equal(proof.verification_email,email);
+  const newProof={new_challenge_id:proof.new_challenge_id,new_code:proof.new_demo_code};
+  await c.fetch("/me/email-change/confirm",newProof,"POST",400);
+  await c.fetch("/me/email-change/confirm",{...newProof,current_challenge_id:proof.current_challenge_id,current_code:proof.current_demo_code});
+  const profile=await c.fetch("/me/identities");
+  assert.equal(profile.emails.find((entry:{is_primary:boolean})=>entry.is_primary).original_email,target);
+  assert(profile.emails.some((entry:{is_primary:boolean;original_email:string;login_enabled:boolean})=>
+    !entry.is_primary&&entry.original_email===email&&entry.login_enabled));
+  assert(profile.identities.some((entry:{provider:string;provider_email:string})=>entry.provider==="microsoft"&&entry.provider_email===target));
+  assert.equal((await c.fetch("/me/receiving-address")).receiving_code,registration.receiving_code);
+});
+
 test("account security, identity linking, email change, dual-control recovery, restriction/closure, and payment email deep links (TASK-167, TASK-168, TASK-050)",async()=>{
   const admin=await staffLogin("admin");
   const {c,registration,terms,email}=await signCustomer();
@@ -3526,7 +3592,7 @@ test("account security, identity linking, email change, dual-control recovery, r
 
   // Create a verified Microsoft OIDC challenge bound to this browser & user to test linking
   const msSubject="ms-sub-"+randomUUID();
-  const msOtp=await c.fetch("/auth/otp/request",{email},"POST",202);
+  const msOtp=await c.fetch("/auth/otp/request",{email:`microsoft-link-${randomUUID()}@qcw.test`},"POST",202);
   const msCodeHash=createHmac("sha256",process.env.AUTH_OTP_PEPPER!).update(`${msOtp.challenge_id}:link:${msOtp.demo_code}`).digest("hex");
   await pool.query(
     `update verification_challenges set purpose='link',initiator_user_id=$2,code_hmac=$3,verified_identity=$4 where id=$1`,
@@ -3549,7 +3615,8 @@ test("account security, identity linking, email change, dual-control recovery, r
   assert.equal(dupErr.error.code,"IDENTITY_ALREADY_LINKED");
 
   // Unlink Microsoft identity succeeds; unlinking the last remaining identity still fails with LAST_LOGIN_METHOD
-  await c.fetch(`/me/identities/${linkedMs.id}`,{},"DELETE",200);
+  const removeProof=await c.fetch(`/me/identities/${linkedMs.id}/removal-code`,{},"POST",202);
+  await c.fetch(`/me/identities/${linkedMs.id}`,{challenge_id:removeProof.challenge_id,code:removeProof.demo_code},"DELETE",200);
   await c.fetch(`/me/identities/${emailIdentityId}`,{},"DELETE",409);
 
   // 4. T91 & T94: Two-step primary email change preserves receiving_code and revokes other device sessions

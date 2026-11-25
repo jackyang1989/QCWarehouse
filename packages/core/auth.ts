@@ -1,7 +1,7 @@
 import { createHmac, randomBytes, randomInt, scryptSync, timingSafeEqual } from "node:crypto";
 import * as oidc from "openid-client";
 import { pepper, seal, unseal } from "./crypto";
-import { oidcSettings, postmarkSettings, type OidcProvider } from "./integrations";
+import { oidcSettings, postmarkSettings, signInMethods, type OidcProvider } from "./integrations";
 import { pool, transaction, type DB } from "../db";
 import { Problem, audit, code, event, findReceivingProfiles, guard, hash, isDemo, lock, one, organization, receivingCode, role, uuid, type Actor } from "./common";
 import { demoTermsVersion, demoWarehouseAddressZh, usableWarehouseAddressSql } from "./demo-fixtures";
@@ -57,13 +57,17 @@ export async function requireCustomerActive(db:DB,actor:Actor) {
   const u=await one<{status:string}>(db,"select status from users where id=$1",[actor.id]);
   guard(u.status==="active","ACCOUNT_RESTRICTED","Your account is currently restricted from new payments or outbound shipping.",403);
 }
-export async function requireCustomerReauth(db:DB,actor:Actor,sessionHash:string,maxAgeMinutes=10) {
+async function customerSession(db:DB,actor:Actor,sessionHash:string,maxAgeMinutes=10) {
   organization(actor);
-  const verified=(await db.query(`select s.id from sessions s join users u on u.id=s.user_id where s.token_hash=$1
+  return (await db.query<{fresh:boolean}>(`select coalesce(s.reauth_at>now()-make_interval(mins=>$3),false) as fresh
+    from sessions s join users u on u.id=s.user_id where s.token_hash=$1
     and s.user_id=$2 and s.kind='customer' and s.revoked_at is null and s.expires_at>now()
-    and s.auth_version=u.auth_version and u.status in ('active','restricted')
-    and s.reauth_at>now()-make_interval(mins=>$3)`,[sessionHash,actor.id,maxAgeMinutes])).rowCount;
-  guard(verified,"AUTH_REAUTH_REQUIRED","Confirm your identity again before performing this sensitive account action.",403);
+    and s.auth_version=u.auth_version and u.status in ('active','restricted')`,[sessionHash,actor.id,maxAgeMinutes])).rows[0];
+}
+
+export async function requireCustomerReauth(db:DB,actor:Actor,sessionHash:string,maxAgeMinutes=10) {
+  const active=await customerSession(db,actor,sessionHash,maxAgeMinutes);
+  guard(active?.fresh,"AUTH_REAUTH_REQUIRED","Confirm your identity again before performing this sensitive account action.",403);
 }
 export async function requireStaffMfa(db:DB,actor:Actor,sessionHash:string,maxAgeMinutes=10) {
   const verified=(await db.query(`select s.id from sessions s join users u on u.id=s.user_id where s.token_hash=$1
@@ -126,9 +130,9 @@ async function signInIdentity(db: DB, identity: Identity, browser: string, allow
     values($1,$2,$3,$4,$5,$6,now()+interval '20 minutes',$7)`,[hash(secret),email,provider,issuer,subject,hash(browser),identity.providerEmail??null]);
   return {state:"onboarding" as const,secret,kind:"customer"};
 }
-export type OtpPurpose = "signin" | "register" | "link" | "change_email" | "change_email_new" | "backup_email" | "recovery" | "recovery_status" | "reauth";
+export type OtpPurpose = "signin" | "register" | "link" | "change_email" | "change_email_new" | "promote_email" | "backup_email" | "recovery" | "recovery_status" | "reauth" | "unlink_identity";
 
-export async function startOtp(email: string, browser: string, verifiedIdentity?: Identity, purpose: OtpPurpose = "signin", initiatorUserId?: string) {
+export async function startOtp(email: string, browser: string, verifiedIdentity?: Identity, purpose: OtpPurpose = "signin", initiatorUserId?: string, binding = "") {
   const normalized = email.trim().toLowerCase();
   const browserHash = hash(browser);
   const otp = randomInt(0,1000000).toString().padStart(6,"0");
@@ -151,7 +155,7 @@ export async function startOtp(email: string, browser: string, verifiedIdentity?
       "RATE_LIMITED","Please wait before requesting another code.",429);
     await db.query(`update verification_challenges set consumed_at=now()
       where browser_binding_hash=$1 and target_email=$2 and purpose=$3 and consumed_at is null`,[browserHash,normalized,purpose]);
-    const digest = createHmac("sha256",pepper()).update(`${challengeId}:${purpose}:${otp}`).digest("hex");
+    const digest = createHmac("sha256",pepper()).update(`${challengeId}:${purpose}:${otp}${binding}`).digest("hex");
     await db.query(`insert into verification_challenges(id,target_email,purpose,initiator_user_id,browser_binding_hash,code_hmac,expires_at,generation,verified_identity)
       values($1,$2,$3,$4,$5,$6,now()+interval '10 minutes',$7,$8)`,[challengeId,normalized,purpose,initiatorUserId??null,browserHash,digest,budget.next_gen,verifiedIdentity ?? null]);
   });
@@ -160,7 +164,8 @@ export async function startOtp(email: string, browser: string, verifiedIdentity?
       method:"POST",
       headers:{"accept":"application/json","content-type":"application/json","X-Postmark-Server-Token":mail.token!},
       body:JSON.stringify({From:mail.from,To:normalized,Subject:"Your QC Warehouse verification code",
-        TextBody:`Your code is ${otp}. It expires in 10 minutes.`,MessageStream:mail.stream}),
+        TextBody:purpose==="unlink_identity"?`Your code to remove a sign-in method is ${otp}. It expires in 10 minutes.`:
+          `Your code is ${otp}. It expires in 10 minutes.`,MessageStream:mail.stream}),
       signal:AbortSignal.timeout(10000),
     }).then(async response=>{
       if(!response.ok) return false;
@@ -530,7 +535,7 @@ export async function staffSignIn(email:string,password:string,otp:string) {
   });
 }
 
-async function consumeChallengeCode(db:DB,challengeId:string,otp:string,browser:string,purpose:OtpPurpose,expectedUserId?:string,deferConsumption=false) {
+async function consumeChallengeCode(db:DB,challengeId:string,otp:string,browser:string,purpose:OtpPurpose,expectedUserId?:string,deferConsumption=false,binding="") {
   const browserHash=hash(browser);
   const target=(await db.query<{target_email:string}>("select target_email::text from verification_challenges where id=$1",[challengeId])).rows[0];
   guard(target,"OTP_INVALID","That code is incorrect, expired, or has already been used.",400);
@@ -545,7 +550,7 @@ async function consumeChallengeCode(db:DB,challengeId:string,otp:string,browser:
     await db.query("update verification_challenges set consumed_at=now() where id=$1",[challengeId]);
     guard(false,"OTP_INVALID","That code is incorrect, expired, or has already been used.",400);
   }
-  const digest=createHmac("sha256",pepper()).update(`${challengeId}:${purpose}:${otp}`).digest();
+  const digest=createHmac("sha256",pepper()).update(`${challengeId}:${purpose}:${otp}${binding}`).digest();
   if(!timingSafeEqual(digest,Buffer.from(c.code_hmac,"hex"))) {
     const nextAttempts=Number(c.attempts)+1;
     const exhausted=nextAttempts>=5 || total.failed+1>=5;
@@ -557,12 +562,13 @@ async function consumeChallengeCode(db:DB,challengeId:string,otp:string,browser:
   return c as {id:string;target_email:string;verified_identity:Identity|null};
 }
 
-async function trustedSecurityEmail(db:Pick<DB,"query">,actor:Actor,id?:string,email?:string) {
+async function trustedSecurityEmail(db:Pick<DB,"query">,actor:Actor,id?:string,email?:string,excludingEmail?:string) {
   organization(actor);
   const match=(await db.query<{email:string}>(`select normalized_email::text as email from user_emails
     where user_id=$1 and verified_at is not null and (is_primary or login_enabled)
     and ($2::uuid is null or id=$2) and ($3::citext is null or normalized_email=$3)
-    order by is_primary desc limit 1`,[actor.id,id??null,email??null])).rows[0];
+    and ($4::citext is null or normalized_email<>$4)
+    order by is_primary desc limit 1`,[actor.id,id??null,email??null,excludingEmail??null])).rows[0];
   guard(match,"VERIFICATION_EMAIL_UNAVAILABLE","Choose a verified email on your account and try again.",409);
   return match.email;
 }
@@ -652,21 +658,44 @@ export async function linkProviderIdentity(
   return {provider,authorization_url:await startProvider(provider,browser,securityReturnPath,link)};
 }
 
-export async function unlinkIdentity(db:DB,actor:Actor,identityId:string,sessionHash:string) {
-  await requireCustomerReauth(db,actor,sessionHash);
+async function removableIdentity(db:Pick<DB,"query">,actor:Actor,identityId:string) {
+  organization(actor);
+  const {rows}=await db.query<{id:string;provider:"google"|"microsoft"|"email_otp";email_id:string|null;email:string|null;is_primary:boolean}>(`
+    select i.id,i.provider,i.email_id,coalesce(e.normalized_email::text,lower(i.provider_email)) as email,
+      coalesce(coalesce(e.normalized_email,i.provider_email::citext)=p.normalized_email,false) as is_primary
+    from auth_identities i left join user_emails e on e.id=i.email_id
+    left join user_emails p on p.user_id=i.user_id and p.is_primary
+    where i.user_id=$1 and i.status='active'`,[actor.id]);
+  const identity=rows.find(row=>row.id===identityId);
+  guard(identity,"NOT_FOUND","Sign-in method not found.",404);
+  const methods=signInMethods();
+  guard(rows.some(row=>row.id!==identityId&&(row.provider==="email_otp"?
+    methods.email||(methods.demo&&row.email?.endsWith("@qcw.test")):methods[row.provider])),
+    "LAST_LOGIN_METHOD","Keep at least one available sign-in method on your account.",409);
+  guard(!identity.is_primary,"PRIMARY_EMAIL_REQUIRED","Set another email as primary before removing this sign-in method.",409);
+  return identity;
+}
+
+export async function requestIdentityRemoval(actor:Actor,identityId:string,sessionHash:string,browser:string,emailId?:string) {
+  const identity=await removableIdentity(pool,actor,identityId);
+  const verificationEmail=await trustedSecurityEmail(pool,actor,emailId,undefined,identity.email??undefined);
+  const proof=await startOtp(verificationEmail,browser,undefined,"unlink_identity",actor.id,`:${sessionHash}:${identityId}`);
+  return {...proof,verification_email:verificationEmail};
+}
+
+export async function unlinkIdentity(db:DB,actor:Actor,identityId:string,sessionHash:string,browser:string,input:{challenge_id?:string;code?:string}) {
+  await removableIdentity(db,actor,identityId);
+  guard(input.challenge_id&&input.code,"AUTH_REAUTH_REQUIRED","Request and enter a verification code to remove this sign-in method.",403);
+  const proof=await consumeChallengeCode(db,input.challenge_id,input.code,browser,"unlink_identity",actor.id,false,`:${sessionHash}:${identityId}`);
   await one(db,"select id from users where id=$1 for update",[actor.id]);
-  const identity=await one<{id:string;provider:string;email_id:string|null}>(db,
-    "select id,provider,email_id from auth_identities where id=$1 and user_id=$2 and status='active' for update",
-    [identityId,actor.id]);
-  const remaining=await one<{n:number}>(db,
-    "select count(*)::int n from auth_identities where user_id=$1 and status='active' and id<>$2",
-    [actor.id,identityId]);
-  guard(remaining.n>=1,"LAST_LOGIN_METHOD","At least one verified sign-in method must remain active on your account.",409);
+  guard(await customerSession(db,actor,sessionHash),"SIGN_IN_REQUIRED","Sign in again to continue.",401);
+  const identity=await removableIdentity(db,actor,identityId);
+  await trustedSecurityEmail(db,actor,undefined,proof.target_email,identity.email??undefined);
   await db.query("update auth_identities set status='revoked',email_id=null where id=$1",[identityId]);
   if(identity.provider==="email_otp" && identity.email_id) {
-    const email=await one<{is_primary:boolean}>(db,"update user_emails set login_enabled=false where id=$1 and user_id=$2 returning is_primary",[identity.email_id,actor.id]);
-    if(!email.is_primary) await revokeOtherSessions(db,actor,sessionHash);
+    await db.query("update user_emails set login_enabled=false where id=$1 and user_id=$2",[identity.email_id,actor.id]);
   }
+  await db.query("update sessions set revoked_at=now() where user_id=$1 and token_hash<>$2 and revoked_at is null",[actor.id,sessionHash]);
   await db.query("update auth_transactions set consumed_at=now() where initiator_user_id=$1 and provider=$2 and consumed_at is null",[actor.id,identity.provider]);
   await db.query("insert into account_security_events(user_id,actor_id,identity_id,kind,outcome,request_id) values($1,$1,$2,'identity_unlinked','succeeded',$3)",
     [actor.id,identityId,uuid()]);
@@ -714,46 +743,66 @@ export async function confirmBackupEmail(db:DB,actor:Actor,sessionHash:string,br
 }
 
 export async function requestEmailChange(actor:Actor,sessionHash:string,newEmail:string,browser:string,verificationEmailId?:string) {
-  await requireCustomerReauth(pool as unknown as DB,actor,sessionHash);
+  organization(actor);
   const target=newEmail.trim().toLowerCase();
-  const conflict=(await pool.query("select 1 from user_emails where normalized_email=$1 and login_enabled",[target])).rowCount;
-  guard(!conflict,"EMAIL_CHANGE_CONFLICT","That email address cannot be used for this change.",409);
-  const current=await one<{email:string}>(pool as unknown as DB,
-    "select normalized_email::text as email from user_emails where user_id=$1 and is_primary",[actor.id]);
-  guard(current.email!==target,"EMAIL_CHANGE_CONFLICT","Enter a different email address than your current primary email.",409);
-  const verificationEmail=await trustedSecurityEmail(pool,actor,verificationEmailId);
-  const curOtp=await startOtp(verificationEmail,browser,undefined,"change_email",actor.id);
-  const newOtp=await startOtp(target,browser,undefined,"change_email_new",actor.id);
+  const {existing,linked,occupied}=await primaryEmailChangeState(pool,actor,target);
+  if(!existing&&!linked) await requireCustomerReauth(pool as unknown as DB,actor,sessionHash);
+  guard(!occupied,"EMAIL_CHANGE_CONFLICT","That email address cannot be used for this change.",409);
+  const current=existing?undefined:await trustedSecurityEmail(pool,actor,verificationEmailId,undefined,target);
+  const curOtp=current?await startOtp(current,browser,undefined,"change_email",actor.id,`:${sessionHash}`):undefined;
+  const newOtp=await startOtp(target,browser,undefined,existing?"promote_email":"change_email_new",actor.id,`:${sessionHash}`);
   return {
-    current_challenge_id:curOtp.challenge_id,
+    current_challenge_id:curOtp?.challenge_id,
     new_challenge_id:newOtp.challenge_id,
-    verification_email:verificationEmail,
+    verification_email:current??target,
     resend_after:60,
-    ...(curOtp.demo_code?{current_demo_code:curOtp.demo_code}:{}),
+    ...(curOtp?.demo_code?{current_demo_code:curOtp.demo_code}:{}),
     ...(newOtp.demo_code?{new_demo_code:newOtp.demo_code}:{}),
   };
 }
 
+async function primaryEmailChangeState(db:Pick<DB,"query">,actor:Actor,target:string) {
+  const primary=(await db.query<{id:string;email:string;login_enabled:boolean}>(
+    "select id,normalized_email::text as email,login_enabled from user_emails where user_id=$1 and is_primary",[actor.id])).rows[0];
+  guard(primary,"NOT_FOUND","Primary email not found.",404);
+  guard(primary.email!==target,"EMAIL_CHANGE_CONFLICT","Enter a different email address than your current primary email.",409);
+  const assigned=(await db.query<{id:string;user_id:string}>(
+    "select id,user_id from user_emails where normalized_email=$1 and login_enabled",[target])).rows[0];
+  const existing=assigned?.user_id===actor.id?assigned:undefined;
+  const linked=!existing&&Boolean((await db.query(`select 1 from auth_identities where user_id=$1 and status='active'
+    and provider in ('google','microsoft') and provider_email::citext=$2 limit 1`,[actor.id,target])).rowCount);
+  return {primary,existing,linked,occupied:Boolean(assigned&&!existing)};
+}
+
 export async function confirmEmailChange(
   db:DB,actor:Actor,sessionHash:string,browser:string,
-  input:{current_challenge_id:string;current_code:string;new_challenge_id:string;new_code:string}
+  input:{current_challenge_id?:string;current_code?:string;new_challenge_id:string;new_code:string}
 ) {
-  await requireCustomerReauth(db,actor,sessionHash);
+  organization(actor);
   guard(input.current_challenge_id!==input.new_challenge_id,"INVALID_REQUEST","Provide both current and new email verification challenges.",422);
-  const curC=await consumeChallengeCode(db,input.current_challenge_id,input.current_code,browser,"change_email",actor.id,true);
-  const newC=await consumeChallengeCode(db,input.new_challenge_id,input.new_code,browser,"change_email_new",actor.id);
+  const curC=input.current_challenge_id&&input.current_code?
+    await consumeChallengeCode(db,input.current_challenge_id,input.current_code,browser,"change_email",actor.id,true,`:${sessionHash}`):undefined;
+  const newC=await consumeChallengeCode(db,input.new_challenge_id,input.new_code,browser,
+    curC?"change_email_new":"promote_email",actor.id,false,`:${sessionHash}`);
   const newEmail=newC.target_email.trim().toLowerCase();
   await lock(db,"email:"+newEmail);
   await one(db,"select id from users where id=$1 for update",[actor.id]);
-  const primary=await one<{id:string;email:string}>(db,
-    "select id,normalized_email::text as email from user_emails where user_id=$1 and is_primary for update",[actor.id]);
-  await requireCustomerReauth(db,actor,sessionHash);
-  await trustedSecurityEmail(db,actor,undefined,curC.target_email);
-  const conflict=(await db.query("select 1 from user_emails where normalized_email=$1 and login_enabled",[newEmail])).rowCount;
-  guard(!conflict&&newEmail!==primary.email,"EMAIL_CHANGE_CONFLICT","That email address cannot be used for this change.",409);
-  await db.query("update verification_challenges set consumed_at=now() where id=$1",[curC.id]);
-  await db.query("update user_emails set is_primary=false,login_enabled=false where id=$1",[primary.id]);
-  const existingUserEmail=(await db.query<{id:string}>("select id from user_emails where user_id=$1 and normalized_email=$2 for update",[actor.id,newEmail])).rows[0];
+  const {existing,primary,linked,occupied}=await primaryEmailChangeState(db,actor,newEmail);
+  const active=await customerSession(db,actor,sessionHash);
+  guard(active,"SIGN_IN_REQUIRED","Sign in again to continue.",401);
+  guard(!curC||existing||linked||active.fresh,"AUTH_REAUTH_REQUIRED","Confirm your identity again before changing to a new email.",403);
+  guard(!occupied,"EMAIL_CHANGE_CONFLICT","That email address cannot be used for this change.",409);
+  guard(curC||existing,"EMAIL_CHANGE_CONFLICT","This address is no longer a verified backup email on this account.",409);
+  if(curC) {
+    await trustedSecurityEmail(db,actor,undefined,curC.target_email,newEmail);
+    await db.query("update verification_challenges set consumed_at=now() where id=$1",[curC.id]);
+  }
+  const otherBackup=linked&&Boolean((await db.query(`select 1 from user_emails where user_id=$1 and not is_primary
+    and login_enabled and normalized_email<>$2`,[actor.id,newEmail])).rowCount);
+  const retainPrevious=primary.login_enabled&&(Boolean(existing)||(linked&&!otherBackup));
+  await db.query("update user_emails set is_primary=false,login_enabled=$2 where id=$1",[primary.id,retainPrevious]);
+  const existingUserEmail=existing??(await db.query<{id:string}>(`select id from user_emails
+    where user_id=$1 and normalized_email=$2 order by verified_at desc nulls last,id limit 1 for update`,[actor.id,newEmail])).rows[0];
   const nextEmail=existingUserEmail
     ?await one<{id:string;original_email:string}>(db,
         "update user_emails set original_email=$2,verified_at=now(),is_primary=true,login_enabled=true,delivery_state=null where id=$1 returning id,original_email",
@@ -762,7 +811,7 @@ export async function confirmEmailChange(
         `insert into user_emails(user_id,original_email,normalized_email,verified_at,is_primary,login_enabled)
          values($1,$2::text,($2::text)::citext,now(),true,true) returning id,original_email`,
         [actor.id,newEmail]);
-  await db.query("update auth_identities set status='revoked',email_id=null where user_id=$1 and provider='email_otp' and email_id=$2",[actor.id,primary.id]);
+  if(!retainPrevious) await db.query("update auth_identities set status='revoked',email_id=null where user_id=$1 and provider='email_otp' and email_id=$2",[actor.id,primary.id]);
   await addEmailOtpIdentity(db,actor.id,nextEmail.id);
   await db.query("update verification_challenges set consumed_at=now() where target_email=$1 and consumed_at is null",[primary.email]);
   await db.query("update sessions set revoked_at=now() where user_id=$1 and token_hash<>$2 and revoked_at is null",[actor.id,sessionHash]);

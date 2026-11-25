@@ -118,6 +118,7 @@ export function Login({staff,methods,next,verify,oauth}:{
     {(!staff||methods.demo)&&<div className={staff?undefined:"email-sign-in"}>
       {!staff&&<h2>{verify?"Verify your email":"Sign in with email"}</h2>}
       {!staff&&verify&&!challenge&&<p className="muted small">Verify your contact email to finish signing in with your provider.</p>}
+      {!staff&&!verify&&!challenge&&<p className="muted small">Use your primary or verified backup email to sign in. New customers can use any email they can access.</p>}
       {challenge?
       <div className="code-step">
         <p>{staff?"测试账号":challenge.demo_code?"Test code for":"Code sent to"} <strong>{email}</strong></p>
@@ -128,7 +129,7 @@ export function Login({staff,methods,next,verify,oauth}:{
           <label>{staff?"验证码":"Verification code"}<input name="code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" required/></label>
         </Form>
         <button type="button" onClick={()=>setChallenge(undefined)}>{staff?"更换邮箱或重新获取验证码":"Change email or request another code"}</button>
-      </div>:<Form disabled={!emailAvailable} label={methods.demo?(staff?"获取测试验证码":"Get test code"):"Send verification code"} run={f=>sendCode(text(f,"email"))}>
+      </div>:<Form submitDisabled={!emailAvailable} label={methods.demo?(staff?"获取测试验证码":"Get test code"):"Send verification code"} run={f=>sendCode(text(f,"email"))}>
         <label>{staff?"测试员工邮箱 (@qcw.test)":"Email address"}<input name="email" type="email" autoComplete="email" defaultValue={email} required aria-describedby={emailAvailable?undefined:"email-sign-in-status"}/></label>
       </Form>}
       {!staff&&!emailAvailable&&<p className="muted small" id="email-sign-in-status">Email verification codes are currently unavailable.</p>}

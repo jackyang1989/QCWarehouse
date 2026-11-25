@@ -5,7 +5,7 @@ import addFormats from "ajv-formats";
 import { parse } from "yaml";
 import { z } from "zod";
 import { transaction, pool, type DB } from "../db";
-import { actorFrom, appOrigin, closeCustomerAccount, completeRegistration, confirmBackupEmail, confirmEmailChange, cookie, csrfCookie, csrfTokenFor, currentTerms, customerPreferences, decideAccountRecovery, demoSwitchAccount, executeAccountRecovery, finishProvider, getCookie, linkProviderIdentity, listIdentities, listSessions, pendingProvider, publicPolicy, readAccountRecoveryStatus, readRecoveryProgress, reportDownloadSignature, reportShareToken, requestAccountRecovery, requestBackupEmail, requestEmailChange, revokeOtherSessions, revokeSession, runOtpVerification, staffSignIn, staffUpdateUserRoles, staffUpdateUserStatus, startCustomerReauth, startOtp, startProvider, startProviderAccountRefresh, unlinkIdentity, updateCustomerPreferences, verifyCsrfToken, verifyCustomerReauth, verifyOtp, verifyReportDownload } from "./auth";
+import { actorFrom, appOrigin, closeCustomerAccount, completeRegistration, confirmBackupEmail, confirmEmailChange, cookie, csrfCookie, csrfTokenFor, currentTerms, customerPreferences, decideAccountRecovery, demoSwitchAccount, executeAccountRecovery, finishProvider, getCookie, linkProviderIdentity, listIdentities, listSessions, pendingProvider, publicPolicy, readAccountRecoveryStatus, readRecoveryProgress, reportDownloadSignature, reportShareToken, requestAccountRecovery, requestBackupEmail, requestEmailChange, requestIdentityRemoval, revokeOtherSessions, revokeSession, runOtpVerification, staffSignIn, staffUpdateUserRoles, staffUpdateUserStatus, startCustomerReauth, startOtp, startProvider, startProviderAccountRefresh, unlinkIdentity, updateCustomerPreferences, verifyCsrfToken, verifyCustomerReauth, verifyOtp, verifyReportDownload } from "./auth";
 import { Problem, audit, guard, hash, idempotent, isDemo, one, organization, role, uuid, type Actor } from "./common";
 import { integrationPreflight, signInMethods } from "./integrations";
 import { failedJobs, retryFailedJob } from "./worker";
@@ -342,10 +342,21 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const result=await transaction(db=>startProviderAccountRefresh(db,actorForRefresh,hash(getCookie(req,"session")),browser,identityId));
     return json(result,200,[cookie("qcw_browser",browser,3600)]);
   }
-  const deleteIdentityRoute=path.match(/^\/me\/identities\/([a-f0-9-]{36})$/i);
-  if(method==="DELETE" && deleteIdentityRoute) {
-    return extraWrite(req,path,actor,z.object({}),
-      (db,a)=>unlinkIdentity(db,a,idSchema.parse(deleteIdentityRoute[1]),hash(getCookie(req,"session"))));
+  const removeIdentityRoute=path.match(/^\/me\/identities\/([a-f0-9-]{36})(\/removal-code)?$/i);
+  if(method==="POST" && removeIdentityRoute?.[2]) {
+    csrf(req);
+    const {verification_email_id}=z.object({verification_email_id:idSchema.optional()}).parse(await input(req));
+    const browser=browserKey(req);
+    return json(await requestIdentityRemoval(actorRequired(actor),idSchema.parse(removeIdentityRoute[1]),hash(getCookie(req,"session")),browser,verification_email_id),
+      202,[cookie("qcw_browser",browser,3600)]);
+  }
+  if(method==="DELETE" && removeIdentityRoute&&!removeIdentityRoute[2]) {
+    csrf(req);
+    const a=actorRequired(actor),key=idSchema.parse(req.headers.get("idempotency-key"));
+    const body=z.strictObject({challenge_id:idSchema.optional(),code:z.string().regex(/^\d{6}$/).optional()})
+      .refine(value=>Boolean(value.challenge_id)===Boolean(value.code)).parse(await input(req));
+    return json(await runOtpVerification(db=>idempotent(db,a.id+":"+path,key,body,
+      ()=>unlinkIdentity(db,a,idSchema.parse(removeIdentityRoute[1]),hash(getCookie(req,"session")),getCookie(req,"qcw_browser"),body))));
   }
   if(method==="POST" && path==="/me/backup-email/request") {
     csrf(req);
@@ -371,9 +382,9 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     csrf(req);
     const a=actorRequired(actor),key=idSchema.parse(req.headers.get("idempotency-key"));
     const body=z.object({
-      current_challenge_id:idSchema,current_code:z.string().regex(/^\d{6}$/),
+      current_challenge_id:idSchema.optional(),current_code:z.string().regex(/^\d{6}$/).optional(),
       new_challenge_id:idSchema,new_code:z.string().regex(/^\d{6}$/),
-    }).parse(await input(req));
+    }).refine(value=>Boolean(value.current_challenge_id)===Boolean(value.current_code)).parse(await input(req));
     return json(await runOtpVerification(db=>idempotent(db,a.id+":"+path,key,body,
       ()=>confirmEmailChange(db,a,hash(getCookie(req,"session")),browser,body))));
   }
