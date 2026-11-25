@@ -6909,8 +6909,8 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
       {linkMessage&&<p className="notice" role="status">{linkMessage}</p>}
       <Table headers={["Email address","Sign-in method","Actions"]} rows={[...contactRows.values()].map(row=>[
         <>{row.email??"Email unavailable"} {row.contact?.is_primary?<Tag tone="blue">Primary email</Tag>:row.contact?<Tag tone="green">Backup email</Tag>:null}</>,
-        <>{row.methods.map(identity=>identity.provider==="google"?"Google":"Microsoft").join(", ")}
-          {row.contact?.login_enabled&&<>{row.methods.length>0?" · ":""}{mailAvailable?"Email code":"Email code unavailable"}</>}</>,
+        row.methods.map<string>(identity=>identity.provider==="google"?"Google":"Microsoft")
+          .concat(mailAvailable&&row.contact?.login_enabled?["Email code"]:[]).join(" · ")||"—",
         <div className="actions">
           {!row.contact?.is_primary&&row.email&&<button className="button sm" type="button" onClick={()=>{
             resetEmailEditor();setPrimaryTarget(row.email);
