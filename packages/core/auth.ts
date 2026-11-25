@@ -745,9 +745,7 @@ export async function confirmBackupEmail(db:DB,actor:Actor,sessionHash:string,br
 export async function requestEmailChange(actor:Actor,sessionHash:string,newEmail:string,browser:string,verificationEmailId?:string) {
   organization(actor);
   const target=newEmail.trim().toLowerCase();
-  const {existing,linked,occupied}=await primaryEmailChangeState(pool,actor,target);
-  if(!existing&&!linked) await requireCustomerReauth(pool as unknown as DB,actor,sessionHash);
-  guard(!occupied,"EMAIL_CHANGE_CONFLICT","That email address cannot be used for this change.",409);
+  const {existing}=await primaryEmailChangeState(pool,actor,target);
   const current=existing?undefined:await trustedSecurityEmail(pool,actor,verificationEmailId,undefined,target);
   const curOtp=current?await startOtp(current,browser,undefined,"change_email",actor.id,`:${sessionHash}`):undefined;
   const newOtp=await startOtp(target,browser,undefined,existing?"promote_email":"change_email_new",actor.id,`:${sessionHash}`);
@@ -771,7 +769,9 @@ async function primaryEmailChangeState(db:Pick<DB,"query">,actor:Actor,target:st
   const existing=assigned?.user_id===actor.id?assigned:undefined;
   const linked=!existing&&Boolean((await db.query(`select 1 from auth_identities where user_id=$1 and status='active'
     and provider in ('google','microsoft') and provider_email::citext=$2 limit 1`,[actor.id,target])).rowCount);
-  return {primary,existing,linked,occupied:Boolean(assigned&&!existing)};
+  guard(existing||linked,"EMAIL_CHANGE_TARGET_NOT_LINKED","Verify the address as a backup email or link its sign-in account first.",409);
+  guard(!assigned||existing,"EMAIL_CHANGE_CONFLICT","That email address cannot be used for this change.",409);
+  return {primary,existing,linked};
 }
 
 export async function confirmEmailChange(
@@ -787,11 +787,8 @@ export async function confirmEmailChange(
   const newEmail=newC.target_email.trim().toLowerCase();
   await lock(db,"email:"+newEmail);
   await one(db,"select id from users where id=$1 for update",[actor.id]);
-  const {existing,primary,linked,occupied}=await primaryEmailChangeState(db,actor,newEmail);
-  const active=await customerSession(db,actor,sessionHash);
-  guard(active,"SIGN_IN_REQUIRED","Sign in again to continue.",401);
-  guard(!curC||existing||linked||active.fresh,"AUTH_REAUTH_REQUIRED","Confirm your identity again before changing to a new email.",403);
-  guard(!occupied,"EMAIL_CHANGE_CONFLICT","That email address cannot be used for this change.",409);
+  guard(await customerSession(db,actor,sessionHash),"SIGN_IN_REQUIRED","Sign in again to continue.",401);
+  const {existing,primary,linked}=await primaryEmailChangeState(db,actor,newEmail);
   guard(curC||existing,"EMAIL_CHANGE_CONFLICT","This address is no longer a verified backup email on this account.",409);
   if(curC) {
     await trustedSecurityEmail(db,actor,undefined,curC.target_email,newEmail);

@@ -3458,6 +3458,11 @@ test("verified backup email signs in to the original account and can replace an 
   await backupDevice.fetch("/auth/reauth/start",{email_id:foreignEmailId},"POST",409);
   await reauth(backupDevice,backupId);
   const nextEmail="primary-"+randomUUID()+"@qcw.test";
+  const unknownTarget=await backupDevice.fetch("/me/email-change/request",{new_email:nextEmail,verification_email_id:backupId},"POST",409);
+  assert.equal(unknownTarget.error.code,"EMAIL_CHANGE_TARGET_NOT_LINKED");
+  assert.equal((await pool.query("select 1 from verification_challenges where target_email=$1",[nextEmail])).rowCount,0);
+  await pool.query(`insert into auth_identities(user_id,provider,issuer,subject,status,linked_at,provider_email)
+    values($1,'microsoft','https://login.microsoftonline.com/common/v2.0',$2,'active',now(),$3)`,[registration.user_id,randomUUID(),nextEmail]);
   const change=await backupDevice.fetch("/me/email-change/request",{new_email:nextEmail,verification_email_id:backupId},"POST",202);
   assert.equal(change.verification_email,backup);
   await backupDevice.fetch("/me/email-change/confirm",{
@@ -3532,13 +3537,19 @@ test("primary email promotion and removal require fresh codes and preserve accou
 test("a connected email becomes primary after both mailboxes are verified",async()=>{
   const {c,registration,email}=await signCustomer();
   const target="microsoft-"+randomUUID()+"@qcw.test";
-  await pool.query(`insert into auth_identities(user_id,provider,issuer,subject,status,linked_at,provider_email)
-    values($1,'microsoft','https://login.microsoftonline.com/common/v2.0',$2,'active',now(),$3)`,[registration.user_id,randomUUID(),target]);
+  const identity=(await pool.query<{id:string}>(`insert into auth_identities(user_id,provider,issuer,subject,status,linked_at,provider_email)
+    values($1,'microsoft','https://login.microsoftonline.com/common/v2.0',$2,'active',now(),$3) returning id`,[registration.user_id,randomUUID(),target])).rows[0];
   const proof=await c.fetch("/me/email-change/request",{new_email:target},"POST",202);
   assert.equal(proof.verification_email,email);
   const newProof={new_challenge_id:proof.new_challenge_id,new_code:proof.new_demo_code};
   await c.fetch("/me/email-change/confirm",newProof,"POST",400);
-  await c.fetch("/me/email-change/confirm",{...newProof,current_challenge_id:proof.current_challenge_id,current_code:proof.current_demo_code});
+  const confirmation={...newProof,current_challenge_id:proof.current_challenge_id,current_code:proof.current_demo_code};
+  await pool.query("update auth_identities set status='revoked' where id=$1",[identity.id]);
+  const revokedTarget=await c.fetch("/me/email-change/confirm",confirmation,"POST",409);
+  assert.equal(revokedTarget.error.code,"EMAIL_CHANGE_TARGET_NOT_LINKED");
+  assert.equal((await c.fetch("/me/identities")).emails.find((entry:{is_primary:boolean})=>entry.is_primary).original_email,email);
+  await pool.query("update auth_identities set status='active' where id=$1",[identity.id]);
+  await c.fetch("/me/email-change/confirm",confirmation);
   const profile=await c.fetch("/me/identities");
   assert.equal(profile.emails.find((entry:{is_primary:boolean})=>entry.is_primary).original_email,target);
   assert(profile.emails.some((entry:{is_primary:boolean;original_email:string;login_enabled:boolean})=>
@@ -3576,7 +3587,8 @@ test("account security, identity linking, email change, dual-control recovery, r
   await c.fetch(`/orders/${draft.id}/cancel`,{revision:ordDetail.revision,reason:"Clear order for security test"});
 
   // 2. T94: Sensitive operations require recent reauthentication
-  await c.fetch("/me/email-change/request",{new_email:"next-"+email},"POST",403);
+  const newEmail="changed-"+randomUUID()+"@qcw.test";
+  await c.fetch("/me/backup-email/request",{email:newEmail},"POST",403);
   const reauthStart=await c.fetch("/auth/reauth/start",{},"POST",202);
   assert(reauthStart.demo_code);
   const reauthOk=await c.fetch("/auth/reauth/verify",{challenge_id:reauthStart.challenge_id,code:reauthStart.demo_code});
@@ -3619,18 +3631,17 @@ test("account security, identity linking, email change, dual-control recovery, r
   await c.fetch(`/me/identities/${linkedMs.id}`,{challenge_id:removeProof.challenge_id,code:removeProof.demo_code},"DELETE",200);
   await c.fetch(`/me/identities/${emailIdentityId}`,{},"DELETE",409);
 
-  // 4. T91 & T94: Two-step primary email change preserves receiving_code and revokes other device sessions
+  // 4. T91 & T94: Verify and promote a backup address, preserving receiving_code and revoking other sessions.
+  const backupProof=await c.fetch("/me/backup-email/request",{email:newEmail},"POST",202);
+  await c.fetch("/me/backup-email/confirm",{challenge_id:backupProof.challenge_id,code:backupProof.demo_code});
   const secondDevice=new Client();
   assert.equal((await secondDevice.login(email)).state,"signed_in");
   const sessionsBefore=await c.fetch("/me/sessions");
   assert.equal(sessionsBefore.sessions.length,2);
 
-  const newEmail="changed-"+randomUUID()+"@qcw.test";
   const changeReq=await c.fetch("/me/email-change/request",{new_email:newEmail},"POST",202);
-  assert(changeReq.current_demo_code && changeReq.new_demo_code);
+  assert(changeReq.new_demo_code);
   const changeConfirm=await c.fetch("/me/email-change/confirm",{
-    current_challenge_id:changeReq.current_challenge_id,
-    current_code:changeReq.current_demo_code,
     new_challenge_id:changeReq.new_challenge_id,
     new_code:changeReq.new_demo_code,
   });

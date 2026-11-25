@@ -220,6 +220,7 @@ small, .small { font-size: 12px; color: var(--muted); }
 }
 
 /* Workspace Layout & Sidebar */
+.workspace { display: flex; flex-direction: column; min-height: 100svh; }
 .workspace-layout, .layout {
   display: grid;
   grid-template-columns: 248px minmax(0, 1fr);
@@ -228,6 +229,15 @@ small, .small { font-size: 12px; color: var(--muted); }
   margin: 0 auto;
   min-height: calc(100svh - 70px);
   transition: grid-template-columns 0.18s ease;
+}
+.workspace-layout { flex: 1; width: 100%; min-height: 0; }
+.workspace-column {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  align-self: stretch;
+  min-width: 0;
+  max-width: 1560px;
+  padding-inline: clamp(22px, 3vw, 48px);
 }
 .workspace-sidebar, .sidebar {
   background: var(--nav);
@@ -333,7 +343,7 @@ small, .small { font-size: 12px; color: var(--muted); }
 .workspace-drawer-backdrop { display: none; }
 .tbl td.col-idx, .tbl th.col-idx { white-space: nowrap; word-break: keep-all; overflow-wrap: normal; width: 52px; text-align: center; }
 
-.workspace-main, .main {
+.main {
   width: 100%;
   min-width: 0;
   min-height: calc(100svh - 70px);
@@ -341,6 +351,7 @@ small, .small { font-size: 12px; color: var(--muted); }
   padding: 30px clamp(22px, 3vw, 48px) 60px;
   background: var(--bg);
 }
+.workspace-main { min-width: 0; padding: 30px 0 24px; }
 .workspace-main:focus { outline: none; }
 .breadcrumb {
   display: flex;
@@ -2018,7 +2029,7 @@ button.option-card.disabled, .option-card.disabled {
   .workspace-customer .workspace-layout.sidebar-collapsed {
     grid-template-columns: 64px minmax(0, 1fr);
   }
-  .workspace .workspace-layout.sidebar-collapsed .workspace-main {
+  .workspace .workspace-layout.sidebar-collapsed .workspace-column {
     max-width: none;
   }
   .workspace-sidebar.collapsed {
@@ -2082,7 +2093,7 @@ button.option-card.disabled, .option-card.disabled {
 }
 @media (max-width: 1023px) {
   .workspace-menu-toggle { display: inline-flex; }
-  .workspace .workspace-layout { display: block; }
+  .workspace .workspace-layout { grid-template-columns: minmax(0, 1fr); }
   .workspace .workspace-sidebar {
     position: fixed; top: 0; left: 0; bottom: 0; z-index: 950;
     width: min(300px, 86vw); height: 100svh; max-height: 100svh; min-height: 100svh; overflow-y: auto;
@@ -2110,7 +2121,9 @@ button.option-card.disabled, .option-card.disabled {
   .wizard-items .tbl input { min-width: 0 !important; width: 100% !important; min-height: 42px; }
 }
 @media (max-width: 860px) {
-  .workspace-main, .main, .public-shell { padding: 20px 14px 42px; }
+  .main, .public-shell { padding: 20px 14px 42px; }
+  .workspace-column { padding-inline: 14px; }
+  .workspace-main { padding-top: 20px; }
   .fields, .fields.three, .grid.cols2, .grid.cols3, .grid.cols4, .land-services, .land-process, .land-report, .report-guide, .process-detail { grid-template-columns: 1fr; }
   .wizard-categories, .wizard-services { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

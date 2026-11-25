@@ -206,28 +206,30 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone,customerAc
         collapsed={sidebarCollapsed}
         onToggleCollapse={toggleSidebarCollapsed}
       />
-      <main className={`workspace-main view-${route.view}`} id="main-content" tabIndex={-1}>
-        {(!isStaff || (!currentLink && parentLink)) && (
-          <nav className="breadcrumb" aria-label={isStaff?"上级模块导航":"Breadcrumb"}>
-            {isStaff ? (
-              <>
-                <Link href={links[0][0]}>{section}</Link>
-                {parentLink && <><span aria-hidden="true">›</span><Link href={parentLink[0]}>{parentLink[1]}</Link></>}
-                <span aria-hidden="true">›</span><strong>详情工作台</strong>
-              </>
-            ) : (
-              <>
-                <Link href="/">QC Warehouse</Link><span aria-hidden="true">›</span>
-                {links[0][0]===normPath?<strong>{section}</strong>:<><Link href={links[0][0]}>{section}</Link>
-                  {(currentLink||parentLink)&&<><span aria-hidden="true">›</span>{currentLink?<strong>{currentLink[1]}</strong>:<Link href={parentLink[0]}>{parentLink[1]}</Link>}</>}
-                </>}
-              </>
-            )}
-          </nav>
-        )}
-        <WorkspaceTimeZone value={timeZone}>{content}</WorkspaceTimeZone>
+      <div className="workspace-column">
+        <main className={`workspace-main view-${route.view}`} id="main-content" tabIndex={-1}>
+          {(!isStaff || (!currentLink && parentLink)) && (
+            <nav className="breadcrumb" aria-label={isStaff?"上级模块导航":"Breadcrumb"}>
+              {isStaff ? (
+                <>
+                  <Link href={links[0][0]}>{section}</Link>
+                  {parentLink && <><span aria-hidden="true">›</span><Link href={parentLink[0]}>{parentLink[1]}</Link></>}
+                  <span aria-hidden="true">›</span><strong>详情工作台</strong>
+                </>
+              ) : (
+                <>
+                  <Link href="/">QC Warehouse</Link><span aria-hidden="true">›</span>
+                  {links[0][0]===normPath?<strong>{section}</strong>:<><Link href={links[0][0]}>{section}</Link>
+                    {(currentLink||parentLink)&&<><span aria-hidden="true">›</span>{currentLink?<strong>{currentLink[1]}</strong>:<Link href={parentLink[0]}>{parentLink[1]}</Link>}</>}
+                  </>}
+                </>
+              )}
+            </nav>
+          )}
+          <WorkspaceTimeZone value={timeZone}>{content}</WorkspaceTimeZone>
+        </main>
         {isStaff ? <InternalWorkspaceFooter area={route.area as "admin"|"warehouse"} demo={demo} timeZone={timeZone}/> : <SiteFooter/>}
-      </main>
+      </div>
     </div>
   </div>;
 }

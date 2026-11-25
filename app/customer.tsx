@@ -6989,17 +6989,13 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
         <button type="button" className="button" onClick={resetEmailEditor}>Cancel</button>
       </div>:primaryTarget!==undefined?<div className="code-step">
         <h3>Change primary email</h3>
-        {primaryTarget&&<p><strong>{primaryTarget}</strong></p>}
-        {mailAvailable&&(!primaryTarget&&!info.reauthenticated?<>
-          <p>Verify your identity to continue.</p>{verifyByEmail}
-        </>:<Form label="Send verification code" run={async f=>{
-          const newEmail=primaryTarget||text(f,"new_email");
-          const res=await request("/me/email-change/request","POST",{new_email:newEmail,verification_email_id:text(f,"verification_email_id")||undefined});
-          setEmailChange({new_email:newEmail,...res});
+        <p><strong>{primaryTarget}</strong></p>
+        <Form label="Send verification code" submitDisabled={!mailAvailable} run={async f=>{
+          const res=await request("/me/email-change/request","POST",{new_email:primaryTarget,verification_email_id:text(f,"verification_email_id")||undefined});
+          setEmailChange({new_email:primaryTarget,...res});
         }}>
-          {!primaryTarget&&<Field name="new_email" label="New primary email address" type="email"/>}
-          {primaryTarget.toLowerCase()!==backup?.normalized_email&&verificationDestination(primaryTarget)}
-        </Form>)}
+          {mailAvailable&&primaryTarget.toLowerCase()!==backup?.normalized_email&&verificationDestination(primaryTarget)}
+        </Form>
         <button type="button" className="button" onClick={resetEmailEditor}>Cancel</button>
       </div>:editingBackup?
         <>
@@ -7033,14 +7029,11 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
             {backupRequestError&&<ErrorBlock error={backupRequestError}/>}
           </Form>}
           <button type="button" className="button" onClick={resetEmailEditor}>Cancel</button>
-        </>:!pendingLink&&<div className="actions">
+        </>:!pendingLink&&
           <button type="button" className="button" onClick={()=>{
             resetEmailEditor();setBackupAddress("");setEditingBackup(true);
           }}>{backup?"Change backup email":"Add backup email"}</button>
-          <button type="button" className="button" onClick={()=>{
-            resetEmailEditor();setPrimaryTarget("");
-          }}>Use a new primary email</button>
-        </div>}
+        }
       </div>
     </Panel>
     {mailAvailable&&!pendingLink&&!backupNeedsReauth&&primaryTarget===undefined&&<Panel id="verify-identity" title="Verify for account changes">
