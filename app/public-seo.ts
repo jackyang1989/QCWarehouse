@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { BRAND_ASSETS, BRAND_NAME } from "../packages/core/brand";
 import { orderSections, type PortalRoute } from "../packages/core/portal-routes";
+import { staffLoginCopy } from "./staff-login-copy";
 
 export function publicSiteOrigin(): string {
   try {
@@ -115,7 +116,7 @@ const PORTAL_ROUTE_TITLES: Record<string, string> = {
   "/signup": "Customer Sign In",
   "/onboarding": "Complete Account Setup",
   "/account/recovery": "Account Recovery",
-  "/staff/login": "员工登录",
+  "/staff/login": staffLoginCopy(null).title,
   "/account": "Overview · My Workspace",
   "/orders": "Inspection Orders · My Workspace",
   "/orders/new": "Create an Inspection · My Workspace",
@@ -168,6 +169,7 @@ const PORTAL_ROUTE_TITLES: Record<string, string> = {
   "/admin/integrations/payments": "支付渠道管理 · 运营管理后台",
   "/admin/integrations/ocr": "OCR 文档识别配置 · 运营管理后台",
   "/admin/integrations/logistics": "物流接入 · 运营管理后台",
+  "/admin/integrations/email": "邮件服务配置 · 运营管理后台",
 };
 
 export function portalTitleForRoute(path: string, route?: PortalRoute): string {
@@ -206,13 +208,13 @@ export function portalTitleForRoute(path: string, route?: PortalRoute): string {
   return BRAND_NAME;
 }
 
-export function metadataForPath(path: string, isPublicMarketing: boolean, route?: PortalRoute): Metadata {
+export function metadataForPath(path: string, isPublicMarketing: boolean, route?: PortalRoute, next?: string): Metadata {
   const origin = publicSiteOrigin();
   const seo = PUBLIC_ROUTE_SEO[path];
 
   if (!isPublicMarketing || !seo) {
     return {
-      title: portalTitleForRoute(path, route),
+      title: route?.view === "staff-login" ? staffLoginCopy(next).title : portalTitleForRoute(path, route),
       robots: { index: false, follow: false },
     };
   }

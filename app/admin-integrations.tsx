@@ -16,7 +16,7 @@ import {
   useLoad,
   type Row,
 } from "./ui";
-import { StatusBanner } from "./admin-labels";
+import { CopyId, StatusBanner } from "./admin-labels";
 import type { Actor } from "../packages/core/common";
 
 const DOMAIN_ZH: Record<string, string> = {
@@ -174,17 +174,17 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
     <div className="stack">
       <section className="page-head">
         <div>
-          <p className="eyebrow">INTEGRATIONS</p>
+          {!isEmailView && <p className="eyebrow">INTEGRATIONS</p>}
           <h1>
-            {isPaymentsView ? "支付渠道配置" : isOcrView ? "OCR 文档识别" : "第三方集成"}
+            {isEmailView ? "邮件服务配置" : isPaymentsView ? "支付渠道配置" : isOcrView ? "OCR 文档识别" : "第三方集成"}
           </h1>
           <p className="subhead">
-            统一管理 Stripe HK、PayPal 人工开票/自动预留、自托管 PaddleOCR ONNX、Google Cloud Vision 与运维接口；密钥经服务端 AES-256-GCM 密文库保管，永不向前端透出明文。
+            {isEmailView ? "管理验证码和交易邮件的发件地址、投递回调与密钥。" : "统一管理 Stripe HK、PayPal 人工开票/自动预留、自托管 PaddleOCR ONNX、Google Cloud Vision 与运维接口；密钥经服务端 AES-256-GCM 密文库保管，永不向前端透出明文。"}
           </p>
         </div>
         <div className="actions">
           <button type="button" className="button sm" onClick={reload}>刷新集成状态</button>
-          <Link className="button sm" href="/admin/payments">前往支付流水与人工核对 →</Link>
+          {!isEmailView && <Link className="button sm" href="/admin/payments">前往支付流水与人工核对 →</Link>}
         </div>
       </section>
 
@@ -262,7 +262,8 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
         </div>
       )}
 
-      <Panel title="服务提供商注册表与生命周期状态" subtitle="点击任意服务商查看安全配置、AES-256-GCM 密钥库与实时连接测试">
+      <Panel title={isEmailView ? "邮件服务商" : "服务提供商注册表与生命周期状态"}
+        subtitle={isEmailView ? undefined : "点击任意服务商查看安全配置、AES-256-GCM 密钥库与实时连接测试"}>
         {visibleProviders.length === 0 ? (
           <p className="muted">正在加载第三方服务商列表…</p>
         ) : (
@@ -324,9 +325,9 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
       </Panel>
 
       {selected && (
-        <div className="split-grid">
+        <div className={isEmailView || resendSelected ? "stack" : "split-grid"}>
           <Panel
-            title={`配置管理 · ${selected.display_name}`}
+            title={`${resendSelected ? "发信设置" : "配置管理"} · ${selected.display_name}`}
             subtitle={resendSelected ? "用于登录验证码、账号安全验证和交易通知。" : `key: ${selected.provider_key} · 合规策略: ${COMPLIANCE_ZH[selected.compliance_status] ?? selected.compliance_status}`}
           >
             {selected.last_check_summary && (
@@ -336,17 +337,7 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
               </p>
             )}
             {resendSelected ? (
-              <div className="stack-tight">
-                <label>
-                  Resend 投递回调地址
-                  <input type="url" readOnly value={String(selected.webhook_url)} onFocus={(e) => e.currentTarget.select()} />
-                </label>
-                <p className="small muted">在 Resend 订阅 Sent、Delivered、Delivery Delayed、Bounced、Complained、Failed 和 Suppressed。</p>
-                <p className="small">
-                  {selected.config?.webhook_verified_at
-                    ? `已收到签名投递回调 · ${stamp(selected.config.webhook_verified_at, true)}`
-                    : selected.config?.connection_test_id ? "等待模拟测试的签名投递回调。刷新后可查看结果。" : "发送模拟测试后可检查签名回调。"}
-                </p>
+              <div className="resend-settings">
                 {isSuperAdmin && (
                   <Form
                     key={`resend-settings-${selected.updated_at}`}
@@ -372,14 +363,24 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
                     <label>
                       发件地址（使用 Resend 已验证的域名）
                       <input name="from_email" defaultValue={String(selected.config?.from_email ?? "")}
-                        placeholder="QC Warehouse <security@auth.qcwarehouse.com>" maxLength={254} required />
+                        placeholder="support@example.com" maxLength={254} required />
                     </label>
-                    <label className="check-row">
+                    <label className="check">
                       <input type="checkbox" name="enabled" defaultChecked={Boolean(selected.enabled)} />
                       <span>启用 Resend 发信</span>
                     </label>
                   </Form>
                 )}
+                <div className="resend-webhook">
+                  <h3>投递回调地址</h3>
+                  <CopyId value={selected.webhook_url} short={false} copyTitle="复制完整回调地址" />
+                  <p className="small muted">在 Resend 订阅 Sent、Delivered、Delivery Delayed、Bounced、Complained、Failed 和 Suppressed。</p>
+                  <p className="small">
+                    {selected.config?.webhook_verified_at
+                      ? `已收到签名投递回调 · ${stamp(selected.config.webhook_verified_at, true)}`
+                      : selected.config?.connection_test_id ? "等待模拟测试的签名投递回调。刷新后可查看结果。" : "发送模拟测试后可检查签名回调。"}
+                  </p>
+                </div>
               </div>
             ) : (
               <>
@@ -494,8 +495,10 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
           </Panel>
 
           <Panel
-            title={`加密密钥库 (AES-256-GCM Vault) · ${selected.display_name}`}
-            subtitle="密钥加密写入 integration_secrets；页面仅展示脱敏后缀与版本号。"
+            title={`加密密钥库${isEmailView || resendSelected ? "" : " (AES-256-GCM Vault)"} · ${selected.display_name}`}
+            subtitle={isEmailView || resendSelected
+              ? "密钥加密保存。下表展示脱敏摘要、版本和状态。"
+              : "密钥加密写入 integration_secrets；页面仅展示脱敏后缀与版本号。"}
           >
             {(selected.secrets ?? []).length === 0 ? (
               <p className="muted">
@@ -562,7 +565,7 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
                     }
                   }}
                 >
-                  <div className="filters-grid">
+                  <div className={isEmailView || resendSelected ? "email-secret-fields" : "filters-grid"}>
                     <label>
                       目标环境
                       <select name="environment" defaultValue={selected.environment}>
