@@ -1543,6 +1543,10 @@ test("Postmark requires an accepted message response and never returns the real 
     assert.equal(payload.To,email);
     assert.equal(payload.MessageStream,"verification");
     code=payload.TextBody.match(/\d{6}/)[0];
+    assert(payload.HtmlBody.includes("Your verification code"));
+    assert(payload.HtmlBody.includes(">"+code+"</td>"));
+    assert(payload.HtmlBody.includes("This code expires in 10 minutes."));
+    assert(!payload.Subject.includes(code));
     return Response.json(accepted?{ErrorCode:0,MessageID:"fixture-message"}:{ErrorCode:10,Message:"fixture rejection"});
   });
   const c=new Client();
@@ -1615,6 +1619,9 @@ test("Resend settings control real OTP and transaction delivery with authenticat
     if(body.to[0]===email) {
       assert.match(headers.get("idempotency-key")??"",/^otp-/);
       code=body.text.match(/\d{6}/)[0];
+      assert(body.html.includes(">"+code+"</td>"));
+      assert(body.html.includes("sign in to QC Warehouse"));
+      assert(!body.subject.includes(code));
       return rejectOtp ? Response.json({name:"validation_error"},{status:403}) : Response.json({id:randomUUID()});
     }
     assert.deepEqual(body.to,[recipient]);

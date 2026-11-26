@@ -357,7 +357,14 @@ export function Action({children,run,primary=false,disabled=false,sm=false,idemp
     try {await run(attempt.current);}catch(e){err(e instanceof Error?e.message:"Failed");}finally{inFlight.current=false;set(false);onSettled?.();}
   }}>{busy?"…":children}</button>{error&&<span className="notice error" role="alert">{error}</span>}</span>;
 }
-export function Form({children,run,label,inline=false,idempotent=false,disabled=false,submitDisabled=false,clearErrorKey=0}:{children:ReactNode;run:(f:FormData,key?:string)=>Promise<unknown>;label:string;inline?:boolean;idempotent?:boolean;disabled?:boolean;submitDisabled?:boolean;clearErrorKey?:number}) {
+export function Form({
+  children, run, label, inline=false, idempotent=false, disabled=false, submitDisabled=false, clearErrorKey=0,
+  secondaryActions,
+}: {
+  children:ReactNode; run:(f:FormData,key?:string)=>Promise<unknown>; label:string; inline?:boolean;
+  idempotent?:boolean; disabled?:boolean; submitDisabled?:boolean; clearErrorKey?:number;
+  secondaryActions?:ReactNode;
+}) {
   const [busy,set]=useState(false),[error,err]=useState("");
   useEffect(()=>err(""),[clearErrorKey]);
   const inFlight=useRef(false),attempt=useRef<{fingerprint:string;key:string}|null>(null);
@@ -381,8 +388,12 @@ export function Form({children,run,label,inline=false,idempotent=false,disabled=
       ?"Connection lost. Your request may already be saved. Retry to check the same request.":e instanceof Error?e.message:"Failed");}
     finally{inFlight.current=false;set(false);}
   }
+  const submitButton=<button type="submit" className="button primary"
+    disabled={busy||disabled||submitDisabled}>{busy?"…":label}</button>;
   return <form className={"form"+(inline?" inline-form":"")} onSubmit={submit}><fieldset disabled={busy||disabled} style={{display:"contents"}}>
-    {children}<button type="submit" className="button primary" disabled={busy||disabled||submitDisabled}>{busy?"…":label}</button></fieldset>
+    {children}
+    {secondaryActions?<div className="form-actions">{secondaryActions}{submitButton}</div>:submitButton}
+  </fieldset>
     {error&&<div className="notice error" role="alert">{error}</div>}</form>;
 }
 export function Field({label,name,type="text",value,required=true,min,max,step}:{label:string;name:string;type?:string;value?:string|number;required?:boolean;min?:number;max?:number;step?:number|string}) {
@@ -448,9 +459,9 @@ export function CodeButton({code,onClick,title}:{code:ReactNode;onClick:()=>void
 }
 
 export function ModalDrawer({
-  open,onClose,title,subtitle,centered=false,wide=false,footer,children,
+  open,onClose,title,subtitle,centered=false,wide=false,compact=false,footer,children,
 }:{
-  open:boolean;onClose:()=>void;title:ReactNode;subtitle?:ReactNode;centered?:boolean;wide?:boolean;footer?:ReactNode;children:ReactNode;
+  open:boolean;onClose:()=>void;title:ReactNode;subtitle?:ReactNode;centered?:boolean;wide?:boolean;compact?:boolean;footer?:ReactNode;children:ReactNode;
 }) {
   const zh=useIsStaffLocale();
   const headingId=useId(),descriptionId=useId();
@@ -472,7 +483,7 @@ export function ModalDrawer({
     return ()=>document.removeEventListener("keydown",onKey);
   },[open,onClose]);
   if(!open)return null;
-  return <div className={"drawer-backdrop"+(centered?" centered":"")} role="dialog" aria-modal="true"
+  return <div className={"drawer-backdrop"+(centered?" centered":"")+(compact?" compact":"")} role="dialog" aria-modal="true"
     aria-labelledby={headingId} aria-describedby={subtitle?descriptionId:undefined}
     onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}>
     <div className={"drawer-panel"+(wide?" wide":"")} onKeyDown={event=>{
@@ -488,7 +499,8 @@ export function ModalDrawer({
     }}>
       <div className="drawer-head">
         <div><h2 id={headingId}>{title}</h2>{subtitle&&<p id={descriptionId}>{subtitle}</p>}</div>
-        <button type="button" className="button sm" ref={closeButton} onClick={onClose}>{zh?"关闭":"Close"}</button>
+        <button type="button" className={compact?"button drawer-dismiss":"button sm"}
+          aria-label={zh?"关闭":"Close"} ref={closeButton} onClick={onClose}>{compact?"×":zh?"关闭":"Close"}</button>
       </div>
       <div className="drawer-body">{children}</div>
       {footer&&<div className="drawer-foot">{footer}</div>}

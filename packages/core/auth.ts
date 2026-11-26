@@ -2,6 +2,7 @@ import { createHmac, randomBytes, randomInt, scryptSync, timingSafeEqual } from 
 import * as oidc from "openid-client";
 import { pepper, seal, unseal } from "./crypto";
 import { submitEmail } from "./email-transport";
+import { renderVerificationEmail } from "./verification-email";
 import { emailSettings, oidcSettings, signInMethods, type OidcProvider } from "./integrations";
 import { pool, transaction, type DB } from "../db";
 import { Problem, audit, code, event, findReceivingProfiles, guard, hash, isDemo, lock, one, organization, receivingCode, role, uuid, type Actor } from "./common";
@@ -133,6 +134,8 @@ async function signInIdentity(db: DB, identity: Identity, browser: string, allow
 }
 export type OtpPurpose = "signin" | "register" | "link" | "change_email" | "change_email_new" | "promote_email" | "backup_email" | "recovery" | "recovery_status" | "reauth" | "unlink_identity";
 
+const OTP_LIFETIME_MINUTES = 10;
+
 export async function startOtp(email: string, browser: string, verifiedIdentity?: Identity, purpose: OtpPurpose = "signin", initiatorUserId?: string, binding = "") {
   const normalized = email.trim().toLowerCase();
   const browserHash = hash(browser);
@@ -158,14 +161,12 @@ export async function startOtp(email: string, browser: string, verifiedIdentity?
       where browser_binding_hash=$1 and target_email=$2 and purpose=$3 and consumed_at is null`,[browserHash,normalized,purpose]);
     const digest = createHmac("sha256",pepper()).update(`${challengeId}:${purpose}:${otp}${binding}`).digest("hex");
     await db.query(`insert into verification_challenges(id,target_email,purpose,initiator_user_id,browser_binding_hash,code_hmac,expires_at,generation,verified_identity)
-      values($1,$2,$3,$4,$5,$6,now()+interval '10 minutes',$7,$8)`,[challengeId,normalized,purpose,initiatorUserId??null,browserHash,digest,budget.next_gen,verifiedIdentity ?? null]);
+      values($1,$2,$3,$4,$5,$6,now()+make_interval(mins => $9),$7,$8)`,[challengeId,normalized,purpose,initiatorUserId??null,browserHash,digest,budget.next_gen,verifiedIdentity ?? null,OTP_LIFETIME_MINUTES]);
   });
   if (!demo) {
-    const text = purpose === "unlink_identity"
-      ? `Your code to remove a sign-in method is ${otp}. It expires in 10 minutes.`
-      : `Your code is ${otp}. It expires in 10 minutes.`;
+    const email = renderVerificationEmail(otp, purpose, OTP_LIFETIME_MINUTES);
     const outcome = await submitEmail(mail, {
-      recipient: normalized, subject: "Your QC Warehouse verification code", text, idempotencyKey: `otp-${challengeId}`,
+      ...email, recipient: normalized, idempotencyKey: `otp-${challengeId}`,
     });
     if (outcome.kind !== "submitted") {
       await pool.query("update verification_challenges set consumed_at=now() where id=$1 and consumed_at is null",[challengeId]);

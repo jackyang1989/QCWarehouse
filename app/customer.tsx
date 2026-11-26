@@ -6942,33 +6942,7 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
       </div>}
       <div className="top-gap" id="email-actions">
       {!mailAvailable&&<p className="muted small" role="status">Email delivery is temporarily unavailable. You can request verification codes once it is restored.</p>}
-      {removal?<div className="code-step">
-        <h3>{removal.identity.provider==="email_otp"?"Remove backup email":removal.identity.provider==="google"?"Disconnect Google":"Disconnect Microsoft"}</h3>
-        {removal.address&&<p><strong>{removal.address}</strong></p>}
-        {removal.challenge?<>
-          <p>Enter the code sent to <strong>{removal.challenge.verification_email}</strong>.</p>
-          <p className="muted small">This also signs out your other devices.</p>
-          {removal.challenge.demo_code&&<p>Test code: <strong className="code">{removal.challenge.demo_code}</strong></p>}
-          <Form label="Confirm removal" idempotent run={async(f,key)=>{
-            await request("/me/identities/"+removal.identity.id,"DELETE",{
-              challenge_id:removal.challenge!.challenge_id,code:text(f,"code"),
-            },key);
-            resetEmailEditor();setSecurityStatus("Sign-in method removed.");refreshAll();
-          }}>
-            <label>Verification code<input name="code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" required/></label>
-          </Form>
-          <button className="button" type="button" onClick={()=>setRemoval({...removal,challenge:undefined})}>Request another code</button>
-        </>:<Form label="Send removal code" submitDisabled={!mailAvailable} run={async f=>{
-          const challenge=await request("/me/identities/"+removal.identity.id+"/removal-code","POST",{
-            verification_email_id:text(f,"verification_email_id")||undefined,
-          });
-          setRemoval({...removal,challenge});
-        }}>
-          {!verificationDestination(removal.address)&&<p>The code will be sent to your primary email.</p>}
-          {verificationDestination(removal.address)}
-        </Form>}
-        <button type="button" className="button" onClick={resetEmailEditor}>Cancel</button>
-      </div>:emailChange?<div className="code-step">
+      {emailChange?<div className="code-step">
         <h3>Confirm primary email change</h3>
         {emailChange.current_challenge_id?<p>Check <strong>{emailChange.verification_email}</strong> and <strong>{emailChange.new_email}</strong> for the two codes.</p>:
           <p>Enter the code sent to <strong>{emailChange.new_email}</strong>.</p>}
@@ -7036,6 +7010,42 @@ function AccountSecurity({receivingCode}:{receivingCode:string}) {
         }
       </div>
     </Panel>
+    {removal&&<ModalDrawer open centered compact
+      title={removal.identity.provider==="email_otp"?"Remove backup email":removal.identity.provider==="google"?"Disconnect Google":"Disconnect Microsoft"}
+      subtitle={removal.address&&<span className="security-removal-address">{removal.address}</span>} onClose={resetEmailEditor}>
+      <div className="security-removal">
+        {removal.challenge?<Form key={removal.challenge.challenge_id} label="Confirm removal" idempotent
+          secondaryActions={<button type="button" className="button" onClick={resetEmailEditor}>Cancel</button>}
+          run={async(f,key)=>{
+          await request("/me/identities/"+removal.identity.id,"DELETE",{
+            challenge_id:removal.challenge!.challenge_id,code:text(f,"code"),
+          },key);
+          resetEmailEditor();setSecurityStatus("Sign-in method removed.");refreshAll();
+        }}>
+          <p id="security-removal-recipient">We sent a 6-digit code to <strong>{removal.challenge.verification_email}</strong>.</p>
+          <div className="security-removal-code">
+            <label>Verification code
+              <input name="code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6}
+                required autoFocus aria-describedby="security-removal-recipient security-removal-effect"/>
+            </label>
+            <div className="security-removal-code-help">
+              <button className="security-removal-resend" type="button" onClick={()=>setRemoval({...removal,challenge:undefined})}>Request a new code</button>
+              {removal.challenge.demo_code&&<span>Demo code <strong className="code">{removal.challenge.demo_code}</strong></span>}
+            </div>
+          </div>
+          <p className="security-removal-effect" id="security-removal-effect">You’ll also be signed out on other devices.</p>
+        </Form>:<Form key="request" label="Send code" submitDisabled={!mailAvailable}
+          secondaryActions={<button type="button" className="button" onClick={resetEmailEditor}>Cancel</button>}
+          run={async f=>{
+            const challenge=await request("/me/identities/"+removal.identity.id+"/removal-code","POST",{
+              verification_email_id:text(f,"verification_email_id")||undefined,
+            });
+            setRemoval(current=>current===removal?{...removal,challenge}:current);
+          }}>
+          {verificationDestination(removal.address)??<p>We’ll send a verification code to your primary email.</p>}
+        </Form>}
+      </div>
+    </ModalDrawer>}
     {mailAvailable&&!pendingLink&&!backupNeedsReauth&&primaryTarget===undefined&&<Panel id="verify-identity" title="Verify for account changes">
       {info.reauthenticated?<p className="notice" role="status">Identity verified.</p>:
         <><p className="muted">Verify your identity before signing out other devices or closing your account.</p>{verifyByEmail}</>}

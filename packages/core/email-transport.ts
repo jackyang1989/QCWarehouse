@@ -10,6 +10,7 @@ type Email = {
   recipient: string;
   subject: string;
   text: string;
+  html?: string;
   idempotencyKey: string;
   metadata?: Record<string, string>;
 };
@@ -32,6 +33,7 @@ export async function submitEmail(mail: Awaited<ReturnType<typeof emailSettings>
           to: [email.recipient],
           subject: email.subject,
           text: email.text,
+          html: email.html,
           tags: email.metadata && Object.entries(email.metadata).map(([name, value]) => ({ name, value })),
         }),
       });
@@ -55,6 +57,7 @@ export async function submitEmail(mail: Awaited<ReturnType<typeof emailSettings>
         To: email.recipient,
         Subject: email.subject,
         TextBody: email.text,
+        HtmlBody: email.html,
         MessageStream: mail.stream,
         Metadata: email.metadata,
       }),
