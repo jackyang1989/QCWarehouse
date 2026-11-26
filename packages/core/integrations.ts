@@ -1,4 +1,6 @@
 import { isDemo } from "./common";
+import { resendSettings } from "./resend-settings";
+import type { DB } from "../db";
 
 export type OidcProvider = "google" | "microsoft";
 const oauth = {
@@ -123,23 +125,34 @@ export function postmarkSettings() {
   const stream = get("POSTMARK_MESSAGE_STREAM") ?? "outbound";
   const webhookToken = get("POSTMARK_WEBHOOK_TOKEN");
   const testToken = token === "POSTMARK_API_TEST";
-  return {token, from, stream, webhookToken, testToken, enabled: !isDemo() && !!(token && from) && !testToken};
+  return {provider:"postmark" as const, token, from, stream, webhookToken, testToken, enabled: !isDemo() && !!(token && from) && !testToken};
 }
+export async function emailSettings(db: Pick<DB, "query">) {
+  switch (get("EMAIL_PROVIDER") ?? "resend") {
+    case "resend": {
+      const settings = await resendSettings(db);
+      return { ...settings, enabled: !isDemo() && settings.enabled };
+    }
+    case "postmark": return postmarkSettings();
+    default: return { provider: null, enabled: false as const };
+  }
+}
+
 export function trackingSettings() {
   return {
     key: get("KUAIDI100_KEY"), customer: get("KUAIDI100_CUSTOMER"),
     callbackBase: origin(get("TRACKING_CALLBACK_BASE_URL") ?? get("APP_URL")),
   };
 }
-export function signInMethods() {
+export async function signInMethods(db: Pick<DB, "query">) {
   return {
     google:oidcSettings("google").configured,
     microsoft:oidcSettings("microsoft").configured,
-    email:postmarkSettings().enabled,
+    email:!isDemo() && (await emailSettings(db)).enabled,
     demo:isDemo(),
   };
 }
-export type SignInMethods = ReturnType<typeof signInMethods>;
+export type SignInMethods = Awaited<ReturnType<typeof signInMethods>>;
 
 export function stripeCheckoutReady(stripe:ReturnType<typeof stripeSettings>&{enabled?:boolean}) {
   return !isDemo()&&stripe.enabled!==false&&!!stripe.key&&!!stripe.webhook&&

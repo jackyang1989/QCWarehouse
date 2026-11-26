@@ -1532,7 +1532,7 @@ test("Google and Microsoft authorization requests use PKCE and reject mismatched
 });
 
 test("Postmark requires an accepted message response and never returns the real OTP in JSON",async t=>{
-  setFixtureEnv(t,{QCW_DEMO:"0",POSTMARK_SERVER_TOKEN:"server-token-fixture",
+  setFixtureEnv(t,{QCW_DEMO:"0",EMAIL_PROVIDER:"postmark",POSTMARK_SERVER_TOKEN:"server-token-fixture",
     EMAIL_FROM:"sender@example.test",POSTMARK_MESSAGE_STREAM:"verification"});
   const email=randomUUID()+"@example.test";
   let code="",accepted=false;
@@ -1556,6 +1556,129 @@ test("Postmark requires an accepted message response and never returns the real 
   process.env.POSTMARK_SERVER_TOKEN="POSTMARK_API_TEST";
   await c.fetch("/auth/otp/request",{email},"POST",503);
   assert.equal(fetch.mock.callCount(),2);
+});
+
+test("Resend settings control real OTP and transaction delivery with authenticated, deduplicated callbacks",async t=>{
+  const customer=await signCustomer(), admin=await staffLogin("admin"), receiver=await staffLogin("receiving");
+  const key=randomBytes(32), token="re_"+randomUUID(), secret="whsec_"+key.toString("base64");
+  setFixtureEnv(t,{
+    QCW_DEMO:"0", EMAIL_PROVIDER:"resend", POSTMARK_SERVER_TOKEN:"unused-postmark-fixture",
+    EMAIL_FROM:"fixture@example.test", POSTMARK_WEBHOOK_TOKEN:"postmark-hook-fixture",
+  });
+  const {deliverEmailOnce,queueNotificationEmail,consumeEmailWebhook}=await import("../packages/core/email");
+  const api="/staff/admin/integrations/resend";
+  const hub=()=>admin.fetch("/staff/admin/integrations?domain=email");
+  const resend=async()=>(await hub()).providers.find((p:{provider_key:string})=>p.provider_key==="resend");
+  assert.equal((await resend()).sending_active,false);
+  assert.equal((await resend()).webhook_url,origin+"/api/v1/webhooks/email/resend");
+  await receiver.fetch(api,{enabled:true},"POST",403);
+  await admin.fetch(api,{enabled:true},"POST",409);
+  const sender={from_email:"QC Warehouse <sender@example.test>"};
+  await admin.fetch(api,{config:sender});
+  await admin.fetch(api+"/secrets",{environment:"sandbox",secret_name:"api_key",secret_value:token},"POST",422);
+  await admin.fetch(api+"/secrets",{environment:"live",secret_name:"api_key",secret_value:token});
+  await admin.fetch(api+"/secrets",{environment:"live",secret_name:"webhook_secret",secret_value:secret});
+  assert.equal((await admin.fetch(api+"/validate",{})).ok,true);
+  const summary=JSON.stringify(await hub());
+  assert(!summary.includes(token) && !summary.includes(secret));
+  assert.equal((await admin.fetch("/auth/providers")).email,false);
+
+  const email=randomUUID()+"@example.test";
+  const recipient=(await pool.query("select normalized_email from user_emails where user_id=$1 and is_primary",
+    [customer.registration.user_id])).rows[0].normalized_email;
+  const notificationId=randomUUID(), messageId=randomUUID(), probeMessageId=randomUUID();
+  let probeId="",deliveryId="",code="",rejectOtp=true;
+  const hookPath="/webhooks/email/resend";
+  function sendEvent(payload:object,{id=randomUUID(),age=0,tamper=false}={}) {
+    const raw=JSON.stringify(payload), timestamp=String(Math.floor(Date.now()/1000)-age);
+    const mac=createHmac("sha256",key).update([id,timestamp,raw].join(".")).digest("base64");
+    return handle(new Request(origin+"/api/v1"+hookPath,{
+      method:"POST", headers:{"svix-id":id,"svix-timestamp":timestamp,"svix-signature":"v1,"+mac},
+      body:tamper ? raw+" " : raw,
+    }),hookPath);
+  }
+  function event(type:string,to=recipient) {
+    return {type,data:{email_id:messageId,to:[to],tags:{delivery_id:deliveryId},bounce:{type:"Permanent"}}};
+  }
+  const fetchMock=t.mock.method(globalThis,"fetch",async (url:string,init:RequestInit)=>{
+    assert.equal(url,"https://api.resend.com/emails");
+    const headers=new Headers(init.headers);
+    assert.equal(headers.get("authorization"),"Bearer "+token);
+    const body=JSON.parse(init.body as string);
+    assert.equal(body.from,sender.from_email);
+    if(body.to[0]==="delivered@resend.dev") {
+      probeId=body.tags[0].value;
+      assert.equal(body.tags[0].name,"connection_test");
+      assert.equal(headers.get("idempotency-key"),probeId);
+      return Response.json({id:probeMessageId});
+    }
+    if(body.to[0]===email) {
+      assert.match(headers.get("idempotency-key")??"",/^otp-/);
+      code=body.text.match(/\d{6}/)[0];
+      return rejectOtp ? Response.json({name:"validation_error"},{status:403}) : Response.json({id:randomUUID()});
+    }
+    assert.deepEqual(body.to,[recipient]);
+    assert.equal(headers.get("idempotency-key"),"notification-"+deliveryId);
+    assert(body.tags.some((tag:{name:string;value:string})=>tag.name==="delivery_id"&&tag.value===deliveryId));
+    await deliverEmailOnce();
+    const id=randomUUID();
+    assert.equal((await sendEvent(event("email.delivered"),{id})).status,200);
+    assert.equal((await sendEvent(event("email.delivered"),{id})).status,200);
+    assert.equal(await transaction(consumeEmailWebhook),true);
+    assert.equal(await transaction(consumeEmailWebhook),false);
+    return Response.json({id:messageId});
+  });
+
+  assert.equal((await admin.fetch(api+"/test",{})).ok,true);
+  assert(!(await resend()).config.webhook_verified_at);
+  const probe={type:"email.delivered",data:{email_id:probeMessageId,to:["delivered@resend.dev"],tags:{connection_test:probeId}}};
+  assert.equal((await sendEvent(probe)).status,200);
+  await transaction(consumeEmailWebhook);
+  assert((await resend()).config.webhook_verified_at);
+  await admin.fetch(api,{enabled:true,lifecycle_state:"enabled"});
+  const otpClient=new Client();
+  assert.equal((await otpClient.fetch("/auth/providers")).email,true);
+  await otpClient.fetch("/auth/otp/request",{email},"POST",503);
+  assert((await pool.query("select consumed_at from verification_challenges where target_email=$1",[email])).rows[0].consumed_at);
+  rejectOtp=false;
+  const otp=await otpClient.fetch("/auth/otp/request",{email},"POST",202);
+  assert(!("demo_code" in otp));
+  assert.equal((await otpClient.fetch("/auth/otp/verify",{challenge_id:otp.challenge_id,code})).state,"onboarding");
+
+  await pool.query("insert into notifications(id,user_id,template,locale,payload,dedupe_key) values($1::uuid,$2,'ticket.reply','en','{}',$1::text)",[notificationId,customer.registration.user_id]);
+  await transaction(db=>queueNotificationEmail(db,notificationId,customer.registration.user_id));
+  deliveryId=(await pool.query("select id from email_deliveries where notification_id=$1",[notificationId])).rows[0].id;
+  const delivery=async()=>(await pool.query("select provider,provider_message_id,state from email_deliveries where id=$1",[deliveryId])).rows[0];
+  assert.equal(await deliverEmailOnce(),true);
+  assert.deepEqual(await delivery(),{provider:"resend",provider_message_id:messageId,state:"delivered"});
+  assert.equal(fetchMock.mock.callCount(),4);
+  assert.equal((await sendEvent(event("email.complained"),{tamper:true})).status,401);
+  assert.equal((await sendEvent(event("email.complained"),{age:301})).status,401);
+  assert.equal((await sendEvent(event("email.complained",email))).status,200);
+  await transaction(consumeEmailWebhook);
+  assert.equal((await delivery()).state,"delivered");
+  const postmarkPath="/webhooks/email/postmark";
+  const oldWebhook=await handle(new Request(origin+"/api/v1"+postmarkPath,{
+    method:"POST",headers:{"x-postmark-webhook-secret":"postmark-hook-fixture"},
+    body:JSON.stringify({RecordType:"SpamComplaint",MessageID:messageId,Metadata:{delivery_id:deliveryId}}),
+  }),postmarkPath);
+  assert.equal(oldWebhook.status,200);
+  await transaction(consumeEmailWebhook);
+  assert.equal((await delivery()).state,"delivered");
+  assert.equal((await sendEvent(event("email.delivery_delayed"))).status,200);
+  await transaction(consumeEmailWebhook);
+  assert.equal((await delivery()).state,"delivered");
+  assert.equal((await sendEvent(event("email.bounced"))).status,200);
+  await transaction(consumeEmailWebhook);
+  assert.equal((await delivery()).state,"bounced");
+  assert.equal((await customer.c.fetch("/me/email-delivery-status")).suppressed,true);
+
+  await admin.fetch(api+"/secrets/revoke",{environment:"live",secret_name:"api_key"});
+  assert(!(await resend()).config.webhook_verified_at);
+  assert.equal((await otpClient.fetch("/auth/providers")).email,false);
+  await otpClient.fetch("/auth/otp/request",{email},"POST",503);
+  assert.equal(fetchMock.mock.callCount(),4);
+  await admin.fetch(api,{enabled:false});
 });
 
 test("Stripe webhook verifies and deduplicates payments and only exposes receipts for owned applied charges",async t=>{
@@ -2395,6 +2518,7 @@ test("Postmark transactional email delivery tracks timeouts, webhooks, out-of-or
   await pool.query("insert into staff_roles(user_id,role) values($1,'support') on conflict do nothing",[adminId]);
   setFixtureEnv(t,{
     QCW_DEMO:"0",
+    EMAIL_PROVIDER:"postmark",
     POSTMARK_SERVER_TOKEN:"postmark-live-fixture",
     EMAIL_FROM:"no-reply@qcwarehouse.test",
     POSTMARK_MESSAGE_STREAM:"outbound",

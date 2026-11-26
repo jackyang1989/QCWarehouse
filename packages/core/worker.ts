@@ -141,8 +141,8 @@ export async function workOnce() {
       return true;
     });
     if(worked) return true;
-    if(await deliverEmailOnce()) return true;
     if(await transaction(consumeEmailWebhook)) return true;
+    if(await deliverEmailOnce()) return true;
     return await transaction(consumeTrackingCallback);
   } catch (error) {
     if(jobId) await pool.query(`update outbox_events set attempts=attempts+1,last_error=$2,

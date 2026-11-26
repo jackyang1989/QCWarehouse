@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { DB } from "../db";
 import { requireCustomerActive } from "./auth";
 import { audit, code, event, guard, hash, lock, one, organization, revision, role, uuid, type Actor } from "./common";
-import { integrationPreflight, stripeSettingsFromDb } from "./integrations";
+import { emailSettings, integrationPreflight, stripeSettingsFromDb } from "./integrations";
 import { demoTermsVersion, demoWarehouseAddressZh } from "./demo-fixtures";
 import { savePhoto } from "./intake";
 import { activatePaidOrder, catalog, orderItemReadiness, priceSchema, readyOrder, templateSchema } from "./orders";
@@ -1724,7 +1724,7 @@ async function launchReadiness(db:DB) {
     rehearsal_sets_completed:reverifiedRuns.length===REHEARSAL_SCENARIOS.length,
     no_exhausted_jobs:counts.exhausted_jobs===0,
     oidc_configured:Boolean(preflight.google.configured && preflight.microsoft.configured),
-    postmark_live:Boolean(preflight.postmark.enabled),
+    email_live:(await emailSettings(db)).enabled,
     stripe_live:preflight.stripe.mode==="live"&&preflight.stripe.checkoutConfigured,
     kuaidi100_live:Boolean(preflight.kuaidi100.queryConfigured && preflight.kuaidi100.httpsCallbackConfigured),
   };

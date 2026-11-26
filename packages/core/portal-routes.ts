@@ -49,6 +49,7 @@ const adminTabs=[
   ["/admin/operations","后台任务",["super_admin"]],
   ["/admin/integrations","第三方集成",["super_admin"]],
   ["/admin/integrations/payments","支付渠道配置",["super_admin"]],
+  ["/admin/integrations/email","邮件服务配置",["super_admin"]],
   ["/admin/integrations/ocr","OCR 文档识别",["super_admin"]],
   ["/admin/integrations/logistics","物流接入",staffAccess.trackingConfiguration],
 ] as const;
@@ -131,7 +132,7 @@ for(const [paths,route] of [
   [["/wh/scan"],{area:"warehouse",view:"warehouse-scan"}],
   [["/admin/storage/locations"],{area:"admin",view:"storage-locations"}],
   [["/admin/logistics"],{area:"admin",view:"logistics"}],
-  [["/admin/integrations","/admin/integrations/payments","/admin/integrations/ocr"],{area:"admin",view:"admin-integrations"}],
+  [["/admin/integrations","/admin/integrations/payments","/admin/integrations/ocr","/admin/integrations/email"],{area:"admin",view:"admin-integrations"}],
   [["/admin/integrations/logistics"],{area:"admin",view:"logistics-configuration"}],
 ] satisfies [string[],PortalRoute][]) {
   for(const path of paths) fixed.set(path,route);

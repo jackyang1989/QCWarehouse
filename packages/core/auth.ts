@@ -1,7 +1,8 @@
 import { createHmac, randomBytes, randomInt, scryptSync, timingSafeEqual } from "node:crypto";
 import * as oidc from "openid-client";
 import { pepper, seal, unseal } from "./crypto";
-import { oidcSettings, postmarkSettings, signInMethods, type OidcProvider } from "./integrations";
+import { submitEmail } from "./email-transport";
+import { emailSettings, oidcSettings, signInMethods, type OidcProvider } from "./integrations";
 import { pool, transaction, type DB } from "../db";
 import { Problem, audit, code, event, findReceivingProfiles, guard, hash, isDemo, lock, one, organization, receivingCode, role, uuid, type Actor } from "./common";
 import { demoTermsVersion, demoWarehouseAddressZh, usableWarehouseAddressSql } from "./demo-fixtures";
@@ -138,7 +139,7 @@ export async function startOtp(email: string, browser: string, verifiedIdentity?
   const otp = randomInt(0,1000000).toString().padStart(6,"0");
   const challengeId = uuid();
   const demo = isDemo() && normalized.endsWith("@qcw.test");
-  const mail = postmarkSettings();
+  const mail = await emailSettings(pool);
   guard(demo || mail.enabled,"EMAIL_UNAVAILABLE","Email verification is unavailable.",503);
   await transaction(async (db) => {
     await lock(db,"otp:" + normalized);
@@ -160,19 +161,13 @@ export async function startOtp(email: string, browser: string, verifiedIdentity?
       values($1,$2,$3,$4,$5,$6,now()+interval '10 minutes',$7,$8)`,[challengeId,normalized,purpose,initiatorUserId??null,browserHash,digest,budget.next_gen,verifiedIdentity ?? null]);
   });
   if (!demo) {
-    const submitted = await fetch("https://api.postmarkapp.com/email", {
-      method:"POST",
-      headers:{"accept":"application/json","content-type":"application/json","X-Postmark-Server-Token":mail.token!},
-      body:JSON.stringify({From:mail.from,To:normalized,Subject:"Your QC Warehouse verification code",
-        TextBody:purpose==="unlink_identity"?`Your code to remove a sign-in method is ${otp}. It expires in 10 minutes.`:
-          `Your code is ${otp}. It expires in 10 minutes.`,MessageStream:mail.stream}),
-      signal:AbortSignal.timeout(10000),
-    }).then(async response=>{
-      if(!response.ok) return false;
-      const result=await response.json();
-      return result?.ErrorCode===0 && typeof result.MessageID==="string" && result.MessageID.length>0;
-    }).catch(()=>false);
-    if(!submitted) {
+    const text = purpose === "unlink_identity"
+      ? `Your code to remove a sign-in method is ${otp}. It expires in 10 minutes.`
+      : `Your code is ${otp}. It expires in 10 minutes.`;
+    const outcome = await submitEmail(mail, {
+      recipient: normalized, subject: "Your QC Warehouse verification code", text, idempotencyKey: `otp-${challengeId}`,
+    });
+    if (outcome.kind !== "submitted") {
       await pool.query("update verification_challenges set consumed_at=now() where id=$1 and consumed_at is null",[challengeId]);
       guard(false,"EMAIL_UNAVAILABLE","The verification email could not be submitted. Request a new code.",503);
     }
@@ -668,7 +663,7 @@ async function removableIdentity(db:Pick<DB,"query">,actor:Actor,identityId:stri
     where i.user_id=$1 and i.status='active'`,[actor.id]);
   const identity=rows.find(row=>row.id===identityId);
   guard(identity,"NOT_FOUND","Sign-in method not found.",404);
-  const methods=signInMethods();
+  const methods=await signInMethods(db);
   guard(rows.some(row=>row.id!==identityId&&(row.provider==="email_otp"?
     methods.email||(methods.demo&&row.email?.endsWith("@qcw.test")):methods[row.provider])),
     "LAST_LOGIN_METHOD","Keep at least one available sign-in method on your account.",409);

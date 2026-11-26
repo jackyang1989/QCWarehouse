@@ -1,8 +1,20 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { pool, transaction, type DB } from "../db";
 import { appOrigin, decryptSecret, encryptSecret, requireStaffMfa } from "./auth";
 import { audit, guard, hash, isDemo, one, organization, role, uuid, type Actor } from "./common";
-import { postmarkSettings } from "./integrations";
+import { EMAIL_SUBMISSION_TIMEOUT_MS, submitEmail } from "./email-transport";
+import { emailSettings, postmarkSettings } from "./integrations";
+import { resendSettings, RESEND_TEST_RECIPIENT } from "./resend-settings";
+
+const SUBMISSION_IN_PROGRESS = "SUBMISSION_IN_PROGRESS";
+const RESEND_DELIVERY_DELAYED = "RESEND_DELIVERY_DELAYED";
+const WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS = 300;
+
+function canRetryDelivery(row: { state: string; error_code: string | null; updated_at: Date }) {
+  return (row.state === "unknown" || row.state === "deferred") &&
+    row.error_code !== RESEND_DELIVERY_DELAYED &&
+    (row.error_code !== SUBMISSION_IN_PROGRESS || Date.now() - row.updated_at.getTime() > EMAIL_SUBMISSION_TIMEOUT_MS);
+}
 
 export function maskEmail(email: string) {
   const [local = "", domain = ""] = email.trim().split("@");
@@ -100,8 +112,7 @@ export async function queueNotificationEmail(db: DB, notificationId: string, use
     );
     return;
   }
-  const mail = postmarkSettings();
-  if (isDemo() && !mail.enabled) {
+  if (isDemo()) {
     await db.query(
       `insert into email_deliveries(id, notification_id, address_snapshot, provider_message_id, attempt, state, updated_at)
        values($1, $2, $3, $4, 1, 'submitted', now())
@@ -184,7 +195,7 @@ export async function deliverEmailOnce() {
       );
       return { handled: true as const };
     }
-    const mail = postmarkSettings();
+    const mail = isDemo() ? { enabled: false as const } : await emailSettings(db);
     if (isDemo() && !mail.enabled) {
       await db.query(
         `update email_deliveries
@@ -202,6 +213,10 @@ export async function deliverEmailOnce() {
       await notifyEmailChannelAlert(db, row.id, "PROVIDER_UNCONFIGURED");
       return { handled: true as const };
     }
+    await db.query(
+      `update email_deliveries set provider = $2, state = 'unknown', error_code = $3, updated_at = now() where id = $1`,
+      [row.id, mail.provider, SUBMISSION_IN_PROGRESS],
+    );
     return {
       handled: false as const,
       id: row.id,
@@ -219,77 +234,36 @@ export async function deliverEmailOnce() {
   if (claimed.handled) return true;
 
   const content = renderEmailContent(claimed.template, claimed.orderPublicNo, claimed.orderIsTest);
-  let outcome:
-    | { kind: "submitted"; messageId: string }
-    | { kind: "bounced"; errorCode: string }
-    | { kind: "unknown"; errorCode: string }
-    | { kind: "deferred"; errorCode: string };
-
-  try {
-    const response = await fetch("https://api.postmarkapp.com/email", {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        "content-type": "application/json",
-        "X-Postmark-Server-Token": claimed.mail.token!,
-      },
-      body: JSON.stringify({
-        From: claimed.mail.from,
-        To: claimed.recipient,
-        Subject: content.subject,
-        TextBody: content.text,
-        MessageStream: claimed.mail.stream,
-        Metadata: {
-          delivery_id: claimed.id,
-          notification_id: claimed.notificationId,
-          attempt: String(claimed.attempt),
-        },
-      }),
-      signal: AbortSignal.timeout(10000),
-    });
-    const body = (await response.json().catch(() => null)) as { ErrorCode?: number; MessageID?: string } | null;
-    if (response.ok && body?.ErrorCode === 0 && typeof body.MessageID === "string" && body.MessageID.length > 0) {
-      outcome = { kind: "submitted", messageId: body.MessageID };
-    } else if (body?.ErrorCode === 406) {
-      outcome = { kind: "bounced", errorCode: "INACTIVE_RECIPIENT" };
-    } else {
-      outcome = { kind: "deferred", errorCode: `POSTMARK_${body?.ErrorCode ?? response.status}` };
-    }
-  } catch (error) {
-    const name = error instanceof Error ? error.name : "";
-    if (name === "TimeoutError" || name === "AbortError") {
-      outcome = { kind: "unknown", errorCode: "REQUEST_TIMEOUT" };
-    } else {
-      outcome = { kind: "deferred", errorCode: "NETWORK_ERROR" };
-    }
-  }
+  const outcome = await submitEmail(claimed.mail, {
+    ...content,
+    recipient: claimed.recipient,
+    idempotencyKey: `notification-${claimed.id}`,
+    metadata: {
+      delivery_id: claimed.id,
+      notification_id: claimed.notificationId,
+      attempt: String(claimed.attempt),
+    },
+  });
 
   await transaction(async (db) => {
-    if (outcome.kind === "submitted") {
-      await db.query(
-        `update email_deliveries
-         set state = 'submitted', provider_message_id = $2, error_code = null, updated_at = now()
-         where id = $1 and state = 'queued'`,
-        [claimed.id, outcome.messageId],
-      );
-      return;
-    }
+    const messageId = outcome.kind === "submitted" ? outcome.messageId : null;
+    const errorCode = outcome.kind === "submitted" ? null : outcome.errorCode;
+    const updated = await db.query(
+      `update email_deliveries
+       set state = $2, provider_message_id = $3, error_code = $4, updated_at = now()
+       where id = $1 and state = 'unknown' and error_code = $5`,
+      [claimed.id, outcome.kind, messageId, errorCode, SUBMISSION_IN_PROGRESS],
+    );
+    if (!updated.rowCount || outcome.kind === "submitted") return;
     if (outcome.kind === "bounced") {
       await db.query(
-        `update email_deliveries set state = 'bounced', error_code = $2, updated_at = now() where id = $1`,
-        [claimed.id, outcome.errorCode],
-      );
-      await db.query(
-        `update user_emails set delivery_state = 'bounced' where user_id = $1 and normalized_email = $2`,
+        `update user_emails set delivery_state = 'bounced' where user_id = $1 and normalized_email = $2
+         and delivery_state is distinct from 'complained'`,
         [claimed.userId, claimed.recipient],
       );
       await notifyCustomerDeliveryFailed(db, claimed.userId, claimed.recipient, "bounced");
       return;
     }
-    await db.query(
-      `update email_deliveries set state = $2, error_code = $3, updated_at = now() where id = $1`,
-      [claimed.id, outcome.kind, outcome.errorCode],
-    );
     await notifyEmailChannelAlert(db, claimed.id, outcome.errorCode);
   });
   return true;
@@ -326,12 +300,7 @@ export async function receivePostmarkWebhook(db: DB, req: Request, raw: string) 
     timingSafeEqual(Buffer.from(hash(candidate), "hex"), Buffer.from(hash(expected), "hex"));
   guard(valid, "WEBHOOK_UNAUTHORIZED", "Invalid Postmark webhook credentials.", 401);
 
-  let payload: Record<string, unknown>;
-  try {
-    payload = JSON.parse(raw) as Record<string, unknown>;
-  } catch {
-    guard(false, "VALIDATION_FAILED", "Webhook payload must be valid JSON.", 400);
-  }
+  const payload = parseWebhook(raw) as Record<string, unknown>;
   const recordType = typeof payload.RecordType === "string" ? payload.RecordType.trim() : "";
   const messageId = typeof payload.MessageID === "string" ? payload.MessageID.trim() : "";
   guard(recordType && messageId, "VALIDATION_FAILED", "Postmark RecordType and MessageID are required.", 400);
@@ -341,130 +310,201 @@ export async function receivePostmarkWebhook(db: DB, req: Request, raw: string) 
       ? String(payload.ID)
       : String(payload.DeliveredAt ?? payload.BouncedAt ?? payload.Tag ?? "0");
   const eventKey = `${recordType}:${messageId}:${discriminator}`;
+  return storeEmailWebhook(db, "postmark", eventKey, raw);
+}
+
+function parseWebhook(raw: string) {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    guard(false, "VALIDATION_FAILED", "Webhook payload must be valid JSON.", 400);
+  }
+  guard(payload && typeof payload === "object" && !Array.isArray(payload), "VALIDATION_FAILED", "Expected an event object.", 400);
+  return payload;
+}
+
+type ResendWebhook = {
+  type?: string;
+  data?: {
+    email_id?: string;
+    to?: string[];
+    tags?: { delivery_id?: string; connection_test?: string };
+    bounce?: { type?: string };
+  };
+};
+
+async function storeEmailWebhook(db: DB, provider: "postmark" | "resend", eventKey: string, raw: string) {
   await db.query(
     `insert into email_webhook_inbox(provider, event_key, payload_ciphertext, received_at)
-     values('postmark', $1, $2, now())
+     values($1, $2, $3, now())
      on conflict(provider, event_key) do nothing`,
-    [eventKey, encryptSecret(raw)],
+    [provider, eventKey, encryptSecret(raw)],
   );
   return { received: true };
 }
 
-export async function consumeEmailWebhook(db: DB) {
-  const inbox = (
-    await db.query<{ id: string; payload_ciphertext: Buffer }>(
-      `select id, payload_ciphertext
-       from email_webhook_inbox
-       where provider = 'postmark' and processed_at is null
-       order by received_at, id
-       limit 1
-       for update skip locked`,
-    )
-  ).rows[0];
-  if (!inbox) return false;
+export async function receiveResendWebhook(db: DB, req: Request, raw: string) {
+  const { webhookKey } = await resendSettings(db);
+  guard(webhookKey?.length, "WEBHOOK_UNAVAILABLE", "Resend webhook is not configured.", 503);
+  const id = req.headers.get("svix-id") ?? "";
+  const timestamp = req.headers.get("svix-timestamp") ?? "";
+  const signature = req.headers.get("svix-signature") ?? "";
+  const fresh = /^\d{1,12}$/.test(timestamp) &&
+    Math.abs(Date.now() / 1000 - Number(timestamp)) <= WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS;
+  guard(id.length > 0 && id.length <= 200 && fresh, "WEBHOOK_UNAUTHORIZED", "Invalid Resend webhook signature.", 401);
+  const expected = createHmac("sha256", webhookKey).update(`${id}.${timestamp}.${raw}`).digest();
+  const valid = signature.split(/\s+/).some((value) => {
+    if (!/^v1,[A-Za-z0-9+/]{43}=$/.test(value)) return false;
+    const digest = Buffer.from(value.slice(3), "base64");
+    return timingSafeEqual(expected, digest);
+  });
+  guard(valid, "WEBHOOK_UNAUTHORIZED", "Invalid Resend webhook signature.", 401);
+  const event = parseWebhook(raw) as ResendWebhook;
+  guard(typeof event.type === "string", "VALIDATION_FAILED", "Resend event type is required.", 400);
+  if (!resendEventTypes.has(event.type)) return { received: true };
+  guard(typeof event.data?.email_id === "string" && event.data.email_id.trim() && Array.isArray(event.data.to),
+    "VALIDATION_FAILED", "Resend email ID and recipients are required.", 400);
+  return storeEmailWebhook(db, "resend", id, raw);
+}
 
-  const payload = JSON.parse(decryptSecret(inbox.payload_ciphertext)) as {
+const resendEventTypes = new Set([
+  "email.sent", "email.delivered", "email.complained", "email.bounced",
+  "email.suppressed", "email.delivery_delayed", "email.failed",
+]);
+
+function deliveryEvent(provider: "postmark" | "resend", raw: string) {
+  if (provider === "resend") {
+    const { type, data } = JSON.parse(raw) as ResendWebhook;
+    const recipients = data?.to?.filter((value) => typeof value === "string").map((value) => value.trim().toLowerCase()) ?? [];
+    const correlation = { messageId: data?.email_id?.trim(), deliveryId: data?.tags?.delivery_id, recipients };
+    switch (type) {
+      case "email.sent": return { ...correlation, state: "submitted" as const, errorCode: null };
+      case "email.delivered": return { ...correlation, state: "delivered" as const, errorCode: null };
+      case "email.complained": return { ...correlation, state: "complained" as const, errorCode: "SPAM_COMPLAINT" };
+      case "email.suppressed": return { ...correlation, state: "bounced" as const, errorCode: "RESEND_SUPPRESSED" };
+      case "email.bounced": return data?.bounce?.type === "Permanent"
+        ? { ...correlation, state: "bounced" as const, errorCode: "HARD_BOUNCE" }
+        : { ...correlation, state: "deferred" as const, errorCode: "SOFT_BOUNCE" };
+      case "email.delivery_delayed": return { ...correlation, state: "deferred" as const, errorCode: RESEND_DELIVERY_DELAYED };
+      case "email.failed": return { ...correlation, state: "deferred" as const, errorCode: "RESEND_FAILED" };
+      default: return null;
+    }
+  }
+
+  const payload = JSON.parse(raw) as {
     RecordType?: string;
     MessageID?: string;
     Type?: string;
     TypeCode?: number | string;
     Inactive?: boolean;
     Metadata?: { delivery_id?: string };
+    Recipient?: string;
+    Email?: string;
   };
-  const messageId = typeof payload.MessageID === "string" ? payload.MessageID.trim() : "";
-  const metadataId =
-    typeof payload.Metadata?.delivery_id === "string" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(payload.Metadata.delivery_id)
-      ? payload.Metadata.delivery_id
-      : null;
+  const address = payload.Recipient ?? payload.Email;
+  const correlation = {
+    messageId: payload.MessageID?.trim(),
+    deliveryId: payload.Metadata?.delivery_id,
+    recipients: typeof address === "string" ? [address.trim().toLowerCase()] : null,
+  };
+  switch (payload.RecordType) {
+    case "Delivery": return { ...correlation, state: "delivered" as const, errorCode: null };
+    case "SpamComplaint": return { ...correlation, state: "complained" as const, errorCode: "SPAM_COMPLAINT" };
+    case "Bounce": {
+      const bounceType = String(payload.Type ?? "");
+      const softBounce = !payload.Inactive && ["Transient", "SoftBounce", "AutoResponder", "DnsError"].includes(bounceType);
+      const errorCode = String(payload.TypeCode ?? (bounceType || (softBounce ? "SOFT_BOUNCE" : "HARD_BOUNCE")));
+      return { ...correlation, state: softBounce ? "deferred" as const : "bounced" as const, errorCode };
+    }
+    default: return null;
+  }
+}
+
+async function applyDeliveryEvent(db: DB, provider: "postmark" | "resend", event: NonNullable<ReturnType<typeof deliveryEvent>>) {
+  const { messageId, deliveryId, recipients, state, errorCode } = event;
+  const metadataId = typeof deliveryId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(deliveryId) ? deliveryId : null;
 
   const delivery = (
-    await db.query<{
-      id: string;
-      notification_id: string;
-      address_snapshot: Buffer;
-      state: string;
-      user_id: string;
-    }>(
-      `select d.id, d.notification_id, d.address_snapshot, d.state, n.user_id
+    await db.query<{ id: string; address_snapshot: Buffer; state: string; error_code: string | null; user_id: string }>(
+      `select d.id, d.address_snapshot, d.state, d.error_code, n.user_id
        from email_deliveries d
        join notifications n on n.id = d.notification_id
-       where d.provider_message_id = $1 or ($2::uuid is not null and d.id = $2::uuid)
-       order by d.attempt desc
+       where d.provider = $1 and (d.provider_message_id = $2 or (d.id = $3::uuid and d.provider_message_id is null))
+       order by (d.provider_message_id is not null) desc, d.attempt desc
        limit 1
        for update of d`,
-      [messageId, metadataId],
+      [provider, messageId, metadataId],
     )
   ).rows[0];
+  if (!delivery) return;
+  const recipient = decryptSecret(delivery.address_snapshot).trim().toLowerCase();
+  if (recipients && !recipients.includes(recipient)) return;
+  if (delivery.state === "complained") return;
+  if (delivery.state === "bounced" && state !== "complained") return;
+  if (delivery.state === "delivered" && (state === "deferred" || state === "submitted")) return;
+  if (errorCode === RESEND_DELIVERY_DELAYED && delivery.state === "deferred" && delivery.error_code !== RESEND_DELIVERY_DELAYED) return;
+  if (state === "submitted" && delivery.state !== "unknown") return;
 
-  if (delivery) {
-    const recipient = decryptSecret(delivery.address_snapshot).trim().toLowerCase();
-    const recordType = payload.RecordType;
-    if (recordType === "Delivery") {
-      if (delivery.state !== "bounced" && delivery.state !== "complained") {
-        await db.query(
-          `update email_deliveries
-           set state = 'delivered', provider_message_id = coalesce(provider_message_id, $2), error_code = null, updated_at = now()
-           where id = $1`,
-          [delivery.id, messageId || null],
-        );
-        await db.query(
-          `update user_emails
-           set delivery_state = 'deliverable'
-           where user_id = $1 and normalized_email = $2 and delivery_state = 'degraded'`,
-          [delivery.user_id, recipient],
-        );
-      }
-    } else if (recordType === "SpamComplaint") {
+  await db.query(
+    `update email_deliveries
+     set state = $2, provider_message_id = coalesce(provider_message_id, $3), error_code = $4, updated_at = now()
+     where id = $1`,
+    [delivery.id, state, messageId, errorCode],
+  );
+
+  const owner = [delivery.user_id, recipient];
+  if (state === "bounced" || state === "complained") {
+    await db.query(
+      `update user_emails set delivery_state = $3
+       where user_id = $1 and normalized_email = $2 and delivery_state is distinct from 'complained'`,
+      [...owner, state],
+    );
+    await notifyCustomerDeliveryFailed(db, delivery.user_id, recipient, state);
+  } else if (state === "delivered") {
+    await db.query(
+      `update user_emails set delivery_state = 'deliverable'
+       where user_id = $1 and normalized_email = $2 and delivery_state = 'degraded'`, owner,
+    );
+  } else if (errorCode === "RESEND_FAILED") {
+    await notifyEmailChannelAlert(db, delivery.id, errorCode);
+  } else if (state === "deferred") {
+    await db.query(
+      `update user_emails set delivery_state = 'degraded'
+       where user_id = $1 and normalized_email = $2 and coalesce(delivery_state, 'deliverable') = 'deliverable'`, owner,
+    );
+  }
+}
+
+export async function consumeEmailWebhook(db: DB) {
+  const inbox = (
+    await db.query<{ id: string; provider: "postmark" | "resend"; payload_ciphertext: Buffer }>(
+      `select id, provider, payload_ciphertext
+       from email_webhook_inbox
+       where provider in ('postmark', 'resend') and processed_at is null
+       order by received_at, id
+       limit 1
+       for update skip locked`,
+    )
+  ).rows[0];
+  if (!inbox) return false;
+  const raw = decryptSecret(inbox.payload_ciphertext);
+  const event = deliveryEvent(inbox.provider, raw);
+  if (inbox.provider === "resend") {
+    const probe = (JSON.parse(raw) as ResendWebhook).data?.tags?.connection_test;
+    if (typeof probe === "string" && event?.state === "delivered" && event.recipients?.includes(RESEND_TEST_RECIPIENT)) {
+      await db.query("select 1 from integration_providers where provider_key = 'resend' for update");
       await db.query(
-        `update email_deliveries
-         set state = 'complained', provider_message_id = coalesce(provider_message_id, $2), error_code = 'SPAM_COMPLAINT', updated_at = now()
-         where id = $1`,
-        [delivery.id, messageId || null],
+        `update integration_providers
+         set config = config || jsonb_build_object('webhook_verified_at', now())
+         where provider_key = 'resend' and config->>'connection_test_id' = $1
+           and config->>'connection_test_message_id' = $2 and config->>'webhook_verified_at' is null`,
+        [probe, event.messageId],
       );
-      await db.query(
-        `update user_emails set delivery_state = 'complained' where user_id = $1 and normalized_email = $2`,
-        [delivery.user_id, recipient],
-      );
-      await notifyCustomerDeliveryFailed(db, delivery.user_id, recipient, "complained");
-    } else if (recordType === "Bounce") {
-      const bounceType = String(payload.Type ?? "");
-      const softBounce =
-        !payload.Inactive &&
-        ["Transient", "SoftBounce", "AutoResponder", "DnsError"].includes(bounceType);
-      const errorCode = String(payload.TypeCode ?? (bounceType || (softBounce ? "SOFT_BOUNCE" : "HARD_BOUNCE")));
-      if (softBounce) {
-        if (!["delivered", "bounced", "complained"].includes(delivery.state)) {
-          await db.query(
-            `update email_deliveries
-             set state = 'deferred', provider_message_id = coalesce(provider_message_id, $2), error_code = $3, updated_at = now()
-             where id = $1`,
-            [delivery.id, messageId || null, errorCode],
-          );
-          await db.query(
-            `update user_emails
-             set delivery_state = 'degraded'
-             where user_id = $1 and normalized_email = $2 and coalesce(delivery_state, 'deliverable') = 'deliverable'`,
-            [delivery.user_id, recipient],
-          );
-        }
-      } else if (delivery.state !== "complained") {
-        await db.query(
-          `update email_deliveries
-           set state = 'bounced', provider_message_id = coalesce(provider_message_id, $2), error_code = $3, updated_at = now()
-           where id = $1`,
-          [delivery.id, messageId || null, errorCode],
-        );
-        await db.query(
-          `update user_emails
-           set delivery_state = 'bounced'
-           where user_id = $1 and normalized_email = $2 and coalesce(delivery_state, 'deliverable') <> 'complained'`,
-          [delivery.user_id, recipient],
-        );
-        await notifyCustomerDeliveryFailed(db, delivery.user_id, recipient, "bounced");
-      }
     }
   }
+  if (event?.messageId) await applyDeliveryEvent(db, inbox.provider, event);
 
   await db.query(`update email_webhook_inbox set processed_at = now() where id = $1`, [inbox.id]);
   return true;
@@ -570,7 +610,7 @@ export async function staffEmailDeliveries(db: DB, actor: Actor, stateFilter: st
       suppressed,
       can_retry:
         row.attempt === row.latest_attempt &&
-        (row.state === "unknown" || row.state === "deferred") &&
+        canRetryDelivery(row) &&
         !suppressed,
     });
   }
@@ -629,13 +669,15 @@ export async function retryEmailDelivery(
     address_snapshot: Buffer;
     attempt: number;
     state: string;
+    error_code: string | null;
+    updated_at: Date;
     user_id: string;
     template: string;
     order_id: string | null;
     order_state: string | null;
   }>(
     db,
-    `select d.id, d.notification_id, d.address_snapshot, d.attempt, d.state,
+    `select d.id, d.notification_id, d.address_snapshot, d.attempt, d.state, d.error_code, d.updated_at,
             n.user_id, n.template, n.order_id, o.state::text as order_state
      from email_deliveries d
      join notifications n on n.id = d.notification_id
@@ -653,9 +695,9 @@ export async function retryEmailDelivery(
     409,
   );
   guard(
-    latest.state === "unknown" || latest.state === "deferred",
+    canRetryDelivery(latest),
     "INVALID_STATE",
-    "Only unknown or deferred email deliveries can be retried.",
+    "This email delivery is not currently eligible for retry.",
     409,
   );
 

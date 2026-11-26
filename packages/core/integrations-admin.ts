@@ -2,7 +2,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { isDemo, one, role, uuid, audit, guard, type Actor } from "./common";
 import { unseal, seal } from "./crypto";
-import { requireStaffMfa } from "./auth";
+import { appOrigin, requireStaffMfa } from "./auth";
+import { submitEmail } from "./email-transport";
+import { emailSettings } from "./integrations";
+import { resendApiKey, resendSender, resendSettings, resendWebhookKey, RESEND_TEST_RECIPIENT, RESEND_WEBHOOK_PATH } from "./resend-settings";
 import type { DB } from "../db";
 
 const execFileAsync = promisify(execFile);
@@ -395,15 +398,32 @@ const PROVIDER_DEFS: ProviderDefinition[] = [
     allowed_hosts: ["poll.kuaidi100.com"],
   },
   {
+    provider_key: "resend",
+    domain: "email",
+    display_name: "Resend",
+    default_lifecycle: "configured",
+    default_environment: "live",
+    default_enabled: false,
+    default_priority: 10,
+    is_primary: true,
+    is_fallback: false,
+    compliance_status: "approved",
+    default_health: "unconfigured",
+    default_config: { from_email: "", no_icp_required: true },
+    secret_names: ["api_key", "webhook_secret"],
+    allowed_config_keys: ["from_email"],
+    url_config_keys: [],
+  },
+  {
     provider_key: "postmark",
     domain: "email",
     display_name: "Postmark Transactional Email",
     default_lifecycle: "configured",
     default_environment: "live",
     default_enabled: true,
-    default_priority: 10,
-    is_primary: true,
-    is_fallback: false,
+    default_priority: 20,
+    is_primary: false,
+    is_fallback: true,
     compliance_status: "approved",
     default_health: "unknown",
     default_config: {
@@ -689,6 +709,11 @@ export async function listActiveSecretNames(
 
 function validateSecretFormat(providerKey: string, environment: EnvMode, secretName: string, value: string) {
   guard(value.trim().length >= 4, "INVALID_SECRET", "Secret value must not be empty.", 400);
+  if (providerKey === "resend") {
+    guard(environment === "live", "INVALID_ENVIRONMENT", "Resend uses the live configuration.", 422);
+    guard(secretName === "api_key" ? resendApiKey(value.trim()) : resendWebhookKey(value.trim()),
+      "INVALID_SECRET", secretName === "api_key" ? "Enter a Resend API key beginning with re_." : "Enter a Resend webhook secret beginning with whsec_.", 422);
+  }
   if (providerKey === "stripe" && secretName === "secret_key") {
     if (environment === "live") {
       guard(/^(sk|rk)_live_\S+$/.test(value.trim()), "INVALID_STRIPE_KEY", "Live Stripe secret_key must start with sk_live_ or rk_live_.", 400);
@@ -793,6 +818,13 @@ export async function recordIntegrationEvent(
   );
 }
 
+const RESEND_TEST_CONFIG = "ARRAY['connection_test_id','connection_test_message_id','webhook_verified_at']";
+
+async function resetResendTest(db: DB) {
+  await db.query(`update integration_providers set config = config - ${RESEND_TEST_CONFIG},
+    health_status = 'unknown', last_checked_at = null, last_check_summary = null, last_error = null where provider_key = 'resend'`);
+}
+
 export async function saveProviderSecret(
   db: DB,
   actor: Actor,
@@ -812,6 +844,7 @@ export async function saveProviderSecret(
   guard(def, "PROVIDER_NOT_FOUND", `Unknown provider '${input.provider_key}'.`, 404);
   guard(def.secret_names.includes(input.secret_name), "UNSUPPORTED_SECRET_NAME", `Secret '${input.secret_name}' is not supported for '${input.provider_key}'.`, 400);
   validateSecretFormat(input.provider_key, input.environment, input.secret_name, input.secret_value);
+  if (input.provider_key === "resend") await resetResendTest(db);
 
   const trimmed = input.secret_value.trim();
   const masked = maskSecret(trimmed);
@@ -910,6 +943,7 @@ export async function revokeProviderSecret(
   await requireStaffMfa(db, actor, sessionHash, 15);
   await ensureIntegrationProvidersSeeded(db);
 
+  if (input.provider_key === "resend") await resetResendTest(db);
   const row = (
     await db.query<{ id: string; masked_hint: string; key_version: number }>(
       `select id, masked_hint, key_version from integration_secrets
@@ -1009,8 +1043,27 @@ export async function updateIntegrationProvider(
     no_icp_required: true,
   };
 
+  if (providerKey === "resend") {
+    guard(nextEnv === "live", "INVALID_ENVIRONMENT", "Resend uses the live configuration.", 422);
+    if ("from_email" in incomingConfig) {
+      const from = resendSender(incomingConfig.from_email);
+      guard(from, "INVALID_SENDER", "Enter a valid sender address, optionally with a display name.", 422);
+      mergedConfig.from_email = from;
+    }
+    if (mergedConfig.from_email !== current.config.from_email) {
+      await resetResendTest(db);
+      delete mergedConfig.connection_test_id;
+      delete mergedConfig.connection_test_message_id;
+      delete mergedConfig.webhook_verified_at;
+    }
+  }
+
   const secretNames = await listActiveSecretNames(db, providerKey, nextEnv);
   const blockers = checkLiveEligibility(providerKey, nextEnv, nextLifecycle, nextEnabled, mergedConfig, secretNames);
+  if (providerKey === "resend" && nextEnabled && nextLifecycle !== "disabled") {
+    const missing = resendMissingFields(mergedConfig, secretNames);
+    guard(!missing.length, "RESEND_CONFIG_INCOMPLETE", `Complete the Resend configuration: ${missing.join(", ")}.`, 409);
+  }
   guard(blockers.length === 0, "PROVIDER_ELIGIBILITY_BLOCKED", blockers[0] ?? "Provider cannot be enabled in this state.", 409);
 
   if (nextPrimary) {
@@ -1059,6 +1112,12 @@ export async function updateIntegrationProvider(
   return getIntegrationProvider(db, providerKey);
 }
 
+function resendMissingFields(config: Record<string, unknown>, secrets: Set<string>) {
+  const missing = ["api_key", "webhook_secret"].filter((name) => !secrets.has(name));
+  if (!resendSender(config.from_email)) missing.unshift("from_email");
+  return missing;
+}
+
 export async function validateProviderConfig(db: DB, actor: Actor, providerKey: string, environment?: EnvMode) {
   role(actor, "super_admin", "finance");
   const provider = await getIntegrationProvider(db, providerKey);
@@ -1097,6 +1156,9 @@ export async function validateProviderConfig(db: DB, actor: Actor, providerKey: 
   } else if (providerKey === "kuaidi100") {
     if (!secretNames.has("key")) missing.push("key");
     if (!secretNames.has("customer")) missing.push("customer");
+  } else if (providerKey === "resend") {
+    guard(env === "live", "INVALID_ENVIRONMENT", "Resend uses the live configuration.", 422);
+    missing.push(...resendMissingFields(provider.config, secretNames));
   } else if (providerKey === "postmark") {
     if (!secretNames.has("server_token")) missing.push("server_token");
   }
@@ -1145,6 +1207,11 @@ export async function testProviderConnection(
   role(actor, "super_admin", "finance");
   await requireStaffMfa(db, actor, sessionHash, 15);
   const provider = await getIntegrationProvider(db, providerKey);
+  if (providerKey === "resend") {
+    role(actor, "super_admin");
+    guard(!environment || environment === "live", "INVALID_ENVIRONMENT", "Resend uses the live configuration.", 422);
+    await db.query("select 1 from integration_providers where provider_key = 'resend' for update");
+  }
   const def = PROVIDER_MAP.get(providerKey);
   const env = environment ?? provider.environment;
   const started = Date.now();
@@ -1194,6 +1261,7 @@ export async function testProviderConnection(
   let healthStatus: "healthy" | "degraded" | "unconfigured" | "error" | "blocked" = "error";
   let summary = "";
   let errorDetail: string | null = null;
+  let resendProbe: { id: string; messageId: string } | null = null;
 
   try {
     if (providerKey === "paypal_manual" || providerKey === "local_storage") {
@@ -1262,6 +1330,30 @@ export async function testProviderConnection(
         summary = ok ? "Google Cloud Vision DOCUMENT_TEXT_DETECTION reachable." : `Google Cloud Vision probe returned HTTP ${res.status}.`;
         if (!ok) errorDetail = (await res.text()).slice(0, 200);
       }
+    } else if (providerKey === "resend") {
+      const mail = await resendSettings(db);
+      if (!mail.token || !mail.from || !mail.webhookKey) {
+        healthStatus = "unconfigured";
+        summary = "保存发件地址、API 密钥和 Webhook 签名密钥后再测试。";
+      } else {
+        const probeId = uuid();
+        const outcome = await submitEmail(mail, {
+          recipient: RESEND_TEST_RECIPIENT,
+          subject: "QC Warehouse Resend connection test",
+          text: "This message tests the Resend integration.",
+          idempotencyKey: probeId,
+          metadata: { connection_test: probeId },
+        });
+        if (outcome.kind === "submitted") {
+          ok = true;
+          healthStatus = "healthy";
+          resendProbe = { id: probeId, messageId: outcome.messageId };
+          summary = "Resend 已受理模拟测试邮件。";
+        } else {
+          errorDetail = outcome.errorCode;
+          summary = "Resend 发信测试未确认。请核对发件域名、密钥权限和额度。";
+        }
+      }
     } else if (providerKey === "postmark") {
       const token = await resolveProviderSecret(db, "postmark", env, "server_token");
       if (!token) {
@@ -1305,6 +1397,15 @@ export async function testProviderConnection(
     healthStatus = "error";
     errorDetail = err instanceof Error ? err.message.slice(0, 240) : "Connection probe failed.";
     summary = `Connection test failed: ${errorDetail}`;
+  }
+
+  if (resendProbe) {
+    await db.query(
+      `update integration_providers set config = (config - ${RESEND_TEST_CONFIG}) ||
+        jsonb_build_object('connection_test_id', $1::text, 'connection_test_message_id', $2::text)
+       where provider_key = 'resend'`,
+      [resendProbe.id, resendProbe.messageId],
+    );
   }
 
   const latency = Date.now() - started;
@@ -1433,6 +1534,7 @@ export async function listIntegrationHub(db: DB, actor: Actor, domain?: Provider
   }
   const statsByProvider = new Map(usageStats.map((u) => [u.provider_key, u]));
 
+  const activeMail = providers.some((p) => p.domain === "email") ? await emailSettings(db) : undefined;
   const items = providers.map((p) => {
     const def = PROVIDER_MAP.get(p.provider_key);
     const activeEnvEnvVars: string[] = [];
@@ -1442,6 +1544,8 @@ export async function listIntegrationHub(db: DB, actor: Actor, domain?: Provider
     return {
       ...p,
       supported_secrets: def?.secret_names ?? [],
+      ...(p.domain === "email" ? { sending_active: activeMail?.enabled === true && activeMail.provider === p.provider_key } : {}),
+      ...(p.provider_key === "resend" ? { webhook_url: appOrigin() + RESEND_WEBHOOK_PATH } : {}),
       env_fallback_secrets: activeEnvEnvVars,
       secrets: secretsByProvider.get(p.provider_key) ?? [],
       metrics: statsByProvider.get(p.provider_key) ?? {

@@ -61,16 +61,17 @@ const HIDDEN_UNINTEGRATED_PROVIDERS = new Set(["creem", "dodo_payments", "airwal
 export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: string; actor: Actor; demo?: boolean }) {
   const isPaymentsView = path === "/admin/integrations/payments";
   const isOcrView = path === "/admin/integrations/ocr";
-  const initialDomain = isPaymentsView ? "payment" : isOcrView ? "ocr" : "all";
+  const isEmailView = path === "/admin/integrations/email";
+  const initialDomain = isPaymentsView ? "payment" : isOcrView ? "ocr" : isEmailView ? "email" : "all";
   const [domain, setDomain] = useState<string>(initialDomain);
   useEffect(() => {
-    setDomain(isPaymentsView ? "payment" : isOcrView ? "ocr" : "all");
-  }, [isPaymentsView, isOcrView]);
+    setDomain(initialDomain);
+  }, [initialDomain]);
 
   const query = domain === "all" ? "" : `?domain=${encodeURIComponent(domain)}`;
   const { data, error, reload } = useLoad(`/staff/admin/integrations${query}`);
   const ocrJobsLoad = useLoad(isOcrView ? "/staff/admin/ocr/jobs" : null);
-  const [selectedKey, setSelectedKey] = useState<string>(isOcrView ? "paddle_ocr" : "stripe");
+  const [selectedKey, setSelectedKey] = useState<string>(isOcrView ? "paddle_ocr" : isEmailView ? "resend" : "stripe");
   const [notice, setNotice] = useState<{ tone: "info" | "warning" | "error" | "success"; text: string }>();
   const [actionError, setActionError] = useState<string>();
   const [reauthNeeded, setReauthNeeded] = useState(false);
@@ -85,7 +86,8 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
   useEffect(() => {
     if (isOcrView) setSelectedKey("paddle_ocr");
     else if (isPaymentsView) setSelectedKey("stripe");
-  }, [isOcrView, isPaymentsView]);
+    else if (isEmailView) setSelectedKey("resend");
+  }, [isOcrView, isPaymentsView, isEmailView]);
 
   useEffect(() => {
     if (!ocrFile) {
@@ -102,6 +104,8 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
   const visibleProviders = providers.filter((p) => !HIDDEN_UNINTEGRATED_PROVIDERS.has(p.provider_key));
   const events: Row[] = data?.events ?? [];
   const selected: Row | undefined = visibleProviders.find((p) => p.provider_key === selectedKey) ?? visibleProviders[0];
+  const resendSelected = selected?.provider_key === "resend";
+  const resendSecretLabels: Record<string, string> = { api_key: "发信 API 密钥", webhook_secret: "Webhook 签名密钥" };
   const paypalManualRow = providers.find((p) => p.provider_key === "paypal_manual");
   const paypalManualEnabled = Boolean(paypalManualRow?.enabled && paypalManualRow?.lifecycle_state !== "disabled");
 
@@ -126,10 +130,10 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
     }
   }
 
-  async function runConnectionTest(key: string, env: string) {
+  async function runConnectionTest(key: string, env: string, idempotencyKey?: string) {
     setActionError(undefined);
     try {
-      const res = await request(`/staff/admin/integrations/${key}/test`, "POST", { environment: env });
+      const res = await request(`/staff/admin/integrations/${key}/test`, "POST", { environment: env }, idempotencyKey);
       setNotice({
         tone: res.ok ? "success" : res.health_status === "blocked" ? "error" : "warning",
         text: `[真实连接探测 · ${res.latency_ms ?? 0}ms] ${res.summary}${res.error ? `（详情：${res.error}）` : ""}`,
@@ -137,6 +141,7 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
       reload();
     } catch (e) {
       handleActionError(e);
+      if (key === "resend") throw e;
     }
   }
 
@@ -247,7 +252,7 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
         </div>
       )}
 
-      {!isPaymentsView && !isOcrView && (
+      {!isPaymentsView && !isOcrView && !isEmailView && (
         <div className="actions" style={{ flexWrap: "wrap" }}>
           {Object.entries(DOMAIN_ZH).map(([k, label]) => (
             <button key={k} type="button" className={`button sm${domain === k ? " primary" : ""}`} onClick={() => setDomain(k)}>
@@ -278,7 +283,7 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
                     <Tag tone={p.environment === "live" ? "blue" : "outline"}>{p.environment.toUpperCase()}</Tag>
                   </div>
                   <small className="muted">
-                    {p.is_primary ? "主用 " : p.is_fallback ? "备选 " : "备用 "}#{p.priority}
+                    {p.domain === "email" ? (p.sending_active ? "当前发信" : p.provider_key === "postmark" ? "手动备用" : "待启用") : p.is_primary ? "主用 " : p.is_fallback ? "备选 " : "备用 "}#{p.priority}
                   </small>
                 </div>,
                 <div key="s" className="cell-stack">
@@ -304,9 +309,13 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
                   <button type="button" className="button sm nowrap" onClick={() => void runValidate(p.provider_key, p.environment)}>
                     校验配置
                   </button>
-                  <button type="button" className="button sm nowrap" onClick={() => void runConnectionTest(p.provider_key, p.environment)}>
-                    连接测试
-                  </button>
+                  {p.provider_key === "resend" ? isSuperAdmin && (
+                    <Action sm idempotent run={(key) => runConnectionTest(p.provider_key, p.environment, key)}>发送模拟测试</Action>
+                  ) : (
+                    <button type="button" className="button sm nowrap" onClick={() => void runConnectionTest(p.provider_key, p.environment)}>
+                      连接测试
+                    </button>
+                  )}
                 </div>,
               ];
             })}
@@ -318,14 +327,62 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
         <div className="split-grid">
           <Panel
             title={`配置管理 · ${selected.display_name}`}
-            subtitle={`key: ${selected.provider_key} · 合规策略: ${COMPLIANCE_ZH[selected.compliance_status] ?? selected.compliance_status}`}
+            subtitle={resendSelected ? "用于登录验证码、账号安全验证和交易通知。" : `key: ${selected.provider_key} · 合规策略: ${COMPLIANCE_ZH[selected.compliance_status] ?? selected.compliance_status}`}
           >
             {selected.last_check_summary && (
               <p className="small" style={{ marginBottom: 10 }}>
                 <strong>最近检测摘要：</strong> {selected.last_check_summary}
-                {selected.last_error ? <span className="muted">（{selected.last_error}）</span> : null}
+                {selected.last_error && selected.last_error !== selected.last_check_summary ? <span className="muted">（{selected.last_error}）</span> : null}
               </p>
             )}
+            {resendSelected ? (
+              <div className="stack-tight">
+                <label>
+                  Resend 投递回调地址
+                  <input type="url" readOnly value={String(selected.webhook_url)} onFocus={(e) => e.currentTarget.select()} />
+                </label>
+                <p className="small muted">在 Resend 订阅 Sent、Delivered、Delivery Delayed、Bounced、Complained、Failed 和 Suppressed。</p>
+                <p className="small">
+                  {selected.config?.webhook_verified_at
+                    ? `已收到签名投递回调 · ${stamp(selected.config.webhook_verified_at, true)}`
+                    : selected.config?.connection_test_id ? "等待模拟测试的签名投递回调。刷新后可查看结果。" : "发送模拟测试后可检查签名回调。"}
+                </p>
+                {isSuperAdmin && (
+                  <Form
+                    key={`resend-settings-${selected.updated_at}`}
+                    label="保存发信设置"
+                    run={async (f) => {
+                      const enabled = f.get("enabled") === "on";
+                      const from = text(f, "from_email");
+                      try {
+                        await request("/staff/admin/integrations/resend", "POST", {
+                          enabled,
+                          lifecycle_state: enabled ? "enabled" : "configured",
+                          config: { from_email: from },
+                        });
+                        setActionError(undefined);
+                        setNotice({ tone: "success", text: "Resend 发信设置已保存。" });
+                        reload();
+                      } catch (e) {
+                        handleActionError(e);
+                        throw e;
+                      }
+                    }}
+                  >
+                    <label>
+                      发件地址（使用 Resend 已验证的域名）
+                      <input name="from_email" defaultValue={String(selected.config?.from_email ?? "")}
+                        placeholder="QC Warehouse <security@auth.qcwarehouse.com>" maxLength={254} required />
+                    </label>
+                    <label className="check-row">
+                      <input type="checkbox" name="enabled" defaultChecked={Boolean(selected.enabled)} />
+                      <span>启用 Resend 发信</span>
+                    </label>
+                  </Form>
+                )}
+              </div>
+            ) : (
+              <>
             <dl className="admin-kv-grid" style={{ marginBottom: 14 }}>
               {Object.entries(selected.config ?? {})
                 .filter(([k]) => k !== "no_icp_required")
@@ -432,6 +489,8 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
                 )}
               </Form>
             )}
+              </>
+            )}
           </Panel>
 
           <Panel
@@ -450,7 +509,7 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
                 headers={["环境", "密钥键名", "脱敏摘要", "版本", "状态", "更新时间", "操作"]}
                 rows={(selected.secrets as Row[]).map((s) => [
                   <Tag key="e" tone={s.environment === "live" ? "blue" : "gray"}>{s.environment}</Tag>,
-                  <code key="n" className="code">{s.secret_name}</code>,
+                  <span key="n">{resendSelected ? resendSecretLabels[s.secret_name] : s.secret_name}</span>,
                   <code key="m" className="code">{s.masked_hint}</code>,
                   `v${s.key_version}`,
                   <Tag key="st" tone={s.status === "active" ? "green" : s.status === "rotated" ? "yellow" : "red"}>{s.status}</Tag>,
@@ -479,6 +538,7 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
             {isSuperAdmin && (selected.supported_secrets ?? []).length > 0 && (
               <div style={{ marginTop: 14 }}>
                 <Form
+                  key={`vault-${selected.provider_key}-${selected.updated_at}`}
                   label="写入或轮换加密密钥"
                   run={async (f) => {
                     try {
@@ -506,7 +566,7 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
                     <label>
                       目标环境
                       <select name="environment" defaultValue={selected.environment}>
-                        <option value="sandbox">sandbox</option>
+                        {!resendSelected && <option value="sandbox">sandbox</option>}
                         <option value="live">live</option>
                       </select>
                     </label>
@@ -514,13 +574,13 @@ export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: str
                       密钥字段
                       <select name="secret_name">
                         {(selected.supported_secrets as string[]).map((sn) => (
-                          <option key={sn} value={sn}>{sn}</option>
+                          <option key={sn} value={sn}>{resendSelected ? resendSecretLabels[sn] : sn}</option>
                         ))}
                       </select>
                     </label>
                     <label>
                       新密钥明文（加密入库后立即清空）
-                      <input name="secret_value" type="password" required autoComplete="off" placeholder="sk_test_... / whsec_... / API Key" />
+                      <input name="secret_value" type="password" required autoComplete="off" placeholder={resendSelected ? "re_… / whsec_…" : "sk_test_... / whsec_... / API Key"} />
                     </label>
                   </div>
                 </Form>

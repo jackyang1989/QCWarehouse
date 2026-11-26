@@ -10,7 +10,7 @@ import { Problem, audit, guard, hash, idempotent, isDemo, one, organization, rol
 import { integrationPreflight, signInMethods } from "./integrations";
 import { failedJobs, retryFailedJob } from "./worker";
 import { quotePolicy, quotePolicyInput, saveQuotePolicy } from "./quote-policy";
-import { customerEmailDeliveryStatus, receivePostmarkWebhook, retryEmailDelivery, staffEmailDeliveries } from "./email";
+import { customerEmailDeliveryStatus, receivePostmarkWebhook, receiveResendWebhook, retryEmailDelivery, staffEmailDeliveries } from "./email";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
@@ -226,7 +226,7 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const result=await transaction(db=>idempotent(db,scope,key,data,()=>createPublicInquiry(db,customer,browser,data)));
     return json(result,201,[cookie("qcw_browser",browser,3600)]);
   }
-  if(method==="GET" && path==="/auth/providers") return json(signInMethods());
+  if(method==="GET" && path==="/auth/providers") return json(await signInMethods(pool));
   if(method==="GET" && path==="/staff/admin/tracking/health") {
     role(actorRequired(actor),...staffAccess.trackingConfiguration);
     return json({check:"local_configuration_only",...integrationPreflight().kuaidi100});
@@ -444,10 +444,11 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     if("rejection" in result) throw result.rejection;
     return json(result);
   }
-  if(method==="POST" && path==="/webhooks/email/postmark") {
+  if(method==="POST" && (path==="/webhooks/email/postmark" || path==="/webhooks/email/resend")) {
     const raw=await req.text();
     guard(raw.length<=500000,"BODY_TOO_LARGE","Webhook payload too large.",413);
-    return json(await transaction(db=>receivePostmarkWebhook(db,req,raw)));
+    const receive=path.endsWith("/resend")?receiveResendWebhook:receivePostmarkWebhook;
+    return json(await transaction(db=>receive(db,req,raw)));
   }
   const callback=path.match(/^\/webhooks\/tracking\/kuaidi100\/([a-f0-9]{64})$/);
   if(method==="POST" && callback) {

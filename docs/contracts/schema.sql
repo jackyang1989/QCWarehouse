@@ -855,6 +855,7 @@ CREATE TABLE email_deliveries (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   notification_id uuid NOT NULL REFERENCES notifications,
   address_snapshot bytea NOT NULL,
+  provider text CHECK (provider IN ('postmark', 'resend')),
   provider_message_id text,
   attempt int NOT NULL,
   state text NOT NULL,
@@ -862,6 +863,8 @@ CREATE TABLE email_deliveries (
   error_code text,
   UNIQUE(notification_id,attempt)
 );
+
+CREATE INDEX email_deliveries_provider_message_idx ON email_deliveries (provider, provider_message_id);
 
 CREATE TABLE email_webhook_inbox (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

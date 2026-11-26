@@ -68,7 +68,7 @@ export function OperationsDesk() {
     </Panel>}
     <Panel title="邮件投递状态与退信抑制监测">
       <StatusBanner tone="info" title="发送语义严格区分（禁止将「通道受理」等同于「客户收妥」）">
-        <strong>submitted</strong> 仅表示平台已交第三方邮件提供商（如 Postmark）受理，<strong>不保证送达收件箱</strong>；仅当收到收件方网关送达回执后才会升格为 <strong>delivered</strong>。
+        <strong>submitted</strong> 仅表示平台已交第三方邮件提供商受理，<strong>不保证送达收件箱</strong>；仅当收到收件方网关送达回执后才会升格为 <strong>delivered</strong>。
       </StatusBanner>
       <div className="admin-toolbar" style={{marginTop:10}}>
         <label>投递状态筛选<select value={emailState} onChange={e=>setEmailState(e.target.value)}>
@@ -193,7 +193,7 @@ const gateLabels:Record<string,string>={
   rehearsal_sets_completed:"5 组演练全部归档通过且完成复验",
   no_exhausted_jobs:"无耗尽重试的积压后台作业",
   oidc_configured:"Google / Microsoft OIDC 正式回调已就绪",
-  postmark_live:"Postmark 正式发信通道已启用",
+  email_live:"正式发信通道已启用",
   stripe_live:"Stripe Live 密钥、Webhook 与收款开关已就绪",
   kuaidi100_live:"快递100 正式查询与 HTTPS 回调已就绪",
 };

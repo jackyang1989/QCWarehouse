@@ -58,7 +58,7 @@ export default async function Page({params,searchParams}:{params:Promise<{page:s
     redirect(withDestination("/staff/login",target));
   }
   if(route.view==="account-recovery") {
-    const methods=signInMethods();
+    const methods=await signInMethods(pool);
     return <AccessShell staff={false}><AccountRecovery emailAvailable={methods.email||methods.demo}/></AccessShell>;
   }
   if(route.view==="login"||route.view==="staff-login"||route.view==="onboarding") {
@@ -69,7 +69,7 @@ export default async function Page({params,searchParams}:{params:Promise<{page:s
     if(!staff&&actor?.kind==="customer") redirect(customerNext??"/account");
     if(route.view==="onboarding"&&!jar.has("qcw_onboarding")) redirect(withDestination("/login",customerNext));
     return <AccessShell staff={staff}>{route.view==="onboarding"?<Onboarding next={customerNext}/>:
-      <Login staff={staff} methods={signInMethods()} next={staff?next:customerNext}
+      <Login staff={staff} methods={await signInMethods(pool)} next={staff?next:customerNext}
         verify={search.verify==="1"} oauth={typeof search.oauth==="string"?search.oauth:undefined}/>}</AccessShell>;
   }
 
