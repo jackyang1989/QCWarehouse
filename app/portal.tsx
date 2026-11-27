@@ -9,6 +9,7 @@ import { AdminPaymentDetail, AdminRefundDetail } from "./admin-finance";
 import { AdminIntegrationsDesk } from "./admin-integrations";
 import { ROLE_ZH } from "./admin-labels";
 import { AdminDisposalDetail, AdminIncidentDetail, AdminInspectionsWorkbench, AdminInspectionTaskDetail } from "./admin-operations";
+import { AdminMediaCenterDesk, AdminMediaDetailDesk } from "./admin-media";
 import { AdminOrderDetailWorkbench } from "./admin-orders";
 import { Action, request, Tag, WorkspaceTimeZone } from "./ui";
 import { Brand, InternalWorkspaceFooter, PublicFooter, PublicHeader, QuickSwitch, SiteFooter, switchDemoPortal, WorkspaceNavigation } from "./chrome";
@@ -116,6 +117,8 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone,customerAc
   else if(route.view==="admin-refund") content=<AdminRefundDetail key={route.id} id={route.id} demo={demo} actor={a}/>;
   else if(route.view==="admin-inspections") content=<AdminInspectionsWorkbench actor={a}/>;
   else if(route.view==="admin-inspection-task") content=<AdminInspectionTaskDetail key={route.id} id={route.id} actor={a}/>;
+  else if(route.view==="admin-media") content=<AdminMediaCenterDesk actor={a}/>;
+  else if(route.view==="admin-media-detail") content=<AdminMediaDetailDesk key={route.id} id={route.id} actor={a}/>;
   else if(route.view==="admin-incident") content=<AdminIncidentDetail key={route.id} id={route.id} actor={a}/>;
   else if(route.view==="admin-disposal") content=<AdminDisposalDetail key={route.id} id={route.id} actor={a}/>;
   else if(route.view==="staff-tickets") content=<StaffTicketQueue/>;

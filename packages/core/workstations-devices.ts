@@ -2,6 +2,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { DB } from "../db";
 import { audit, event, guard, hash, lock, one, role, uuid, type Actor } from "./common";
+import { recordRevocationTombstone } from "./media-center";
 
 export const STATION_TYPES = ["A_receiving", "B_inspection_shoot", "C_pack_handover"] as const;
 export const DEVICE_ROLES = ["camera", "scanner", "scale", "printer", "workstation_terminal"] as const;
@@ -879,6 +880,14 @@ export async function revokeDevice(
     auth_generation: nextGeneration,
     revoked_leases: killedLeases.length,
     reason: input.reason,
+  });
+  await recordRevocationTombstone(db, {
+    entityType: "device_revocation",
+    entityId: device.id,
+    minAuthGeneration: nextGeneration,
+    revokedBy: actor.id,
+    reason: input.reason,
+    details: { device_code: device.device_code, warehouse_id: device.warehouse_id },
   });
 
   return {

@@ -32,6 +32,7 @@ const adminTabs=[
   ["/admin/customers","客户档案",["super_admin"]],
   ["/admin/tickets","客户工单",staffAccess.orders],
   ["/admin/inspections","质检与报告",["super_admin"]],
+  ["/admin/media","媒体与证据",["super_admin","warehouse_admin","reviewer"]],
   ["/admin/dispositions","处置与报价",["super_admin"]],
   ["/admin/refunds","退款审批",["super_admin"]],
   ["/admin/payments","支付流水",["super_admin"]],
@@ -70,6 +71,7 @@ export function canOpenStaffPage(path:string,route:PortalRoute,roles:readonly st
   if(route.view==="admin-payment"||route.view==="admin-refund") return hasStaffAccess(roles,staffAccess.finance);
   if(route.view==="admin-customer"||route.view==="admin-customers") return hasStaffAccess(roles,["super_admin","support","finance"]);
   if(route.view==="admin-inspections"||route.view==="admin-inspection-task") return hasStaffAccess(roles,["super_admin","support","inspector","reviewer","warehouse_admin"]);
+  if(route.view==="admin-media"||route.view==="admin-media-detail") return hasStaffAccess(roles,["super_admin","warehouse_admin","reviewer","inspector","support","finance"]);
   if(route.view==="admin-incident") return hasStaffAccess(roles,["receiver","warehouse_admin","support","finance","super_admin"]);
   if(route.view==="admin-disposal") return hasStaffAccess(roles,["receiver","warehouse_admin","support","super_admin"]);
   if(route.view==="warehouse-package"||route.view==="warehouse-item") return hasStaffAccess(roles,staffAccess.intake);
@@ -91,8 +93,8 @@ export const legalPages = {
 } as const;
 
 type Area = "public" | "customer" | "warehouse" | "admin";
-type StaticView = "catalog" | "how-it-works" | "faq" | "report-guide" | "public-inquiry" | "legal" | "login" | "onboarding" | "account-recovery" | "staff-login" | "customer" | "customer-actions" | "warehouse" | "admin" | "admin-customers" | "admin-inspections" | "admin-integrations" | "staff-tickets" | "logistics" | "logistics-configuration" | "storage-move" | "storage-locations" | "warehouse-scan" | "report-desk" | "operations";
-type DetailView = "order" | "report" | "parcel" | "shipment" | "task" | "demo" | "warehouse-package" | "warehouse-item" | "customer-case" | "staff-ticket" | "staff-order" | "admin-customer" | "admin-payment" | "admin-refund" | "admin-incident" | "admin-disposal" | "admin-inspection-task" | "order-quote" | "order-shipment" | "dispatch-batch" | "staff-report";
+type StaticView = "catalog" | "how-it-works" | "faq" | "report-guide" | "public-inquiry" | "legal" | "login" | "onboarding" | "account-recovery" | "staff-login" | "customer" | "customer-actions" | "warehouse" | "admin" | "admin-customers" | "admin-inspections" | "admin-media" | "admin-integrations" | "staff-tickets" | "logistics" | "logistics-configuration" | "storage-move" | "storage-locations" | "warehouse-scan" | "report-desk" | "operations";
+type DetailView = "order" | "report" | "parcel" | "shipment" | "task" | "demo" | "warehouse-package" | "warehouse-item" | "customer-case" | "staff-ticket" | "staff-order" | "admin-customer" | "admin-payment" | "admin-refund" | "admin-incident" | "admin-disposal" | "admin-inspection-task" | "admin-media-detail" | "order-quote" | "order-shipment" | "dispatch-batch" | "staff-report";
 export const orderSections={
   payment:"Payment",parcels:"Parcels",dispositions:"Item instructions",storage:"Storage",
 } as const;
@@ -122,6 +124,7 @@ for(const [paths,route] of [
   [["/actions"],{area:"customer",view:"customer-actions"}],
   [["/admin/customers"],{area:"admin",view:"admin-customers"}],
   [["/admin/inspections"],{area:"admin",view:"admin-inspections"}],
+  [["/admin/media"],{area:"admin",view:"admin-media"}],
   [["/admin/tickets"],{area:"admin",view:"staff-tickets"}],
   [["/admin/operations"],{area:"admin",view:"operations"}],
   [["/admin/catalog","/admin/categories","/admin/templates","/admin/dispositions","/admin/refunds","/admin/payments","/admin/incidents","/admin/shipping-rates","/admin/config","/admin/legal","/admin/users"],{area:"admin",view:"admin"}],
@@ -154,6 +157,7 @@ const details:{pattern:RegExp;area:Area;view:DetailView}[]=[
   {pattern:new RegExp("^/admin/incidents/"+uuid+"$"),area:"admin",view:"admin-incident"},
   {pattern:new RegExp("^/admin/disposals/"+uuid+"$"),area:"admin",view:"admin-disposal"},
   {pattern:new RegExp("^/admin/inspections/tasks/"+uuid+"$"),area:"admin",view:"admin-inspection-task"},
+  {pattern:new RegExp("^/admin/media/"+uuid+"$"),area:"admin",view:"admin-media-detail"},
   {pattern:new RegExp("^/parcels/"+uuid+"$"),area:"customer",view:"parcel"},
   {pattern:new RegExp("^/shipments/"+uuid+"$"),area:"customer",view:"shipment"},
   {pattern:new RegExp("^/wh/task/"+uuid+"$"),area:"warehouse",view:"task"},

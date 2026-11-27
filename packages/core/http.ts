@@ -21,6 +21,7 @@ import { acceptTaskHandover, assignWorkItem, cancelTaskHandover, claimTaskLease,
 import { abortStorageUpload, authorizePrivateObjectRead, authorizePublicAssetUpload, authorizeStorageUpload, authorizeStorageUploadSchema, completeStorageUpload, completeStorageUploadSchema, deleteStorageObjectControlled, deleteStorageObjectSchema, issueMultipartPartUrl, listProviderCapabilities, multipartPartUrlSchema, recordBlockedDeletionAudit, streamPrivateObjectResponse, streamPublicAssetResponse } from "./storage-service";
 import { createStorageInstance, createStorageMigrationJob, deleteStorageInstance, getStorageInstanceDetail, getStorageMigrationJob, getStorageUsageMetrics, listStorageInstances, listStorageMigrationJobs, pauseStorageMigrationJob, probeStorageInstance, resumeStorageMigrationJob, retryFailedMigrationItems, revokeStorageInstanceSecret, rollbackStorageInstanceSecret, rollbackStorageMigrationJob, runStorageMigrationBatch, saveStorageInstanceSecret, saveStorageSecretSchema, revokeStorageSecretSchema, rollbackStorageSecretSchema, switchPrimaryStorageInstance, transitionStorageInstanceState, updateStorageInstance } from "./storage-hub";
 import { authorizeEvidenceUpload, authorizeEvidenceUploadSchema, cancelCaptureCommand, cancelCaptureCommandSchema, cleanupExpiredUnfinishedUploads, completeEvidenceUpload, getEvidenceDetail, issueCaptureCommand, issueCaptureCommandSchema, linkEvidenceSchema, linkEvidenceToEntity, listEvidenceSyncQueue, resolveQuarantinedEvidenceRecord, resolveQuarantineEvidenceSchema, retryMediaProcessingJob } from "./capture-evidence";
+import { cancelMediaExportJob, createCostRateCardSchema, createExportJobSchema, createMediaExportJob, createMediaRetentionRequest, createRetentionRequestSchema, createStorageCostRateCard, decideMediaRetentionRequest, decideRetentionRequestSchema, getAdminMediaDetail, getAdminMediaStats, getDeviceMediaHistory, getEmployeeMediaHistory, getMediaExportJob, listAdminMediaCenter, listMediaExportJobs, listMediaReconciliationAnomalies, listMediaRetentionRequests, listRevocationTombstones, readLegacyCompatibleBinary, replayRevocationTombstones, resolveMediaReconciliationAnomaly, rollbackLegacyMigrationPointers, runMediaReconciliation, streamAdminMediaObject, switchVerifiedLegacyMigrationPointers } from "./media-center";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
@@ -711,7 +712,7 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const r=await readReport(db,a,idSchema.parse(report[1]),version);
     if(report[3]) {
       verifyReportDownload(a.id,r.id,url.searchParams.get("expires")??"",url.searchParams.get("sig")??"");
-      const response=binary(await one<{data:Buffer;mime:string}>(db,"select data,mime from private_files where key=$1",[r.pdf_key]));
+      const response=binary(await readLegacyCompatibleBinary(db,{legacyKey:r.pdf_key}));
       const reportCode=String(r.snapshot.report_no??"").replace(/[^A-Z0-9-]/gi,"")||"inspection-report";
       response.headers.set("content-disposition",`attachment; filename="${reportCode}-v${r.version}.pdf"`);
       return response;
@@ -2152,6 +2153,97 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   }
   if(method==="POST" && path==="/staff/evidence/cleanup-expired") {
     return extraWrite(req,path,actor,z.object({min_age_minutes:z.number().int().min(1).max(10080).default(60)}),(db,a,b)=>cleanupExpiredUnfinishedUploads(db,b.min_age_minutes,a));
+  }
+
+  // ---------- TASK-188 Global Media & Evidence Center + Legacy Migration ----------
+  if(method==="GET" && path==="/staff/admin/media") {
+    const queryObj=Object.fromEntries([...url.searchParams].filter(([,v])=>v!==""));
+    return json(await transaction(db=>listAdminMediaCenter(db,actorRequired(actor),queryObj)));
+  }
+  if(method==="GET" && path==="/staff/admin/media/stats") {
+    return json(await transaction(db=>getAdminMediaStats(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/media/rate-cards") {
+    return extraWrite(req,path,actor,createCostRateCardSchema,(db,a,b)=>createStorageCostRateCard(db,a,b),201);
+  }
+  const adminMediaDevHist=path.match(/^\/staff\/admin\/media\/devices\/([a-f0-9-]{36})\/history$/i);
+  if(method==="GET" && adminMediaDevHist) {
+    const queryObj=Object.fromEntries([...url.searchParams].filter(([,v])=>v!==""));
+    return json(await transaction(db=>getDeviceMediaHistory(db,actorRequired(actor),idSchema.parse(adminMediaDevHist[1]),queryObj)));
+  }
+  const adminMediaEmpHist=path.match(/^\/staff\/admin\/media\/employees\/([a-f0-9-]{36})\/history$/i);
+  if(method==="GET" && adminMediaEmpHist) {
+    const queryObj=Object.fromEntries([...url.searchParams].filter(([,v])=>v!==""));
+    return json(await transaction(db=>getEmployeeMediaHistory(db,actorRequired(actor),idSchema.parse(adminMediaEmpHist[1]),queryObj)));
+  }
+  if(method==="GET" && path==="/staff/admin/media/exports") {
+    return json(await transaction(db=>listMediaExportJobs(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/media/exports") {
+    return extraWrite(req,path,actor,createExportJobSchema,
+      (db,a,b)=>createMediaExportJob(db,a,hash(getCookie(req,"session")),b),201);
+  }
+  const adminMediaExportDetail=path.match(/^\/staff\/admin\/media\/exports\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && adminMediaExportDetail) {
+    return json(await transaction(db=>getMediaExportJob(db,actorRequired(actor),idSchema.parse(adminMediaExportDetail[1]))));
+  }
+  const adminMediaExportCancel=path.match(/^\/staff\/admin\/media\/exports\/([a-f0-9-]{36})\/cancel$/i);
+  if(method==="POST" && adminMediaExportCancel) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>cancelMediaExportJob(db,a,idSchema.parse(adminMediaExportCancel[1])));
+  }
+  if(method==="GET" && path==="/staff/admin/media/retention-requests") {
+    return json(await transaction(db=>listMediaRetentionRequests(db,actorRequired(actor))));
+  }
+  const adminMediaRetReq=path.match(/^\/staff\/admin\/media\/([a-f0-9-]{36})\/retention-requests$/i);
+  if(method==="POST" && adminMediaRetReq) {
+    return extraWrite(req,path,actor,createRetentionRequestSchema,(db,a,b)=>createMediaRetentionRequest(db,a,idSchema.parse(adminMediaRetReq[1]),b),201);
+  }
+  const adminMediaRetDecide=path.match(/^\/staff\/admin\/media\/retention-requests\/([a-f0-9-]{36})\/decide$/i);
+  if(method==="POST" && adminMediaRetDecide) {
+    csrf(req);
+    const a=actorRequired(actor),key=idSchema.parse(req.headers.get("idempotency-key")),data=decideRetentionRequestSchema.parse(await input(req));
+    const reqId=idSchema.parse(adminMediaRetDecide[1]);
+    const res=await transaction(db=>idempotent(db,a.id+":"+path,key,data,()=>decideMediaRetentionRequest(db,a,hash(getCookie(req,"session")),reqId,data))) as {http_status?:number;error?:unknown};
+    if(res.http_status) return json({error:res.error},res.http_status);
+    return json(res,200);
+  }
+  const adminMediaMigSwitch=path.match(/^\/staff\/admin\/media\/migrations\/([a-f0-9-]{36})\/switch$/i);
+  if(method==="POST" && adminMediaMigSwitch) {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>switchVerifiedLegacyMigrationPointers(db,a,hash(getCookie(req,"session")),idSchema.parse(adminMediaMigSwitch[1])));
+  }
+  const adminMediaMigRollback=path.match(/^\/staff\/admin\/media\/migrations\/([a-f0-9-]{36})\/rollback-switch$/i);
+  if(method==="POST" && adminMediaMigRollback) {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>rollbackLegacyMigrationPointers(db,a,hash(getCookie(req,"session")),idSchema.parse(adminMediaMigRollback[1])));
+  }
+  if(method==="GET" && path==="/staff/admin/media/reconcile") {
+    const status=url.searchParams.get("status")?.trim()||undefined;
+    return json(await transaction(db=>listMediaReconciliationAnomalies(db,actorRequired(actor),status)));
+  }
+  if(method==="POST" && path==="/staff/admin/media/reconcile") {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>runMediaReconciliation(db,a),201);
+  }
+  const adminMediaReconResolve=path.match(/^\/staff\/admin\/media\/reconcile\/anomalies\/([a-f0-9-]{36})\/resolve$/i);
+  if(method==="POST" && adminMediaReconResolve) {
+    return extraWrite(req,path,actor,z.object({note:z.string().trim().min(2).max(500)}),
+      (db,a,b)=>resolveMediaReconciliationAnomaly(db,a,idSchema.parse(adminMediaReconResolve[1]),b.note));
+  }
+  if(method==="GET" && path==="/staff/admin/media/recovery/tombstones") {
+    return json(await transaction(db=>listRevocationTombstones(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/media/recovery/replay-tombstones") {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>replayRevocationTombstones(db,a,hash(getCookie(req,"session"))));
+  }
+  const adminMediaStream=path.match(/^\/staff\/admin\/media\/([a-f0-9-]{36})\/stream$/i);
+  if(method==="GET" && adminMediaStream) {
+    const variant=z.enum(["original","normalized","thumbnail","annotated","video_playback","video_poster"]).default("original").parse(url.searchParams.get("variant")??"original");
+    return await transaction(db=>streamAdminMediaObject(db,actorRequired(actor),idSchema.parse(adminMediaStream[1]),variant,req.headers.get("range")));
+  }
+  const adminMediaDetail=path.match(/^\/staff\/admin\/media\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && adminMediaDetail) {
+    return json(await transaction(db=>getAdminMediaDetail(db,actorRequired(actor),idSchema.parse(adminMediaDetail[1]))));
   }
 
   return null;

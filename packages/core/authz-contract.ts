@@ -166,6 +166,7 @@ export type AuthzAction = keyof typeof ACTION_CATALOG;
 export const ADMIN_DIRECT_ROUTE_ROLES: Record<string, readonly StaffRole[]> = {
   "/admin/customers": ["super_admin", "support", "finance"],
   "/admin/inspections": ["super_admin", "support", "inspector", "reviewer", "warehouse_admin"],
+  "/admin/media": ["super_admin", "warehouse_admin", "reviewer", "inspector", "support", "finance"],
   "/admin/dispositions": staffAccess.orders,
   "/admin/incidents": staffAccess.orders,
   "/admin/refunds": staffAccess.finance,

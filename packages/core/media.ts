@@ -7,6 +7,7 @@ import { Problem, audit, guard, hash, one, organization, role, uuid, type Actor 
 import { canReadCasePhoto } from "./tickets";
 import { pendingIntakeClaimSql } from "./intake";
 import { assertNoUnsafeLiveFallback } from "./storage-hub";
+import { readLegacyCompatibleBinary } from "./media-center";
 
 export const mediaKindSchema = z.enum([
   "intake_outer",
@@ -302,6 +303,8 @@ export async function completeMediaUpload(db: Pick<DB, "query">, actor: Actor, m
     uploaded_by: string;
     object_key: string;
     thumb_key: string | null;
+    storage_object_id: string | null;
+    thumb_storage_object_id: string | null;
     mime: string;
     size_bytes: number;
     sha256: string;
@@ -449,6 +452,8 @@ export async function authorizeMediaRead(db: DB, actor: Actor, id: string) {
     kind: string;
     object_key: string;
     thumb_key: string | null;
+    storage_object_id: string | null;
+    thumb_storage_object_id: string | null;
     mime: string;
     sha256: string;
     width: number | null;
@@ -618,11 +623,18 @@ export async function readMediaBinary(
     verifyMediaReadSignature(actor.id, id, variant, expires, sig);
   }
   const m = await authorizeMediaRead(db, actor, id);
-  const key = variant === "thumb" && m.thumb_key ? m.thumb_key : m.object_key;
-  const file = (await db.query<{ data: Buffer; mime: string }>("select data,mime from private_files where key=$1", [key])).rows[0];
-  if (!file && key !== m.object_key) {
-    return one<{ data: Buffer; mime: string }>(db, "select data,mime from private_files where key=$1", [m.object_key]);
+  const useThumb = variant === "thumb" && Boolean(m.thumb_key || m.thumb_storage_object_id);
+  const key = useThumb && m.thumb_key ? m.thumb_key : m.object_key;
+  const objId = useThumb ? m.thumb_storage_object_id : m.storage_object_id;
+  try {
+    return await readLegacyCompatibleBinary(db, { storageObjectId: objId, legacyKey: key });
+  } catch (err) {
+    if (useThumb && (m.object_key || m.storage_object_id)) {
+      return await readLegacyCompatibleBinary(db, {
+        storageObjectId: m.storage_object_id,
+        legacyKey: m.object_key,
+      });
+    }
+    throw err;
   }
-  guard(file, "NOT_FOUND", "Photo not found.", 404);
-  return file;
 }

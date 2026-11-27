@@ -171,6 +171,7 @@ const PORTAL_ROUTE_TITLES: Record<string, string> = {
   "/admin/integrations/logistics": "物流接入 · 运营管理后台",
   "/admin/integrations/email": "邮件服务配置 · 运营管理后台",
   "/admin/integrations/storage": "对象存储配置 · 运营管理后台",
+  "/admin/media": "媒体与证据中心 · 运营管理后台",
 };
 
 export function portalTitleForRoute(path: string, route?: PortalRoute): string {
@@ -202,6 +203,7 @@ export function portalTitleForRoute(path: string, route?: PortalRoute): string {
     if (route.view === "admin-incident") return "库存事故详情 · 运营管理后台";
     if (route.view === "admin-disposal") return "特殊处置单 · 运营管理后台";
     if (route.view === "admin-inspection-task") return "质检任务监督 · 运营管理后台";
+    if (route.view === "admin-media-detail") return "媒体证据详情 · 运营管理后台";
     if (route.area === "customer") return "My Workspace";
     if (route.area === "warehouse") return "仓库作业中心";
     if (route.area === "admin") return "运营管理后台";
