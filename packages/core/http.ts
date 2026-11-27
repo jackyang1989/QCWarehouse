@@ -15,6 +15,7 @@ import { activateLegalEntity, createLegalEntityDraft, createMerchantInstance, ev
 import { acceptStaffInvitation, createAndInviteStaff, getStaffDetail, listStaffDirectory, offboardStaffAccount, previewStaffInvitation, resendStaffInvitation, revokeAllStaffSessions, revokeStaffInvitation, staffAcceptInviteSchema, staffInviteSchema, staffOffboardSchema, startStaffInvitationMfa } from "./staff-lifecycle";
 import { archiveRbacRole, assignCustomRoleToStaff, computeEffectiveStaffPermissions, createCustomRbacRoleDraft, listRbacRoles, previewRbacRoleImpact, publishRbacRole, rbacAssignmentSchema, rbacRoleDraftSchema, removeCustomRoleFromStaff } from "./rbac-admin";
 import { createAddressSnapshot, createAddressSnapshotSchema, createRegionAlias, getActiveRegionOverview, getAddressSnapshot, getRegionDetail, importRegionDatasetDraft, listRegionChildren, listRegionDatasetVersions, parseChineseAddress, parseChineseAddressSchema, publishRegionDatasetVersion, regionAliasCreateSchema, regionChildrenQuerySchema, regionImportDraftSchema, regionPathValidateSchema, regionSearchQuerySchema, revokeRegionAlias, rollbackRegionDatasetVersion, searchRegions, validateRegionPath } from "./regions";
+import { adjustConsumableStock, archiveWarehouse, batchCreateWarehouseBins, binGovernanceSchema, consumableAdjustSchema, consumableCreateSchema, containerCreateSchema, containerMoveSchema, createAndDispatchTransfer, createPackagingConsumable, createWarehouse, createWarehouseContainer, createWarehouseZone, getWarehouseDetail, listPackagingConsumables, listWarehouses, locationReserveSchema, moveOrNestContainer, previewWarehouseDeactivationImpact, receiveWarehouseTransfer, recommendEmptyLocations, recommendLocationsQuerySchema, releaseLocationReservation, reserveLocationSpace, transferDispatchSchema, transferReceiveSchema, updateBinGovernance, updateWarehouseControls, warehouseBinBatchSchema, warehouseControlsSchema, warehouseCreateSchema, warehouseZoneCreateSchema } from "./warehouses";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
@@ -1689,6 +1690,88 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   const aliasRevokeMatch=path.match(/^\/staff\/admin\/regions\/aliases\/([a-f0-9-]{36})\/revoke$/i);
   if(method==="POST" && aliasRevokeMatch) {
     return extraWrite(req,path,actor,z.object({}),(db,a)=>revokeRegionAlias(db,a,idSchema.parse(aliasRevokeMatch[1]),hash(getCookie(req,"session"))));
+  }
+
+  // ---------- TASK-182 Self-Operated Warehouses & Inventory Master ----------
+  if(method==="GET" && path==="/staff/warehouses") {
+    return json(await transaction(db=>listWarehouses(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/warehouses") {
+    return extraWrite(req,path,actor,warehouseCreateSchema,(db,a,b)=>createWarehouse(db,a,b,hash(getCookie(req,"session"))),201);
+  }
+  const whDetail=path.match(/^\/staff\/warehouses\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && whDetail) {
+    return json(await transaction(db=>getWarehouseDetail(db,actorRequired(actor),idSchema.parse(whDetail[1]))));
+  }
+  const whControls=path.match(/^\/staff\/warehouses\/([a-f0-9-]{36})\/controls$/i);
+  if(method==="PATCH" && whControls) {
+    return extraWrite(req,path,actor,warehouseControlsSchema,(db,a,b)=>updateWarehouseControls(db,a,idSchema.parse(whControls[1]),b,hash(getCookie(req,"session"))));
+  }
+  const whImpact=path.match(/^\/staff\/warehouses\/([a-f0-9-]{36})\/archive-impact$/i);
+  if(method==="GET" && whImpact) {
+    return json(await transaction(db=>previewWarehouseDeactivationImpact(db,actorRequired(actor),idSchema.parse(whImpact[1]))));
+  }
+  const whArchive=path.match(/^\/staff\/warehouses\/([a-f0-9-]{36})\/archive$/i);
+  if(method==="POST" && whArchive) {
+    return extraWrite(req,path,actor,z.object({reason:z.string().trim().min(4).max(500)}),
+      (db,a,b)=>archiveWarehouse(db,a,idSchema.parse(whArchive[1]),b.reason,hash(getCookie(req,"session"))));
+  }
+  const whZones=path.match(/^\/staff\/warehouses\/([a-f0-9-]{36})\/zones$/i);
+  if(method==="POST" && whZones) {
+    return extraWrite(req,path,actor,warehouseZoneCreateSchema,(db,a,b)=>createWarehouseZone(db,a,idSchema.parse(whZones[1]),b),201);
+  }
+  const whBinsBatch=path.match(/^\/staff\/warehouses\/([a-f0-9-]{36})\/bins\/batch$/i);
+  if(method==="POST" && whBinsBatch) {
+    return extraWrite(req,path,actor,warehouseBinBatchSchema,(db,a,b)=>batchCreateWarehouseBins(db,a,idSchema.parse(whBinsBatch[1]),b),201);
+  }
+  const binGov=path.match(/^\/staff\/warehouse-bins\/([a-f0-9-]{36})$/i);
+  if(method==="PATCH" && binGov) {
+    return extraWrite(req,path,actor,binGovernanceSchema,(db,a,b)=>updateBinGovernance(db,a,idSchema.parse(binGov[1]),b));
+  }
+  if(method==="POST" && path==="/staff/warehouse-reservations") {
+    return extraWrite(req,path,actor,locationReserveSchema,(db,a,b)=>reserveLocationSpace(db,a,b),201);
+  }
+  const resRelease=path.match(/^\/staff\/warehouse-reservations\/([a-f0-9-]{36})\/release$/i);
+  if(method==="POST" && resRelease) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>releaseLocationReservation(db,a,idSchema.parse(resRelease[1])));
+  }
+  const whRecommend=path.match(/^\/staff\/warehouses\/([a-f0-9-]{36})\/bins\/recommend$/i);
+  if(method==="GET" && whRecommend) {
+    const a=actorRequired(actor);
+    role(a,"super_admin","warehouse_admin","receiver","inspector");
+    const sp=new URL(req.url).searchParams;
+    const q=recommendLocationsQuerySchema.parse({
+      zone_type:sp.get("zone_type")??undefined,
+      min_free_units:sp.get("min_free_units")??undefined,
+      limit:sp.get("limit")??undefined,
+    });
+    return json(await transaction(db=>recommendEmptyLocations(db,a,idSchema.parse(whRecommend[1]),q)));
+  }
+  const whContainers=path.match(/^\/staff\/warehouses\/([a-f0-9-]{36})\/containers$/i);
+  if(method==="POST" && whContainers) {
+    return extraWrite(req,path,actor,containerCreateSchema,(db,a,b)=>createWarehouseContainer(db,a,idSchema.parse(whContainers[1]),b),201);
+  }
+  const containerMove=path.match(/^\/staff\/warehouse-containers\/([a-f0-9-]{36})\/move$/i);
+  if(method==="POST" && containerMove) {
+    return extraWrite(req,path,actor,containerMoveSchema,(db,a,b)=>moveOrNestContainer(db,a,idSchema.parse(containerMove[1]),b));
+  }
+  if(method==="POST" && path==="/staff/warehouse-transfers") {
+    return extraWrite(req,path,actor,transferDispatchSchema,(db,a,b)=>createAndDispatchTransfer(db,a,b),201);
+  }
+  const transferReceive=path.match(/^\/staff\/warehouse-transfers\/([a-f0-9-]{36})\/receive$/i);
+  if(method==="POST" && transferReceive) {
+    return extraWrite(req,path,actor,transferReceiveSchema,(db,a,b)=>receiveWarehouseTransfer(db,a,idSchema.parse(transferReceive[1]),b));
+  }
+  const whConsumables=path.match(/^\/staff\/warehouses\/([a-f0-9-]{36})\/consumables$/i);
+  if(method==="GET" && whConsumables) {
+    return json(await transaction(db=>listPackagingConsumables(db,actorRequired(actor),idSchema.parse(whConsumables[1]))));
+  }
+  if(method==="POST" && whConsumables) {
+    return extraWrite(req,path,actor,consumableCreateSchema,(db,a,b)=>createPackagingConsumable(db,a,idSchema.parse(whConsumables[1]),b),201);
+  }
+  const consumableAdjust=path.match(/^\/staff\/warehouse-consumables\/([a-f0-9-]{36})\/adjust$/i);
+  if(method==="POST" && consumableAdjust) {
+    return extraWrite(req,path,actor,consumableAdjustSchema,(db,a,b)=>adjustConsumableStock(db,a,idSchema.parse(consumableAdjust[1]),b));
   }
 
   return null;
