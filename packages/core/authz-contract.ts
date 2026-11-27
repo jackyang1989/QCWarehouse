@@ -185,6 +185,7 @@ export const ADMIN_DIRECT_ROUTE_ROLES: Record<string, readonly StaffRole[]> = {
   "/admin/integrations": ["super_admin"],
   "/admin/integrations/payments": ["super_admin"],
   "/admin/integrations/email": ["super_admin"],
+  "/admin/integrations/storage": ["super_admin"],
   "/admin/integrations/ocr": ["super_admin"],
   "/admin/integrations/logistics": staffAccess.trackingConfiguration,
 };

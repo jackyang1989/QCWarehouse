@@ -464,10 +464,10 @@ export class S3CompatibleStorageProvider implements ObjectStorageProvider {
       extraHeaders?: Record<string, string>;
     },
   ): Promise<Response> {
-    await assertSafeStorageEndpointDns(this.cfg.endpoint, {
+    const url = buildTargetUrl(this.baseEndpoint, this.bucket, key, this.addressingStyle);
+    await assertSafeStorageEndpointDns(url.origin, {
       allowInsecureLoopbackForTest: this.cfg.allowInsecureLoopbackForTest,
     });
-    const url = buildTargetUrl(this.baseEndpoint, this.bucket, key, this.addressingStyle);
     for (const [k, v] of Object.entries(opts?.query ?? {})) {
       url.searchParams.set(k, v);
     }
@@ -718,7 +718,7 @@ export async function runStorageCapabilityProbe(
     results.range_read = { status: "passed" };
 
     const presignedGet = provider.presignGetObject(singleKey, 120);
-    const getRes = await fetch(presignedGet.url, { redirect: "error" });
+    const getRes = await fetch(presignedGet.url, { redirect: "error", signal: AbortSignal.timeout(15_000) });
     guard(getRes.ok, "PROBE_PRESIGNED_GET_FAILED", `Presigned GET failed (${getRes.status}).`);
     const gotBuf = Buffer.from(await getRes.arrayBuffer());
     guard(sha256Hex(gotBuf) === expectedSha, "PROBE_SHA256_MISMATCH", "Presigned GET digest mismatch.");
@@ -726,7 +726,12 @@ export async function runStorageCapabilityProbe(
 
     const mp = await provider.createMultipartUpload(multiKey, "application/octet-stream");
     const partUrl = provider.presignUploadPart(multiKey, mp.uploadId, 1, 120);
-    const p1Res = await fetch(partUrl.url, { method: "PUT", body: sample, redirect: "error" });
+    const p1Res = await fetch(partUrl.url, {
+      method: "PUT",
+      body: sample,
+      redirect: "error",
+      signal: AbortSignal.timeout(15_000),
+    });
     guard(p1Res.ok, "PROBE_MULTIPART_PUT_FAILED", `Part upload failed (${p1Res.status}).`);
     const etag = p1Res.headers.get("etag") ?? `"${createHash("md5").update(sample).digest("hex")}"`;
     await provider.completeMultipartUpload(multiKey, mp.uploadId, [{ partNumber: 1, etag }]);

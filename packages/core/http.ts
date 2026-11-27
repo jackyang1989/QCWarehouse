@@ -18,7 +18,8 @@ import { createAddressSnapshot, createAddressSnapshotSchema, createRegionAlias, 
 import { adjustConsumableStock, archiveWarehouse, batchCreateWarehouseBins, binGovernanceSchema, consumableAdjustSchema, consumableCreateSchema, containerCreateSchema, containerMoveSchema, createAndDispatchTransfer, createPackagingConsumable, createWarehouse, createWarehouseContainer, createWarehouseZone, getWarehouseDetail, listPackagingConsumables, listWarehouses, locationReserveSchema, moveOrNestContainer, previewWarehouseDeactivationImpact, receiveWarehouseTransfer, recommendEmptyLocations, recommendLocationsQuerySchema, releaseLocationReservation, reserveLocationSpace, transferDispatchSchema, transferReceiveSchema, updateBinGovernance, updateWarehouseControls, warehouseBinBatchSchema, warehouseControlsSchema, warehouseCreateSchema, warehouseZoneCreateSchema } from "./warehouses";
 import { claimDeviceLease, createWorkstation, decideDeviceAuthorization, deviceAccessPolicySchema, deviceCalibrationOrFaultSchema, deviceDecisionSchema, deviceHeartbeat, deviceHeartbeatSchema, deviceLeaseClaimSchema, devicePreregisterSchema, deviceRequestSchema, deviceRevokeSchema, evaluateServiceSellability, getDeviceAccessPolicy, grantOrUpdateSkill, listDeviceAuthRequests, listDevices, listInspectorSkills, listStaffOwnNotifications, listWorkstations, markStaffNotificationRead, preregisterDevice, recordDeviceCalibrationOrFault, releaseDeviceLease, requestDeviceAuthorization, revokeDevice, revokeSkillGrant, sellabilityQuerySchema, setDeviceAccessPolicy, skillGrantSchema, skillRevokeSchema, updateWorkstationStatus, workstationCreateSchema, workstationStatusSchema } from "./workstations-devices";
 import { acceptTaskHandover, assignWorkItem, cancelTaskHandover, claimTaskLease, evidenceSubmitWithLeaseSchema, handoverAcceptSchema, handoverCancelSchema, handoverInitiateSchema, initiateTaskHandover, listDispatchWorkItems, listQuarantinedEvidence, listStaffShifts, pauseWorkItem, quarantineResolveSchema, registerDispatchWorkItem, resolveQuarantinedEvidence, resumeWorkItem, revokeStaffActiveLeases, staffShiftStatusSchema, staffShiftUpsertSchema, submitEvidenceWithLease, taskLeaseClaimSchema, updateStaffShiftStatus, upsertStaffShift, workItemAssignSchema, workItemPauseSchema, workItemRegisterSchema } from "./scheduling-dispatch";
-import { abortStorageUpload, authorizePrivateObjectRead, authorizeStorageUpload, authorizeStorageUploadSchema, completeStorageUpload, completeStorageUploadSchema, deleteStorageObjectControlled, deleteStorageObjectSchema, issueMultipartPartUrl, listProviderCapabilities, multipartPartUrlSchema, recordBlockedDeletionAudit, streamPrivateObjectResponse } from "./storage-service";
+import { abortStorageUpload, authorizePrivateObjectRead, authorizePublicAssetUpload, authorizeStorageUpload, authorizeStorageUploadSchema, completeStorageUpload, completeStorageUploadSchema, deleteStorageObjectControlled, deleteStorageObjectSchema, issueMultipartPartUrl, listProviderCapabilities, multipartPartUrlSchema, recordBlockedDeletionAudit, streamPrivateObjectResponse, streamPublicAssetResponse } from "./storage-service";
+import { createStorageInstance, createStorageMigrationJob, deleteStorageInstance, getStorageInstanceDetail, getStorageMigrationJob, getStorageUsageMetrics, listStorageInstances, listStorageMigrationJobs, pauseStorageMigrationJob, probeStorageInstance, resumeStorageMigrationJob, retryFailedMigrationItems, revokeStorageInstanceSecret, rollbackStorageInstanceSecret, rollbackStorageMigrationJob, runStorageMigrationBatch, saveStorageInstanceSecret, saveStorageSecretSchema, revokeStorageSecretSchema, rollbackStorageSecretSchema, switchPrimaryStorageInstance, transitionStorageInstanceState, updateStorageInstance } from "./storage-hub";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
@@ -152,6 +153,10 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const response=await transaction(async db=>share[2]===undefined?json(await readSharedReport(db,share[1])):
       binary(await readSharedPhoto(db,share[1],Number(share[2]),Number(share[3]),Number(share[4]))));
     return privateShareResponse(response);
+  }
+  const pubAsset=path.match(/^\/public\/assets\/([a-f0-9-]{36})\/stream$/i);
+  if(method==="GET"&&pubAsset) {
+    return streamPublicAssetResponse(idSchema.parse(pubAsset[1]),req.headers.get("range"));
   }
   const versionShares=path.match(/^\/orders\/([a-f0-9-]{36})\/report\/versions\/(\d+)\/shares$/i);
   if(versionShares&&(method==="GET"||method==="POST")) {
@@ -2004,6 +2009,98 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
       }
       throw err;
     }
+  }
+
+  // ---------- TASK-186 Configurable Object Storage Hub (PAGE-M21) ----------
+  if(method==="GET" && path==="/staff/admin/storage/instances") {
+    return json(await transaction(db=>listStorageInstances(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/storage/instances") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),
+      (db,a,b)=>createStorageInstance(db,a,hash(getCookie(req,"session")),b),201);
+  }
+  const stInstDetail=path.match(/^\/staff\/admin\/storage\/instances\/([a-f0-9-]{36})$/i);
+  if(stInstDetail && method==="GET") {
+    return json(await transaction(db=>getStorageInstanceDetail(db,actorRequired(actor),idSchema.parse(stInstDetail[1]))));
+  }
+  if(stInstDetail && method==="PATCH") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),
+      (db,a,b)=>updateStorageInstance(db,a,hash(getCookie(req,"session")),idSchema.parse(stInstDetail[1]),b));
+  }
+  if(stInstDetail && method==="DELETE") {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>deleteStorageInstance(db,a,hash(getCookie(req,"session")),idSchema.parse(stInstDetail[1])));
+  }
+  const stInstSecret=path.match(/^\/staff\/admin\/storage\/instances\/([a-f0-9-]{36})\/secrets$/i);
+  if(stInstSecret && method==="POST") {
+    return extraWrite(req,path,actor,saveStorageSecretSchema,
+      (db,a,b)=>saveStorageInstanceSecret(db,a,hash(getCookie(req,"session")),idSchema.parse(stInstSecret[1]),b));
+  }
+  const stInstRollback=path.match(/^\/staff\/admin\/storage\/instances\/([a-f0-9-]{36})\/secrets\/rollback$/i);
+  if(stInstRollback && method==="POST") {
+    return extraWrite(req,path,actor,rollbackStorageSecretSchema,
+      (db,a,b)=>rollbackStorageInstanceSecret(db,a,hash(getCookie(req,"session")),idSchema.parse(stInstRollback[1]),b));
+  }
+  const stInstRevoke=path.match(/^\/staff\/admin\/storage\/instances\/([a-f0-9-]{36})\/secrets\/revoke$/i);
+  if(stInstRevoke && method==="POST") {
+    return extraWrite(req,path,actor,revokeStorageSecretSchema,
+      (db,a,b)=>revokeStorageInstanceSecret(db,a,hash(getCookie(req,"session")),idSchema.parse(stInstRevoke[1]),b));
+  }
+  const stInstProbe=path.match(/^\/staff\/admin\/storage\/instances\/([a-f0-9-]{36})\/probe$/i);
+  if(stInstProbe && method==="POST") {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>probeStorageInstance(db,a,hash(getCookie(req,"session")),idSchema.parse(stInstProbe[1])));
+  }
+  const stInstState=path.match(/^\/staff\/admin\/storage\/instances\/([a-f0-9-]{36})\/state$/i);
+  if(stInstState && method==="POST") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),
+      (db,a,b)=>transitionStorageInstanceState(db,a,hash(getCookie(req,"session")),idSchema.parse(stInstState[1]),b));
+  }
+  if(method==="POST" && path==="/staff/admin/storage/switch-primary") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),
+      (db,a,b)=>switchPrimaryStorageInstance(db,a,hash(getCookie(req,"session")),b));
+  }
+  if(method==="GET" && path==="/staff/admin/storage/usage") {
+    return json(await transaction(db=>getStorageUsageMetrics(db,actorRequired(actor))));
+  }
+  if(method==="GET" && path==="/staff/admin/storage/migrations") {
+    return json(await transaction(db=>listStorageMigrationJobs(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/storage/migrations") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),
+      (db,a,b)=>createStorageMigrationJob(db,a,hash(getCookie(req,"session")),b),201);
+  }
+  const stMigDetail=path.match(/^\/staff\/admin\/storage\/migrations\/([a-f0-9-]{36})$/i);
+  if(stMigDetail && method==="GET") {
+    return json(await transaction(db=>getStorageMigrationJob(db,actorRequired(actor),idSchema.parse(stMigDetail[1]))));
+  }
+  const stMigRun=path.match(/^\/staff\/admin\/storage\/migrations\/([a-f0-9-]{36})\/run$/i);
+  if(stMigRun && method==="POST") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),
+      (db,a,b)=>runStorageMigrationBatch(db,a,hash(getCookie(req,"session")),idSchema.parse(stMigRun[1]),b));
+  }
+  const stMigPause=path.match(/^\/staff\/admin\/storage\/migrations\/([a-f0-9-]{36})\/pause$/i);
+  if(stMigPause && method==="POST") {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>pauseStorageMigrationJob(db,a,hash(getCookie(req,"session")),idSchema.parse(stMigPause[1])));
+  }
+  const stMigResume=path.match(/^\/staff\/admin\/storage\/migrations\/([a-f0-9-]{36})\/resume$/i);
+  if(stMigResume && method==="POST") {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>resumeStorageMigrationJob(db,a,hash(getCookie(req,"session")),idSchema.parse(stMigResume[1])));
+  }
+  const stMigRetry=path.match(/^\/staff\/admin\/storage\/migrations\/([a-f0-9-]{36})\/retry$/i);
+  if(stMigRetry && method==="POST") {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>retryFailedMigrationItems(db,a,hash(getCookie(req,"session")),idSchema.parse(stMigRetry[1])));
+  }
+  const stMigRollback=path.match(/^\/staff\/admin\/storage\/migrations\/([a-f0-9-]{36})\/rollback$/i);
+  if(stMigRollback && method==="POST") {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>rollbackStorageMigrationJob(db,a,hash(getCookie(req,"session")),idSchema.parse(stMigRollback[1])));
+  }
+  if(method==="POST" && path==="/staff/admin/storage/public-assets/authorize") {
+    return extraWrite(req,path,actor,authorizeStorageUploadSchema,(db,a,b)=>authorizePublicAssetUpload(db,a,b),201);
   }
 
   return null;

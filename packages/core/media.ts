@@ -6,6 +6,7 @@ import { appOrigin } from "./auth";
 import { Problem, audit, guard, hash, one, organization, role, uuid, type Actor } from "./common";
 import { canReadCasePhoto } from "./tickets";
 import { pendingIntakeClaimSql } from "./intake";
+import { assertNoUnsafeLiveFallback } from "./storage-hub";
 
 export const mediaKindSchema = z.enum([
   "intake_outer",
@@ -162,6 +163,7 @@ export async function createMediaUploadUrl(
   actor: Actor,
   input: z.infer<typeof uploadUrlInputSchema>
 ) {
+  await assertNoUnsafeLiveFallback(db);
   guard(input.mime !== "application/pdf" || input.kind === "attachment", "FILE_INVALID", "PDF uploads are only supported for attachments and purchase evidence.", 422);
   let org: string | null = actor.kind === "customer" ? organization(actor) : null;
   if (actor.kind === "customer") {
@@ -271,6 +273,7 @@ export async function putMediaStaging(
   sig: string,
   bytes: Buffer
 ) {
+  await assertNoUnsafeLiveFallback(db);
   const m = await one<{
     id: string;
     uploaded_by: string;

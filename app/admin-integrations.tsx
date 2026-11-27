@@ -17,6 +17,7 @@ import {
   type Row,
 } from "./ui";
 import { CopyId, StatusBanner } from "./admin-labels";
+import { AdminStorageDesk } from "./admin-storage";
 import type { Actor } from "../packages/core/common";
 
 const DOMAIN_ZH: Record<string, string> = {
@@ -59,6 +60,9 @@ const COMPLIANCE_ZH: Record<string, string> = {
 const HIDDEN_UNINTEGRATED_PROVIDERS = new Set(["creem", "dodo_payments", "airwallex", "oceanpayment"]);
 
 export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: string; actor: Actor; demo?: boolean }) {
+  if (path === "/admin/integrations/storage") {
+    return <AdminStorageDesk actor={actor} />;
+  }
   const isPaymentsView = path === "/admin/integrations/payments";
   const isOcrView = path === "/admin/integrations/ocr";
   const isEmailView = path === "/admin/integrations/email";

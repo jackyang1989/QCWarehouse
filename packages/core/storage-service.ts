@@ -7,6 +7,12 @@ import {
   STORAGE_PROVIDER_CAPABILITIES,
   type ObjectStorageProvider,
 } from "./object-storage";
+import {
+  assertNoUnsafeLiveFallback,
+  resolveConfiguredReadProvider,
+  resolveConfiguredWriteProvider,
+  type StorageInstanceRow,
+} from "./storage-hub";
 
 export const ALLOWED_STORAGE_MIMES = [
   "image/jpeg",
@@ -63,6 +69,7 @@ export const authorizeStorageUploadSchema = z.object({
   parent_object_id: z.uuid().nullable().optional(),
   legal_hold: z.boolean().default(false),
   retention_days: z.number().int().min(1).max(3650).nullable().optional(),
+  environment: z.enum(["sandbox", "live"]).optional(),
 });
 
 const STAGING_PREFIX = "staging/";
@@ -111,6 +118,40 @@ function requireRuntimeProvider(): ObjectStorageProvider {
     503,
   );
   return activeRuntimeProvider;
+}
+
+async function resolveWriteProviderAndInstance(
+  db: DB,
+  visibilityScope: "private_evidence" | "public_assets",
+  purpose?: string,
+  preferredEnvironment?: "sandbox" | "live",
+): Promise<{ provider: ObjectStorageProvider; instance: StorageInstanceRow | null }> {
+  const configured = await resolveConfiguredWriteProvider(db, {
+    visibilityScope,
+    purpose,
+    preferredEnvironment,
+  });
+  if (configured) {
+    return { provider: configured.provider, instance: configured.instance };
+  }
+  if (visibilityScope === "public_assets") {
+    guard(false, "PUBLIC_STORAGE_UNCONFIGURED", "No active public_assets object storage instance is configured.", 503);
+  }
+  return { provider: requireRuntimeProvider(), instance: null };
+}
+
+async function resolveReadProviderAndInstance(
+  db: Pick<DB, "query">,
+  obj: { storage_instance_id?: string | null; storage_provider_key: string; visibility?: string },
+): Promise<{ provider: ObjectStorageProvider; instance: StorageInstanceRow | null }> {
+  const configured = await resolveConfiguredReadProvider(db, obj);
+  if (configured) {
+    return { provider: configured.provider, instance: configured.instance };
+  }
+  if (obj.storage_instance_id) {
+    guard(false, "OBJECT_STORAGE_UNAVAILABLE", "Configured storage instance for object cannot be resolved.", 503);
+  }
+  return { provider: requireRuntimeProvider(), instance: null };
 }
 
 export function detectMimeFromMagicBytes(head: Uint8Array): string | null {
@@ -197,11 +238,48 @@ export async function authorizeStorageUpload(
   actor: Actor,
   input: z.infer<typeof authorizeStorageUploadSchema>,
 ) {
-  const provider = requireRuntimeProvider();
   if (actor.kind === "staff") {
     role(actor, ...STAFF_OBJECT_ROLES);
   } else {
     guard(actor.kind === "customer" && actor.org, "FORBIDDEN", "Customer organization required.", 403);
+  }
+  return authorizeScopedStorageUpload(db, actor, input, "private_evidence");
+}
+
+export async function authorizePublicAssetUpload(
+  db: DB,
+  actor: Actor,
+  input: z.infer<typeof authorizeStorageUploadSchema>,
+) {
+  role(actor, "super_admin", "template_admin");
+  return authorizeScopedStorageUpload(db, actor, input, "public_assets");
+}
+
+async function authorizeScopedStorageUpload(
+  db: DB,
+  actor: Actor,
+  input: z.infer<typeof authorizeStorageUploadSchema>,
+  visibilityScope: "private_evidence" | "public_assets",
+) {
+  const { provider, instance } = await resolveWriteProviderAndInstance(
+    db,
+    visibilityScope,
+    input.purpose,
+    input.environment,
+  );
+  if (instance) {
+    guard(
+      BigInt(input.size_bytes) <= BigInt(instance.max_file_size_bytes),
+      "FILE_TOO_LARGE",
+      `File exceeds maximum allowed size (${instance.max_file_size_bytes} bytes) for instance '${instance.instance_key}'.`,
+      422,
+    );
+    guard(
+      Array.isArray(instance.allowed_mimes) && instance.allowed_mimes.includes(input.declared_mime),
+      "UNSUPPORTED_MEDIA_TYPE",
+      `MIME type '${input.declared_mime}' is not permitted on storage instance '${instance.instance_key}'.`,
+      422,
+    );
   }
 
   if (input.parent_object_id) {
@@ -217,31 +295,37 @@ export async function authorizeStorageUpload(
   }
 
   const objectId = uuid();
-  const orgSegment = actor.org ?? "staff";
+  const orgSegment = visibilityScope === "public_assets" ? "public" : actor.org ?? "staff";
   const now = new Date();
   const yyyy = String(now.getUTCFullYear());
   const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
   const ext = MIME_EXTENSIONS[input.declared_mime];
-  const objectKey = `private/${orgSegment}/${input.purpose}/${yyyy}/${mm}/${objectId}/${input.variant_kind}.${ext}`;
+  const prefix = instance?.key_prefix ? `${instance.key_prefix}/` : "";
+  const rootFolder = visibilityScope === "public_assets" ? "public" : `private/${orgSegment}`;
+  const dbVisibility = visibilityScope === "public_assets" ? "public_asset" : "private";
+  const objectKey = `${prefix}${rootFolder}/${input.purpose}/${yyyy}/${mm}/${objectId}/${input.variant_kind}.${ext}`;
   const stagingKey = stagingKeyFor(objectKey);
+  const presignPutTtl = instance?.presign_put_ttl_sec ?? 600;
   const retentionUntil = input.retention_days ? new Date(Date.now() + input.retention_days * 86400_000).toISOString() : null;
 
   const obj = await one(
     db,
     `insert into storage_objects(
-       id, storage_provider_key, bucket, object_key, org_id, owner_user_id, purpose,
+       id, storage_instance_id, storage_provider_key, bucket, object_key, org_id, owner_user_id, purpose,
        visibility, original_filename, declared_mime, size_bytes, expected_sha256,
        status, is_immutable, parent_object_id, variant_kind, retention_until, legal_hold, created_by
-     ) values($1, $2, $3, $4, $5, $6, $7, 'private', $8, $9, $10, $11, 'authorized', true, $12, $13, $14, $15, $16)
-     returning id, storage_provider_key, bucket, object_key, declared_mime, size_bytes, expected_sha256, status, variant_kind, is_immutable`,
+     ) values($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'authorized', true, $14, $15, $16, $17, $18)
+     returning id, storage_instance_id, storage_provider_key, bucket, object_key, visibility, declared_mime, size_bytes, expected_sha256, status, variant_kind, is_immutable`,
     [
       objectId,
+      instance?.id ?? null,
       provider.providerKey,
       provider.bucket,
       objectKey,
-      actor.org ?? null,
+      visibilityScope === "public_assets" ? null : actor.org ?? null,
       actor.id,
       input.purpose,
+      dbVisibility,
       input.original_filename ?? null,
       input.declared_mime,
       input.size_bytes,
@@ -262,7 +346,7 @@ export async function authorizeStorageUpload(
     const partsCount = input.expected_parts ?? 1;
     const partUrls = Array.from({ length: partsCount }, (_, idx) => ({
       part_number: idx + 1,
-      ...provider.presignUploadPart(stagingKey, mp.uploadId, idx + 1, 600),
+      ...provider.presignUploadPart(stagingKey, mp.uploadId, idx + 1, presignPutTtl),
     }));
     uploadTarget = {
       upload_mode: "multipart",
@@ -270,7 +354,7 @@ export async function authorizeStorageUpload(
       part_urls: partUrls,
     };
   } else {
-    const put = provider.presignPutObject(stagingKey, input.declared_mime, 600);
+    const put = provider.presignPutObject(stagingKey, input.declared_mime, presignPutTtl);
     uploadTarget = {
       upload_mode: "presigned_put",
       ...put,
@@ -302,9 +386,11 @@ export async function authorizeStorageUpload(
   );
   await audit(db, actor, "storage_upload_authorized", "storage_objects", objectId, {
     purpose: input.purpose,
+    visibility_scope: visibilityScope,
     declared_mime: input.declared_mime,
     size_bytes: input.size_bytes,
     upload_mode: input.upload_mode,
+    instance_id: instance?.id ?? null,
   });
 
   return {
@@ -320,9 +406,10 @@ export async function issueMultipartPartUrl(
   objectId: string,
   partNumber: number,
 ) {
-  const provider = requireRuntimeProvider();
   const obj = await one<{
     id: string;
+    storage_instance_id: string | null;
+    storage_provider_key: string;
     object_key: string;
     org_id: string | null;
     owner_user_id: string | null;
@@ -330,11 +417,12 @@ export async function issueMultipartPartUrl(
     status: string;
   }>(
     db,
-    "select id, object_key, org_id, owner_user_id, created_by, status from storage_objects where id = $1 for share",
+    "select id, storage_instance_id, storage_provider_key, object_key, org_id, owner_user_id, created_by, status from storage_objects where id = $1 for share",
     [objectId],
   );
   assertActorCanAccessObject(actor, obj);
   guard(obj.status === "authorized" || obj.status === "uploading", "OBJECT_NOT_UPLOADING", "Object is no longer accepting parts.", 409);
+  const { provider, instance } = await resolveReadProviderAndInstance(db, obj);
 
   const sess = await one<{ id: string; upload_mode: string; provider_upload_id: string | null; status: string; is_expired: boolean }>(
     db,
@@ -349,7 +437,7 @@ export async function issueMultipartPartUrl(
   return {
     object_id: obj.id,
     part_number: partNumber,
-    ...provider.presignUploadPart(stagingKeyFor(obj.object_key), sess.provider_upload_id, partNumber, 600),
+    ...provider.presignUploadPart(stagingKeyFor(obj.object_key), sess.provider_upload_id, partNumber, instance?.presign_put_ttl_sec ?? 600),
   };
 }
 
@@ -396,9 +484,9 @@ export async function completeStorageUpload(
   objectId: string,
   input: z.infer<typeof completeStorageUploadSchema>,
 ) {
-  const provider = requireRuntimeProvider();
   const obj = await one<{
     id: string;
+    storage_instance_id: string | null;
     storage_provider_key: string;
     bucket: string;
     object_key: string;
@@ -411,7 +499,7 @@ export async function completeStorageUpload(
     status: string;
   }>(
     db,
-    `select id, storage_provider_key, bucket, object_key, org_id, owner_user_id, created_by,
+    `select id, storage_instance_id, storage_provider_key, bucket, object_key, org_id, owner_user_id, created_by,
             declared_mime, size_bytes::text as size_bytes, expected_sha256, status
      from storage_objects where id = $1 for update`,
     [objectId],
@@ -429,6 +517,7 @@ export async function completeStorageUpload(
     `Cannot complete upload from status '${obj.status}'.`,
     409,
   );
+  const { provider } = await resolveReadProviderAndInstance(db, obj);
 
   const sess = await one<{
     id: string;
@@ -575,9 +664,10 @@ export async function completeStorageUpload(
 }
 
 export async function abortStorageUpload(db: DB, actor: Actor, objectId: string) {
-  const provider = requireRuntimeProvider();
   const obj = await one<{
     id: string;
+    storage_instance_id: string | null;
+    storage_provider_key: string;
     object_key: string;
     org_id: string | null;
     owner_user_id: string | null;
@@ -585,11 +675,12 @@ export async function abortStorageUpload(db: DB, actor: Actor, objectId: string)
     status: string;
   }>(
     db,
-    "select id, object_key, org_id, owner_user_id, created_by, status from storage_objects where id = $1 for update",
+    "select id, storage_instance_id, storage_provider_key, object_key, org_id, owner_user_id, created_by, status from storage_objects where id = $1 for update",
     [objectId],
   );
   assertActorCanAccessObject(actor, obj);
   guard(obj.status !== "ready", "OBJECT_IMMUTABLE_NO_OVERWRITE", "Cannot abort a verified ready object.", 409);
+  const { provider } = await resolveReadProviderAndInstance(db, obj);
 
   const stagingKey = stagingKeyFor(obj.object_key);
   const sess = (
@@ -620,10 +711,12 @@ export async function authorizePrivateObjectRead(
   objectId: string,
   expiresSeconds = 180,
 ) {
-  const provider = requireRuntimeProvider();
   const obj = await one<{
     id: string;
+    storage_instance_id: string | null;
+    storage_provider_key: string;
     object_key: string;
+    visibility: string;
     org_id: string | null;
     owner_user_id: string | null;
     created_by: string | null;
@@ -633,14 +726,16 @@ export async function authorizePrivateObjectRead(
     verified_sha256: string | null;
   }>(
     db,
-    `select id, object_key, org_id, owner_user_id, created_by, status, declared_mime, detected_mime, verified_sha256
+    `select id, storage_instance_id, storage_provider_key, object_key, visibility, org_id, owner_user_id, created_by, status, declared_mime, detected_mime, verified_sha256
      from storage_objects where id = $1`,
     [objectId],
   );
   assertActorCanAccessObject(actor, obj);
   guard(obj.status === "ready", "OBJECT_NOT_READY", `Object in status '${obj.status}' cannot be accessed.`, 409);
+  const { provider, instance } = await resolveReadProviderAndInstance(db, obj);
+  const ttl = Math.max(30, Math.min(expiresSeconds, instance?.presign_get_ttl_sec ?? 300));
 
-  const access = provider.presignGetObject(obj.object_key, expiresSeconds);
+  const access = provider.presignGetObject(obj.object_key, ttl);
   await db.query(
     `insert into storage_access_audit(object_id, actor_id, actor_kind, action, status)
      values($1, $2, $3, 'presign_get', 'granted')`,
@@ -655,25 +750,28 @@ export async function authorizePrivateObjectRead(
   };
 }
 
+function parseOptionalByteRange(rangeHeader: string | null): { start: number; end: number | null } | null {
+  if (!rangeHeader) return null;
+  const match = rangeHeader.trim().match(/^bytes=(\d+)-(\d*)$/);
+  guard(match, "INVALID_RANGE", "Invalid Range header.", 416);
+  const start = Number(match[1]);
+  const end = match[2] ? Number(match[2]) : null;
+  guard(end === null || start <= end, "RANGE_NOT_SATISFIABLE", "Range start exceeds range end.", 416);
+  return { start, end };
+}
+
 export async function streamPrivateObjectResponse(
   actor: Actor,
   objectId: string,
   rangeHeader: string | null,
 ): Promise<Response> {
-  const provider = requireRuntimeProvider();
-  let parsedRange: { start: number; end: number | null } | null = null;
-  if (rangeHeader) {
-    const match = rangeHeader.trim().match(/^bytes=(\d+)-(\d*)$/);
-    guard(match, "INVALID_RANGE", "Invalid Range header.", 416);
-    const start = Number(match[1]);
-    const end = match[2] ? Number(match[2]) : null;
-    guard(end === null || start <= end, "RANGE_NOT_SATISFIABLE", "Range start exceeds range end.", 416);
-    parsedRange = { start, end };
-  }
+  const parsedRange = parseOptionalByteRange(rangeHeader);
 
-  const obj = await transaction(async (db) => {
-    const row = await one<{
+  const { row, provider } = await transaction(async (db) => {
+    const r = await one<{
       id: string;
+      storage_instance_id: string | null;
+      storage_provider_key: string;
       object_key: string;
       org_id: string | null;
       owner_user_id: string | null;
@@ -684,29 +782,87 @@ export async function streamPrivateObjectResponse(
       detected_mime: string | null;
     }>(
       db,
-      `select id, object_key, org_id, owner_user_id, created_by, status, size_bytes::text as size_bytes, declared_mime, detected_mime
+      `select id, storage_instance_id, storage_provider_key, object_key, org_id, owner_user_id, created_by, status, size_bytes::text as size_bytes, declared_mime, detected_mime
        from storage_objects where id = $1`,
       [objectId],
     );
-    assertActorCanAccessObject(actor, row);
-    guard(row.status === "ready", "OBJECT_NOT_READY", `Object in status '${row.status}' cannot be streamed.`, 409);
-    const totalSize = Number(row.size_bytes);
+    assertActorCanAccessObject(actor, r);
+    guard(r.status === "ready", "OBJECT_NOT_READY", `Object in status '${r.status}' cannot be streamed.`, 409);
+    const totalSize = Number(r.size_bytes);
     if (parsedRange && parsedRange.start >= totalSize) {
       guard(false, "RANGE_NOT_SATISFIABLE", `Requested range start ${parsedRange.start} is outside object size ${totalSize}.`, 416);
     }
-    return row;
+    const target = await resolveReadProviderAndInstance(db, r);
+    return { row: r, provider: target.provider };
   });
 
-  const streamRes = await provider.getObjectStream(obj.object_key, rangeHeader ?? undefined);
+  const streamRes = await provider.getObjectStream(row.object_key, rangeHeader ?? undefined);
   await pool.query(
     `insert into storage_access_audit(object_id, actor_id, actor_kind, action, range_header, status)
      values($1, $2, $3, $4, $5, 'granted')`,
-    [obj.id, actor.id, actor.kind, rangeHeader ? "range_read" : "stream_read", rangeHeader],
+    [row.id, actor.id, actor.kind, rangeHeader ? "range_read" : "stream_read", rangeHeader],
   );
   const headers = new Headers({
-    "content-type": obj.detected_mime ?? obj.declared_mime,
+    "content-type": row.detected_mime ?? row.declared_mime,
     "accept-ranges": "bytes",
     "cache-control": "private, no-store",
+    "x-content-type-options": "nosniff",
+  });
+  if (streamRes.contentLength !== null) headers.set("content-length", String(streamRes.contentLength));
+  if (streamRes.contentRange) headers.set("content-range", streamRes.contentRange);
+  if (streamRes.etag) headers.set("etag", streamRes.etag);
+
+  return new Response(streamRes.body, { status: streamRes.status, headers });
+}
+
+export async function streamPublicAssetResponse(
+  objectId: string,
+  rangeHeader: string | null,
+): Promise<Response> {
+  const parsedRange = parseOptionalByteRange(rangeHeader);
+  const { row, provider } = await transaction(async (db) => {
+    const r = (
+      await db.query<{
+        id: string;
+        storage_instance_id: string | null;
+        storage_provider_key: string;
+        object_key: string;
+        visibility: string;
+        status: string;
+        size_bytes: string;
+        declared_mime: string;
+        detected_mime: string | null;
+      }>(
+        `select id, storage_instance_id, storage_provider_key, object_key, visibility, status, size_bytes::text as size_bytes, declared_mime, detected_mime
+         from storage_objects where id = $1`,
+        [objectId],
+      )
+    ).rows[0];
+    guard(
+      r && r.visibility === "public_asset" && r.status === "ready",
+      "NOT_FOUND",
+      "Public asset not found.",
+      404,
+    );
+    const totalSize = Number(r.size_bytes);
+    if (parsedRange && parsedRange.start >= totalSize) {
+      guard(false, "RANGE_NOT_SATISFIABLE", `Requested range start ${parsedRange.start} is outside object size ${totalSize}.`, 416);
+    }
+    const target = await resolveReadProviderAndInstance(db, r);
+    guard(
+      target.instance?.visibility_scope === "public_assets",
+      "NOT_FOUND",
+      "Public asset storage boundary mismatch.",
+      404,
+    );
+    return { row: r, provider: target.provider };
+  });
+
+  const streamRes = await provider.getObjectStream(row.object_key, rangeHeader ?? undefined);
+  const headers = new Headers({
+    "content-type": row.detected_mime ?? row.declared_mime,
+    "accept-ranges": "bytes",
+    "cache-control": "public, max-age=300",
     "x-content-type-options": "nosniff",
   });
   if (streamRes.contentLength !== null) headers.set("content-length", String(streamRes.contentLength));
@@ -735,16 +891,17 @@ export async function deleteStorageObjectControlled(
   reason: string,
 ) {
   role(actor, "super_admin");
-  const provider = requireRuntimeProvider();
   const obj = await one<{
     id: string;
+    storage_instance_id: string | null;
+    storage_provider_key: string;
     object_key: string;
     status: string;
     legal_hold: boolean;
     retention_expired: boolean;
   }>(
     db,
-    `select id, object_key, status, legal_hold,
+    `select id, storage_instance_id, storage_provider_key, object_key, status, legal_hold,
             (retention_until is null or retention_until <= now()) as retention_expired
      from storage_objects where id = $1 for update`,
     [objectId],
@@ -763,6 +920,7 @@ export async function deleteStorageObjectControlled(
       409,
     );
   }
+  const { provider } = await resolveReadProviderAndInstance(db, obj);
 
   await provider.deleteObject(obj.object_key);
   const archived = await one(

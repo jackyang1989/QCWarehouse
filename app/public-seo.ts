@@ -170,6 +170,7 @@ const PORTAL_ROUTE_TITLES: Record<string, string> = {
   "/admin/integrations/ocr": "OCR 文档识别配置 · 运营管理后台",
   "/admin/integrations/logistics": "物流接入 · 运营管理后台",
   "/admin/integrations/email": "邮件服务配置 · 运营管理后台",
+  "/admin/integrations/storage": "对象存储配置 · 运营管理后台",
 };
 
 export function portalTitleForRoute(path: string, route?: PortalRoute): string {

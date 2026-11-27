@@ -356,7 +356,7 @@ const navIcons:Record<string,string>={
   "/admin/settings":"warehouse_address","/admin/storage/locations":"locations",
   "/admin/shipping-rates":"shipping_rates","/admin/config":"settings","/admin/legal":"legal",
   "/admin/users":"users","/admin/audit":"audit","/admin/operations":"operations",
-  "/admin/integrations":"integrations","/admin/integrations/payments":"payments","/admin/integrations/ocr":"templates","/admin/integrations/logistics":"integrations","/admin/integrations/email":"integrations",
+  "/admin/integrations":"integrations","/admin/integrations/payments":"payments","/admin/integrations/ocr":"templates","/admin/integrations/logistics":"integrations","/admin/integrations/email":"integrations","/admin/integrations/storage":"integrations",
 };
 
 export function PlatformIcon({name}:{name:string}) {
@@ -374,7 +374,7 @@ const navigationSections = {
   ],
   admin: [
     ["运营管理",["/admin","/admin/orders","/admin/customers","/admin/tickets","/admin/inspections","/admin/dispositions","/admin/refunds","/admin/payments","/admin/finance","/admin/logistics","/admin/incidents"]],
-    ["平台配置",["/admin/catalog","/admin/templates","/admin/storage/locations","/admin/shipping-rates","/admin/config","/admin/legal","/admin/users","/admin/audit","/admin/operations","/admin/integrations","/admin/integrations/payments","/admin/integrations/ocr","/admin/integrations/logistics","/admin/integrations/email"]],
+    ["平台配置",["/admin/catalog","/admin/templates","/admin/storage/locations","/admin/shipping-rates","/admin/config","/admin/legal","/admin/users","/admin/audit","/admin/operations","/admin/integrations","/admin/integrations/payments","/admin/integrations/ocr","/admin/integrations/logistics","/admin/integrations/email","/admin/integrations/storage"]],
   ],
 } satisfies Record<string,[string,string[]][]>;
 
