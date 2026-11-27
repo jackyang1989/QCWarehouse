@@ -558,6 +558,16 @@ export async function startTask(db:DB,actor:Actor,id:string,rev:number) {
   role(actor,"inspector");
   const t=await lockedTask(db,id);
   revision(t.revision,rev);
+  guard(!t.paused_at,"TASK_PAUSED","This task is currently paused or undergoing handover.");
+  guard(!t.assignee_id || t.assignee_id===actor.id,"TASK_ASSIGNED_TO_OTHER","This task is assigned to another inspector.",403);
+  const wi=(await db.query<{dispatch_status:string;current_assignee_id:string|null}>(
+    "select dispatch_status,current_assignee_id from dispatch_work_items where inspection_task_id=$1",
+    [id],
+  )).rows[0];
+  if(wi) {
+    guard(!["paused","handover_pending","cancelled"].includes(wi.dispatch_status),"TASK_PAUSED","This task is currently paused or undergoing handover.");
+    guard(!wi.current_assignee_id || wi.current_assignee_id===actor.id,"TASK_ASSIGNED_TO_OTHER","This task is assigned to another inspector.",403);
+  }
   const blocked=(await db.query("select 1 from order_blocks where order_id=$1 and resolved_at is null limit 1",[t.order_id])).rowCount;
   guard(t.state==="READY" && ["queued","inspecting"].includes(t.order_state) && !blocked,"TASK_UNAVAILABLE","The task is already claimed or blocked.");
   await assertTaskItemsOutsideQuarantine(db,t);
@@ -592,6 +602,7 @@ export async function recordResults(db:DB,actor:Actor,id:string,rev:number,resul
   role(actor,"inspector");
   const t=await lockedTask(db,id);
   revision(t.revision,rev);
+  guard(!t.paused_at,"TASK_PAUSED","This task is currently paused or undergoing handover.");
   guard(t.state==="IN_PROGRESS" && t.assignee_id===actor.id && t.order_state==="inspecting","TASK_UNAVAILABLE","This task is not assigned to you.");
   const template=templateSchema.parse(t.content),members=await components(db,t);
   guard(results.length<=300,"RESULT_LIMIT","Save fewer results at once.",422);
@@ -631,6 +642,16 @@ export async function recordResults(db:DB,actor:Actor,id:string,rev:number,resul
     const derived=circumference(value,check);
     if(derived!==undefined)detailsObj.derived_circumference=derived;
     const serializedDetails=Object.keys(detailsObj).length>0?detailsObj:null;
+    const existingAuthor=(await db.query<{recorded_by:string|null}>(
+      "select recorded_by from inspection_results where task_id=$1 and item_key=$2 and component=$3 and attempt=$4",
+      [id,value.item_key,value.component,value.attempt],
+    )).rows[0];
+    guard(
+      !existingAuthor?.recorded_by || existingAuthor.recorded_by===actor.id,
+      "HISTORICAL_AUTHOR_IMMUTABLE",
+      "Cannot overwrite a historical inspection result authored by another inspector; record a new attempt instead.",
+      409,
+    );
     if(value.is_final) await db.query("update inspection_results set is_final=false where task_id=$1 and item_key=$2 and component=$3 and is_final",[id,value.item_key,value.component]);
     const r=await one<{id:string}>(db,`insert into inspection_results(task_id,item_key,component,attempt,status,typed_value,unit,method,reason,details,is_final,recorded_by)
       values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
@@ -735,6 +756,7 @@ export async function recordTaskShot(
   role(actor,"inspector");
   const t=await lockedTask(db,id);
   revision(t.revision,input.revision);
+  guard(!t.paused_at,"TASK_PAUSED","This task is currently paused or undergoing handover.");
   guard(t.state==="IN_PROGRESS" && t.assignee_id===actor.id && t.order_state==="inspecting","TASK_UNAVAILABLE","This task is not assigned to you.");
   const template=templateSchema.parse(t.content),members=await components(db,t);
   const isOrderShot=Boolean(t.group_id && template.order_shots?.includes(input.shot_code) && ["group","order","main"].includes(input.component));
@@ -815,6 +837,7 @@ export async function submitTask(db:DB,actor:Actor,id:string,rev:number) {
   role(actor,"inspector");
   const t=await lockedTask(db,id);
   revision(t.revision,rev);
+  guard(!t.paused_at,"TASK_PAUSED","This task is currently paused or undergoing handover.");
   guard(t.state==="IN_PROGRESS" && t.assignee_id===actor.id && t.order_state==="inspecting","TASK_UNAVAILABLE","This task is not assigned to you.");
   await assertTaskItemsOutsideQuarantine(db,t);
   const comp=await evaluateCompleteness(db,t);

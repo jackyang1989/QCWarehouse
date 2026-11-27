@@ -17,6 +17,7 @@ import { archiveRbacRole, assignCustomRoleToStaff, computeEffectiveStaffPermissi
 import { createAddressSnapshot, createAddressSnapshotSchema, createRegionAlias, getActiveRegionOverview, getAddressSnapshot, getRegionDetail, importRegionDatasetDraft, listRegionChildren, listRegionDatasetVersions, parseChineseAddress, parseChineseAddressSchema, publishRegionDatasetVersion, regionAliasCreateSchema, regionChildrenQuerySchema, regionImportDraftSchema, regionPathValidateSchema, regionSearchQuerySchema, revokeRegionAlias, rollbackRegionDatasetVersion, searchRegions, validateRegionPath } from "./regions";
 import { adjustConsumableStock, archiveWarehouse, batchCreateWarehouseBins, binGovernanceSchema, consumableAdjustSchema, consumableCreateSchema, containerCreateSchema, containerMoveSchema, createAndDispatchTransfer, createPackagingConsumable, createWarehouse, createWarehouseContainer, createWarehouseZone, getWarehouseDetail, listPackagingConsumables, listWarehouses, locationReserveSchema, moveOrNestContainer, previewWarehouseDeactivationImpact, receiveWarehouseTransfer, recommendEmptyLocations, recommendLocationsQuerySchema, releaseLocationReservation, reserveLocationSpace, transferDispatchSchema, transferReceiveSchema, updateBinGovernance, updateWarehouseControls, warehouseBinBatchSchema, warehouseControlsSchema, warehouseCreateSchema, warehouseZoneCreateSchema } from "./warehouses";
 import { claimDeviceLease, createWorkstation, decideDeviceAuthorization, deviceAccessPolicySchema, deviceCalibrationOrFaultSchema, deviceDecisionSchema, deviceHeartbeat, deviceHeartbeatSchema, deviceLeaseClaimSchema, devicePreregisterSchema, deviceRequestSchema, deviceRevokeSchema, evaluateServiceSellability, getDeviceAccessPolicy, grantOrUpdateSkill, listDeviceAuthRequests, listDevices, listInspectorSkills, listStaffOwnNotifications, listWorkstations, markStaffNotificationRead, preregisterDevice, recordDeviceCalibrationOrFault, releaseDeviceLease, requestDeviceAuthorization, revokeDevice, revokeSkillGrant, sellabilityQuerySchema, setDeviceAccessPolicy, skillGrantSchema, skillRevokeSchema, updateWorkstationStatus, workstationCreateSchema, workstationStatusSchema } from "./workstations-devices";
+import { acceptTaskHandover, assignWorkItem, cancelTaskHandover, claimTaskLease, evidenceSubmitWithLeaseSchema, handoverAcceptSchema, handoverCancelSchema, handoverInitiateSchema, initiateTaskHandover, listDispatchWorkItems, listQuarantinedEvidence, listStaffShifts, pauseWorkItem, quarantineResolveSchema, registerDispatchWorkItem, resolveQuarantinedEvidence, resumeWorkItem, revokeStaffActiveLeases, staffShiftStatusSchema, staffShiftUpsertSchema, submitEvidenceWithLease, taskLeaseClaimSchema, updateStaffShiftStatus, upsertStaffShift, workItemAssignSchema, workItemPauseSchema, workItemRegisterSchema } from "./scheduling-dispatch";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
@@ -1870,6 +1871,89 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   const staffNotifRead=path.match(/^\/staff\/me\/notifications\/([a-f0-9-]{36})\/read$/i);
   if(method==="POST" && staffNotifRead) {
     return extraWrite(req,path,actor,z.object({}),(db,a)=>markStaffNotificationRead(db,a,idSchema.parse(staffNotifRead[1])));
+  }
+
+  // ---------- TASK-184 Scheduling, Dispatch, Task Leases, Handovers & Late-Evidence Quarantine ----------
+  if(method==="GET" && path==="/staff/shifts") {
+    const a=actorRequired(actor);
+    role(a,"receiver","inspector","reviewer","warehouse_admin","super_admin");
+    const sp=new URL(req.url).searchParams;
+    return json(await transaction(db=>listStaffShifts(db,a,{
+      warehouse_id:sp.get("warehouse_id")??undefined,
+      shift_date:sp.get("shift_date")??undefined,
+      user_id:sp.get("user_id")??undefined,
+    })));
+  }
+  if(method==="PUT" && path==="/staff/shifts") {
+    return extraWrite(req,path,actor,staffShiftUpsertSchema,(db,a,b)=>upsertStaffShift(db,a,b));
+  }
+  const shiftStatus=path.match(/^\/staff\/shifts\/([a-f0-9-]{36})\/status$/i);
+  if(method==="PATCH" && shiftStatus) {
+    return extraWrite(req,path,actor,staffShiftStatusSchema,(db,a,b)=>updateStaffShiftStatus(db,a,idSchema.parse(shiftStatus[1]),b));
+  }
+  if(method==="GET" && path==="/staff/dispatch/work-items") {
+    const a=actorRequired(actor);
+    role(a,"receiver","inspector","reviewer","warehouse_admin","super_admin");
+    const sp=new URL(req.url).searchParams;
+    return json(await transaction(db=>listDispatchWorkItems(db,a,{
+      warehouse_id:sp.get("warehouse_id")??undefined,
+      task_domain:sp.get("task_domain")??undefined,
+      dispatch_status:sp.get("dispatch_status")??undefined,
+      assignee_id:sp.get("assignee_id")??undefined,
+    })));
+  }
+  if(method==="POST" && path==="/staff/dispatch/work-items") {
+    return extraWrite(req,path,actor,workItemRegisterSchema,(db,a,b)=>registerDispatchWorkItem(db,a,b),201);
+  }
+  const wiAssign=path.match(/^\/staff\/dispatch\/work-items\/([a-f0-9-]{36})\/assign$/i);
+  if(method==="POST" && wiAssign) {
+    return extraWrite(req,path,actor,workItemAssignSchema,(db,a,b)=>assignWorkItem(db,a,idSchema.parse(wiAssign[1]),b));
+  }
+  const wiLease=path.match(/^\/staff\/dispatch\/work-items\/([a-f0-9-]{36})\/leases$/i);
+  if(method==="POST" && wiLease) {
+    return extraWrite(req,path,actor,taskLeaseClaimSchema,(db,a,b)=>claimTaskLease(db,a,idSchema.parse(wiLease[1]),b),201);
+  }
+  const wiPause=path.match(/^\/staff\/dispatch\/work-items\/([a-f0-9-]{36})\/pause$/i);
+  if(method==="POST" && wiPause) {
+    return extraWrite(req,path,actor,workItemPauseSchema,(db,a,b)=>pauseWorkItem(db,a,idSchema.parse(wiPause[1]),b));
+  }
+  const wiResume=path.match(/^\/staff\/dispatch\/work-items\/([a-f0-9-]{36})\/resume$/i);
+  if(method==="POST" && wiResume) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>resumeWorkItem(db,a,idSchema.parse(wiResume[1])));
+  }
+  const wiHandover=path.match(/^\/staff\/dispatch\/work-items\/([a-f0-9-]{36})\/handovers$/i);
+  if(method==="POST" && wiHandover) {
+    return extraWrite(req,path,actor,handoverInitiateSchema,(db,a,b)=>initiateTaskHandover(db,a,idSchema.parse(wiHandover[1]),b),201);
+  }
+  const hoAccept=path.match(/^\/staff\/dispatch\/handovers\/([a-f0-9-]{36})\/accept$/i);
+  if(method==="POST" && hoAccept) {
+    return extraWrite(req,path,actor,handoverAcceptSchema,(db,a,b)=>acceptTaskHandover(db,a,idSchema.parse(hoAccept[1]),b));
+  }
+  const hoCancel=path.match(/^\/staff\/dispatch\/handovers\/([a-f0-9-]{36})\/cancel$/i);
+  if(method==="POST" && hoCancel) {
+    return extraWrite(req,path,actor,handoverCancelSchema,(db,a,b)=>cancelTaskHandover(db,a,idSchema.parse(hoCancel[1]),b));
+  }
+  const staffRevokeLeases=path.match(/^\/staff\/dispatch\/staff\/([a-f0-9-]{36})\/revoke-leases$/i);
+  if(method==="POST" && staffRevokeLeases) {
+    return extraWrite(req,path,actor,z.object({reason:z.string().trim().min(2).max(500)}),(db,a,b)=>revokeStaffActiveLeases(db,a,idSchema.parse(staffRevokeLeases[1]),b.reason));
+  }
+  if(method==="POST" && path==="/staff/dispatch/evidence-submit") {
+    csrf(req);
+    const a=actorRequired(actor);
+    const key=idSchema.parse(req.headers.get("idempotency-key"));
+    const data=evidenceSubmitWithLeaseSchema.parse(await input(req));
+    const result=await transaction(db=>idempotent(db,a.id+":"+path,key,data,()=>submitEvidenceWithLease(db,a,data))) as {quarantined?:boolean};
+    return json(result,result.quarantined?202:200);
+  }
+  if(method==="GET" && path==="/staff/dispatch/quarantined-evidence") {
+    const a=actorRequired(actor);
+    role(a,"warehouse_admin","super_admin","reviewer");
+    const wi=new URL(req.url).searchParams.get("work_item_id")??undefined;
+    return json(await transaction(db=>listQuarantinedEvidence(db,a,wi)));
+  }
+  const qResolve=path.match(/^\/staff\/dispatch\/quarantined-evidence\/([a-f0-9-]{36})\/resolve$/i);
+  if(method==="POST" && qResolve) {
+    return extraWrite(req,path,actor,quarantineResolveSchema,(db,a,b)=>resolveQuarantinedEvidence(db,a,idSchema.parse(qResolve[1]),b));
   }
 
   return null;
