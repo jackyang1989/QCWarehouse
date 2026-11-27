@@ -450,4 +450,30 @@ test("admin workbench: payment refund state sync (partially_refunded -> refunded
   assert(deskAfterBind.termsVersions.some((t: { is_demo_fixture?: boolean }) => t.is_demo_fixture === true));
   assert(deskAfterBind.termsVersions.some((t: { consent_count?: number }) => Number(t.consent_count ?? 0) >= 1));
   assert(Array.isArray(deskAfterBind.templates) && deskAfterBind.templates.some((t: { order_count?: number }) => typeof t.order_count === "number"));
+
+  // Verify TASK-177 real isolated restore proof transitions backup_restore health from unknown -> operational when reconciliation is clean
+  const healthBefore = await admin.fetch("/staff/admin/system-health");
+  assert.equal(healthBefore.healthy, true);
+  assert.equal(healthBefore.checks.backup_restore.status, "unknown");
+  const realDrill = await admin.fetch(
+    "/staff/admin/recovery-runs",
+    {
+      environment: "isolated-pg-restore",
+      backup_reference: "pgdump-admin-workbench-verified",
+      rpo_seconds: 0,
+      rto_seconds: 1,
+      manifest_sha256: "e".repeat(64),
+      dump_sha256: "f".repeat(64),
+      environment_fingerprint: `${databaseName}-restore-isolated`,
+      restore_command_ref: "npm run ops:backup-verify",
+      notes: "Clean reconciliation pg_dump/pg_restore proof",
+    },
+    "POST",
+    201
+  );
+  assert.equal(realDrill.reconciliation.evidence_mode, "real_isolated_restore");
+  assert.equal(realDrill.reconciliation.production_verified, true);
+  const healthAfter = await admin.fetch("/staff/admin/system-health");
+  assert.equal(healthAfter.checks.backup_restore.status, "operational");
+  assert.equal(healthAfter.checks.backup_restore.last_backup_reference, "pgdump-admin-workbench-verified");
 });

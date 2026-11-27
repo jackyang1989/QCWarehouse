@@ -119,53 +119,88 @@ function SystemHealthAndRecoveryPanel() {
   const health=useLoad("/staff/admin/system-health");
   const h=health.data;
   const counts=h?.counts??{};
+  const checks=h?.checks??{};
   const runs=h?.recovery_runs??h?.recent_recovery_runs??[];
-  return <Panel title="系统健康、备份校验与恢复演练">
-    <p className="muted">验证对象存储与私有媒体完整性，登记备份恢复演练并重放恢复时间点后的会话撤销、账号注销、解绑与退信抑制清单，同时核对外部支付与出库交接一致性。</p>
+  const statusTone=(status:string|undefined)=>
+    status==="operational"?"green":status==="degraded"?"yellow":status==="unavailable"?"red":"gray";
+  const statusLabel=(status:string|undefined)=>
+    status==="operational"?"正常 (Operational)":status==="degraded"?"降级/待迁 (Degraded)":status==="unavailable"?"不可用 (Unavailable)":"未知/未实测 (Unknown)";
+  const checkRows=[
+    ["数据库连通与延迟", checks.database?.status, `${checks.database?.database_name??"—"} · 延迟 ${checks.database?.latency_ms??0} ms`],
+    ["数据库迁移版本", checks.migrations?.status, `已应用 ${checks.migrations?.applied_count??0} 个 · 最新 ${checks.migrations?.latest_migration??"—"}`],
+    ["不可变审计/冻结触发器", checks.immutable_triggers?.status, `${checks.immutable_triggers?.count??(h?.immutable_triggers??[]).length} / ${checks.immutable_triggers?.expected??5} 个`],
+    ["Outbox 异步作业队列", checks.outbox_queue?.status, `待跑 ${checks.outbox_queue?.pending_count??counts.pending_jobs_count??0} · 重试中 ${checks.outbox_queue?.retrying_count??counts.failed_jobs_count??0} · 已耗尽 ${checks.outbox_queue?.exhausted_count??counts.exhausted_jobs_count??0}`],
+    ["私有媒体存储后端", checks.media_storage?.status, `${checks.media_storage?.backend??"postgres_private_files_legacy"} · ${checks.media_storage?.object_count??counts.private_files_count??0} 文件 (${checks.media_storage?.total_bytes??counts.private_files_bytes??0} B)`],
+    ["真实备份与隔离恢复", checks.backup_restore?.status, checks.backup_restore?.last_verified_at?`最近实测 ${stamp(checks.backup_restore.last_verified_at)} · ${checks.backup_restore.last_backup_reference??"—"}`:"尚未执行带 manifest SHA-256 实证的隔离恢复（手工登记不计为通过）"],
+  ];
+  return <Panel title="分层系统健康、备份校验与真实隔离恢复">
+    <p className="muted">按库连通/迁移/不可变触发器/Outbox/媒体存储/真实隔离恢复六层分别评估状态（禁止仅凭触发器数宣布健康）。生产环境人工登记演练不修改活跃会话/用户并记为未验证。</p>
     {health.error&&<ErrorBlock error={health.error}/>}
     {h&&<>
       <div className="metric-strip" aria-label="系统健康与备份">
-        <div className="metric"><span>系统健康状态</span><strong>{h.healthy?"正常":"告警"}</strong><small>不可变触发器 {(h.immutable_triggers??[]).length} 个</small></div>
+        <div className="metric"><span>综合状态 / 就绪度</span><strong><Tag tone={statusTone(h.overall_status)}>{statusLabel(h.overall_status)}</Tag></strong><small>存活 {h.liveness??"operational"} · 就绪 {h.readiness??(h.healthy?"operational":"unavailable")}</small></div>
         <div className="metric"><span>订单 / 已发布报告</span><strong>{counts.orders_count??0} / {counts.reports_count??0}</strong><small>收款记录 {counts.payments_count??0}</small></div>
-        <div className="metric"><span>待执行 / 失败作业</span><strong>{counts.pending_jobs_count??0} / {counts.failed_jobs_count??0}</strong><small>审计事件 {counts.audit_count??0}</small></div>
-        <div className="metric"><span>恢复演练记录</span><strong>{runs.length}</strong><small>RPO / RTO 审计</small></div>
+        <div className="metric"><span>待执行 / 失败 / 耗尽</span><strong>{counts.pending_jobs_count??0} / {counts.failed_jobs_count??0} / {counts.exhausted_jobs_count??0}</strong><small>审计事件 {counts.audit_count??0}</small></div>
+        <div className="metric"><span>恢复记录 / 隔离实证</span><strong>{runs.length}</strong><small>实证状态：<Tag tone={statusTone(checks.backup_restore?.status)}>{statusLabel(checks.backup_restore?.status)}</Tag></small></div>
+      </div>
+      <div style={{marginBottom:16}}>
+        <Table
+          headers={["健康检查维度","实时状态","核验依据与阈值"]}
+          rows={checkRows.map(([name,st,detail])=>[
+            <strong key={String(name)}>{name}</strong>,
+            <Tag key={String(name)+"-st"} tone={statusTone(typeof st==="string"?st:undefined)}>{statusLabel(typeof st==="string"?st:undefined)}</Tag>,
+            detail,
+          ])}
+        />
       </div>
       <div className="ops-columns">
         <div>
-          <Form label="登记恢复演练与安全撤销清单重放" run={async f=>{
+          <Form label="登记隔离备份恢复证据（需独立环境与清单哈希）" run={async f=>{
             const sess=text(f,"revoked_session_ids").split(",").map(s=>s.trim()).filter(Boolean);
+            const manifestSha=text(f,"manifest_sha256").trim();
+            const dumpSha=text(f,"dump_sha256").trim();
+            const envFp=text(f,"environment_fingerprint").trim();
             await request("/staff/admin/recovery-runs","POST",{
               environment:text(f,"environment")||"staging-drill",
               backup_reference:text(f,"backup_reference"),
               rpo_seconds:Number(text(f,"rpo_seconds")||0),
               rto_seconds:Number(text(f,"rto_seconds")||60),
               revoked_session_ids:sess,
+              ...(manifestSha?{manifest_sha256:manifestSha}:{}),
+              ...(dumpSha?{dump_sha256:dumpSha}:{}),
+              ...(envFp?{environment_fingerprint:envFp}:{}),
               notes:text(f,"notes"),
             });
             health.reload();
           }}>
             <div className="grid two">
               <label>演练环境<input name="environment" defaultValue="staging-drill" required/></label>
-              <label>备份快照编号<input name="backup_reference" placeholder="pg-dump-20261107" required/></label>
+              <label>备份快照编号<input name="backup_reference" placeholder="pg-dump-20261127" required/></label>
             </div>
             <div className="grid two">
               <label>实测 RPO（秒）<input name="rpo_seconds" type="number" defaultValue="0" min={0} required/></label>
               <label>实测 RTO（秒）<input name="rto_seconds" type="number" defaultValue="45" min={0} required/></label>
             </div>
-            <label>需重放撤销的会话 ID（逗号分隔，可选）<input name="revoked_session_ids"/></label>
+            <div className="grid two">
+              <label>恢复清单 SHA-256（可选，实证必填）<input name="manifest_sha256" placeholder="64位十六进制哈希"/></label>
+              <label>Dump 文件 SHA-256（可选，实证必填）<input name="dump_sha256" placeholder="64位十六进制哈希"/></label>
+            </div>
+            <label>隔离目标库指纹（可选，不可与当前主库同名）<input name="environment_fingerprint" placeholder="qcw_restore_isolated"/></label>
+            <label>需重放撤销的会话 ID（逗号分隔，仅隔离演练有效）<input name="revoked_session_ids"/></label>
             <label>恢复核验说明<textarea name="notes" rows={2}/></label>
           </Form>
         </div>
         <div>
-          <Table headers={["演练编号","环境 / 快照","状态","RPO / RTO","重放与对账摘要","时间"]} rows={runs.map((r:Row)=>{
+          <Table headers={["演练编号","证据层级 / 环境 / 快照","状态","RPO / RTO","重放与对账摘要","时间"]} rows={runs.map((r:Row)=>{
             const m=r.reconciliation??r.replay_manifest??{};
             const rec=m.payment_handover_reconciliation??{};
+            const mode=m.evidence_mode??(m.verified?"isolated_test_drill":"manual_registration_unverified");
             return [
-              <strong className="code">{r.id.slice(0,8)}</strong>,
-              <span>{m.environment??"staging-drill"} · <span className="code">{m.backup_reference??"—"}</span></span>,
-              <Tag>{m.verified?"verified":"warning"}</Tag>,
-              <span>{m.rpo_seconds??0}s / {m.rto_seconds??0}s</span>,
-              <span>重放会话 {m.replayed?.sessions_revoked??0} · 已付收费 {rec.paid_charges_verified??0} · 交接批次 {rec.shipments_handed_over_verified??0}</span>,
+              <strong key="id" className="code">{r.id.slice(0,8)}</strong>,
+              <span key="env"><span className="code">{mode}</span> · {m.environment??"staging-drill"} · <span className="code">{m.backup_reference??"—"}</span></span>,
+              <Tag key="st" tone={m.production_verified?"green":m.verified?"blue":"yellow"}>{m.production_verified?"real_verified":m.verified?"test_drill":"unverified"}</Tag>,
+              <span key="rt">{m.rpo_seconds??0}s / {m.rto_seconds??0}s</span>,
+              <span key="rep">重放会话 {m.replayed?.sessions_revoked??0} · 已付收费 {rec.paid_charges_verified??0} · 交接批次 {rec.shipments_handed_over_verified??0}</span>,
               stamp(r.finished_at??r.started_at),
             ];
           })} empty="暂无恢复演练记录。"/>

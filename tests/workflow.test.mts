@@ -8864,4 +8864,80 @@ test("expected_lines quantity mismatch returns 422 VALIDATION_FAILED and subcate
   assert.equal(cmpSub.order.state,"awaiting_payment");
 });
 
+test("TASK-177: layered health check rejects exhausted outbox jobs and separates manual/test drills from real isolated restore proof",async()=>{
+  const admin=await staffLogin("admin");
+  const initial=await admin.fetch("/staff/admin/system-health");
+  assert.equal(initial.healthy,true);
+  assert.equal(initial.overall_status,"operational");
+  assert.equal(initial.checks.database.status,"operational");
+  assert.equal(initial.checks.migrations.status,"operational");
+  assert.equal(initial.checks.immutable_triggers.status,"operational");
+  assert.equal(initial.checks.outbox_queue.status,"operational");
+  assert.equal(initial.checks.media_storage.status,"degraded");
+  assert.equal(initial.checks.backup_restore.status,"unknown");
+
+  const {rows:[exhausted]}=await pool.query<{id:string}>(
+    `insert into outbox_events(type,payload,attempts,last_error,next_attempt_at)
+     values('ticket.reply','{"ticket_id":"00000000-0000-4000-8000-000000000001"}'::jsonb,5,'PERMANENT_TEST_FAILURE',now())
+     returning id`
+  );
+  try {
+    const degraded=await admin.fetch("/staff/admin/system-health");
+    assert.equal(degraded.healthy,false,"Exhausted outbox jobs must fail healthy flag even when 5 triggers exist");
+    assert.equal(degraded.overall_status,"degraded");
+    assert.equal(degraded.checks.outbox_queue.status,"degraded");
+    assert.equal(degraded.checks.outbox_queue.exhausted_count>=1,true);
+  } finally {
+    await pool.query("delete from outbox_events where id=$1",[exhausted.id]);
+  }
+
+  await admin.fetch("/staff/admin/recovery-runs",{
+    backup_reference:"same-db-bad",
+    manifest_sha256:"a".repeat(64),
+    dump_sha256:"b".repeat(64),
+    environment_fingerprint:databaseName,
+  },"POST",409);
+
+  const realDrill=await admin.fetch("/staff/admin/recovery-runs",{
+    environment:"isolated-pg-restore",
+    backup_reference:"pgdump-task177-verified",
+    rpo_seconds:0,
+    rto_seconds:2,
+    manifest_sha256:"c".repeat(64),
+    dump_sha256:"d".repeat(64),
+    environment_fingerprint:`${databaseName}-restore-isolated`,
+    restore_command_ref:"npm run ops:backup-verify",
+    notes:"Verified pg_dump/pg_restore manifest parity",
+  },"POST",201);
+  assert.equal(realDrill.reconciliation.evidence_mode,"real_isolated_restore");
+  assert.equal(realDrill.reconciliation.payment_handover_reconciliation.reconciled,false);
+  assert.equal(realDrill.reconciliation.production_verified,false,"Real restore proof must still withhold production_verified when payments lack provider_ref");
+
+  const afterBlockedReal=await admin.fetch("/staff/admin/system-health");
+  assert.equal(afterBlockedReal.checks.backup_restore.status,"unknown");
+
+  const prevNodeEnv=process.env.NODE_ENV;
+  const prevDemo=process.env.QCW_DEMO;
+  try {
+    process.env.NODE_ENV="production";
+    process.env.QCW_DEMO="0";
+    const manualProdDrill=await admin.fetch("/staff/admin/recovery-runs",{
+      environment:"manual-prod-note",
+      backup_reference:"manual-operator-entry",
+      rpo_seconds:0,
+      rto_seconds:5,
+      suppressed_emails:["blocked-side-effect@example.com"],
+    },"POST",201);
+    assert.equal(manualProdDrill.reconciliation.evidence_mode,"manual_registration_unverified");
+    assert.equal(manualProdDrill.reconciliation.verified,false);
+    assert.equal(manualProdDrill.reconciliation.production_verified,false);
+    assert.equal(manualProdDrill.reconciliation.production_side_effect_blocked,true);
+  } finally {
+    if(prevNodeEnv===undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV=prevNodeEnv;
+    if(prevDemo===undefined) delete process.env.QCW_DEMO;
+    else process.env.QCW_DEMO=prevDemo;
+  }
+});
+
 test("all core operations have a validated success response",assertCoreCoverage);

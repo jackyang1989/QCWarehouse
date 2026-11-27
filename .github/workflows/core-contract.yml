@@ -43,6 +43,7 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/qcw-contract"
           "$RUNNER_TEMP/qcw-contract/bin/python" -m pip install 'PyYAML==6.0.1' 'jsonschema==4.23.0'
           "$RUNNER_TEMP/qcw-contract/bin/python" docs/contracts/check.py
+          "$RUNNER_TEMP/qcw-contract/bin/python" tests/contract-check.test.py
       - name: Migrate empty database and verify relations
         run: |
           DATABASE_URL="$TEST_DATABASE_URL" npm run db:migrate

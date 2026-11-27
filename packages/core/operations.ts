@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { DB } from "../db";
 import { requireCustomerActive } from "./auth";
-import { audit, code, event, guard, hash, lock, one, organization, revision, role, uuid, type Actor } from "./common";
+import { audit, code, event, guard, hash, isDemo, lock, one, organization, revision, role, uuid, type Actor } from "./common";
 import { emailSettings, integrationPreflight, stripeSettingsFromDb } from "./integrations";
 import { demoTermsVersion, demoWarehouseAddressZh } from "./demo-fixtures";
 import { savePhoto } from "./intake";
@@ -1334,6 +1334,9 @@ export async function requestCustomerPrivacyAction(
 
 export async function systemHealthAndBackupCheck(db:DB,actor:Actor) {
   role(actor,"super_admin");
+  const started=Date.now();
+  const dbMeta=await one<{database_name:string}>(db,"select current_database() database_name");
+  const dbLatencyMs=Math.max(0,Date.now()-started);
   const counts=await one<{
     users_count:number;
     orders_count:number;
@@ -1343,6 +1346,9 @@ export async function systemHealthAndBackupCheck(db:DB,actor:Actor) {
     audit_count:number;
     pending_jobs_count:number;
     failed_jobs_count:number;
+    exhausted_jobs_count:number;
+    private_files_count:number;
+    private_files_bytes:number;
   }>(
     db,
     `select
@@ -1353,20 +1359,93 @@ export async function systemHealthAndBackupCheck(db:DB,actor:Actor) {
        (select count(*)::int from report_versions where state='published') reports_count,
        (select count(*)::int from audit_events) audit_count,
        (select count(*)::int from outbox_events where processed_at is null and attempts=0) pending_jobs_count,
-       (select count(*)::int from outbox_events where processed_at is null and attempts>0) failed_jobs_count`
+       (select count(*)::int from outbox_events where processed_at is null and attempts>0 and attempts<5) failed_jobs_count,
+       (select count(*)::int from outbox_events where processed_at is null and attempts>=5) exhausted_jobs_count,
+       (select count(*)::int from private_files) private_files_count,
+       (select coalesce(sum(octet_length(data)),0)::bigint from private_files)::double precision private_files_bytes`
   );
+  const migrationRows=(await db.query<{name:string}>("select name from qc_migrations order by name desc")).rows;
   const triggers=(await db.query<{tgname:string}>(
     `select tgname from pg_trigger
      where not tgisinternal and tgname in ('immutable_audit','immutable_logistics','freeze_report','freeze_template','freeze_inspection_quote')
      order by tgname`
   )).rows.map(r=>r.tgname);
-  const recoveryRuns=(await db.query(
+  const recoveryRuns=(await db.query<{
+    id:string;
+    restored_to:Date;
+    started_at:Date;
+    finished_at:Date|null;
+    reconciliation:Record<string,unknown>;
+    approved_by:string;
+  }>(
     "select id,restored_to,started_at,finished_at,reconciliation,approved_by from recovery_runs order by started_at desc limit 10"
   )).rows;
+  const latestRealRestore=recoveryRuns.find(r=>
+    r.reconciliation?.evidence_mode==="real_isolated_restore" &&
+    r.reconciliation?.isolated_environment===true &&
+    r.reconciliation?.production_verified===true
+  );
+  const manualRegistrationsCount=recoveryRuns.filter(r=>r.reconciliation?.evidence_mode==="manual_registration_unverified").length;
+  const checks={
+    database:{
+      status:"operational" as const,
+      latency_ms:dbLatencyMs,
+      database_name:dbMeta.database_name,
+    },
+    migrations:{
+      status:migrationRows.length>=13?"operational" as const:migrationRows.length>0?"degraded" as const:"unavailable" as const,
+      applied_count:migrationRows.length,
+      latest_migration:migrationRows[0]?.name??null,
+    },
+    immutable_triggers:{
+      status:triggers.length===5?"operational" as const:"unavailable" as const,
+      count:triggers.length,
+      expected:5,
+      triggers,
+    },
+    outbox_queue:{
+      status:counts.exhausted_jobs_count===0?"operational" as const:"degraded" as const,
+      pending_count:counts.pending_jobs_count,
+      retrying_count:counts.failed_jobs_count,
+      exhausted_count:counts.exhausted_jobs_count,
+    },
+    media_storage:{
+      status:"degraded" as const,
+      backend:"postgres_private_files_legacy" as const,
+      object_count:counts.private_files_count,
+      total_bytes:counts.private_files_bytes,
+      note:"Transitional PostgreSQL BYTEA storage; external private object storage pending TASK-185/186.",
+    },
+    backup_restore:{
+      status:latestRealRestore?"operational" as const:"unknown" as const,
+      last_verified_at:latestRealRestore?(latestRealRestore.finished_at??latestRealRestore.started_at):null,
+      last_backup_reference:latestRealRestore?(latestRealRestore.reconciliation?.backup_reference??null):null,
+      manifest_sha256:latestRealRestore?(latestRealRestore.reconciliation?.manifest_sha256??null):null,
+      manual_registrations_count:manualRegistrationsCount,
+    },
+  };
+  const overallStatus=
+    checks.immutable_triggers.status==="unavailable"||checks.migrations.status==="unavailable"
+      ?"unavailable" as const
+      :checks.outbox_queue.status==="degraded"||checks.migrations.status==="degraded"
+        ?"degraded" as const
+        :"operational" as const;
+  const healthy=
+    checks.database.status==="operational" &&
+    checks.migrations.status==="operational" &&
+    checks.immutable_triggers.status==="operational" &&
+    checks.outbox_queue.status==="operational";
   return {
     checked_at:new Date().toISOString(),
-    healthy:triggers.length>=5,
-    counts,
+    healthy,
+    liveness:"operational" as const,
+    readiness:overallStatus==="unavailable"?"unavailable" as const:"operational" as const,
+    overall_status:overallStatus,
+    counts:{
+      ...counts,
+      applied_migrations_count:migrationRows.length,
+    },
+    checks,
     immutable_triggers:triggers,
     recovery_runs:recoveryRuns,
   };
@@ -1406,50 +1485,77 @@ export async function recordRecoveryDrill(
     closed_user_ids?:string[];
     revoked_identity_ids?:string[];
     suppressed_emails?:string[];
+    manifest_sha256?:string;
+    dump_sha256?:string;
+    environment_fingerprint?:string;
+    restore_command_ref?:string;
   }
 ) {
   role(actor,"super_admin");
   const startedAt=new Date();
   const restoredTo=input.restored_to?new Date(input.restored_to):new Date();
+  const activeDb=(await one<{name:string}>(db,"select current_database() name")).name;
+  const hex64=/^[a-f0-9]{64}$/i;
+  const hasManifestProof=Boolean(
+    input.manifest_sha256 && hex64.test(input.manifest_sha256) &&
+    input.dump_sha256 && hex64.test(input.dump_sha256) &&
+    input.environment_fingerprint?.trim()
+  );
+  if(hasManifestProof) {
+    guard(
+      input.environment_fingerprint!.trim()!==activeDb,
+      "RECOVERY_NOT_ISOLATED",
+      "Recovery verification must target an isolated environment distinct from the active database.",
+      409
+    );
+  }
+  const isTestOrDemo=process.env.NODE_ENV==="test" || isDemo();
+  const evidenceMode=hasManifestProof
+    ?"real_isolated_restore" as const
+    :isTestOrDemo
+      ?"isolated_test_drill" as const
+      :"manual_registration_unverified" as const;
 
-  // T105: Replay post-restore revocation / deletion / suppression manifest so PITR never resurrects revoked sessions, identities, or closed accounts
+  // T105: Replay post-restore revocation / deletion / suppression only inside isolated test/demo environments; never mutate live production state from drill registration (§68.1).
   let replayedSessions=0;
   let replayedUsers=0;
   let replayedIdentities=0;
   let replayedSuppressedEmails=0;
 
-  if(input.revoked_session_ids?.length) {
-    const r=await db.query(
-      "update sessions set revoked_at=coalesce(revoked_at,now()) where id=any($1::uuid[])",
-      [input.revoked_session_ids]
-    );
-    replayedSessions=r.rowCount??0;
-  }
-  if(input.closed_user_ids?.length) {
-    const r=await db.query(
-      "update users set status='closed',auth_version=auth_version+1,updated_at=now() where id=any($1::uuid[])",
-      [input.closed_user_ids]
-    );
-    await db.query("update sessions set revoked_at=coalesce(revoked_at,now()) where user_id=any($1::uuid[])",[input.closed_user_ids]);
-    await db.query("update auth_identities set status='revoked' where user_id=any($1::uuid[])",[input.closed_user_ids]);
-    await db.query("update user_emails set is_primary=false,login_enabled=false where user_id=any($1::uuid[])",[input.closed_user_ids]);
-    replayedUsers=r.rowCount??0;
-  }
-  if(input.revoked_identity_ids?.length) {
-    const r=await db.query(
-      "update auth_identities set status='revoked' where id=any($1::uuid[])",
-      [input.revoked_identity_ids]
-    );
-    replayedIdentities=r.rowCount??0;
-  }
-  if(input.suppressed_emails?.length) {
-    const norms=input.suppressed_emails.map(e=>e.trim().toLowerCase()).filter(Boolean);
-    if(norms.length) {
-      await db.query(
-        "update user_emails set delivery_state='bounced' where normalized_email=any($1::citext[])",
-        [norms]
+  if(isTestOrDemo) {
+    if(input.revoked_session_ids?.length) {
+      const r=await db.query(
+        "update sessions set revoked_at=coalesce(revoked_at,now()) where id=any($1::uuid[])",
+        [input.revoked_session_ids]
       );
-      replayedSuppressedEmails=norms.length;
+      replayedSessions=r.rowCount??0;
+    }
+    if(input.closed_user_ids?.length) {
+      const r=await db.query(
+        "update users set status='closed',auth_version=auth_version+1,updated_at=now() where id=any($1::uuid[])",
+        [input.closed_user_ids]
+      );
+      await db.query("update sessions set revoked_at=coalesce(revoked_at,now()) where user_id=any($1::uuid[])",[input.closed_user_ids]);
+      await db.query("update auth_identities set status='revoked' where user_id=any($1::uuid[])",[input.closed_user_ids]);
+      await db.query("update user_emails set is_primary=false,login_enabled=false where user_id=any($1::uuid[])",[input.closed_user_ids]);
+      replayedUsers=r.rowCount??0;
+    }
+    if(input.revoked_identity_ids?.length) {
+      const r=await db.query(
+        "update auth_identities set status='revoked' where id=any($1::uuid[])",
+        [input.revoked_identity_ids]
+      );
+      replayedIdentities=r.rowCount??0;
+    }
+    if(input.suppressed_emails?.length) {
+      const norms=input.suppressed_emails.map(e=>e.trim().toLowerCase()).filter(Boolean);
+      if(norms.length) {
+        await db.query(
+          "update user_emails set delivery_state='bounced' where normalized_email=any($1::citext[])",
+          [norms]
+        );
+        replayedSuppressedEmails=norms.length;
+      }
     }
   }
 
@@ -1481,12 +1587,22 @@ export async function recordRecoveryDrill(
     emails_suppressed:replayedSuppressedEmails,
   };
 
+  const productionVerified=evidenceMode==="real_isolated_restore" && health.healthy && paymentHandoverReconciled;
+  const verified=evidenceMode!=="manual_registration_unverified" && health.healthy && paymentHandoverReconciled;
+
   const reconciliation={
     ...health.counts,
-    environment:input.environment??"staging-drill",
+    environment:input.environment??(evidenceMode==="manual_registration_unverified"?"manual-entry":"staging-drill"),
     backup_reference:input.backup_reference??null,
+    evidence_mode:evidenceMode,
+    manifest_sha256:hasManifestProof?input.manifest_sha256!.toLowerCase():null,
+    dump_sha256:hasManifestProof?input.dump_sha256!.toLowerCase():null,
+    environment_fingerprint:hasManifestProof?input.environment_fingerprint!.trim():null,
+    restore_command_ref:input.restore_command_ref?.trim()??null,
     immutable_triggers:health.immutable_triggers,
-    isolated_environment:true,
+    isolated_environment:evidenceMode!=="manual_registration_unverified",
+    production_side_effect_blocked:!isTestOrDemo && evidenceMode==="manual_registration_unverified",
+    production_verified:productionVerified,
     rpo_seconds:rpoSeconds,
     rto_seconds:rtoSeconds,
     replayed,
@@ -1502,8 +1618,10 @@ export async function recordRecoveryDrill(
       shipments_handed_over_verified:finRec.handed_over_shipments,
       reconciled:paymentHandoverReconciled,
     },
-    note:(input.note??input.notes)?.trim()??"Automated logical backup, suppression manifest replay, and payment/handover reconciliation check",
-    verified:health.healthy && paymentHandoverReconciled,
+    note:(input.note??input.notes)?.trim()??(evidenceMode==="manual_registration_unverified"
+      ?"Manual recovery registration only (unverified until executed with isolated pg_restore manifest proof)."
+      :"Isolated backup, suppression manifest replay, and payment/handover reconciliation check"),
+    verified,
   };
   const row=await one<{
     id:string;
@@ -1521,7 +1639,7 @@ export async function recordRecoveryDrill(
   );
   await audit(db,actor,"record_recovery_run","recovery_runs",row.id,{
     count:health.counts.orders_count,
-    active:health.healthy && paymentHandoverReconciled,
+    active:verified,
   });
   return {...row,replayed};
 }
@@ -1856,6 +1974,10 @@ export const staffSchemas={
     closed_user_ids:z.array(z.string().uuid()).max(500).optional(),
     revoked_identity_ids:z.array(z.string().uuid()).max(500).optional(),
     suppressed_emails:z.array(z.string().email()).max(500).optional(),
+    manifest_sha256:z.string().regex(/^[a-f0-9]{64}$/i).optional(),
+    dump_sha256:z.string().regex(/^[a-f0-9]{64}$/i).optional(),
+    environment_fingerprint:z.string().trim().min(1).max(120).optional(),
+    restore_command_ref:z.string().trim().max(200).optional(),
   }),
   disposalSwitch:z.object({
     enabled:z.boolean(),
