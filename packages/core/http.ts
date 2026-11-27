@@ -24,6 +24,7 @@ import { authorizeEvidenceUpload, authorizeEvidenceUploadSchema, cancelCaptureCo
 import { cancelMediaExportJob, createCostRateCardSchema, createExportJobSchema, createMediaExportJob, createMediaRetentionRequest, createRetentionRequestSchema, createStorageCostRateCard, decideMediaRetentionRequest, decideRetentionRequestSchema, getAdminMediaDetail, getAdminMediaStats, getDeviceMediaHistory, getEmployeeMediaHistory, getMediaExportJob, listAdminMediaCenter, listMediaExportJobs, listMediaReconciliationAnomalies, listMediaRetentionRequests, listRevocationTombstones, readLegacyCompatibleBinary, replayRevocationTombstones, resolveMediaReconciliationAnomaly, rollbackLegacyMigrationPointers, runMediaReconciliation, streamAdminMediaObject, switchVerifiedLegacyMigrationPointers } from "./media-center";
 import { createImmutableLocaleSnapshot, createLocaleSnapshotSchema, decideDynamicTranslation, decideDynamicTranslationSchema, getAdminI18nOverview, getLocalePreferencesForActor, listDynamicTranslations, listRegisteredLocales, markEntityTranslationsStale, markTranslationsStaleSchema, publicLocaleSelectionSchema, setPublicLocalePreference, toggleLocaleStatusSchema, toggleRegisteredLocale, updateActorLocalePreferences, updateLocalePreferencesSchema, upsertDynamicTranslation, upsertDynamicTranslationSchema } from "./i18n-service";
 import { appendAiModelRateVersion, appendAiRateSchema, approveAiModel, approveAiProviderInstance, createAiInstanceSchema, createAiProviderInstance, deprecateAiModel, getAdminAiCostLedger, getAdminAiOverview, listAiInvocations, manualAiModelSchema, probeAiProviderInstance, reconciliationSchema, recordAiCostReconciliation, registerAiModelManual, revokeAiInstanceSecret, revokeAiSecretSchema, runSyntheticTranslationTest, saveAiInstanceSecret, saveAiSecretSchema, syncAiProviderModels, syntheticTestSchema, transitionAiInstanceLifecycle, updateAiInstanceSchema, updateAiProviderInstance, upsertAiBudgetPolicy, upsertBudgetPolicySchema } from "./ai-service";
+import { approveGlossaryTerm, cancelTranslationJob, createGlossaryTerm, createGlossaryTermSchema, createPromptDraft, createPromptDraftSchema, createPurposeRouteDraft, createPurposeRouteSchema, enqueueTranslationJob, enqueueTranslationJobSchema, getTranslationJobDetail, invalidateTenantTranslationCache, listEvalRuns, listGlossaryTerms, listPromptVersions, listPurposeRoutes, publishPromptVersion, publishPurposeRoute, retryTranslationJob, retryTranslationJobSchema, reviewEvalHumanQaSchema, reviewEvalRunHumanQa, rollbackPromptVersion, rollbackPurposeRoute, runEvalSuiteSchema, runTranslationEvalSuite, seedDefaultAiPrompts, seedDefaultEvalCases } from "./ai-translation-service";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
@@ -2397,6 +2398,85 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   if(method==="POST" && path==="/staff/admin/ai/costs/reconcile") {
     return extraWrite(req,path,actor,reconciliationSchema,
       (db,a,b)=>recordAiCostReconciliation(db,a,hash(getCookie(req,"session")),b),201);
+  }
+
+  // ---------- TASK-192 9-Purpose Routing, Prompts, Glossary, Jobs & Semantic Evals ----------
+  if(method==="GET" && path==="/staff/admin/ai/prompts") {
+    return json(await transaction(db=>listPromptVersions(db,actorRequired(actor),url.searchParams.get("purpose_code")??undefined)));
+  }
+  if(method==="POST" && path==="/staff/admin/ai/prompts/seed") {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>seedDefaultAiPrompts(db,a),201);
+  }
+  if(method==="POST" && path==="/staff/admin/ai/prompts") {
+    return extraWrite(req,path,actor,createPromptDraftSchema,(db,a,b)=>createPromptDraft(db,a,b),201);
+  }
+  const aiPromptPublish=path.match(/^\/staff\/admin\/ai\/prompts\/([a-f0-9-]{36})\/publish$/i);
+  if(method==="POST" && aiPromptPublish) {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>publishPromptVersion(db,a,hash(getCookie(req,"session")),idSchema.parse(aiPromptPublish[1])));
+  }
+  const aiPromptRollback=path.match(/^\/staff\/admin\/ai\/prompts\/([a-f0-9-]{36})\/rollback$/i);
+  if(method==="POST" && aiPromptRollback) {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>rollbackPromptVersion(db,a,hash(getCookie(req,"session")),idSchema.parse(aiPromptRollback[1])));
+  }
+  if(method==="GET" && path==="/staff/admin/ai/glossary") {
+    return json(await transaction(db=>listGlossaryTerms(db,actorRequired(actor),url.searchParams.get("domain")??undefined)));
+  }
+  if(method==="POST" && path==="/staff/admin/ai/glossary") {
+    return extraWrite(req,path,actor,createGlossaryTermSchema,(db,a,b)=>createGlossaryTerm(db,a,b),201);
+  }
+  const aiGlossaryApprove=path.match(/^\/staff\/admin\/ai\/glossary\/([a-f0-9-]{36})\/approve$/i);
+  if(method==="POST" && aiGlossaryApprove) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>approveGlossaryTerm(db,a,idSchema.parse(aiGlossaryApprove[1])));
+  }
+  if(method==="GET" && path==="/staff/admin/ai/routes") {
+    return json(await transaction(db=>listPurposeRoutes(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/ai/routes") {
+    return extraWrite(req,path,actor,createPurposeRouteSchema,(db,a,b)=>createPurposeRouteDraft(db,a,b),201);
+  }
+  const aiRoutePublish=path.match(/^\/staff\/admin\/ai\/routes\/([a-f0-9-]{36})\/publish$/i);
+  if(method==="POST" && aiRoutePublish) {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>publishPurposeRoute(db,a,hash(getCookie(req,"session")),idSchema.parse(aiRoutePublish[1])));
+  }
+  const aiRouteRollback=path.match(/^\/staff\/admin\/ai\/routes\/([a-f0-9-]{36})\/rollback$/i);
+  if(method==="POST" && aiRouteRollback) {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>rollbackPurposeRoute(db,a,hash(getCookie(req,"session")),idSchema.parse(aiRouteRollback[1])));
+  }
+  if(method==="POST" && path==="/ai/translations/jobs") {
+    return extraWrite(req,path,actor,enqueueTranslationJobSchema,(db,a,b)=>enqueueTranslationJob(db,a,b),201);
+  }
+  const aiJobGet=path.match(/^\/ai\/translations\/jobs\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && aiJobGet) {
+    return json(await transaction(db=>getTranslationJobDetail(db,actorRequired(actor),idSchema.parse(aiJobGet[1]))));
+  }
+  const aiJobCancel=path.match(/^\/staff\/admin\/ai\/jobs\/([a-f0-9-]{36})\/cancel$/i);
+  if(method==="POST" && aiJobCancel) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>cancelTranslationJob(db,a,idSchema.parse(aiJobCancel[1])));
+  }
+  const aiJobRetry=path.match(/^\/staff\/admin\/ai\/jobs\/([a-f0-9-]{36})\/retry$/i);
+  if(method==="POST" && aiJobRetry) {
+    return extraWrite(req,path,actor,retryTranslationJobSchema,(db,a,b)=>retryTranslationJob(db,a,idSchema.parse(aiJobRetry[1]),b));
+  }
+  if(method==="POST" && path==="/staff/admin/ai/cache/invalidate") {
+    return extraWrite(req,path,actor,z.object({tenant_scope_key:z.string().trim().min(3)}),
+      (db,a,b)=>invalidateTenantTranslationCache(db,a,b.tenant_scope_key));
+  }
+  if(method==="GET" && path==="/staff/admin/ai/evals") {
+    return json(await transaction(db=>listEvalRuns(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/ai/evals/seed") {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>seedDefaultEvalCases(db,a),201);
+  }
+  if(method==="POST" && path==="/staff/admin/ai/evals/run") {
+    return extraWrite(req,path,actor,runEvalSuiteSchema,(db,a,b)=>runTranslationEvalSuite(db,a,b),201);
+  }
+  const aiEvalReview=path.match(/^\/staff\/admin\/ai\/evals\/([a-f0-9-]{36})\/review$/i);
+  if(method==="POST" && aiEvalReview) {
+    return extraWrite(req,path,actor,reviewEvalHumanQaSchema,(db,a,b)=>reviewEvalRunHumanQa(db,a,idSchema.parse(aiEvalReview[1]),b));
   }
 
   return null;

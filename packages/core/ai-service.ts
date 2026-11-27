@@ -149,7 +149,7 @@ export type AiInstanceRow = {
   updated_at: string;
 };
 
-type AiRateRow = {
+export type AiRateRow = {
   id: string;
   model_id: string;
   version: number;
@@ -245,7 +245,7 @@ export function computeActualCostFromUsage(params: {
   };
 }
 
-async function loadActiveSecretsForInstance(
+export async function loadActiveSecretsForInstance(
   db: Pick<DB, "query">,
   instanceId: string,
 ): Promise<{ apiKey: string | null; organizationHeader: string | null; projectHeader: string | null }> {
@@ -352,10 +352,15 @@ export async function updateAiProviderInstance(
     ? assertSafeAiBaseUrl(input.base_url, existing.adapter_type).toString().replace(/\/+$/, "")
     : existing.base_url;
 
-  // §53.7: Changing endpoint or protocol requires re-verification and re-approval.
+  // §53.7: Changing endpoint, protocol, data region policy, or allowed purposes requires re-approval.
   const connectionSensitiveChanged =
     (input.base_url && nextBaseUrl !== existing.base_url) ||
     (input.api_protocol && nextProto !== existing.api_protocol);
+  const policySensitiveChanged =
+    (input.data_region_policy !== undefined && input.data_region_policy !== existing.data_region_policy) ||
+    (input.allowed_purposes !== undefined &&
+      JSON.stringify([...input.allowed_purposes].sort()) !== JSON.stringify([...existing.allowed_purposes].sort()));
+  const reapprovalRequired = Boolean(connectionSensitiveChanged || policySensitiveChanged);
 
   const updated = await one<AiInstanceRow>(
     db,
@@ -377,7 +382,7 @@ export async function updateAiProviderInstance(
          monthly_budget_cents = coalesce($17, monthly_budget_cents),
          warn_threshold_pct = coalesce($18, warn_threshold_pct),
          status = case when $19 and status in ('tested', 'approved') then 'draft' else status end,
-         last_health_status = case when $19 then 'unknown' else last_health_status end,
+         last_health_status = case when $20 then 'unknown' else last_health_status end,
          updated_at = now()
      where id = $1
      returning *`,
@@ -400,12 +405,14 @@ export async function updateAiProviderInstance(
       input.daily_budget_cents ?? null,
       input.monthly_budget_cents ?? null,
       input.warn_threshold_pct ?? null,
+      reapprovalRequired,
       Boolean(connectionSensitiveChanged),
     ],
   );
 
   await audit(db, actor, "ai_instance_updated", "ai_provider_instances", updated.id, {
     connection_reverification_required: Boolean(connectionSensitiveChanged),
+    reapproval_required: reapprovalRequired,
   });
   return { instance: updated };
 }

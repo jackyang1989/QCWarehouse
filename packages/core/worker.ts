@@ -6,6 +6,7 @@ import { consumeTrackingCallback, subscribeTrackingOnce, syncTrackingOnce } from
 import { consumeEmailWebhook, deliverEmailOnce, queueNotificationEmail } from "./email";
 import { cleanupStaleMediaUploads } from "./media";
 import { cleanupExpiredUnfinishedUploads, processMediaJob } from "./capture-evidence";
+import { processTranslationJob } from "./ai-translation-service";
 import { audit, guard, isDemo, one, role, type Actor } from "./common";
 import { requireStaffMfa } from "./auth";
 import { eligibleManualQuoteOrderSql } from "./orders";
@@ -145,11 +146,42 @@ export async function workOnce() {
     if(worked) return true;
     if(await transaction(consumeEmailWebhook)) return true;
     if(await deliverEmailOnce()) return true;
-    return await transaction(consumeTrackingCallback);
+    if(await transaction(consumeTrackingCallback)) return true;
+    return await workOneAiTranslation();
   } catch (error) {
     if(jobId) await pool.query(`update outbox_events set attempts=attempts+1,last_error=$2,
       next_attempt_at=now()+make_interval(secs=>least(900,10*(attempts+1))) where id=$1 and processed_at is null`,
       [jobId,error instanceof Error && "code" in error?String(error.code):"JOB_FAILED"]);
+    throw error;
+  }
+}
+
+async function workOneAiTranslation(): Promise<boolean> {
+  const claimed = await transaction(async db => {
+    const row = (await db.query<{ id: string; payload: { job_id?: string }; attempts: number }>(
+      `select id, payload, attempts from outbox_events
+       where type = 'ai.translate' and processed_at is null and next_attempt_at <= now() and attempts < $1
+       order by created_at, id limit 1 for update skip locked`,
+      [maxJobAttempts],
+    )).rows[0];
+    if (!row) return null;
+    await db.query("update outbox_events set next_attempt_at = now() + interval '150 seconds' where id = $1", [row.id]);
+    return row;
+  });
+  if (!claimed) return false;
+  try {
+    if (claimed.payload?.job_id) {
+      await processTranslationJob(claimed.payload.job_id);
+    }
+    await pool.query("update outbox_events set processed_at = now(), last_error = null where id = $1", [claimed.id]);
+    return true;
+  } catch (error) {
+    await pool.query(
+      `update outbox_events set attempts = attempts + 1, last_error = $2,
+         next_attempt_at = now() + make_interval(secs => least(900, 10 * (attempts + 1)))
+       where id = $1 and processed_at is null`,
+      [claimed.id, error instanceof Error && "code" in error ? String(error.code) : "AI_JOB_FAILED"],
+    );
     throw error;
   }
 }
