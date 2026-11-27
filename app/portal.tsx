@@ -26,12 +26,51 @@ import { clearCustomerDraftRecovery } from "./draft-recovery";
 import { AuditDesk } from "./audit-desk";
 import { staffLoginCopy } from "./staff-login-copy";
 import { NotificationInbox } from "./notifications";
+import { LocaleProvider, useLocale, WorkspaceLanguageSwitcher } from "./i18n-client";
+import { t } from "../packages/core/i18n/messages";
+import { localizePublicPath, type EnabledLocale } from "../packages/core/locale-contract";
 
 import { canOpenStaffPage, customerDestination, customerTabs, staffHome, staffTabs, withDestination, type PortalRoute } from "../packages/core/portal-routes";
 
 import type { Actor } from "../packages/core/common";
 
-export function Portal({path,target,route,actor:a,demo=false,timeZone,customerAccount}:{path:string;target:string;route:PortalRoute;actor:Actor|null;demo?:boolean;timeZone?:string;customerAccount?:string}) {
+const CUSTOMER_TAB_KEYS: Record<string, string> = {
+  "/account": "tab.customer.account",
+  "/orders": "tab.customer.orders",
+  "/orders/new": "tab.customer.newOrder",
+  "/parcels": "tab.customer.parcels",
+  "/items": "tab.customer.items",
+  "/reports": "tab.customer.reports",
+  "/account/billing": "tab.customer.billing",
+  "/support": "tab.customer.support",
+  "/actions": "tab.customer.actions",
+  "/account/notifications": "tab.customer.notifications",
+};
+
+type PortalProps = {
+  path:string;
+  target:string;
+  route:PortalRoute;
+  actor:Actor|null;
+  demo?:boolean;
+  timeZone?:string;
+  customerAccount?:string;
+  initialLocale?:EnabledLocale;
+};
+
+export function Portal(props: PortalProps) {
+  const isStaffDefault = props.route.area === "warehouse" || props.route.area === "admin";
+  const resolvedInitialLocale: EnabledLocale = props.initialLocale
+    ?? (props.path === "/zh" || props.path.startsWith("/zh/") ? "zh-CN" : isStaffDefault ? "zh-CN" : "en-US");
+  return (
+    <LocaleProvider initialLocale={resolvedInitialLocale} authenticated={Boolean(props.actor)}>
+      <PortalInner {...props}/>
+    </LocaleProvider>
+  );
+}
+
+function PortalInner({path,target,route,actor:a,demo=false,timeZone,customerAccount}:PortalProps) {
+  const { locale } = useLocale();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const menuToggle=useRef<HTMLButtonElement>(null);
@@ -71,16 +110,21 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone,customerAc
   },[mobileNavOpen]);
   const isStaff=route.area==="warehouse"||route.area==="admin";
   const publicPage=route.area==="public";
+  const canonicalPublicPath=publicPage&&(path==="/zh"||path.startsWith("/zh/"))?(path.slice(3)||"/"):path;
   const warehouseLinks=a?.kind==="staff"?staffTabs("warehouse",a.roles):[];
   const adminLinks=a?.kind==="staff"?staffTabs("admin",a.roles):[];
-  const links=route.area==="warehouse"?warehouseLinks:route.area==="admin"?adminLinks:a?.kind==="customer"?customerTabs:[];
+  const localizedCustomerTabs:[string,string][]=customerTabs.map(([href,label])=>[
+    href,
+    CUSTOMER_TAB_KEYS[href]?t(locale,CUSTOMER_TAB_KEYS[href]):label,
+  ]);
+  const links=route.area==="warehouse"?warehouseLinks:route.area==="admin"?adminLinks:a?.kind==="customer"?localizedCustomerTabs:[];
   let content;
-  if(route.view==="catalog") content=<PublicCatalogRouter path={path}/>;
+  if(route.view==="catalog") content=<PublicCatalogRouter path={canonicalPublicPath}/>;
   else if(route.view==="how-it-works") content=<PublicHowItWorks/>;
   else if(route.view==="faq") content=<FAQ/>;
   else if(route.view==="public-inquiry") content=<PublicInquiry/>;
   else if(route.view==="report-guide") content=<ReportGuide/>;
-  else if(route.view==="legal") content=<PublicLegal path={path}/>;
+  else if(route.view==="legal") content=<PublicLegal path={canonicalPublicPath}/>;
   else if(!a) content=null;
   else if(isStaff && a.kind!=="staff") content=<section className="panel narrow"><h1>需要工作区权限</h1>
     <p>当前登录的是客户账号。请使用有权访问{route.area==="warehouse"?"仓库工作台":"管理后台"}的账号登录。</p>
@@ -146,17 +190,16 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone,customerAc
   else if(route.view==="parcel") content=<TrackView kind="parcels" id={route.id}/>;
   else if(route.view==="shipment") content=<OrderFulfillment key={route.id} id={route.id} kind="shipments"/>;
   else content=<CustomerDesk path={path==="/billing"?"/account/billing":path} demo={demo}/>;
-  const locale=isStaff?"zh-CN":"en";
-  const signOut=a?<Action run={async()=>{await request("/auth/logout","POST",{});if(a.kind==="customer") clearCustomerDraftRecovery(a.id);else{try{for(const k of Object.keys(window.localStorage)){if(k.startsWith("qcw_task_draft_"))window.localStorage.removeItem(k);}}catch{}}location.assign(a.kind==="staff"?"/staff/login":"/login");}}>{a.kind==="staff"?"退出登录":"Sign out"}</Action>:undefined;
+  const signOut=a?<Action run={async()=>{await request("/auth/logout","POST",{});if(a.kind==="customer") clearCustomerDraftRecovery(a.id);else{try{for(const k of Object.keys(window.localStorage)){if(k.startsWith("qcw_task_draft_"))window.localStorage.removeItem(k);}}catch{}}location.assign(a.kind==="staff"?"/staff/login":"/login");}}>{a.kind==="staff"?t(locale,"workspace.signOutStaff"):t(locale,"workspace.signOutCustomer")}</Action>:undefined;
   const homeLink=a?.kind==="customer"?"/account":undefined;
   if(publicPage||!a||links.length===0) return <>
-    <PublicHeader path={path} accountHref={homeLink} staff={a?.kind==="staff"} accountAction={a?.kind==="customer"?signOut:undefined} actor={a} demo={demo}/>
+    <PublicHeader path={path} accountHref={homeLink} staff={a?.kind==="staff"} accountAction={a?.kind==="customer"?signOut:undefined} actor={a} demo={demo} locale={locale}/>
     <main className={`public-shell view-${route.view}`} id="main-content" lang={locale}>{content}</main>
-    {publicPage ? <PublicFooter/> : <SiteFooter/>}
+    {publicPage ? <PublicFooter locale={locale}/> : <SiteFooter locale={locale}/>}
   </>;
 
   const normPath = path==="/billing"?"/account/billing":path==="/notifications"?"/account/notifications":path;
-  const section=route.area==="admin"?"运营总览":route.area==="warehouse"?"仓库总览":"My Workspace";
+  const section=route.area==="admin"?t(locale,"workspace.adminTitle"):route.area==="warehouse"?t(locale,"workspace.warehouseTitle"):t(locale,"workspace.customerTitle");
   const currentLink=links.find(([href])=>href===normPath);
   const parentLink =
     links.filter(([href])=>href!=="/wh"&&href!=="/admin"&&normPath.startsWith(href+"/")).sort(([left],[right])=>right.length-left.length)[0]
@@ -166,7 +209,7 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone,customerAc
     : "";
 
   return <div className={`workspace workspace-${route.area}`} lang={locale}>
-    <a className="skip-link" href="#main-content">{isStaff?"跳至主要内容":"Skip to main content"}</a>
+    <a className="skip-link" href="#main-content">{t(locale,"a11y.skipToContent")}</a>
     <header className="workspace-top">
       <div className="workspace-brand">
         <button
@@ -175,25 +218,26 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone,customerAc
           className="workspace-menu-toggle"
           aria-expanded={mobileNavOpen}
           aria-controls="workspace-sidebar-nav"
-          aria-label={isStaff?(mobileNavOpen?"关闭侧栏导航":"展开侧栏导航"):(mobileNavOpen?"Close workspace menu":"Open workspace menu")}
+          aria-label={mobileNavOpen?t(locale,"a11y.closeMenu"):t(locale,"a11y.openMenu")}
           onClick={()=>setMobileNavOpen(v=>!v)}
         >
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             {mobileNavOpen ? <path d="M6 6l12 12M18 6L6 18"/> : <path d="M4 7h16M4 12h16M4 17h16"/>}
           </svg>
         </button>
-        <Brand/>
-        <span className="workspace-context">{route.area==="admin"?"运营管理后台":route.area==="warehouse"?"仓库作业中心":"CLIENT WORKSPACE"}</span>
+        <Brand locale={locale}/>
+        <span className="workspace-context">{route.area==="admin"?t(locale,"workspace.adminTitle"):route.area==="warehouse"?t(locale,"workspace.warehouseTitle"):t(locale,"workspace.customerBadge")}</span>
       </div>
       <span className="topspacer"/>
       <div className="header-right">
+        <WorkspaceLanguageSwitcher locale={locale}/>
         {!isStaff&&a.kind==="customer"&&<Link className="workspace-account" href="/account/security" aria-current={path==="/account/security"?"page":undefined}>
           <strong title={customerAccount}>{customerAccount??"Account"}</strong>
-          <span>Sign-in methods &amp; security</span>
+          <span>{t(locale,"workspace.securityLink")}</span>
         </Link>}
-        {isStaff && staffRoleSummary && <Tag tone="blue">岗位：{staffRoleSummary}</Tag>}
-        {isStaff && <QuickSwitch active={route.area as "customer"|"warehouse"|"admin"} actor={a} demo={demo}/>}
-        {demo&&isStaff&&<Tag tone="outline">演示模式</Tag>}
+        {isStaff && staffRoleSummary && <Tag tone="blue">{t(locale,"workspace.rolePrefix",{roles:staffRoleSummary})}</Tag>}
+        {isStaff && <QuickSwitch active={route.area as "customer"|"warehouse"|"admin"} actor={a} demo={demo} locale={locale}/>}
+        {demo&&isStaff&&<Tag tone="outline">{t(locale,"workspace.demoBadge")}</Tag>}
         {signOut}
       </div>
     </header>
@@ -213,16 +257,16 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone,customerAc
       <div className="workspace-column">
         <main className={`workspace-main view-${route.view}`} id="main-content" tabIndex={-1}>
           {(!isStaff || (!currentLink && parentLink)) && (
-            <nav className="breadcrumb" aria-label={isStaff?"上级模块导航":"Breadcrumb"}>
+            <nav className="breadcrumb" aria-label={t(locale,"a11y.breadcrumb")}>
               {isStaff ? (
                 <>
                   <Link href={links[0][0]}>{section}</Link>
                   {parentLink && <><span aria-hidden="true">›</span><Link href={parentLink[0]}>{parentLink[1]}</Link></>}
-                  <span aria-hidden="true">›</span><strong>详情工作台</strong>
+                  <span aria-hidden="true">›</span><strong>{t(locale,"workspace.detailTitle")}</strong>
                 </>
               ) : (
                 <>
-                  <Link href="/">QC Warehouse</Link><span aria-hidden="true">›</span>
+                  <Link href={localizePublicPath("/", locale)}>QC Warehouse</Link><span aria-hidden="true">›</span>
                   {links[0][0]===normPath?<strong>{section}</strong>:<><Link href={links[0][0]}>{section}</Link>
                     {(currentLink||parentLink)&&<><span aria-hidden="true">›</span>{currentLink?<strong>{currentLink[1]}</strong>:<Link href={parentLink[0]}>{parentLink[1]}</Link>}</>}
                   </>}
@@ -232,7 +276,7 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone,customerAc
           )}
           <WorkspaceTimeZone value={timeZone}>{content}</WorkspaceTimeZone>
         </main>
-        {isStaff ? <InternalWorkspaceFooter area={route.area as "admin"|"warehouse"} demo={demo} timeZone={timeZone}/> : <SiteFooter/>}
+        {isStaff ? <InternalWorkspaceFooter area={route.area as "admin"|"warehouse"} demo={demo} timeZone={timeZone} locale={locale}/> : <SiteFooter locale={locale}/>}
       </div>
     </div>
   </div>;

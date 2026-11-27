@@ -3,6 +3,9 @@
 import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { BRAND_ASSETS, BRAND_NAME, BRAND_TAGLINE } from "../packages/core/brand";
+import { t } from "../packages/core/i18n/messages";
+import { localizePublicPath, type EnabledLocale } from "../packages/core/locale-contract";
+import { PublicLanguageSwitcher, useLocale } from "./i18n-client";
 import { request } from "./ui";
 import type { Actor } from "../packages/core/common";
 
@@ -10,11 +13,15 @@ export function Brand({
   variant = "default",
   mode = "wordmark",
   className,
+  locale: explicitLocale,
 }: {
   variant?: "default" | "white";
   mode?: "wordmark" | "mark";
   className?: string;
+  locale?: EnabledLocale;
 } = {}) {
+  const { locale: ctxLocale } = useLocale();
+  const locale = explicitLocale ?? ctxLocale;
   const isMark = mode === "mark";
   const src = isMark
     ? (variant === "white" ? BRAND_ASSETS.openQcWhite : BRAND_ASSETS.openQc)
@@ -23,7 +30,7 @@ export function Brand({
   const height = isMark ? BRAND_ASSETS.iconSize : BRAND_ASSETS.height;
   return <Link
     className={`wordmark${isMark ? " wordmark-compact" : ""}${className ? ` ${className}` : ""}`}
-    href="/"
+    href={localizePublicPath("/", locale)}
     aria-label={`${BRAND_NAME} home`}
   >
     <img
@@ -47,53 +54,59 @@ export async function switchDemoPortal(targetHref:string, demoEmail:string) {
   location.assign(targetHref);
 }
 
-export function QuickSwitch({active,actor,demo=false}:{active:"public"|"customer"|"warehouse"|"admin";actor?:Actor|null;demo?:boolean}) {
+export function QuickSwitch({active,actor,demo=false,locale:explicitLocale}:{active:"public"|"customer"|"warehouse"|"admin";actor?:Actor|null;demo?:boolean;locale?:EnabledLocale}) {
+  const { locale: ctxLocale } = useLocale();
+  const locale = explicitLocale ?? ctxLocale;
   const canCustomer = actor?.kind==="customer";
   const canWarehouse = actor?.kind==="staff" && actor.roles.some(r=>["receiver","warehouse_admin","inspector","reviewer","super_admin"].includes(r));
   const canAdmin = actor?.kind==="staff" && actor.roles.some(r=>["super_admin","finance","support","template_admin"].includes(r));
 
   return <div className="quick-switch" role="navigation" aria-label="工作区切换">
-    <Link href="/" className={active==="public"?"on":""}>官网</Link>
+    <Link href={localizePublicPath("/", locale)} className={active==="public"?"on":""}>{t(locale, "workspace.switchHome")}</Link>
     {(canCustomer || demo) && (
       <Link
         href="/orders"
         className={active==="customer"?"on":""}
-        title={canCustomer?"客户工作台":"切换至演示客户账号"}
+        title={canCustomer?t(locale, "workspace.customerTitle"):"切换至演示客户账号"}
         onClick={canCustomer?undefined:(e=>{e.preventDefault();void switchDemoPortal("/orders","customer@qcw.test");})}
-      >客户中心</Link>
+      >{t(locale, "workspace.switchCustomer")}</Link>
     )}
     {(canWarehouse || demo) && (
       <Link
         href="/wh"
         className={active==="warehouse"?"on":""}
-        title={canWarehouse?"仓库作业台":"切换至演示仓库账号"}
+        title={canWarehouse?t(locale, "workspace.warehouseTitle"):"切换至演示仓库账号"}
         onClick={canWarehouse?undefined:(e=>{e.preventDefault();void switchDemoPortal("/wh","admin@qcw.test");})}
-      >仓库台</Link>
+      >{t(locale, "workspace.switchWarehouse")}</Link>
     )}
     {(canAdmin || demo) && (
       <Link
         href="/admin"
         className={active==="admin"?"on":""}
-        title={canAdmin?"运营管理后台":"切换至演示管理账号"}
+        title={canAdmin?t(locale, "workspace.adminTitle"):"切换至演示管理账号"}
         onClick={canAdmin?undefined:(e=>{e.preventDefault();void switchDemoPortal("/admin","admin@qcw.test");})}
-      >管理后台</Link>
+      >{t(locale, "workspace.switchAdmin")}</Link>
     )}
   </div>;
 }
 
 const publicNavLinks: [string, string][] = [
-  ["/catalog", "Services"],
-  ["/categories", "Categories"],
-  ["/how-it-works", "How It Works"],
-  ["/report-guide", "Sample Reports"],
-  ["/pricing", "Pricing"],
-  ["/faq", "FAQ"],
+  ["/catalog", "nav.public.services"],
+  ["/categories", "nav.public.categories"],
+  ["/how-it-works", "nav.public.howItWorks"],
+  ["/report-guide", "nav.public.sampleReports"],
+  ["/pricing", "nav.public.pricing"],
+  ["/faq", "nav.public.faq"],
 ];
 
-export function PublicHeader({accountHref,accountAction,staff,path="/",actor}:{
-  accountHref?:string;accountAction?:ReactNode;staff?:boolean;path?:string;actor?:Actor|null;demo?:boolean;
+export function PublicHeader({accountHref,staff,path="/",actor,locale:explicitLocale}:{
+  accountHref?:string;accountAction?:ReactNode;staff?:boolean;path?:string;actor?:Actor|null;demo?:boolean;locale?:EnabledLocale;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const { locale: ctxLocale } = useLocale();
+  const locale: EnabledLocale = explicitLocale ?? (path === "/zh" || path.startsWith("/zh/") ? "zh-CN" : ctxLocale);
+  const canonicalPath = path === "/zh" ? "/" : path.startsWith("/zh/") ? (path.slice(3) || "/") : path;
+  const hrefFor = (base: string) => localizePublicPath(base, locale);
 
   useEffect(() => {
     setMenuOpen(false);
@@ -109,11 +122,11 @@ export function PublicHeader({accountHref,accountAction,staff,path="/",actor}:{
   }, [menuOpen]);
 
   const isActive = (href: string) =>
-    path === href || (href === "/catalog" && path.startsWith("/services/"));
+    canonicalPath === href || (href === "/catalog" && canonicalPath.startsWith("/services/"));
 
   const isCustomer = actor ? actor.kind === "customer" : (!staff && Boolean(accountHref));
   const customerHref = isCustomer ? (accountHref ?? "/account") : "/login";
-  const customerLabel = isCustomer ? "My Workspace" : "Sign In";
+  const customerLabel = isCustomer ? t(locale, "public.myWorkspace") : t(locale, "public.signIn");
 
   async function handleSignOut() {
     try {
@@ -124,36 +137,37 @@ export function PublicHeader({accountHref,accountAction,staff,path="/",actor}:{
   }
 
   return <>
-    <a className="skip-link" href="#main-content">Skip to main content</a>
+    <a className="skip-link" href="#main-content">{t(locale, "a11y.skipToContent")}</a>
     <header className="top public-top">
       <div className="public-top-inner">
         <div className="workspace-brand">
-          <Brand/>
-          <span className="workspace-context">INDEPENDENT PRODUCT INSPECTION IN CHINA</span>
+          <Brand locale={locale}/>
+          <span className="workspace-context">{t(locale, "public.taglineHeader")}</span>
         </div>
-        <nav className="public-nav" aria-label="Primary">
-          {publicNavLinks.map(([href,label])=>(
-            <Link key={href} href={href} aria-current={isActive(href)?"page":undefined}>{label}</Link>
+        <nav className="public-nav" aria-label={t(locale, "a11y.primaryNav")}>
+          {publicNavLinks.map(([href,key])=>(
+            <Link key={href} href={hrefFor(href)} aria-current={isActive(href)?"page":undefined}>{t(locale, key)}</Link>
           ))}
         </nav>
         <div className="public-header-actions">
+          <PublicLanguageSwitcher path={canonicalPath} authenticated={actor?.kind === "customer" || actor?.kind === "staff"} locale={locale}/>
           <Link className="button sm public-signin-btn" href={customerHref}>
             {customerLabel}
           </Link>
           {isCustomer && (
             <button type="button" className="button sm public-signout-btn" onClick={() => void handleSignOut()}>
-              Sign Out
+              {t(locale, "public.signOut")}
             </button>
           )}
           <Link className="button primary sm public-cta-btn" href="/orders/new">
-            Start Inspection
+            {t(locale, "public.startInspection")}
           </Link>
           <button
             type="button"
             className="public-menu-toggle"
             aria-expanded={menuOpen}
             aria-controls="public-mobile-drawer"
-            aria-label={menuOpen ? "Close navigation menu" : "Open navigation menu"}
+            aria-label={menuOpen ? t(locale, "a11y.closeMenu") : t(locale, "a11y.openMenu")}
             onClick={() => setMenuOpen(v => !v)}
           >
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -164,25 +178,26 @@ export function PublicHeader({accountHref,accountAction,staff,path="/",actor}:{
       </div>
       {menuOpen && (
         <div className="public-mobile-drawer" id="public-mobile-drawer">
-          <nav aria-label="Mobile Primary">
-            {publicNavLinks.map(([href,label])=>(
+          <nav aria-label={t(locale, "a11y.mobileNav")}>
+            {publicNavLinks.map(([href,key])=>(
               <Link
                 key={href}
-                href={href}
+                href={hrefFor(href)}
                 aria-current={isActive(href)?"page":undefined}
                 onClick={() => setMenuOpen(false)}
               >
-                {label}
+                {t(locale, key)}
               </Link>
             ))}
-            <Link href="/contact" onClick={() => setMenuOpen(false)}>Contact Support</Link>
+            <Link href={hrefFor("/contact")} onClick={() => setMenuOpen(false)}>{t(locale, "nav.public.contact")}</Link>
           </nav>
           <div className="public-mobile-actions">
+            <PublicLanguageSwitcher path={canonicalPath} authenticated={actor?.kind === "customer" || actor?.kind === "staff"} locale={locale}/>
             <Link className="button full" href={customerHref} onClick={() => setMenuOpen(false)}>
               {customerLabel}
             </Link>
             <Link className="button primary full" href="/orders/new" onClick={() => setMenuOpen(false)}>
-              Start Inspection
+              {t(locale, "public.startInspection")}
             </Link>
             {isCustomer && (
               <button
@@ -190,7 +205,7 @@ export function PublicHeader({accountHref,accountAction,staff,path="/",actor}:{
                 className="button full public-mobile-signout"
                 onClick={() => { setMenuOpen(false); void handleSignOut(); }}
               >
-                Sign Out
+                {t(locale, "public.signOut")}
               </button>
             )}
           </div>
@@ -200,83 +215,91 @@ export function PublicHeader({accountHref,accountAction,staff,path="/",actor}:{
   </>;
 }
 
-export function PublicFooter() {
+export function PublicFooter({locale:explicitLocale}:{locale?:EnabledLocale} = {}) {
+  const { locale: ctxLocale } = useLocale();
+  const locale = explicitLocale ?? ctxLocale;
+  const hrefFor = (base: string) => localizePublicPath(base, locale);
   return <footer className="public-footer">
     <div className="public-footer-inner">
       <div className="public-footer-grid">
         <div className="public-footer-brand">
-          <Brand variant="white"/>
+          <Brand variant="white" locale={locale}/>
           <p className="public-footer-lead">
-            Independent product inspection in China, supplier sample comparison, and post-inspection item routing for international e-commerce brands and small-batch buyers.
+            {t(locale, "public.footerLead")}
           </p>
           <p className="public-footer-boundary">
-            <strong>Service scope:</strong> {BRAND_NAME} inspects and photographs physical samples at our China facility before international dispatch. We don&apos;t source or sell products, and factory AQL audits or laboratory certifications sit outside our scope.
+            {t(locale, "public.footerBoundary", { brand: BRAND_NAME })}
           </p>
         </div>
         <div className="public-footer-col">
-          <h4>Services</h4>
+          <h4>{t(locale, "public.colServices")}</h4>
           <ul>
-            <li><Link href="/catalog">Services Overview</Link></li>
-            <li><Link href="/services/inspection">Product Inspection</Link></li>
-            <li><Link href="/services/compare">Sample Comparison</Link></li>
-            <li><Link href="/services/reference">Golden Sample Matching</Link></li>
-            <li><Link href="/categories">Product Categories</Link></li>
-            <li><Link href="/pricing">Pricing &amp; Estimator</Link></li>
+            <li><Link href={hrefFor("/catalog")}>{locale === "zh-CN" ? "服务项目总览" : "Services Overview"}</Link></li>
+            <li><Link href={hrefFor("/services/inspection")}>{locale === "zh-CN" ? "实物商品质检" : "Product Inspection"}</Link></li>
+            <li><Link href={hrefFor("/services/compare")}>{locale === "zh-CN" ? "供应商样品对比" : "Sample Comparison"}</Link></li>
+            <li><Link href={hrefFor("/services/reference")}>{locale === "zh-CN" ? "确认样留存比对" : "Golden Sample Matching"}</Link></li>
+            <li><Link href={hrefFor("/categories")}>{locale === "zh-CN" ? "支持检验类目" : "Product Categories"}</Link></li>
+            <li><Link href={hrefFor("/pricing")}>{locale === "zh-CN" ? "收费标准与试算" : "Pricing & Estimator"}</Link></li>
           </ul>
         </div>
         <div className="public-footer-col">
-          <h4>Process &amp; Evidence</h4>
+          <h4>{t(locale, "public.colProcess")}</h4>
           <ul>
-            <li><Link href="/how-it-works">How It Works</Link></li>
-            <li><Link href="/report-guide">Sample Inspection Report</Link></li>
-            <li><Link href="/faq">FAQ &amp; Help Center</Link></li>
-            <li><Link href="/contact">Contact &amp; Custom Scope</Link></li>
+            <li><Link href={hrefFor("/how-it-works")}>{locale === "zh-CN" ? "仓内质检流程" : "How It Works"}</Link></li>
+            <li><Link href={hrefFor("/report-guide")}>{locale === "zh-CN" ? "样板质检报告" : "Sample Inspection Report"}</Link></li>
+            <li><Link href={hrefFor("/faq")}>{locale === "zh-CN" ? "常见问题帮助" : "FAQ & Help Center"}</Link></li>
+            <li><Link href={hrefFor("/contact")}>{locale === "zh-CN" ? "联系定制范围" : "Contact & Custom Scope"}</Link></li>
           </ul>
         </div>
         <div className="public-footer-col">
-          <h4>Account &amp; Policies</h4>
+          <h4>{t(locale, "public.colAccount")}</h4>
           <ul>
-            <li><Link href="/login">Customer Sign In</Link></li>
-            <li><Link href="/orders/new">Start an Inspection</Link></li>
-            <li><Link href="/legal/terms">Terms of Service</Link></li>
-            <li><Link href="/legal/privacy">Privacy Policy</Link></li>
-            <li><Link href="/legal/restricted-items">Restricted Items</Link></li>
-            <li><Link href="/legal/report-notice">Report Limitations</Link></li>
+            <li><Link href="/login">{locale === "zh-CN" ? "客户登录" : "Customer Sign In"}</Link></li>
+            <li><Link href="/orders/new">{t(locale, "public.startInspection")}</Link></li>
+            <li><Link href={hrefFor("/legal/terms")}>{t(locale, "public.linkTerms")}</Link></li>
+            <li><Link href={hrefFor("/legal/privacy")}>{t(locale, "public.linkPrivacy")}</Link></li>
+            <li><Link href={hrefFor("/legal/restricted-items")}>{t(locale, "public.linkRestricted")}</Link></li>
+            <li><Link href={hrefFor("/legal/report-notice")}>{t(locale, "public.linkReportNotice")}</Link></li>
           </ul>
         </div>
       </div>
       <div className="public-footer-bottom">
         <span>© {new Date().getFullYear()} {BRAND_NAME} · {BRAND_TAGLINE}</span>
         <div className="public-footer-meta">
-          <Link href="/legal">All Policies</Link>
+          <Link href={hrefFor("/legal")}>{t(locale, "public.linkAllPolicies")}</Link>
           <span aria-hidden="true">·</span>
-          <Link href="/contact">Commercial Inquiries</Link>
+          <Link href={hrefFor("/contact")}>{t(locale, "nav.public.contact")}</Link>
           <span aria-hidden="true">·</span>
-          <Link href="/staff/login" prefetch={false}>Staff sign-in</Link>
+          <Link href="/staff/login" prefetch={false}>{t(locale, "public.linkStaffSignIn")}</Link>
         </div>
       </div>
     </div>
   </footer>;
 }
 
-export function SiteFooter() {
+export function SiteFooter({locale:explicitLocale}:{locale?:EnabledLocale} = {}) {
+  const { locale: ctxLocale } = useLocale();
+  const locale = explicitLocale ?? ctxLocale;
+  const hrefFor = (base: string) => localizePublicPath(base, locale);
   return <footer className="site-footer">
     <div><strong>{BRAND_NAME}</strong> · {BRAND_TAGLINE}</div>
-    <nav aria-label="Footer">
-      <Link href="/faq">FAQ</Link>
-      <Link href="/contact">Contact</Link>
-      <Link href="/legal/terms">Terms</Link>
-      <Link href="/legal/privacy">Privacy</Link>
-      <Link href="/staff/login" prefetch={false}>Staff sign-in</Link>
+    <nav aria-label={t(locale, "a11y.footerNav")}>
+      <Link href={hrefFor("/faq")}>{t(locale, "nav.public.faq")}</Link>
+      <Link href={hrefFor("/contact")}>{t(locale, "nav.public.contact")}</Link>
+      <Link href={hrefFor("/legal/terms")}>{t(locale, "public.linkTerms")}</Link>
+      <Link href={hrefFor("/legal/privacy")}>{t(locale, "public.linkPrivacy")}</Link>
+      <Link href="/staff/login" prefetch={false}>{t(locale, "public.linkStaffSignIn")}</Link>
     </nav>
   </footer>;
 }
 
-export function InternalWorkspaceFooter({area,demo=false,timeZone="Asia/Shanghai"}:{area:"admin"|"warehouse";demo?:boolean;timeZone?:string}) {
+export function InternalWorkspaceFooter({area,demo=false,timeZone="Asia/Shanghai",locale:explicitLocale}:{area:"admin"|"warehouse";demo?:boolean;timeZone?:string;locale?:EnabledLocale}) {
+  const { locale: ctxLocale } = useLocale();
+  const locale = explicitLocale ?? ctxLocale;
+  const areaLabel = area === "admin" ? t(locale, "workspace.adminTitle") : t(locale, "workspace.warehouseTitle");
   return <footer className="site-footer internal-footer">
     <div>
-      <strong>{BRAND_NAME} {area==="admin"?"运营管理后台":"仓库作业工作台"}</strong>
-      <span> · 时区 {timeZone} · 全操作实时写入不可变审计台账</span>
+      {t(locale, "workspace.internalFooter", { brand: BRAND_NAME, area: areaLabel, timeZone })}
     </div>
     <div className="muted small">
       {demo ? "当前为本地演示隔离环境 (QCW_DEMO=1)" : "受控生产/预发布环境"}

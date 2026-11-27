@@ -93,7 +93,7 @@ export const legalPages = {
 } as const;
 
 type Area = "public" | "customer" | "warehouse" | "admin";
-type StaticView = "catalog" | "how-it-works" | "faq" | "report-guide" | "public-inquiry" | "legal" | "login" | "onboarding" | "account-recovery" | "staff-login" | "customer" | "customer-actions" | "warehouse" | "admin" | "admin-customers" | "admin-inspections" | "admin-media" | "admin-integrations" | "staff-tickets" | "logistics" | "logistics-configuration" | "storage-move" | "storage-locations" | "warehouse-scan" | "report-desk" | "operations";
+type StaticView = "public-home" | "catalog" | "how-it-works" | "faq" | "report-guide" | "public-inquiry" | "legal" | "login" | "onboarding" | "account-recovery" | "staff-login" | "customer" | "customer-actions" | "warehouse" | "admin" | "admin-customers" | "admin-inspections" | "admin-media" | "admin-integrations" | "staff-tickets" | "logistics" | "logistics-configuration" | "storage-move" | "storage-locations" | "warehouse-scan" | "report-desk" | "operations";
 type DetailView = "order" | "report" | "parcel" | "shipment" | "task" | "demo" | "warehouse-package" | "warehouse-item" | "customer-case" | "staff-ticket" | "staff-order" | "admin-customer" | "admin-payment" | "admin-refund" | "admin-incident" | "admin-disposal" | "admin-inspection-task" | "admin-media-detail" | "order-quote" | "order-shipment" | "dispatch-batch" | "staff-report";
 export const orderSections={
   payment:"Payment",parcels:"Parcels",dispositions:"Item instructions",storage:"Storage",
@@ -168,9 +168,26 @@ const details:{pattern:RegExp;area:Area;view:DetailView}[]=[
   {pattern:new RegExp("^/checkout/demo/"+uuid+"$"),area:"customer",view:"demo"},
 ];
 
+const EXCLUDED_ZH_PUBLIC_VIEWS = new Set<string>([
+  "login",
+  "staff-login",
+  "onboarding",
+  "account-recovery",
+]);
+
 export function resolvePortalRoute(path:string):PortalRoute|undefined {
   const entry=fixed.get(path);
   if(entry) return entry;
+  if(path==="/zh"||path==="/zh/") return {area:"public",view:"public-home"};
+  if(path.startsWith("/zh/")) {
+    const base=path.slice(3)||"/";
+    if(base==="/") return {area:"public",view:"public-home"};
+    const zhEntry=fixed.get(base);
+    if(zhEntry&&zhEntry.area==="public"&&!EXCLUDED_ZH_PUBLIC_VIEWS.has(zhEntry.view)) {
+      return zhEntry;
+    }
+    return undefined;
+  }
   for(const {pattern,area,view} of details) {
     const match=pattern.exec(path);
     if(match) {

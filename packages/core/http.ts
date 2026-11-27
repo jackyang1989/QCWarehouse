@@ -22,6 +22,7 @@ import { abortStorageUpload, authorizePrivateObjectRead, authorizePublicAssetUpl
 import { createStorageInstance, createStorageMigrationJob, deleteStorageInstance, getStorageInstanceDetail, getStorageMigrationJob, getStorageUsageMetrics, listStorageInstances, listStorageMigrationJobs, pauseStorageMigrationJob, probeStorageInstance, resumeStorageMigrationJob, retryFailedMigrationItems, revokeStorageInstanceSecret, rollbackStorageInstanceSecret, rollbackStorageMigrationJob, runStorageMigrationBatch, saveStorageInstanceSecret, saveStorageSecretSchema, revokeStorageSecretSchema, rollbackStorageSecretSchema, switchPrimaryStorageInstance, transitionStorageInstanceState, updateStorageInstance } from "./storage-hub";
 import { authorizeEvidenceUpload, authorizeEvidenceUploadSchema, cancelCaptureCommand, cancelCaptureCommandSchema, cleanupExpiredUnfinishedUploads, completeEvidenceUpload, getEvidenceDetail, issueCaptureCommand, issueCaptureCommandSchema, linkEvidenceSchema, linkEvidenceToEntity, listEvidenceSyncQueue, resolveQuarantinedEvidenceRecord, resolveQuarantineEvidenceSchema, retryMediaProcessingJob } from "./capture-evidence";
 import { cancelMediaExportJob, createCostRateCardSchema, createExportJobSchema, createMediaExportJob, createMediaRetentionRequest, createRetentionRequestSchema, createStorageCostRateCard, decideMediaRetentionRequest, decideRetentionRequestSchema, getAdminMediaDetail, getAdminMediaStats, getDeviceMediaHistory, getEmployeeMediaHistory, getMediaExportJob, listAdminMediaCenter, listMediaExportJobs, listMediaReconciliationAnomalies, listMediaRetentionRequests, listRevocationTombstones, readLegacyCompatibleBinary, replayRevocationTombstones, resolveMediaReconciliationAnomaly, rollbackLegacyMigrationPointers, runMediaReconciliation, streamAdminMediaObject, switchVerifiedLegacyMigrationPointers } from "./media-center";
+import { createImmutableLocaleSnapshot, createLocaleSnapshotSchema, decideDynamicTranslation, decideDynamicTranslationSchema, getAdminI18nOverview, getLocalePreferencesForActor, listDynamicTranslations, listRegisteredLocales, markEntityTranslationsStale, markTranslationsStaleSchema, publicLocaleSelectionSchema, setPublicLocalePreference, toggleLocaleStatusSchema, toggleRegisteredLocale, updateActorLocalePreferences, updateLocalePreferencesSchema, upsertDynamicTranslation, upsertDynamicTranslationSchema } from "./i18n-service";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
@@ -2244,6 +2245,66 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   const adminMediaDetail=path.match(/^\/staff\/admin\/media\/([a-f0-9-]{36})$/i);
   if(method==="GET" && adminMediaDetail) {
     return json(await transaction(db=>getAdminMediaDetail(db,actorRequired(actor),idSchema.parse(adminMediaDetail[1]))));
+  }
+
+  // ---------- TASK-190 Full-Site i18n Platform ----------
+  if(method==="GET" && path==="/public/locales") {
+    return json(await listRegisteredLocales(pool));
+  }
+  if(method==="POST" && path==="/public/locale") {
+    csrf(req,"origin_only");
+    const body=publicLocaleSelectionSchema.parse(await input(req));
+    const res=await transaction(db=>setPublicLocalePreference(db,actor,body));
+    return json({locale:res.locale},200,[cookie("qcw_locale",res.locale,31536000)]);
+  }
+  if(method==="GET" && path==="/me/locale-preferences") {
+    const a=actorRequired(actor);
+    return json(await getLocalePreferencesForActor(pool,a,{
+      cookieLocale:getCookie(req,"qcw_locale"),
+      acceptLanguage:req.headers.get("accept-language"),
+    }));
+  }
+  if(method==="PATCH" && path==="/me/locale-preferences") {
+    csrf(req);
+    const a=actorRequired(actor),key=idSchema.parse(req.headers.get("idempotency-key")),data=updateLocalePreferencesSchema.parse(await input(req));
+    const res=await transaction(db=>idempotent(db,a.id+":"+path,key,data,()=>updateActorLocalePreferences(db,a,data))) as {ui_locale:string;cookie_header:string|null};
+    const cookiesToSet=res.cookie_header?[cookie("qcw_locale",res.ui_locale,31536000)]:[];
+    return json(res,200,cookiesToSet);
+  }
+  if(method==="GET" && path==="/staff/admin/i18n/overview") {
+    return json(await transaction(db=>getAdminI18nOverview(db,actorRequired(actor))));
+  }
+  const i18nLocToggle=path.match(/^\/staff\/admin\/i18n\/locales\/([^/]+)\/status$/i);
+  if(method==="POST" && i18nLocToggle) {
+    let decodedCode:string;
+    try {
+      decodedCode=decodeURIComponent(i18nLocToggle[1]);
+    } catch {
+      throw new Problem("INVALID_REQUEST","Invalid locale code encoding.",422);
+    }
+    return extraWrite(req,path,actor,toggleLocaleStatusSchema,
+      (db,a,b)=>toggleRegisteredLocale(db,a,hash(getCookie(req,"session")),decodedCode,b));
+  }
+  if(method==="GET" && path==="/staff/admin/i18n/translations") {
+    return json(await transaction(db=>listDynamicTranslations(db,actorRequired(actor),{
+      entity_type:url.searchParams.get("entity_type")??undefined,
+      entity_id:url.searchParams.get("entity_id")?idSchema.parse(url.searchParams.get("entity_id")):undefined,
+      locale:url.searchParams.get("locale")??undefined,
+      status:url.searchParams.get("status")??undefined,
+    })));
+  }
+  if(method==="POST" && path==="/staff/admin/i18n/translations") {
+    return extraWrite(req,path,actor,upsertDynamicTranslationSchema,(db,a,b)=>upsertDynamicTranslation(db,a,b),201);
+  }
+  const i18nTransDecide=path.match(/^\/staff\/admin\/i18n\/translations\/([a-f0-9-]{36})\/decide$/i);
+  if(method==="POST" && i18nTransDecide) {
+    return extraWrite(req,path,actor,decideDynamicTranslationSchema,(db,a,b)=>decideDynamicTranslation(db,a,idSchema.parse(i18nTransDecide[1]),b));
+  }
+  if(method==="POST" && path==="/staff/admin/i18n/translations/mark-stale") {
+    return extraWrite(req,path,actor,markTranslationsStaleSchema,(db,a,b)=>markEntityTranslationsStale(db,a,b));
+  }
+  if(method==="POST" && path==="/staff/admin/i18n/snapshots") {
+    return extraWrite(req,path,actor,createLocaleSnapshotSchema,(db,a,b)=>createImmutableLocaleSnapshot(db,a,b),201);
   }
 
   return null;
