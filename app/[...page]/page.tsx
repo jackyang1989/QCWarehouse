@@ -21,14 +21,15 @@ const PUBLIC_MARKETING_VIEWS = new Set([
   "legal",
 ]);
 
-export async function generateMetadata({params}:{params:Promise<{page:string[]}>}): Promise<Metadata> {
+export async function generateMetadata({params,searchParams}:{params:Promise<{page:string[]}>;searchParams:Promise<Search>}): Promise<Metadata> {
   const {page} = await params;
   if (page.some(segment => segment.includes("/"))) return {};
   const path = "/" + page.join("/");
   const route = resolvePortalRoute(path);
   if (!route) return {};
   const isMarketing = route.area === "public" && PUBLIC_MARKETING_VIEWS.has(route.view);
-  return metadataForPath(path, isMarketing, route);
+  const next = route.view === "staff-login" ? (await searchParams).next : undefined;
+  return metadataForPath(path, isMarketing, route, typeof next === "string" ? next : undefined);
 }
 
 export default async function Page({params,searchParams}:{params:Promise<{page:string[]}>;searchParams:Promise<Search>}) {

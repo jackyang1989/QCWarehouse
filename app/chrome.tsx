@@ -356,7 +356,7 @@ const navIcons:Record<string,string>={
   "/admin/settings":"warehouse_address","/admin/storage/locations":"locations",
   "/admin/shipping-rates":"shipping_rates","/admin/config":"settings","/admin/legal":"legal",
   "/admin/users":"users","/admin/audit":"audit","/admin/operations":"operations",
-  "/admin/integrations":"integrations","/admin/integrations/payments":"payments","/admin/integrations/ocr":"templates","/admin/integrations/logistics":"integrations",
+  "/admin/integrations":"integrations","/admin/integrations/payments":"payments","/admin/integrations/ocr":"templates","/admin/integrations/logistics":"integrations","/admin/integrations/email":"integrations",
 };
 
 export function PlatformIcon({name}:{name:string}) {
@@ -374,7 +374,7 @@ const navigationSections = {
   ],
   admin: [
     ["运营管理",["/admin","/admin/orders","/admin/customers","/admin/tickets","/admin/inspections","/admin/dispositions","/admin/refunds","/admin/payments","/admin/finance","/admin/logistics","/admin/incidents"]],
-    ["平台配置",["/admin/catalog","/admin/templates","/admin/storage/locations","/admin/shipping-rates","/admin/config","/admin/legal","/admin/users","/admin/audit","/admin/operations","/admin/integrations","/admin/integrations/payments","/admin/integrations/ocr","/admin/integrations/logistics"]],
+    ["平台配置",["/admin/catalog","/admin/templates","/admin/storage/locations","/admin/shipping-rates","/admin/config","/admin/legal","/admin/users","/admin/audit","/admin/operations","/admin/integrations","/admin/integrations/payments","/admin/integrations/ocr","/admin/integrations/logistics","/admin/integrations/email"]],
   ],
 } satisfies Record<string,[string,string[]][]>;
 
@@ -393,6 +393,9 @@ export function WorkspaceNavigation({
   const otherLinks = area==="warehouse"
     ? []
     : links.filter(([href])=>!(area==="admin"&&hasAdminCatalog&&href==="/admin/settings") && !grouped.some(([,group])=>group.some(([url])=>url===href)));
+  const sections = area==="admin"
+    ? grouped.map(([name, group])=>[name,name==="平台配置"?[...group,...otherLinks]:group] as const)
+    : [...grouped,["More",otherLinks] as const];
   const isStaff = area==="warehouse" || area==="admin";
   const toggleLabel = isStaff ? (collapsed ? "展开侧栏菜单" : "收起侧栏菜单") : (collapsed ? "Expand sidebar" : "Collapse sidebar");
   const asideRef = useRef<HTMLElement | null>(null);
@@ -460,7 +463,7 @@ export function WorkspaceNavigation({
       </div>
     </div>
     <nav className="workspace-nav" aria-label={title}>
-      {[...grouped,[area==="customer"?"More":"平台配置",otherLinks] as const].filter(([,group])=>group.length>0).map(([name,group])=><div className="workspace-nav-group" key={name}>
+      {sections.filter(([,group])=>group.length>0).map(([name,group])=><div className="workspace-nav-group" key={name}>
         <p>{name}</p>
         {group.map(([href,label])=><Link key={href} href={href} aria-current={href===current?"page":undefined} title={collapsed?label:undefined} onClick={onCloseMobile}>
           <PlatformIcon name={navIcons[href]??"orders"}/><span>{label}</span>

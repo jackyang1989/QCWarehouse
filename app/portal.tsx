@@ -23,6 +23,7 @@ import { OperationsDesk } from "./operations-desk";
 import { PublishedReports } from "./report-sharing";
 import { clearCustomerDraftRecovery } from "./draft-recovery";
 import { AuditDesk } from "./audit-desk";
+import { staffLoginCopy } from "./staff-login-copy";
 import { NotificationInbox } from "./notifications";
 
 import { canOpenStaffPage, customerDestination, customerTabs, staffHome, staffTabs, withDestination, type PortalRoute } from "../packages/core/portal-routes";
@@ -80,10 +81,10 @@ export function Portal({path,target,route,actor:a,demo=false,timeZone,customerAc
   else if(route.view==="report-guide") content=<ReportGuide/>;
   else if(route.view==="legal") content=<PublicLegal path={path}/>;
   else if(!a) content=null;
-  else if(isStaff && a.kind!=="staff") content=<section className="panel narrow"><h1>需要员工权限</h1>
-    <p>当前登录的是客户账号，无权访问{route.area==="warehouse"?"仓库":"管理后台"}工作台，请使用已分配权限的员工账号登录。</p>
+  else if(isStaff && a.kind!=="staff") content=<section className="panel narrow"><h1>需要工作区权限</h1>
+    <p>当前登录的是客户账号。请使用有权访问{route.area==="warehouse"?"仓库工作台":"管理后台"}的账号登录。</p>
     <div className="actions">
-      <Link className="button primary" href={withDestination("/staff/login",target)}>前往员工登录</Link>
+      <Link className="button primary" href={withDestination("/staff/login",target)}>前往{staffLoginCopy(target).title}</Link>
       <Link className="button" href="/orders">返回客户工作台</Link>
     </div></section>;
   else if(isStaff&&!canOpenStaffPage(path,route,a.roles)) content=<section className="panel"><h1>当前账号角色无权访问该页面</h1>

@@ -211,6 +211,12 @@ export function inspectionScopePath(orderNumber:string,scopeId:string) {
   return "/orders/"+encodeURIComponent(orderNumber)+"#scope-"+encodeURIComponent(scopeId);
 }
 
+export function staffDestinationArea(path:string|null|undefined) {
+  const url=localPortalUrl(path);
+  const area=url&&resolvePortalRoute(url.pathname)?.area;
+  return area==="admin"||area==="warehouse"?area:null;
+}
+
 export function staffDestination(path:string|null|undefined,roles:readonly string[]) {
   const url=localPortalUrl(path);
   const route=url&&resolvePortalRoute(url.pathname);

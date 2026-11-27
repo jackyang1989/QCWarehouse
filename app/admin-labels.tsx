@@ -642,10 +642,12 @@ export function CopyId({
   value,
   short = true,
   label,
+  copyTitle,
 }: {
   value?: string | null;
   short?: boolean;
   label?: string;
+  copyTitle?: string;
 }) {
   const [copied, setCopied] = useState(false);
   if (!value) return <span className="muted">—</span>;
@@ -656,7 +658,7 @@ export function CopyId({
       <button
         type="button"
         className="copy-id-btn"
-        title={`复制完整编号：${value}`}
+        title={copyTitle ?? `复制完整编号：${value}`}
         onClick={async () => {
           try {
             await navigator.clipboard.writeText(value);

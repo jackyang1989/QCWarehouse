@@ -6,6 +6,7 @@ import { BRAND_NAME } from "../packages/core/brand";
 import type { SignInMethods } from "../packages/core/integrations";
 import { staffDestination, staffHome, withDestination } from "../packages/core/portal-routes";
 import { Brand } from "./chrome";
+import { staffLoginCopy } from "./staff-login-copy";
 import { ErrorBlock, Form, RequestError, request, text, useLoad } from "./ui";
 
 const oauthMessages:Record<string,string>={
@@ -34,6 +35,7 @@ export function Login({staff,methods,next,verify,oauth}:{
   const [demoBusy,setDemoBusy]=useState(false);
   const [demoError,setDemoError]=useState("");
   const emailAvailable=methods.email||methods.demo;
+  const internalCopy=staffLoginCopy(next);
 
   async function after(result:SignInResult) {
     if(result.kind==="staff") {
@@ -79,9 +81,9 @@ export function Login({staff,methods,next,verify,oauth}:{
   }
 
   return <section className="panel access-card" aria-labelledby="access-title">
-    <p className="eyebrow">{staff?`${BRAND_NAME} 员工工作区`:`${BRAND_NAME} customer account`}</p>
-    <h1 id="access-title">{staff?"员工登录":"Sign in or create an account"}</h1>
-    <p className="muted">{staff?"登录后进入已获授权的仓库或运营页面。":"Sign in to open your workspace. New customers get a personal warehouse receiving code after registration."}</p>
+    {!staff&&<p className="eyebrow">{BRAND_NAME} customer account</p>}
+    <h1 id="access-title">{staff?internalCopy.title:"Sign in or create an account"}</h1>
+    <p className="muted">{staff?internalCopy.description:"Sign in to open your workspace. New customers get a personal warehouse receiving code after registration."}</p>
     {!staff&&next&&<p className="notice">You’ll return to your requested page after signing in.</p>}
     {!staff&&oauth&&Object.hasOwn(oauthMessages,oauth)&&<ErrorBlock error={oauthMessages[oauth]}/>}
     {!staff&&!challenge&&<div className="sign-in-methods">
@@ -112,7 +114,7 @@ export function Login({staff,methods,next,verify,oauth}:{
     {staff&&<Form label="密码与验证器登录" run={async f=>after(await request("/staff/auth/login","POST",{
       email:text(f,"email"),password:String(f.get("password")??""),otp:text(f,"otp"),
     }))}>
-      <label>员工邮箱<input name="email" type="email" autoComplete="username" required/></label>
+      <label>登录邮箱<input name="email" type="email" autoComplete="username" required/></label>
       <label>密码<input name="password" type="password" autoComplete="current-password" required/></label>
       <label>验证器动态码<input name="otp" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" required/></label>
     </Form>}
