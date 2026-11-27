@@ -6,7 +6,7 @@ import { parse } from "yaml";
 import { z } from "zod";
 import { transaction, pool, type DB } from "../db";
 import { actorFrom, appOrigin, closeCustomerAccount, completeRegistration, confirmBackupEmail, confirmEmailChange, cookie, csrfCookie, csrfTokenFor, currentTerms, customerPreferences, decideAccountRecovery, demoSwitchAccount, executeAccountRecovery, finishProvider, getCookie, linkProviderIdentity, listIdentities, listSessions, pendingProvider, publicPolicy, readAccountRecoveryStatus, readRecoveryProgress, reportDownloadSignature, reportShareToken, requestAccountRecovery, requestBackupEmail, requestEmailChange, requestIdentityRemoval, revokeOtherSessions, revokeSession, runOtpVerification, staffSignIn, staffUpdateUserRoles, staffUpdateUserStatus, startCustomerReauth, startOtp, startProvider, startProviderAccountRefresh, unlinkIdentity, updateCustomerPreferences, verifyCsrfToken, verifyCustomerReauth, verifyOtp, verifyReportDownload } from "./auth";
-import { Problem, audit, guard, hash, idempotent, isDemo, one, organization, role, uuid, type Actor } from "./common";
+import { Problem, audit, guard, hash, idempotent, isDemo, lock, one, organization, role, uuid, type Actor } from "./common";
 import { integrationPreflight, signInMethods } from "./integrations";
 import { failedJobs, retryFailedJob } from "./worker";
 import { quotePolicy, quotePolicyInput, saveQuotePolicy } from "./quote-policy";
@@ -23,6 +23,7 @@ import { createStorageInstance, createStorageMigrationJob, deleteStorageInstance
 import { authorizeEvidenceUpload, authorizeEvidenceUploadSchema, cancelCaptureCommand, cancelCaptureCommandSchema, cleanupExpiredUnfinishedUploads, completeEvidenceUpload, getEvidenceDetail, issueCaptureCommand, issueCaptureCommandSchema, linkEvidenceSchema, linkEvidenceToEntity, listEvidenceSyncQueue, resolveQuarantinedEvidenceRecord, resolveQuarantineEvidenceSchema, retryMediaProcessingJob } from "./capture-evidence";
 import { cancelMediaExportJob, createCostRateCardSchema, createExportJobSchema, createMediaExportJob, createMediaRetentionRequest, createRetentionRequestSchema, createStorageCostRateCard, decideMediaRetentionRequest, decideRetentionRequestSchema, getAdminMediaDetail, getAdminMediaStats, getDeviceMediaHistory, getEmployeeMediaHistory, getMediaExportJob, listAdminMediaCenter, listMediaExportJobs, listMediaReconciliationAnomalies, listMediaRetentionRequests, listRevocationTombstones, readLegacyCompatibleBinary, replayRevocationTombstones, resolveMediaReconciliationAnomaly, rollbackLegacyMigrationPointers, runMediaReconciliation, streamAdminMediaObject, switchVerifiedLegacyMigrationPointers } from "./media-center";
 import { createImmutableLocaleSnapshot, createLocaleSnapshotSchema, decideDynamicTranslation, decideDynamicTranslationSchema, getAdminI18nOverview, getLocalePreferencesForActor, listDynamicTranslations, listRegisteredLocales, markEntityTranslationsStale, markTranslationsStaleSchema, publicLocaleSelectionSchema, setPublicLocalePreference, toggleLocaleStatusSchema, toggleRegisteredLocale, updateActorLocalePreferences, updateLocalePreferencesSchema, upsertDynamicTranslation, upsertDynamicTranslationSchema } from "./i18n-service";
+import { appendAiModelRateVersion, appendAiRateSchema, approveAiModel, approveAiProviderInstance, createAiInstanceSchema, createAiProviderInstance, deprecateAiModel, getAdminAiCostLedger, getAdminAiOverview, listAiInvocations, manualAiModelSchema, probeAiProviderInstance, reconciliationSchema, recordAiCostReconciliation, registerAiModelManual, revokeAiInstanceSecret, revokeAiSecretSchema, runSyntheticTranslationTest, saveAiInstanceSecret, saveAiSecretSchema, syncAiProviderModels, syntheticTestSchema, transitionAiInstanceLifecycle, updateAiInstanceSchema, updateAiProviderInstance, upsertAiBudgetPolicy, upsertBudgetPolicySchema } from "./ai-service";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
@@ -2307,12 +2308,125 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     return extraWrite(req,path,actor,createLocaleSnapshotSchema,(db,a,b)=>createImmutableLocaleSnapshot(db,a,b),201);
   }
 
+  // ---------- TASK-191 AI Providers, Models & Atomic Budget Ledger ----------
+  if(method==="GET" && path==="/staff/admin/ai/overview") {
+    return json(await transaction(db=>getAdminAiOverview(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/ai/instances") {
+    return extraWrite(req,path,actor,createAiInstanceSchema,(db,a,b)=>createAiProviderInstance(db,a,b),201);
+  }
+  const aiInstPatch=path.match(/^\/staff\/admin\/ai\/instances\/([a-f0-9-]{36})$/i);
+  if(method==="PATCH" && aiInstPatch) {
+    return extraWrite(req,path,actor,updateAiInstanceSchema,
+      (db,a,b)=>updateAiProviderInstance(db,a,hash(getCookie(req,"session")),idSchema.parse(aiInstPatch[1]),b));
+  }
+  const aiInstSecret=path.match(/^\/staff\/admin\/ai\/instances\/([a-f0-9-]{36})\/secrets$/i);
+  if(method==="POST" && aiInstSecret) {
+    return extraWrite(req,path,actor,saveAiSecretSchema,
+      (db,a,b)=>saveAiInstanceSecret(db,a,hash(getCookie(req,"session")),idSchema.parse(aiInstSecret[1]),b),201);
+  }
+  const aiInstSecretRevoke=path.match(/^\/staff\/admin\/ai\/instances\/([a-f0-9-]{36})\/secrets\/revoke$/i);
+  if(method==="POST" && aiInstSecretRevoke) {
+    return extraWrite(req,path,actor,revokeAiSecretSchema,
+      (db,a,b)=>revokeAiInstanceSecret(db,a,hash(getCookie(req,"session")),idSchema.parse(aiInstSecretRevoke[1]),b));
+  }
+  const aiInstProbe=path.match(/^\/staff\/admin\/ai\/instances\/([a-f0-9-]{36})\/probe$/i);
+  if(method==="POST" && aiInstProbe) {
+    csrf(req);
+    const a=actorRequired(actor),key=idSchema.parse(req.headers.get("idempotency-key")),instId=idSchema.parse(aiInstProbe[1]);
+    return json(await runIdempotentExternal(a.id+":"+path,key,{instance_id:instId},()=>probeAiProviderInstance(a,instId)));
+  }
+  const aiInstApprove=path.match(/^\/staff\/admin\/ai\/instances\/([a-f0-9-]{36})\/approve$/i);
+  if(method==="POST" && aiInstApprove) {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>approveAiProviderInstance(db,a,hash(getCookie(req,"session")),idSchema.parse(aiInstApprove[1])));
+  }
+  const aiInstDisable=path.match(/^\/staff\/admin\/ai\/instances\/([a-f0-9-]{36})\/(disable|archive)$/i);
+  if(method==="POST" && aiInstDisable) {
+    const targetState=aiInstDisable[2]==="archive"?"archived":"disabled";
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>transitionAiInstanceLifecycle(db,a,hash(getCookie(req,"session")),idSchema.parse(aiInstDisable[1]),targetState));
+  }
+  const aiModelsSync=path.match(/^\/staff\/admin\/ai\/instances\/([a-f0-9-]{36})\/models\/sync$/i);
+  if(method==="POST" && aiModelsSync) {
+    csrf(req);
+    const a=actorRequired(actor),key=idSchema.parse(req.headers.get("idempotency-key")),instId=idSchema.parse(aiModelsSync[1]);
+    return json(await runIdempotentExternal(a.id+":"+path,key,{instance_id:instId},()=>syncAiProviderModels(a,instId)));
+  }
+  const aiModelManual=path.match(/^\/staff\/admin\/ai\/instances\/([a-f0-9-]{36})\/models$/i);
+  if(method==="POST" && aiModelManual) {
+    return extraWrite(req,path,actor,manualAiModelSchema,
+      (db,a,b)=>registerAiModelManual(db,a,idSchema.parse(aiModelManual[1]),b),201);
+  }
+  const aiModelRates=path.match(/^\/staff\/admin\/ai\/models\/([a-f0-9-]{36})\/rates$/i);
+  if(method==="POST" && aiModelRates) {
+    return extraWrite(req,path,actor,appendAiRateSchema,
+      (db,a,b)=>appendAiModelRateVersion(db,a,hash(getCookie(req,"session")),idSchema.parse(aiModelRates[1]),b),201);
+  }
+  const aiModelTest=path.match(/^\/staff\/admin\/ai\/models\/([a-f0-9-]{36})\/test$/i);
+  if(method==="POST" && aiModelTest) {
+    csrf(req);
+    const a=actorRequired(actor),key=idSchema.parse(req.headers.get("idempotency-key")),modelId=idSchema.parse(aiModelTest[1]);
+    const body=syntheticTestSchema.parse(await input(req));
+    return json(await runIdempotentExternal(a.id+":"+path,key,{model_id:modelId,...body},()=>runSyntheticTranslationTest(a,modelId,body)));
+  }
+  const aiModelApprove=path.match(/^\/staff\/admin\/ai\/models\/([a-f0-9-]{36})\/approve$/i);
+  if(method==="POST" && aiModelApprove) {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>approveAiModel(db,a,hash(getCookie(req,"session")),idSchema.parse(aiModelApprove[1])));
+  }
+  const aiModelDeprecate=path.match(/^\/staff\/admin\/ai\/models\/([a-f0-9-]{36})\/deprecate$/i);
+  if(method==="POST" && aiModelDeprecate) {
+    return extraWrite(req,path,actor,z.object({}),
+      (db,a)=>deprecateAiModel(db,a,hash(getCookie(req,"session")),idSchema.parse(aiModelDeprecate[1])));
+  }
+  if(method==="POST" && path==="/staff/admin/ai/budget-policies") {
+    return extraWrite(req,path,actor,upsertBudgetPolicySchema,
+      (db,a,b)=>upsertAiBudgetPolicy(db,a,hash(getCookie(req,"session")),b));
+  }
+  if(method==="GET" && path==="/staff/admin/ai/invocations") {
+    return json(await transaction(db=>listAiInvocations(db,actorRequired(actor),{
+      instance_id:url.searchParams.get("instance_id")?idSchema.parse(url.searchParams.get("instance_id")):undefined,
+      purpose_code:url.searchParams.get("purpose_code")??undefined,
+      status:url.searchParams.get("status")??undefined,
+    })));
+  }
+  if(method==="GET" && path==="/staff/admin/ai/costs") {
+    return json(await transaction(db=>getAdminAiCostLedger(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/ai/costs/reconcile") {
+    return extraWrite(req,path,actor,reconciliationSchema,
+      (db,a,b)=>recordAiCostReconciliation(db,a,hash(getCookie(req,"session")),b),201);
+  }
+
   return null;
 }
 async function extraWrite<S extends z.ZodType>(req:Request,path:string,actor:Actor|null,schema:S,run:(db:DB,actor:Actor,data:z.output<S>)=>Promise<unknown>,status=200) {
   csrf(req);
   const a=actorRequired(actor),key=idSchema.parse(req.headers.get("idempotency-key")),data=schema.parse(await input(req));
   return json(await transaction(db=>idempotent(db,a.id+":"+path,key,data,()=>run(db,a,data))),status);
+}
+async function runIdempotentExternal<T>(scope:string,key:string,payload:unknown,fn:()=>Promise<T>):Promise<T> {
+  const digest=hash(JSON.stringify(payload));
+  const cached=await transaction(async db=>{
+    await lock(db,scope+":"+key);
+    const prev=(await db.query<{request_hash:string;response:T}>("select request_hash,response from idempotency_keys where scope=$1 and key=$2",[scope,key])).rows[0];
+    if(prev) {
+      guard(prev.request_hash===digest,"IDEMPOTENCY_CONFLICT","This key was used for a different request.");
+      return {hit:true as const,response:prev.response};
+    }
+    return {hit:false as const};
+  });
+  if(cached.hit) return cached.response;
+  const result=await fn();
+  await transaction(async db=>{
+    await lock(db,scope+":"+key);
+    const exists=(await db.query("select 1 from idempotency_keys where scope=$1 and key=$2",[scope,key])).rowCount;
+    if(!exists) {
+      await db.query("insert into idempotency_keys(scope,key,request_hash,response) values($1,$2,$3,$4)",[scope,key,digest,JSON.stringify(result)]);
+    }
+  });
+  return result;
 }
 
 // The request is validated against the operation's OpenAPI schema before dispatch.

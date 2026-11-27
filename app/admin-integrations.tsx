@@ -17,6 +17,7 @@ import {
   type Row,
 } from "./ui";
 import { CopyId, StatusBanner } from "./admin-labels";
+import { AdminAiDesk } from "./admin-ai";
 import { AdminStorageDesk } from "./admin-storage";
 import type { Actor } from "../packages/core/common";
 
@@ -62,6 +63,9 @@ const HIDDEN_UNINTEGRATED_PROVIDERS = new Set(["creem", "dodo_payments", "airwal
 export function AdminIntegrationsDesk({ path, actor, demo = false }: { path: string; actor: Actor; demo?: boolean }) {
   if (path === "/admin/integrations/storage") {
     return <AdminStorageDesk actor={actor} />;
+  }
+  if (path === "/admin/integrations/ai") {
+    return <AdminAiDesk actor={actor} />;
   }
   const isPaymentsView = path === "/admin/integrations/payments";
   const isOcrView = path === "/admin/integrations/ocr";
