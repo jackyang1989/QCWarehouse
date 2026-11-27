@@ -1,9 +1,11 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { pool, transaction, type DB } from "../db";
 import { appOrigin, decryptSecret, encryptSecret, requireStaffMfa } from "./auth";
-import { audit, guard, hash, isDemo, one, organization, role, uuid, type Actor } from "./common";
+import { audit, guard, hash, isDemo, lock, one, organization, role, uuid, type Actor } from "./common";
 import { EMAIL_SUBMISSION_TIMEOUT_MS, submitEmail } from "./email-transport";
 import { emailSettings, postmarkSettings } from "./integrations";
+import { assertEnabledLocale, normalizeLocaleTag, type EnabledLocale } from "./locale-contract";
+import { renderLockedTemplateSnapshot } from "./messaging-contract";
 import { resendSettings, RESEND_TEST_RECIPIENT } from "./resend-settings";
 
 const SUBMISSION_IN_PROGRESS = "SUBMISSION_IN_PROGRESS";
@@ -159,7 +161,7 @@ async function notifyEmailChannelAlert(db: DB, deliveryId: string, errorCode: st
 
 export async function deliverEmailOnce() {
   const claimed = await transaction(async (db) => {
-    const row = (
+      const row = (
       await db.query<{
         id: string;
         notification_id: string;
@@ -167,10 +169,12 @@ export async function deliverEmailOnce() {
         attempt: number;
         user_id: string;
         template: string;
+        notification_locale: string | null;
         order_public_no: string | null;
         order_is_test: boolean;
       }>(
-        `select d.id, d.notification_id, d.address_snapshot, d.attempt, n.user_id, n.template, o.public_no as order_public_no, coalesce(o.is_test, false) as order_is_test
+        `select d.id, d.notification_id, d.address_snapshot, d.attempt, n.user_id, n.template,
+                n.locale as notification_locale, o.public_no as order_public_no, coalesce(o.is_test, false) as order_is_test
          from email_deliveries d
          join notifications n on n.id = d.notification_id
          left join orders o on o.id = n.order_id
@@ -213,9 +217,15 @@ export async function deliverEmailOnce() {
       await notifyEmailChannelAlert(db, row.id, "PROVIDER_UNCONFIGURED");
       return { handled: true as const };
     }
+    const rendered = await renderTransactionalEmailFromTemplate(db, {
+      templateCode: row.template,
+      locale: row.notification_locale,
+      orderPublicNo: row.order_public_no,
+      isTest: row.order_is_test,
+    });
     await db.query(
-      `update email_deliveries set provider = $2, state = 'unknown', error_code = $3, updated_at = now() where id = $1`,
-      [row.id, mail.provider, SUBMISSION_IN_PROGRESS],
+      `update email_deliveries set provider = $2, state = 'unknown', error_code = $3, locale = $4, template_version = $5, updated_at = now() where id = $1`,
+      [row.id, mail.provider, SUBMISSION_IN_PROGRESS, rendered.locale, rendered.templateVersion],
     );
     return {
       handled: false as const,
@@ -227,13 +237,14 @@ export async function deliverEmailOnce() {
       template: row.template,
       orderPublicNo: row.order_public_no,
       orderIsTest: row.order_is_test,
+      rendered,
       mail,
     };
   });
   if (!claimed) return false;
   if (claimed.handled) return true;
 
-  const content = renderEmailContent(claimed.template, claimed.orderPublicNo, claimed.orderIsTest);
+  const content = { subject: claimed.rendered.subject, text: claimed.rendered.text };
   const outcome = await submitEmail(claimed.mail, {
     ...content,
     recipient: claimed.recipient,
@@ -742,5 +753,266 @@ export async function retryEmailDelivery(
     notification_id: latest.notification_id,
     attempt: nextAttempt,
     state: "queued" as const,
+  };
+}
+
+// ---------- TASK-194B: Bilingual Notification Templates & Honest Email Channel Readiness ----------
+
+function templateActionLink(templateCode: string, orderPublicNo: string | null, origin: string) {
+  switch (templateCode) {
+    case "payment.confirmed":
+      return orderPublicNo ? `${origin}/orders/${orderPublicNo}/parcels` : `${origin}/account/billing`;
+    case "package.received":
+      return orderPublicNo ? `${origin}/orders/${orderPublicNo}/parcels` : `${origin}/parcels`;
+    case "order.ready":
+    case "samples_ready":
+      return orderPublicNo ? `${origin}/orders/${orderPublicNo}` : `${origin}/orders`;
+    case "report.published":
+    case "report.amended":
+      return orderPublicNo ? `${origin}/orders/${orderPublicNo}/report` : `${origin}/reports`;
+    case "shipment.handed_over":
+      return orderPublicNo ? `${origin}/orders/${orderPublicNo}` : `${origin}/account`;
+    case "ticket.reply":
+      return `${origin}/support`;
+    case "staff.invited":
+      return `${origin}/staff/login`;
+    default:
+      return `${origin}/account`;
+  }
+}
+
+export async function renderTransactionalEmailFromTemplate(
+  db: Pick<DB, "query">,
+  params: { templateCode: string; locale?: string | null; orderPublicNo: string | null; isTest?: boolean },
+): Promise<{ subject: string; text: string; locale: EnabledLocale; templateVersion: number | null }> {
+  const normalized = normalizeLocaleTag(params.locale);
+  const locale: EnabledLocale = normalized === "zh-CN" ? "zh-CN" : "en-US";
+  const prefix = params.isTest ? "[TEST] " : "";
+  const origin = appOrigin();
+
+  const row = (
+    await db.query<{ version: number; subject_template: string; body_template: string }>(
+      `select version, subject_template, body_template
+       from notification_templates
+       where template_code = $1 and locale = $2 and status = 'published'
+       order by version desc limit 1`,
+      [params.templateCode, locale],
+    )
+  ).rows[0];
+
+  if (row) {
+    const ref = params.orderPublicNo ? ` (${params.orderPublicNo})` : "";
+    const link = templateActionLink(params.templateCode, params.orderPublicNo, origin);
+    const rendered = renderLockedTemplateSnapshot({
+      templateCode: params.templateCode,
+      locale,
+      titleTemplate: row.subject_template,
+      bodyTemplate: row.body_template,
+      variables: { ref, link },
+    });
+    return {
+      subject: `${prefix}${rendered.title}`,
+      text: rendered.body,
+      locale,
+      templateVersion: row.version,
+    };
+  }
+
+  const fallback = renderEmailContent(params.templateCode, params.orderPublicNo, Boolean(params.isTest));
+  return { ...fallback, locale, templateVersion: null };
+}
+
+export async function listNotificationTemplates(db: Pick<DB, "query">, actor: Actor) {
+  role(actor, "super_admin");
+  const { rows } = await db.query(
+    `select id, template_code, locale, version, status, subject_template, body_template,
+            allowed_variables, created_by, approved_by, published_at, created_at
+     from notification_templates
+     order by template_code, locale, version desc`,
+  );
+  return { templates: rows };
+}
+
+const SUPPORTED_TEMPLATE_VARIABLES = new Set(["ref", "link"]);
+
+export async function createNotificationTemplateDraft(
+  db: DB,
+  actor: Actor,
+  input: {
+    template_code: string;
+    locale: string;
+    subject_template: string;
+    body_template: string;
+    allowed_variables: string[];
+  },
+) {
+  role(actor, "super_admin");
+  const templateCode = input.template_code.trim();
+  const locale = assertEnabledLocale(input.locale);
+  guard(
+    !/[<>]/.test(input.subject_template) && !/[<>]/.test(input.body_template),
+    "UNSAFE_TEMPLATE_MARKUP",
+    "Notification templates must be plain text without raw HTML or script markup.",
+    422,
+  );
+  for (const v of input.allowed_variables) {
+    guard(
+      SUPPORTED_TEMPLATE_VARIABLES.has(v),
+      "UNSUPPORTED_TEMPLATE_VARIABLE",
+      `Unsupported notification variable '${v}'. Only {ref} and {link} are supported at runtime.`,
+      422,
+    );
+  }
+  for (const match of `${input.subject_template} ${input.body_template}`.matchAll(/\{([a-zA-Z0-9_]+)\}/g)) {
+    const v = match[1]!;
+    guard(
+      SUPPORTED_TEMPLATE_VARIABLES.has(v),
+      "UNSUPPORTED_TEMPLATE_VARIABLE",
+      `Template references unsupported placeholder '{${v}}'. Only {ref} and {link} are supplied at runtime.`,
+      422,
+    );
+  }
+  const sampleVars: Record<string, string> = {};
+  for (const v of input.allowed_variables) sampleVars[v] = `sample_${v}`;
+  // Validate placeholders & reject HTML/script tags at draft save time.
+  renderLockedTemplateSnapshot({
+    templateCode,
+    locale,
+    titleTemplate: input.subject_template,
+    bodyTemplate: input.body_template,
+    variables: sampleVars,
+  });
+
+  await lock(db, `notification_template:${templateCode}:${locale}`);
+  const nextVerRow = await one<{ next_ver: number }>(
+    db,
+    `select coalesce(max(version), 0)::int + 1 as next_ver
+     from notification_templates where template_code = $1 and locale = $2`,
+    [templateCode, locale],
+  );
+  const id = uuid();
+  const created = await one(
+    db,
+    `insert into notification_templates(
+       id, template_code, locale, version, status, subject_template, body_template, allowed_variables, created_by
+     ) values($1, $2, $3, $4, 'draft', $5, $6, $7::jsonb, $8)
+     returning id, template_code, locale, version, status, created_by, created_at`,
+    [
+      id,
+      templateCode,
+      locale,
+      nextVerRow.next_ver,
+      input.subject_template,
+      input.body_template,
+      JSON.stringify(input.allowed_variables),
+      actor.id,
+    ],
+  );
+  await audit(db, actor, "create_notification_template_draft", "notification_templates", id, {
+    template_code: templateCode,
+    locale,
+    version: nextVerRow.next_ver,
+  });
+  return created;
+}
+
+export async function publishNotificationTemplate(
+  db: DB,
+  actor: Actor,
+  templateId: string,
+  sessionHash: string,
+) {
+  role(actor, "super_admin");
+  await requireStaffMfa(db, actor, sessionHash, 15);
+  const target = await one<{
+    id: string;
+    template_code: string;
+    locale: string;
+    version: number;
+    status: string;
+    created_by: string | null;
+  }>(
+    db,
+    `select id, template_code, locale, version, status, created_by
+     from notification_templates where id = $1 for update`,
+    [templateId],
+  );
+  guard(target.status === "draft", "INVALID_STATE", "Only draft notification templates can be published.", 409);
+  guard(!target.created_by || target.created_by !== actor.id, "SELF_REVIEW_FORBIDDEN", "Template author cannot publish their own draft.", 403);
+
+  await lock(db, `notification_template:${target.template_code}:${target.locale}`);
+  await db.query(
+    `update notification_templates set status = 'retired'
+     where template_code = $1 and locale = $2 and status = 'published'`,
+    [target.template_code, target.locale],
+  );
+  const published = await one(
+    db,
+    `update notification_templates set status = 'published', approved_by = $2, published_at = now()
+     where id = $1
+     returning id, template_code, locale, version, status, approved_by, published_at`,
+    [templateId, actor.id],
+  );
+  await audit(db, actor, "publish_notification_template", "notification_templates", templateId, {
+    template_code: target.template_code,
+    locale: target.locale,
+    version: target.version,
+  });
+  return published;
+}
+
+export async function emailChannelReadiness(db: Pick<DB, "query">, actor: Actor) {
+  role(actor, "super_admin");
+  const { rows: providers } = await db.query<{
+    provider_key: string;
+    enabled: boolean;
+    lifecycle_state: string;
+    health_status: string;
+    is_primary: boolean;
+    config: Record<string, unknown>;
+  }>(
+    `select provider_key, enabled, lifecycle_state, health_status, is_primary, config
+     from integration_providers where provider_key in ('resend', 'postmark')`,
+  );
+  const stats = await one<{
+    live_delivered_count: number;
+    live_resend_delivered_count: number;
+    live_postmark_delivered_count: number;
+    live_submitted_count: number;
+    live_bounced_count: number;
+    live_deferred_count: number;
+  }>(
+    db,
+    `select
+       count(*) filter (where state = 'delivered' and coalesce(provider_message_id, '') not like 'demo-%')::int as live_delivered_count,
+       count(*) filter (where state = 'delivered' and provider = 'resend' and coalesce(provider_message_id, '') not like 'demo-%')::int as live_resend_delivered_count,
+       count(*) filter (where state = 'delivered' and provider = 'postmark' and coalesce(provider_message_id, '') not like 'demo-%')::int as live_postmark_delivered_count,
+       count(*) filter (where state = 'submitted' and coalesce(provider_message_id, '') not like 'demo-%')::int as live_submitted_count,
+       count(*) filter (where state in ('bounced', 'complained'))::int as live_bounced_count,
+       count(*) filter (where state = 'deferred')::int as live_deferred_count
+     from email_deliveries`,
+  );
+  const resend = await resendSettings(db);
+  const pm = postmarkSettings();
+  const resendRow = providers.find((p) => p.provider_key === "resend");
+  const pmRow = providers.find((p) => p.provider_key === "postmark");
+
+  return {
+    channels: {
+      resend: {
+        configured: resend.enabled,
+        is_primary: Boolean(resendRow?.is_primary),
+        connection_tested: resendRow?.health_status === "healthy",
+        verified_live_delivery: stats.live_resend_delivered_count > 0,
+      },
+      postmark: {
+        configured: pm.enabled,
+        is_primary: Boolean(pmRow?.is_primary),
+        connection_tested: pmRow?.health_status === "healthy",
+        verified_live_delivery: stats.live_postmark_delivered_count > 0,
+      },
+    },
+    delivery_stats: stats,
+    connection_test_equals_live_delivery: false as const,
   };
 }

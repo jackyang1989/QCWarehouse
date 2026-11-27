@@ -10,7 +10,8 @@ import { Problem, audit, guard, hash, idempotent, isDemo, one, organization, rol
 import { integrationPreflight, signInMethods } from "./integrations";
 import { failedJobs, retryFailedJob } from "./worker";
 import { quotePolicy, quotePolicyInput, saveQuotePolicy } from "./quote-policy";
-import { customerEmailDeliveryStatus, receivePostmarkWebhook, receiveResendWebhook, retryEmailDelivery, staffEmailDeliveries } from "./email";
+import { customerEmailDeliveryStatus, createNotificationTemplateDraft, emailChannelReadiness, listNotificationTemplates, publishNotificationTemplate, receivePostmarkWebhook, receiveResendWebhook, retryEmailDelivery, staffEmailDeliveries } from "./email";
+import { activateLegalEntity, createLegalEntityDraft, createMerchantInstance, evaluateOpeningReadinessMatrix, legalEntityCreateSchema, listLegalEntities, listMerchantInstances, merchantInstanceCreateSchema, merchantInstanceStatusSchema, retireLegalEntity, transitionMerchantInstanceStatus } from "./legal-merchants";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
@@ -1494,6 +1495,54 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const bytes=Buffer.from(await file.arrayBuffer());
     const mime=file.type || (file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/png");
     return json(await transaction(db=>adminTestOcrExtract(db,a,hash(getCookie(req,"session")),{bytes,mime,provider_key:providerKey})));
+  }
+
+  // ---------- TASK-194B & TASK-178 Admin Governance Routes ----------
+  if(method==="GET" && path==="/staff/admin/notification-templates") {
+    return json(await transaction(db=>listNotificationTemplates(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/notification-templates") {
+    return extraWrite(req,path,actor,z.object({
+      template_code:z.string().trim().min(2).max(80),
+      locale:z.enum(["en-US","zh-CN"]),
+      subject_template:z.string().trim().min(1).max(200),
+      body_template:z.string().trim().min(1).max(2000),
+      allowed_variables:z.array(z.enum(["ref","link"])).max(2).default(["ref","link"]),
+    }),createNotificationTemplateDraft,201);
+  }
+  const tplPublish=path.match(/^\/staff\/admin\/notification-templates\/([a-f0-9-]{36})\/publish$/i);
+  if(method==="POST" && tplPublish) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>publishNotificationTemplate(db,a,idSchema.parse(tplPublish[1]),hash(getCookie(req,"session"))));
+  }
+  if(method==="GET" && path==="/staff/admin/email-readiness") {
+    return json(await transaction(db=>emailChannelReadiness(db,actorRequired(actor))));
+  }
+  if(method==="GET" && path==="/staff/admin/legal-entities") {
+    return json(await transaction(db=>listLegalEntities(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/legal-entities") {
+    return extraWrite(req,path,actor,legalEntityCreateSchema,(db,a,b)=>createLegalEntityDraft(db,a,b,hash(getCookie(req,"session"))),201);
+  }
+  const entityActivate=path.match(/^\/staff\/admin\/legal-entities\/([a-f0-9-]{36})\/activate$/i);
+  if(method==="POST" && entityActivate) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>activateLegalEntity(db,a,idSchema.parse(entityActivate[1]),hash(getCookie(req,"session"))));
+  }
+  const entityRetire=path.match(/^\/staff\/admin\/legal-entities\/([a-f0-9-]{36})\/retire$/i);
+  if(method==="POST" && entityRetire) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>retireLegalEntity(db,a,idSchema.parse(entityRetire[1]),hash(getCookie(req,"session"))));
+  }
+  if(method==="GET" && path==="/staff/admin/merchant-instances") {
+    return json(await transaction(db=>listMerchantInstances(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/merchant-instances") {
+    return extraWrite(req,path,actor,merchantInstanceCreateSchema,(db,a,b)=>createMerchantInstance(db,a,b,hash(getCookie(req,"session"))),201);
+  }
+  const merchantStatus=path.match(/^\/staff\/admin\/merchant-instances\/([a-f0-9-]{36})\/status$/i);
+  if(method==="POST" && merchantStatus) {
+    return extraWrite(req,path,actor,merchantInstanceStatusSchema,(db,a,b)=>transitionMerchantInstanceStatus(db,a,idSchema.parse(merchantStatus[1]),b,hash(getCookie(req,"session"))));
+  }
+  if(method==="GET" && path==="/staff/admin/opening-readiness") {
+    return json(await transaction(db=>evaluateOpeningReadinessMatrix(db,actorRequired(actor))));
   }
 
   return null;
