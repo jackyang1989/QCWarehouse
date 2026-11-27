@@ -6,6 +6,7 @@ import { renderVerificationEmail } from "./verification-email";
 import { emailSettings, oidcSettings, signInMethods, type OidcProvider } from "./integrations";
 import { pool, transaction, type DB } from "../db";
 import { Problem, audit, code, event, findReceivingProfiles, guard, hash, isDemo, lock, one, organization, receivingCode, role, uuid, type Actor } from "./common";
+import { assertLastOwnerPreserved } from "./authz-contract";
 import { demoTermsVersion, demoWarehouseAddressZh, usableWarehouseAddressSql } from "./demo-fixtures";
 
 const token = () => randomBytes(32).toString("base64url");
@@ -1007,11 +1008,17 @@ export async function staffUpdateUserStatus(
   await requireStaffMfa(db,actor,sessionHash,15);
   const u=await one<{id:string;status:string}>(db,"select id,status from users where id=$1 for update",[targetUserId]);
   guard(u.status!=="closed","ACCOUNT_CLOSED","Closed accounts cannot be reopened via status toggle.",409);
+  const targetRoles=(await db.query<{role:string}>("select role from staff_roles where user_id=$1",[targetUserId])).rows.map(r=>r.role);
+  const isStaff=targetRoles.length>0;
+  if(input.status!=="active" && targetRoles.includes("super_admin")) {
+    await assertLastOwnerPreserved(db,targetUserId);
+  }
+  const invalidateSessions=input.status==="disabled" || (input.status!=="active" && isStaff);
   await db.query(
-    `update users set status=$2,auth_version=case when $2='disabled' then auth_version+1 else auth_version end,updated_at=now() where id=$1`,
-    [targetUserId,input.status]
+    `update users set status=$2,auth_version=case when $3 then auth_version+1 else auth_version end,updated_at=now() where id=$1`,
+    [targetUserId,input.status,invalidateSessions]
   );
-  if(input.status==="disabled") {
+  if(invalidateSessions) {
     await db.query("update sessions set revoked_at=now() where user_id=$1 and revoked_at is null",[targetUserId]);
   }
   await db.query("insert into account_security_events(user_id,actor_id,kind,outcome,request_id) values($1,$2,$3,'succeeded',$4)",
@@ -1034,6 +1041,9 @@ export async function staffUpdateUserRoles(
   guard(actor.id!==targetUserId || nextRoles.includes("super_admin"),
     "SELF_LOCKOUT_FORBIDDEN","Super administrators cannot remove their own super_admin role.",409);
   const prev=(await db.query<{role:string}>("select role from staff_roles where user_id=$1 order by role",[targetUserId])).rows.map(r=>r.role);
+  if(prev.includes("super_admin") && !nextRoles.includes("super_admin")) {
+    await assertLastOwnerPreserved(db,targetUserId);
+  }
   await db.query("delete from staff_roles where user_id=$1",[targetUserId]);
   for(const r of nextRoles) {
     await db.query("insert into staff_roles(user_id,role) values($1,$2)",[targetUserId,r]);

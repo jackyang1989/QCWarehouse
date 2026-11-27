@@ -1,3 +1,4 @@
+import { ADMIN_DIRECT_ROUTE_ROLES } from "./authz-contract";
 import { hasStaffAccess, staffAccess } from "./staff-access";
 
 const sampleCodeBody="(?:S[A-Z0-9]{5,8}|S-[A-Z0-9-]{1,64}|DSP-?[A-Z0-9-]{1,64})";
@@ -71,11 +72,8 @@ export function canOpenStaffPage(path:string,route:PortalRoute,roles:readonly st
   if(route.view==="admin-incident") return hasStaffAccess(roles,["receiver","warehouse_admin","support","finance","super_admin"]);
   if(route.view==="admin-disposal") return hasStaffAccess(roles,["receiver","warehouse_admin","support","super_admin"]);
   if(route.view==="warehouse-package"||route.view==="warehouse-item") return hasStaffAccess(roles,staffAccess.intake);
-  if(["/admin/catalog","/admin/categories","/admin/templates","/admin/shipping-rates","/admin/config","/admin/legal","/admin/users","/admin/settings"].includes(path)) return hasStaffAccess(roles,staffAccess.templates);
-  if(["/admin/dispositions","/admin/incidents"].includes(path)) return hasStaffAccess(roles,staffAccess.orders);
-  if(["/admin/refunds","/admin/payments"].includes(path)) return hasStaffAccess(roles,staffAccess.finance);
-  if(["/admin/integrations","/admin/integrations/payments"].includes(path)) return hasStaffAccess(roles,["super_admin","finance"]);
-  if(path==="/admin/integrations/ocr") return hasStaffAccess(roles,["super_admin","finance","warehouse_admin"]);
+  const directRoles=ADMIN_DIRECT_ROUTE_ROLES[path];
+  if(directRoles) return hasStaffAccess(roles,directRoles);
   return staffTabs(route.area,roles).some(([link])=>link===path);
 }
 

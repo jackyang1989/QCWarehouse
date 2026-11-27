@@ -8,6 +8,7 @@ import sharp from "sharp";
 import Stripe from "stripe";
 import { assertCoreCoverage, assertCoreResponse } from "./core-responses";
 import { canOpenStaffPage, customerDestination, resolvePortalRoute, staffDestination, staffTabs } from "../packages/core/portal-routes";
+import { assertIdempotencyContract, authorizeOwnerBootstrap } from "../packages/core/authz-contract";
 
 const target=process.env.TEST_DATABASE_URL;
 assert(target,"Set TEST_DATABASE_URL to an isolated qcw_test database.");
@@ -8937,6 +8938,58 @@ test("TASK-177: layered health check rejects exhausted outbox jobs and separates
     else process.env.NODE_ENV=prevNodeEnv;
     if(prevDemo===undefined) delete process.env.QCW_DEMO;
     else process.env.QCW_DEMO=prevDemo;
+  }
+});
+
+test("TASK-180A live DB: last-Owner protection, Owner bootstrap lock, T42 SQL idempotency & LIF-004 denial",async()=>{
+  const admin=await staffLogin("admin");
+  const {rows:owners}=await pool.query<{id:string}>(
+    "select u.id from staff_roles sr join users u on u.id=sr.user_id where sr.role='super_admin' and u.status='active' order by u.created_at",
+  );
+  assert(owners.length>=1,"Expected at least one active super_admin");
+  const extraOwners=owners.slice(1).map(r=>r.id);
+  try {
+    if(extraOwners.length) {
+      await pool.query("update users set status='disabled' where id=any($1::uuid[])",[extraOwners]);
+    }
+    const soleOwnerId=owners[0]!.id;
+    const blockedDisable=await admin.fetch(`/staff/users/${soleOwnerId}/status`,{
+      status:"disabled",
+      reason:"Attempt disabling last active super_admin",
+    },"POST",409);
+    assert.equal(blockedDisable.error.code,"LAST_OWNER_PROTECTED");
+
+    const blockedRestrict=await admin.fetch(`/staff/users/${soleOwnerId}/status`,{
+      status:"restricted",
+      reason:"Attempt restricting last active super_admin",
+    },"POST",409);
+    assert.equal(blockedRestrict.error.code,"LAST_OWNER_PROTECTED");
+
+    const receiver=await staffLogin("receiving");
+    await receiver.fetch(`/staff/users/${soleOwnerId}/roles`,{
+      roles:["receiver"],
+      reason:"Privilege escalation attempt",
+    },"POST",403);
+    assert.equal(canOpenStaffPage("/admin/users",resolvePortalRoute("/admin/users")!,["template_admin"]),false);
+
+    const token="bootstrap-secret-token-at-least-24-chars";
+    await assert.rejects(
+      authorizeOwnerBootstrap(pool,token,token),
+      (err:unknown)=>err instanceof Error && "code" in err && (err as {code:string}).code==="OWNER_BOOTSTRAP_CLOSED",
+    );
+
+    const idemKey=randomUUID();
+    const first=await transaction(db=>assertIdempotencyContract(db,soleOwnerId,"POST","/orders",idemKey,{qty:2},async()=>({ok:true,seq:1})));
+    const replay=await transaction(db=>assertIdempotencyContract(db,soleOwnerId,"POST","/orders",idemKey,{qty:2},async()=>({ok:true,seq:999})));
+    assert.deepEqual(replay,first);
+    await assert.rejects(
+      transaction(db=>assertIdempotencyContract(db,soleOwnerId,"POST","/orders",idemKey,{qty:3},async()=>({ok:true}))),
+      (err:unknown)=>err instanceof Error && "code" in err && (err as {code:string}).code==="IDEMPOTENCY_CONFLICT",
+    );
+  } finally {
+    if(extraOwners.length) {
+      await pool.query("update users set status='active' where id=any($1::uuid[])",[extraOwners]);
+    }
   }
 });
 
