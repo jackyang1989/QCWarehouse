@@ -16,6 +16,7 @@ import { acceptStaffInvitation, createAndInviteStaff, getStaffDetail, listStaffD
 import { archiveRbacRole, assignCustomRoleToStaff, computeEffectiveStaffPermissions, createCustomRbacRoleDraft, listRbacRoles, previewRbacRoleImpact, publishRbacRole, rbacAssignmentSchema, rbacRoleDraftSchema, removeCustomRoleFromStaff } from "./rbac-admin";
 import { createAddressSnapshot, createAddressSnapshotSchema, createRegionAlias, getActiveRegionOverview, getAddressSnapshot, getRegionDetail, importRegionDatasetDraft, listRegionChildren, listRegionDatasetVersions, parseChineseAddress, parseChineseAddressSchema, publishRegionDatasetVersion, regionAliasCreateSchema, regionChildrenQuerySchema, regionImportDraftSchema, regionPathValidateSchema, regionSearchQuerySchema, revokeRegionAlias, rollbackRegionDatasetVersion, searchRegions, validateRegionPath } from "./regions";
 import { adjustConsumableStock, archiveWarehouse, batchCreateWarehouseBins, binGovernanceSchema, consumableAdjustSchema, consumableCreateSchema, containerCreateSchema, containerMoveSchema, createAndDispatchTransfer, createPackagingConsumable, createWarehouse, createWarehouseContainer, createWarehouseZone, getWarehouseDetail, listPackagingConsumables, listWarehouses, locationReserveSchema, moveOrNestContainer, previewWarehouseDeactivationImpact, receiveWarehouseTransfer, recommendEmptyLocations, recommendLocationsQuerySchema, releaseLocationReservation, reserveLocationSpace, transferDispatchSchema, transferReceiveSchema, updateBinGovernance, updateWarehouseControls, warehouseBinBatchSchema, warehouseControlsSchema, warehouseCreateSchema, warehouseZoneCreateSchema } from "./warehouses";
+import { claimDeviceLease, createWorkstation, decideDeviceAuthorization, deviceAccessPolicySchema, deviceCalibrationOrFaultSchema, deviceDecisionSchema, deviceHeartbeat, deviceHeartbeatSchema, deviceLeaseClaimSchema, devicePreregisterSchema, deviceRequestSchema, deviceRevokeSchema, evaluateServiceSellability, getDeviceAccessPolicy, grantOrUpdateSkill, listDeviceAuthRequests, listDevices, listInspectorSkills, listStaffOwnNotifications, listWorkstations, markStaffNotificationRead, preregisterDevice, recordDeviceCalibrationOrFault, releaseDeviceLease, requestDeviceAuthorization, revokeDevice, revokeSkillGrant, sellabilityQuerySchema, setDeviceAccessPolicy, skillGrantSchema, skillRevokeSchema, updateWorkstationStatus, workstationCreateSchema, workstationStatusSchema } from "./workstations-devices";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
@@ -1772,6 +1773,103 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   const consumableAdjust=path.match(/^\/staff\/warehouse-consumables\/([a-f0-9-]{36})\/adjust$/i);
   if(method==="POST" && consumableAdjust) {
     return extraWrite(req,path,actor,consumableAdjustSchema,(db,a,b)=>adjustConsumableStock(db,a,idSchema.parse(consumableAdjust[1]),b));
+  }
+
+  // ---------- TASK-183 Workstations, Device Authorization & Inspector Skills ----------
+  if(method==="GET" && path==="/staff/workstations") {
+    const a=actorRequired(actor);
+    role(a,"receiver","inspector","reviewer","warehouse_admin","super_admin");
+    const wh=new URL(req.url).searchParams.get("warehouse_id")??undefined;
+    return json(await transaction(db=>listWorkstations(db,a,wh)));
+  }
+  if(method==="POST" && path==="/staff/workstations") {
+    return extraWrite(req,path,actor,workstationCreateSchema,(db,a,b)=>createWorkstation(db,a,b),201);
+  }
+  const wsStatus=path.match(/^\/staff\/workstations\/([a-f0-9-]{36})\/status$/i);
+  if(method==="PATCH" && wsStatus) {
+    return extraWrite(req,path,actor,workstationStatusSchema,(db,a,b)=>updateWorkstationStatus(db,a,idSchema.parse(wsStatus[1]),b));
+  }
+  if(method==="GET" && path==="/staff/workstations/sellability-check") {
+    const a=actorRequired(actor);
+    role(a,"receiver","inspector","reviewer","warehouse_admin","super_admin");
+    const sp=new URL(req.url).searchParams;
+    const q=sellabilityQuerySchema.parse({
+      warehouse_id:sp.get("warehouse_id"),
+      required_device_roles:sp.get("required_device_roles")??undefined,
+      required_skill_code:sp.get("required_skill_code")??undefined,
+    });
+    return json(await transaction(db=>evaluateServiceSellability(db,a,q)));
+  }
+  if(method==="GET" && path==="/staff/device-access-policies") {
+    const a=actorRequired(actor);
+    role(a,"receiver","inspector","reviewer","warehouse_admin","super_admin");
+    const wh=new URL(req.url).searchParams.get("warehouse_id")??undefined;
+    return json(await transaction(db=>getDeviceAccessPolicy(db,a,wh)));
+  }
+  if(method==="PUT" && path==="/staff/device-access-policies") {
+    return extraWrite(req,path,actor,deviceAccessPolicySchema,(db,a,b)=>setDeviceAccessPolicy(db,a,b));
+  }
+  if(method==="GET" && path==="/staff/devices") {
+    const a=actorRequired(actor);
+    role(a,"receiver","inspector","reviewer","warehouse_admin","super_admin");
+    const wh=new URL(req.url).searchParams.get("warehouse_id")??undefined;
+    return json(await transaction(db=>listDevices(db,a,wh)));
+  }
+  if(method==="POST" && path==="/staff/devices/preregister") {
+    return extraWrite(req,path,actor,devicePreregisterSchema,(db,a,b)=>preregisterDevice(db,a,b),201);
+  }
+  if(method==="GET" && path==="/staff/device-requests") {
+    const a=actorRequired(actor);
+    role(a,"receiver","inspector","reviewer","warehouse_admin","super_admin");
+    const wh=new URL(req.url).searchParams.get("warehouse_id")??undefined;
+    return json(await transaction(db=>listDeviceAuthRequests(db,a,wh)));
+  }
+  if(method==="POST" && path==="/staff/device-requests") {
+    return extraWrite(req,path,actor,deviceRequestSchema,(db,a,b)=>requestDeviceAuthorization(db,a,b),201);
+  }
+  const devReqDecide=path.match(/^\/staff\/device-requests\/([a-f0-9-]{36})\/decide$/i);
+  if(method==="POST" && devReqDecide) {
+    return extraWrite(req,path,actor,deviceDecisionSchema,(db,a,b)=>decideDeviceAuthorization(db,a,idSchema.parse(devReqDecide[1]),b));
+  }
+  const devRevoke=path.match(/^\/staff\/devices\/([a-f0-9-]{36})\/revoke$/i);
+  if(method==="POST" && devRevoke) {
+    return extraWrite(req,path,actor,deviceRevokeSchema,(db,a,b)=>revokeDevice(db,a,idSchema.parse(devRevoke[1]),b));
+  }
+  if(method==="POST" && path==="/devices/heartbeat") {
+    const data=deviceHeartbeatSchema.parse(await input(req));
+    return json(await transaction(db=>deviceHeartbeat(db,data)));
+  }
+  const devLease=path.match(/^\/staff\/devices\/([a-f0-9-]{36})\/leases$/i);
+  if(method==="POST" && devLease) {
+    return extraWrite(req,path,actor,deviceLeaseClaimSchema,(db,a,b)=>claimDeviceLease(db,a,idSchema.parse(devLease[1]),b),201);
+  }
+  const leaseRelease=path.match(/^\/staff\/device-leases\/([a-f0-9-]{36})\/release$/i);
+  if(method==="POST" && leaseRelease) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>releaseDeviceLease(db,a,idSchema.parse(leaseRelease[1])));
+  }
+  const devCalibration=path.match(/^\/staff\/devices\/([a-f0-9-]{36})\/calibration$/i);
+  if(method==="POST" && devCalibration) {
+    return extraWrite(req,path,actor,deviceCalibrationOrFaultSchema,(db,a,b)=>recordDeviceCalibrationOrFault(db,a,idSchema.parse(devCalibration[1]),b),201);
+  }
+  if(method==="GET" && path==="/staff/inspector-skills") {
+    const a=actorRequired(actor);
+    role(a,"receiver","inspector","reviewer","warehouse_admin","super_admin");
+    const uid=new URL(req.url).searchParams.get("user_id")??undefined;
+    return json(await transaction(db=>listInspectorSkills(db,a,uid)));
+  }
+  if(method==="PUT" && path==="/staff/inspector-skills") {
+    return extraWrite(req,path,actor,skillGrantSchema,(db,a,b)=>grantOrUpdateSkill(db,a,b));
+  }
+  const skillRevoke=path.match(/^\/staff\/inspector-skills\/([a-f0-9-]{36})\/revoke$/i);
+  if(method==="POST" && skillRevoke) {
+    return extraWrite(req,path,actor,skillRevokeSchema,(db,a,b)=>revokeSkillGrant(db,a,idSchema.parse(skillRevoke[1]),b));
+  }
+  if(method==="GET" && path==="/staff/me/notifications") {
+    return json(await transaction(db=>listStaffOwnNotifications(db,actorRequired(actor))));
+  }
+  const staffNotifRead=path.match(/^\/staff\/me\/notifications\/([a-f0-9-]{36})\/read$/i);
+  if(method==="POST" && staffNotifRead) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>markStaffNotificationRead(db,a,idSchema.parse(staffNotifRead[1])));
   }
 
   return null;
