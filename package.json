@@ -13,7 +13,7 @@
     "test:brand": "node --import tsx --test tests/brand-consistency.test.mts",
     "test:pkg1-contracts": "node --import tsx --test tests/pkg1-wave1-contracts.test.mts",
     "test:pkg1-wave23": "node --import tsx --test tests/pkg1-wave23-contracts.test.mts",
-    "test:integration": "node --env-file-if-exists=.env --import tsx --test --test-concurrency=1 tests/brand-consistency.test.mts tests/pkg1-wave1-contracts.test.mts tests/pkg1-wave23-contracts.test.mts tests/pkg1-wave56-email-entities.test.mts tests/pkg1-wave78-staff-rbac.test.mts tests/pkg1-wave9-regions.test.mts tests/pkg1-wave10-warehouses.test.mts tests/pkg1-wave11-workstations-devices.test.mts tests/pkg1-wave12-scheduling-dispatch.test.mts tests/workflow.test.mts tests/admin-workbench.test.mts tests/round5-payments-ocr.test.mts",
+    "test:integration": "node --env-file-if-exists=.env --import tsx --test --test-concurrency=1 tests/brand-consistency.test.mts tests/pkg1-wave1-contracts.test.mts tests/pkg1-wave23-contracts.test.mts tests/pkg1-wave56-email-entities.test.mts tests/pkg1-wave78-staff-rbac.test.mts tests/pkg1-wave9-regions.test.mts tests/pkg1-wave10-warehouses.test.mts tests/pkg1-wave11-workstations-devices.test.mts tests/pkg1-wave12-scheduling-dispatch.test.mts tests/pkg2-wave13-object-storage.test.mts tests/workflow.test.mts tests/admin-workbench.test.mts tests/round5-payments-ocr.test.mts",
     "worker": "node --env-file-if-exists=.env --import tsx scripts/worker.ts",
     "integrations:check": "node --env-file-if-exists=.env --import tsx scripts/integration-preflight.ts",
     "ops:backup-verify": "node scripts/pre-migration-backup-restore.mjs"

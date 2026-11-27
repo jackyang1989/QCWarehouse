@@ -18,6 +18,7 @@ import { createAddressSnapshot, createAddressSnapshotSchema, createRegionAlias, 
 import { adjustConsumableStock, archiveWarehouse, batchCreateWarehouseBins, binGovernanceSchema, consumableAdjustSchema, consumableCreateSchema, containerCreateSchema, containerMoveSchema, createAndDispatchTransfer, createPackagingConsumable, createWarehouse, createWarehouseContainer, createWarehouseZone, getWarehouseDetail, listPackagingConsumables, listWarehouses, locationReserveSchema, moveOrNestContainer, previewWarehouseDeactivationImpact, receiveWarehouseTransfer, recommendEmptyLocations, recommendLocationsQuerySchema, releaseLocationReservation, reserveLocationSpace, transferDispatchSchema, transferReceiveSchema, updateBinGovernance, updateWarehouseControls, warehouseBinBatchSchema, warehouseControlsSchema, warehouseCreateSchema, warehouseZoneCreateSchema } from "./warehouses";
 import { claimDeviceLease, createWorkstation, decideDeviceAuthorization, deviceAccessPolicySchema, deviceCalibrationOrFaultSchema, deviceDecisionSchema, deviceHeartbeat, deviceHeartbeatSchema, deviceLeaseClaimSchema, devicePreregisterSchema, deviceRequestSchema, deviceRevokeSchema, evaluateServiceSellability, getDeviceAccessPolicy, grantOrUpdateSkill, listDeviceAuthRequests, listDevices, listInspectorSkills, listStaffOwnNotifications, listWorkstations, markStaffNotificationRead, preregisterDevice, recordDeviceCalibrationOrFault, releaseDeviceLease, requestDeviceAuthorization, revokeDevice, revokeSkillGrant, sellabilityQuerySchema, setDeviceAccessPolicy, skillGrantSchema, skillRevokeSchema, updateWorkstationStatus, workstationCreateSchema, workstationStatusSchema } from "./workstations-devices";
 import { acceptTaskHandover, assignWorkItem, cancelTaskHandover, claimTaskLease, evidenceSubmitWithLeaseSchema, handoverAcceptSchema, handoverCancelSchema, handoverInitiateSchema, initiateTaskHandover, listDispatchWorkItems, listQuarantinedEvidence, listStaffShifts, pauseWorkItem, quarantineResolveSchema, registerDispatchWorkItem, resolveQuarantinedEvidence, resumeWorkItem, revokeStaffActiveLeases, staffShiftStatusSchema, staffShiftUpsertSchema, submitEvidenceWithLease, taskLeaseClaimSchema, updateStaffShiftStatus, upsertStaffShift, workItemAssignSchema, workItemPauseSchema, workItemRegisterSchema } from "./scheduling-dispatch";
+import { abortStorageUpload, authorizePrivateObjectRead, authorizeStorageUpload, authorizeStorageUploadSchema, completeStorageUpload, completeStorageUploadSchema, deleteStorageObjectControlled, deleteStorageObjectSchema, issueMultipartPartUrl, listProviderCapabilities, multipartPartUrlSchema, recordBlockedDeletionAudit, streamPrivateObjectResponse } from "./storage-service";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
@@ -1954,6 +1955,55 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   const qResolve=path.match(/^\/staff\/dispatch\/quarantined-evidence\/([a-f0-9-]{36})\/resolve$/i);
   if(method==="POST" && qResolve) {
     return extraWrite(req,path,actor,quarantineResolveSchema,(db,a,b)=>resolveQuarantinedEvidence(db,a,idSchema.parse(qResolve[1]),b));
+  }
+
+  // ---------- TASK-185 Object Storage Adapter & Private File Access ----------
+  if(method==="GET" && path==="/staff/storage/providers/capabilities") {
+    return json(listProviderCapabilities(actorRequired(actor)));
+  }
+  if(method==="POST" && path==="/storage/objects/authorize") {
+    return extraWrite(req,path,actor,authorizeStorageUploadSchema,(db,a,b)=>authorizeStorageUpload(db,a,b),201);
+  }
+  const stPart=path.match(/^\/storage\/objects\/([a-f0-9-]{36})\/multipart\/part-url$/i);
+  if(method==="POST" && stPart) {
+    return extraWrite(req,path,actor,multipartPartUrlSchema,(db,a,b)=>issueMultipartPartUrl(db,a,idSchema.parse(stPart[1]),b.part_number));
+  }
+  const stComplete=path.match(/^\/storage\/objects\/([a-f0-9-]{36})\/complete$/i);
+  if(method==="POST" && stComplete) {
+    csrf(req);
+    const a=actorRequired(actor),key=idSchema.parse(req.headers.get("idempotency-key")),data=completeStorageUploadSchema.parse(await input(req));
+    const oid=idSchema.parse(stComplete[1]);
+    const result=await transaction(db=>idempotent(db,a.id+":"+path,key,data,()=>completeStorageUpload(db,a,oid,data))) as {quarantined?:boolean};
+    return json(result,result.quarantined?422:200);
+  }
+  const stAbort=path.match(/^\/storage\/objects\/([a-f0-9-]{36})\/abort$/i);
+  if(method==="POST" && stAbort) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>abortStorageUpload(db,a,idSchema.parse(stAbort[1])));
+  }
+  const stAccess=path.match(/^\/storage\/objects\/([a-f0-9-]{36})\/access$/i);
+  if(method==="GET" && stAccess) {
+    const a=actorRequired(actor);
+    const oid=idSchema.parse(stAccess[1]);
+    const exp=z.coerce.number().int().min(30).max(300).optional().parse(new URL(req.url).searchParams.get("expires")??undefined);
+    return json(await transaction(db=>authorizePrivateObjectRead(db,a,oid,exp)));
+  }
+  const stStream=path.match(/^\/storage\/objects\/([a-f0-9-]{36})\/stream$/i);
+  if(method==="GET" && stStream) {
+    const a=actorRequired(actor);
+    const oid=idSchema.parse(stStream[1]);
+    return streamPrivateObjectResponse(a,oid,req.headers.get("range"));
+  }
+  const stDelete=path.match(/^\/staff\/storage\/objects\/([a-f0-9-]{36})$/i);
+  if(method==="DELETE" && stDelete) {
+    const oid=idSchema.parse(stDelete[1]);
+    try {
+      return await extraWrite(req,path,actor,deleteStorageObjectSchema,(db,a,b)=>deleteStorageObjectControlled(db,a,oid,b.reason));
+    } catch(err) {
+      if(err instanceof Problem && err.code==="DELETION_PROTECTED" && actor) {
+        await recordBlockedDeletionAudit(oid,actor,err.message);
+      }
+      throw err;
+    }
   }
 
   return null;
