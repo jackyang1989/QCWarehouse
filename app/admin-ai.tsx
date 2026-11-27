@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { Action, ErrorBlock, Form, Panel, request, stamp, Table, Tag, text, useLoad, type Row } from "./ui";
 import { AI_PURPOSE_CODES } from "../packages/core/ai-contract";
 import type { Actor } from "../packages/core/common";
@@ -88,6 +89,9 @@ export function AdminAiDesk({ actor }: { actor: Actor }) {
               {label}
             </button>
           ))}
+          <Link className="button sm" href="/admin/translations">
+            动态翻译与审核任务中心 (PAGE-M43) →
+          </Link>
         </div>
         {banner && <div className="line-note" style={{ marginTop: 10 }}>{banner}</div>}
       </Panel>

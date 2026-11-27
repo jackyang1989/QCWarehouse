@@ -21,6 +21,7 @@ import {
 import { AdminFinanceAnalytics, AdminPaymentsWorkbench, AdminRefundsWorkbench } from "./admin-finance";
 import { AdminOrdersWorkbench } from "./admin-orders";
 import { AdminDispositionsWorkbench, AdminIncidentsWorkbench, AdminOverviewDashboard } from "./admin-operations";
+import { BilingualEntityPanel } from "./bilingual-editor";
 import { OperationNoteList, OperationNotes } from "./operation-notes";
 import { operationNoteLimit } from "../packages/core/order-note-limits";
 
@@ -2132,6 +2133,7 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
   const [previewTemplate,setPreviewTemplate]=useState<Row|null>(null);
   const [compareTemplateId,setCompareTemplateId]=useState<string>("");
   const [admittingCategory,setAdmittingCategory]=useState<Row|null>(null);
+  const [translatingCategory,setTranslatingCategory]=useState<Row|null>(null);
   const [drawer,setDrawer]=useState<StaffObjectTarget|null>(null);
 
   if(error)return <ErrorBlock error={error}/>;
@@ -2410,16 +2412,21 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
                     </div>
                   : <span key="adm" className="muted">尚未登记准入材料</span>,
                 <span key="tc" className="nowrap">{publishedTplCount} 个已发布模板</span>,
-                superAdmin&&c.status!=="ACTIVE"?(
-                  <button key="act" type="button" className="button sm primary nowrap" onClick={()=>setAdmittingCategory(c)}>
-                    填写准入并激活 →
+                <div key="ops" className="row flexwrap" style={{gap:6}}>
+                  <button type="button" className="button sm" onClick={()=>setTranslatingCategory(translatingCategory?.id===c.id?null:c)}>
+                    {translatingCategory?.id===c.id?"收起双语":"双语译文"}
                   </button>
-                ):superAdmin&&c.status==="ACTIVE"?(
-                  <Action key="pa" sm run={async()=>{
-                    if(!window.confirm(`确认暂停「${c.labels["zh-CN"]}」对外新建订单？已创建的在途订单仍正常履约。`)) return;
-                    await request("/staff/admin/categories/"+c.id+"/status","POST",{status:"PAUSED"});reload();
-                  }}>暂停可售</Action>
-                ):null,
+                  {superAdmin&&c.status!=="ACTIVE"?(
+                    <button key="act" type="button" className="button sm primary nowrap" onClick={()=>setAdmittingCategory(c)}>
+                      填写准入并激活 →
+                    </button>
+                  ):superAdmin&&c.status==="ACTIVE"?(
+                    <Action key="pa" sm run={async()=>{
+                      if(!window.confirm(`确认暂停「${c.labels["zh-CN"]}」对外新建订单？已创建的在途订单仍正常履约。`)) return;
+                      await request("/staff/admin/categories/"+c.id+"/status","POST",{status:"PAUSED"});reload();
+                    }}>暂停可售</Action>
+                  ):null}
+                </div>,
               ];
             })}
             empty="暂无类目记录。"
@@ -2431,6 +2438,29 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
             }}><Field name="slug" label="类目编码"/><Field name="zh" label="中文名称"/><Field name="en" label="英文名称"/></Form>
           </>}
         </Panel>
+        {(translatingCategory??(data.categories??[])[0])&&(
+          <BilingualEntityPanel
+            key={String((translatingCategory??(data.categories??[])[0]).id)}
+            entityType="category"
+            entityId={String((translatingCategory??(data.categories??[])[0]).id)}
+            entityLabel={`类目：${String((translatingCategory??(data.categories??[])[0]).labels?.["zh-CN"]??(translatingCategory??(data.categories??[])[0]).slug)}`}
+            actor={actor}
+            fields={[
+              {
+                field_key: "display_name",
+                label: "类目名称 (Display Name)",
+                source_text: String((translatingCategory??(data.categories??[])[0]).labels?.["zh-CN"]??""),
+                source_revision: 1,
+              },
+              {
+                field_key: "scope_note",
+                label: "准入与适用范围说明",
+                source_text: String((translatingCategory??(data.categories??[])[0]).admission_snapshot?.pilot_evidence??"仅在 SOP 与质检模板审核后开放接单"),
+                source_revision: 1,
+              },
+            ]}
+          />
+        )}
       </>}
 
       {catalogTab==="offers"&&superAdmin&&<Panel title="可售套餐 SKU 与版本价格" subtitle="调价将签发新价格版本；客户已创建/已确认订单永久保留下单当时的价格快照。">
@@ -2603,6 +2633,30 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
                 s.component??"整件默认 (main)",
               ])}
               empty="未配置必拍机位。"
+            />
+          </div>
+
+          <div style={{marginTop:14}}>
+            <BilingualEntityPanel
+              key={String(previewTemplate.id)}
+              entityType="inspection_template"
+              entityId={String(previewTemplate.id)}
+              entityLabel={`检查模板：${String(previewTemplate.template_key)} v${previewTemplate.version}`}
+              actor={actor}
+              fields={[
+                {
+                  field_key: "measure_conditions",
+                  label: "测量环境与工器具条件",
+                  source_text: String(previewTemplate.content?.measure_conditions??""),
+                  source_revision: Number(previewTemplate.version??1),
+                },
+                ...(previewTemplate.content?.checks??[]).slice(0,5).map((c:Row)=>({
+                  field_key: `check_${String(c.key)}`,
+                  label: `检查项：${String(c.zh??c.label??c.key)}`,
+                  source_text: String(c.method??c.zh??""),
+                  source_revision: Number(previewTemplate.version??1),
+                })),
+              ]}
             />
           </div>
         </Panel>

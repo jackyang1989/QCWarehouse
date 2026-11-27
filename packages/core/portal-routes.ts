@@ -55,6 +55,7 @@ const adminTabs=[
   ["/admin/integrations/storage","对象存储配置",["super_admin"]],
   ["/admin/integrations/ocr","OCR 文档识别",["super_admin"]],
   ["/admin/integrations/ai","AI 与翻译服务",["super_admin"]],
+  ["/admin/translations","动态翻译与审核",["super_admin","template_admin","reviewer"]],
   ["/admin/integrations/logistics","物流接入",staffAccess.trackingConfiguration],
 ] as const;
 
@@ -94,7 +95,7 @@ export const legalPages = {
 } as const;
 
 type Area = "public" | "customer" | "warehouse" | "admin";
-type StaticView = "public-home" | "catalog" | "how-it-works" | "faq" | "report-guide" | "public-inquiry" | "legal" | "login" | "onboarding" | "account-recovery" | "staff-login" | "customer" | "customer-actions" | "warehouse" | "admin" | "admin-customers" | "admin-inspections" | "admin-media" | "admin-integrations" | "staff-tickets" | "logistics" | "logistics-configuration" | "storage-move" | "storage-locations" | "warehouse-scan" | "report-desk" | "operations";
+type StaticView = "public-home" | "catalog" | "how-it-works" | "faq" | "report-guide" | "public-inquiry" | "legal" | "login" | "onboarding" | "account-recovery" | "staff-login" | "customer" | "customer-actions" | "warehouse" | "admin" | "admin-customers" | "admin-inspections" | "admin-media" | "admin-integrations" | "admin-translations" | "staff-tickets" | "logistics" | "logistics-configuration" | "storage-move" | "storage-locations" | "warehouse-scan" | "report-desk" | "operations";
 type DetailView = "order" | "report" | "parcel" | "shipment" | "task" | "demo" | "warehouse-package" | "warehouse-item" | "customer-case" | "staff-ticket" | "staff-order" | "admin-customer" | "admin-payment" | "admin-refund" | "admin-incident" | "admin-disposal" | "admin-inspection-task" | "admin-media-detail" | "order-quote" | "order-shipment" | "dispatch-batch" | "staff-report";
 export const orderSections={
   payment:"Payment",parcels:"Parcels",dispositions:"Item instructions",storage:"Storage",
@@ -136,6 +137,7 @@ for(const [paths,route] of [
   [["/admin/storage/locations"],{area:"admin",view:"storage-locations"}],
   [["/admin/logistics"],{area:"admin",view:"logistics"}],
   [["/admin/integrations","/admin/integrations/payments","/admin/integrations/ocr","/admin/integrations/email","/admin/integrations/storage","/admin/integrations/ai"],{area:"admin",view:"admin-integrations"}],
+  [["/admin/translations"],{area:"admin",view:"admin-translations"}],
   [["/admin/integrations/logistics"],{area:"admin",view:"logistics-configuration"}],
 ] satisfies [string[],PortalRoute][]) {
   for(const path of paths) fixed.set(path,route);

@@ -190,6 +190,7 @@ export const ADMIN_DIRECT_ROUTE_ROLES: Record<string, readonly StaffRole[]> = {
   "/admin/integrations/ocr": ["super_admin"],
   "/admin/integrations/ai": ["super_admin"],
   "/admin/integrations/logistics": staffAccess.trackingConfiguration,
+  "/admin/translations": ["super_admin", "template_admin", "reviewer"],
 };
 
 export type StaffScopeContext = {

@@ -275,6 +275,7 @@ const PORTAL_ROUTE_TITLES: Record<string, string> = {
   "/admin/integrations/email": "邮件服务配置 · 运营管理后台",
   "/admin/integrations/storage": "对象存储配置 · 运营管理后台",
   "/admin/integrations/ai": "AI 与翻译服务 · 运营管理后台",
+  "/admin/translations": "动态翻译与审核任务中心 · 运营管理后台",
   "/admin/media": "媒体与证据中心 · 运营管理后台",
 };
 

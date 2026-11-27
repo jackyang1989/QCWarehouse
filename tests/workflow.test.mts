@@ -265,7 +265,7 @@ test("portal routing preserves valid deep links and limits staff pages by role",
   assert(permits("/admin/integrations/logistics",["super_admin"]));
   assert.deepEqual(staffTabs("admin",["finance"]).map(([path])=>path),["/admin","/admin/finance"]);
   assert.deepEqual(staffTabs("admin",["support"]).map(([path])=>path),["/admin","/admin/orders","/admin/tickets","/admin/logistics"]);
-  assert.deepEqual(staffTabs("admin",["template_admin"]).map(([path])=>path),["/admin","/admin/settings"]);
+  assert.deepEqual(staffTabs("admin",["template_admin"]).map(([path])=>path),["/admin","/admin/settings","/admin/translations"]);
 });
 
 test("an interrupted inspection checkout resumes the current charge and requotes the same order after expiry",async()=>{

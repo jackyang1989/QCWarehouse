@@ -472,9 +472,9 @@ export async function upsertDynamicTranslation(
     db,
     `insert into i18n_dynamic_translations (
        id, entity_type, entity_id, field_key, locale, revision,
-       source_locale, source_revision, source_hash, translated_text,
-       status, translator_kind, human_locked, created_by
-     ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       source_locale, source_revision, source_hash, source_text, translated_text,
+       status, translator_kind, human_locked, created_by, updated_by
+     ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)
      returning *`,
     [
       uuid(),
@@ -486,6 +486,7 @@ export async function upsertDynamicTranslation(
       sourceLocale,
       input.source_revision,
       sourceHash,
+      input.source_text,
       input.translated_text ?? null,
       nextStatus,
       input.translator_kind,
@@ -603,7 +604,7 @@ export async function markEntityTranslationsStale(
     `update i18n_dynamic_translations
      set status = 'stale', published_at = null, updated_at = now()
      where entity_type = $1 and entity_id = $2 ${fieldClause}
-       and status in ('approved', 'published')
+       and status in ('machine_draft', 'human_draft', 'pending_review', 'approved', 'published')
        and source_hash <> $3`,
     params,
   );

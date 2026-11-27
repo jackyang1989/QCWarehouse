@@ -23,6 +23,7 @@ import { createStorageInstance, createStorageMigrationJob, deleteStorageInstance
 import { authorizeEvidenceUpload, authorizeEvidenceUploadSchema, cancelCaptureCommand, cancelCaptureCommandSchema, cleanupExpiredUnfinishedUploads, completeEvidenceUpload, getEvidenceDetail, issueCaptureCommand, issueCaptureCommandSchema, linkEvidenceSchema, linkEvidenceToEntity, listEvidenceSyncQueue, resolveQuarantinedEvidenceRecord, resolveQuarantineEvidenceSchema, retryMediaProcessingJob } from "./capture-evidence";
 import { cancelMediaExportJob, createCostRateCardSchema, createExportJobSchema, createMediaExportJob, createMediaRetentionRequest, createRetentionRequestSchema, createStorageCostRateCard, decideMediaRetentionRequest, decideRetentionRequestSchema, getAdminMediaDetail, getAdminMediaStats, getDeviceMediaHistory, getEmployeeMediaHistory, getMediaExportJob, listAdminMediaCenter, listMediaExportJobs, listMediaReconciliationAnomalies, listMediaRetentionRequests, listRevocationTombstones, readLegacyCompatibleBinary, replayRevocationTombstones, resolveMediaReconciliationAnomaly, rollbackLegacyMigrationPointers, runMediaReconciliation, streamAdminMediaObject, switchVerifiedLegacyMigrationPointers } from "./media-center";
 import { createImmutableLocaleSnapshot, createLocaleSnapshotSchema, decideDynamicTranslation, decideDynamicTranslationSchema, getAdminI18nOverview, getLocalePreferencesForActor, listDynamicTranslations, listRegisteredLocales, markEntityTranslationsStale, markTranslationsStaleSchema, publicLocaleSelectionSchema, setPublicLocalePreference, toggleLocaleStatusSchema, toggleRegisteredLocale, updateActorLocalePreferences, updateLocalePreferencesSchema, upsertDynamicTranslation, upsertDynamicTranslationSchema } from "./i18n-service";
+import { applyCandidateSchema, applyTranslationCandidate, cancelTranslationBatch, createBatchSchema, createTranslationBatch, exportTranslationBatchCsv, getTranslationBatchDetail, getTranslationDiff, listTranslationBatches, pauseTranslationBatch, previewBatchSchema, previewTranslationBatch, publishCheckSchema, publishEntityTranslations, publishEntityTranslationsSchema, assertRequiredLocalesReadyForPublish, rejectTranslationCandidate, requestFieldOrFormTranslation, requestTranslationSchema, resumeTranslationBatch, retryFailedBatchItems } from "./translation-workflow";
 import { appendAiModelRateVersion, appendAiRateSchema, approveAiModel, approveAiProviderInstance, createAiInstanceSchema, createAiProviderInstance, deprecateAiModel, getAdminAiCostLedger, getAdminAiOverview, listAiInvocations, manualAiModelSchema, probeAiProviderInstance, reconciliationSchema, recordAiCostReconciliation, registerAiModelManual, revokeAiInstanceSecret, revokeAiSecretSchema, runSyntheticTranslationTest, saveAiInstanceSecret, saveAiSecretSchema, syncAiProviderModels, syntheticTestSchema, transitionAiInstanceLifecycle, updateAiInstanceSchema, updateAiProviderInstance, upsertAiBudgetPolicy, upsertBudgetPolicySchema } from "./ai-service";
 import { approveGlossaryTerm, cancelTranslationJob, createGlossaryTerm, createGlossaryTermSchema, createPromptDraft, createPromptDraftSchema, createPurposeRouteDraft, createPurposeRouteSchema, enqueueTranslationJob, enqueueTranslationJobSchema, getTranslationJobDetail, invalidateTenantTranslationCache, listEvalRuns, listGlossaryTerms, listPromptVersions, listPurposeRoutes, publishPromptVersion, publishPurposeRoute, retryTranslationJob, retryTranslationJobSchema, reviewEvalHumanQaSchema, reviewEvalRunHumanQa, rollbackPromptVersion, rollbackPurposeRoute, runEvalSuiteSchema, runTranslationEvalSuite, seedDefaultAiPrompts, seedDefaultEvalCases } from "./ai-translation-service";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
@@ -2477,6 +2478,64 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   const aiEvalReview=path.match(/^\/staff\/admin\/ai\/evals\/([a-f0-9-]{36})\/review$/i);
   if(method==="POST" && aiEvalReview) {
     return extraWrite(req,path,actor,reviewEvalHumanQaSchema,(db,a,b)=>reviewEvalRunHumanQa(db,a,idSchema.parse(aiEvalReview[1]),b));
+  }
+
+  // ---------- TASK-193 Dynamic Translation Component Workflow & Review/Batch Center (PAGE-M43) ----------
+  if(method==="POST" && path==="/staff/admin/translations/request") {
+    return extraWrite(req,path,actor,requestTranslationSchema,(db,a,b)=>requestFieldOrFormTranslation(db,a,b));
+  }
+  const dynTransDiff=path.match(/^\/staff\/admin\/translations\/([a-f0-9-]{36})\/diff$/i);
+  if(method==="GET" && dynTransDiff) {
+    return json(await transaction(db=>getTranslationDiff(db,actorRequired(actor),idSchema.parse(dynTransDiff[1]))));
+  }
+  const dynTransApply=path.match(/^\/staff\/admin\/translations\/([a-f0-9-]{36})\/apply-candidate$/i);
+  if(method==="POST" && dynTransApply) {
+    return extraWrite(req,path,actor,applyCandidateSchema,(db,a,b)=>applyTranslationCandidate(db,a,idSchema.parse(dynTransApply[1]),b));
+  }
+  const dynTransReject=path.match(/^\/staff\/admin\/translations\/([a-f0-9-]{36})\/reject-candidate$/i);
+  if(method==="POST" && dynTransReject) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>rejectTranslationCandidate(db,a,idSchema.parse(dynTransReject[1])));
+  }
+  if(method==="POST" && path==="/staff/admin/translations/publish-check") {
+    return extraWrite(req,path,actor,publishCheckSchema,
+      (db,a,b)=>assertRequiredLocalesReadyForPublish(db,a,b.entity_type,b.entity_id,b.required_fields,b.required_locales));
+  }
+  if(method==="POST" && path==="/staff/admin/translations/publish-entity") {
+    return extraWrite(req,path,actor,publishEntityTranslationsSchema,(db,a,b)=>publishEntityTranslations(db,a,b));
+  }
+  if(method==="POST" && path==="/staff/admin/translations/batches/preview") {
+    return extraWrite(req,path,actor,previewBatchSchema,(db,a,b)=>previewTranslationBatch(db,a,b));
+  }
+  if(method==="GET" && path==="/staff/admin/translations/batches") {
+    return json(await transaction(db=>listTranslationBatches(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/translations/batches") {
+    return extraWrite(req,path,actor,createBatchSchema,(db,a,b)=>createTranslationBatch(db,a,b),201);
+  }
+  const dynBatchDetail=path.match(/^\/staff\/admin\/translations\/batches\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && dynBatchDetail) {
+    return json(await transaction(db=>getTranslationBatchDetail(db,actorRequired(actor),idSchema.parse(dynBatchDetail[1]))));
+  }
+  const dynBatchPause=path.match(/^\/staff\/admin\/translations\/batches\/([a-f0-9-]{36})\/pause$/i);
+  if(method==="POST" && dynBatchPause) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>pauseTranslationBatch(db,a,idSchema.parse(dynBatchPause[1])));
+  }
+  const dynBatchResume=path.match(/^\/staff\/admin\/translations\/batches\/([a-f0-9-]{36})\/resume$/i);
+  if(method==="POST" && dynBatchResume) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>resumeTranslationBatch(db,a,idSchema.parse(dynBatchResume[1])));
+  }
+  const dynBatchCancel=path.match(/^\/staff\/admin\/translations\/batches\/([a-f0-9-]{36})\/cancel$/i);
+  if(method==="POST" && dynBatchCancel) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>cancelTranslationBatch(db,a,idSchema.parse(dynBatchCancel[1])));
+  }
+  const dynBatchRetry=path.match(/^\/staff\/admin\/translations\/batches\/([a-f0-9-]{36})\/retry-failed$/i);
+  if(method==="POST" && dynBatchRetry) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>retryFailedBatchItems(db,a,idSchema.parse(dynBatchRetry[1])));
+  }
+  const dynBatchExport=path.match(/^\/staff\/admin\/translations\/batches\/([a-f0-9-]{36})\/export$/i);
+  if(method==="GET" && dynBatchExport) {
+    const out=await transaction(db=>exportTranslationBatchCsv(db,actorRequired(actor),hash(getCookie(req,"session")),idSchema.parse(dynBatchExport[1])));
+    return new Response(out.csv,{status:200,headers:{"content-type":"text/csv; charset=utf-8","content-disposition":`attachment; filename="${out.filename}"`}});
   }
 
   return null;

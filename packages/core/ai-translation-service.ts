@@ -27,6 +27,7 @@ import {
 import { requireStaffMfa } from "./auth";
 import { audit, guard, hash, one, Problem, role, uuid, type Actor } from "./common";
 import { assertEnabledLocale } from "./locale-contract";
+import { syncCompletedTranslationJobToDynamicFields } from "./translation-workflow-sync";
 
 export const createPromptDraftSchema = z.object({
   purpose_code: z.enum(AI_PURPOSE_CODES),
@@ -967,6 +968,12 @@ export async function enqueueTranslationJob(
       "Cross-tenant translation scope is forbidden.",
       403,
     );
+    guard(
+      !input.idempotency_key.startsWith("wf:") && !input.idempotency_key.startsWith("batch:"),
+      "FORBIDDEN",
+      "Customer translation jobs cannot use internal workflow idempotency prefixes.",
+      403,
+    );
     tenantScopeKey = expectedScope;
   } else {
     role(actor, "super_admin", "template_admin", "reviewer", "support", "inspector");
@@ -1269,6 +1276,7 @@ async function failTranslationExecutionOnException(params: {
         errSummary,
       ],
     );
+    await syncCompletedTranslationJobToDynamicFields(db, params.job.id);
 
     return {
       skip: false as const,
@@ -1290,6 +1298,42 @@ export async function processTranslationJob(jobId: string, workerOwner = "worker
     ).rows[0];
     if (!job || !["queued", "retry_wait"].includes(job.status)) {
       return { skip: true as const };
+    }
+
+    const parentBatchStatus = (
+      await db.query<{ status: string }>(
+        `select b.status
+         from translation_batch_run_items bi
+         join translation_batch_runs b on b.id = bi.batch_id
+         where bi.ai_job_id = $1
+         limit 1`,
+        [job.id],
+      )
+    ).rows[0]?.status;
+
+    if (parentBatchStatus === "cancelled") {
+      await db.query(
+        `update ai_translation_jobs
+         set status = 'cancelled', last_error_code = 'BATCH_CANCELLED',
+             last_error_summary = 'Parent translation batch was cancelled prior to execution.',
+             lease_token = null, lease_owner = null, completed_at = now(), updated_at = now()
+         where id = $1`,
+        [job.id],
+      );
+      await db.query(
+        "update ai_translation_job_items set status = 'cancelled', updated_at = now() where job_id = $1 and status in ('queued','failed')",
+        [job.id],
+      );
+      await syncCompletedTranslationJobToDynamicFields(db, job.id);
+      return { skip: true as const, cancelled: true };
+    }
+
+    if (parentBatchStatus === "paused") {
+      await db.query(
+        "update ai_translation_jobs set status = 'retry_wait', updated_at = now() where id = $1",
+        [job.id],
+      );
+      return { skip: true as const, paused: true };
     }
 
     if (Number(job.attempts) >= Number(job.max_attempts)) {
@@ -1494,6 +1538,7 @@ export async function processTranslationJob(jobId: string, workerOwner = "worker
          where id = $1`,
         [job.id, cacheHits, cachedJobStatus],
       );
+      await syncCompletedTranslationJobToDynamicFields(db, job.id);
       return { skip: true as const, cachedOnly: true };
     }
 
@@ -1813,6 +1858,7 @@ export async function processTranslationJob(jobId: string, workerOwner = "worker
          where id = $1`,
         [job.id, nextJobStatus, usedFallback, cacheHits, attemptedProviderCalls, callResult.errorCode, callResult.errorSummary],
       );
+      await syncCompletedTranslationJobToDynamicFields(db, job.id);
       return { skip: false, status: nextJobStatus, invocation_id: inv.id };
     }
 
@@ -1919,6 +1965,7 @@ export async function processTranslationJob(jobId: string, workerOwner = "worker
        where id = $1`,
       [job.id, finalJobStatus, usedFallback, cacheHits, attemptedProviderCalls, rejectedCount],
     );
+    await syncCompletedTranslationJobToDynamicFields(db, job.id);
 
     return {
       skip: false,
