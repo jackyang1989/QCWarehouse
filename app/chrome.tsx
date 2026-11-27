@@ -371,8 +371,8 @@ const navIcons:Record<string,string>={
   "/account/notifications":"notifications","/notifications":"notifications","/support":"support",
   "/wh":"overview","/wh/scan":"scan","/wh/intake":"intake","/wh/packages":"packages","/wh/samples":"items",
   "/wh/storage":"storage","/wh/inspection":"inspection","/wh/execute":"execute","/wh/sync":"sync",
-  "/wh/review":"review","/wh/dispatch":"dispatch","/wh/logistics":"logistics","/wh/stocktakes":"stocktakes",
-  "/admin":"overview","/admin/orders":"orders","/admin/customers":"users","/admin/tickets":"support",
+  "/wh/review":"review","/wh/dispatch":"dispatch","/wh/logistics":"logistics","/wh/stocktakes":"stocktakes","/wh/notifications":"notifications",
+  "/admin":"overview","/admin/orders":"orders","/admin/customers":"users","/admin/tickets":"support","/admin/notifications":"notifications",
   "/admin/inspections":"inspection","/admin/media":"reports","/admin/dispositions":"compare",
   "/admin/refunds":"refunds","/admin/payments":"payments","/admin/finance":"analytics","/admin/logistics":"logistics",
   "/admin/incidents":"incidents","/admin/catalog":"catalog","/admin/templates":"templates",
@@ -393,10 +393,10 @@ const navigationSections = {
     ["Account",["/account","/account/billing","/account/notifications","/support"]],
   ],
   warehouse: [
-    ["运营作业",["/wh","/wh/scan","/wh/intake","/wh/packages","/wh/samples","/wh/storage","/wh/inspection","/wh/execute","/wh/sync","/wh/review","/wh/dispatch","/wh/logistics","/wh/stocktakes"]],
+    ["运营作业",["/wh","/wh/scan","/wh/intake","/wh/packages","/wh/samples","/wh/storage","/wh/inspection","/wh/execute","/wh/sync","/wh/review","/wh/dispatch","/wh/logistics","/wh/stocktakes","/wh/notifications"]],
   ],
   admin: [
-    ["运营管理",["/admin","/admin/orders","/admin/customers","/admin/tickets","/admin/inspections","/admin/media","/admin/dispositions","/admin/refunds","/admin/payments","/admin/finance","/admin/logistics","/admin/incidents"]],
+    ["运营管理",["/admin","/admin/orders","/admin/customers","/admin/tickets","/admin/notifications","/admin/inspections","/admin/media","/admin/dispositions","/admin/refunds","/admin/payments","/admin/finance","/admin/logistics","/admin/incidents"]],
     ["平台配置",["/admin/catalog","/admin/templates","/admin/storage/locations","/admin/shipping-rates","/admin/config","/admin/legal","/admin/users","/admin/audit","/admin/operations","/admin/integrations","/admin/integrations/payments","/admin/integrations/ocr","/admin/integrations/logistics","/admin/integrations/email","/admin/integrations/storage"]],
   ],
 } satisfies Record<string,[string,string[]][]>;

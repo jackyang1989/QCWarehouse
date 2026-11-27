@@ -5,7 +5,7 @@ import { audit, event, guard, hash, isDemo, lock, numericCode, one, role, shangh
 import { passwordHash, requireStaffMfa } from "./auth";
 import { assertLastOwnerPreserved, STAFF_ROLES, type StaffRole } from "./authz-contract";
 import { seal, unseal } from "./crypto";
-import { queueNotificationEmail } from "./email";
+import { emitActiveSuperAdminEvent, emitCommunicationEvent } from "./communications";
 
 export const staffInviteSchema = z.object({
   display_name: z.string().trim().min(2).max(120),
@@ -75,13 +75,24 @@ async function issueInviteRecord(
       params.actorId,
     ],
   );
-  const notif = await one<{ id: string }>(
-    db,
-    `insert into notifications(id, user_id, template, locale, payload, dedupe_key)
-     values($1, $2, 'staff.invited', $3, $4::jsonb, $5) returning id`,
-    [uuid(), params.userId, params.locale, JSON.stringify({ invitation_id: inviteId }), `staff.invited:${inviteId}`],
-  );
-  await queueNotificationEmail(db, notif.id, params.userId, params.workEmail);
+  await emitCommunicationEvent(db, {
+    sourceKind: "security_alert",
+    eventType: "staff.invited",
+    entityType: "staff_invitations",
+    entityId: inviteId,
+    dedupeKey: `staff.invited:${inviteId}`,
+    metadata: { invitation_id: inviteId },
+    createdBy: params.actorId,
+    channels: ["in_app", "email"],
+    recipients: [
+      {
+        userId: params.userId,
+        kind: "staff",
+        locale: params.locale,
+        emailOverride: params.workEmail,
+      },
+    ],
+  });
   await event(db, "staff.invited", { user_id: params.userId, invitation_id: inviteId, locale: params.locale });
   return { inviteId, rawToken };
 }
@@ -425,6 +436,27 @@ export async function acceptStaffInvitation(db: DB, input: z.infer<typeof staffA
     employee_no: inv.employee_no,
     roles: inv.preassigned_roles,
   });
+  await emitCommunicationEvent(db, {
+    sourceKind: "security_alert",
+    eventType: "staff.activated",
+    entityType: "staff_profiles",
+    entityId: inv.user_id,
+    dedupeKey: `staff.activated:${inv.id}`,
+    metadata: { employee_no: inv.employee_no, invitation_id: inv.id },
+    createdBy: inv.user_id,
+    channels: ["in_app"],
+    recipients: [{ userId: inv.user_id, kind: "staff" }],
+  });
+  await emitActiveSuperAdminEvent(db, {
+    sourceKind: "security_alert",
+    eventType: "staff.activated",
+    entityType: "staff_profiles",
+    entityId: inv.user_id,
+    dedupeKey: `staff.activated:admin:${inv.id}`,
+    metadata: { employee_no: inv.employee_no, invitation_id: inv.id },
+    createdBy: inv.user_id,
+    channels: ["in_app"],
+  });
 
   return {
     activated: true as const,
@@ -442,10 +474,26 @@ export async function revokeAllStaffSessions(db: DB, actor: Actor, targetUserId:
     "update sessions set revoked_at = now() where user_id = $1 and revoked_at is null returning id",
     [targetUserId],
   );
-  await db.query("update users set auth_version = auth_version + 1, updated_at = now() where id = $1", [targetUserId]);
+  const updatedAuth = await one<{ auth_version: number }>(
+    db,
+    "update users set auth_version = auth_version + 1, updated_at = now() where id = $1 returning auth_version",
+    [targetUserId],
+  );
   await audit(db, actor, "revoke_staff_sessions", "users", targetUserId, {
     revoked_sessions_count: revoked.rowCount ?? 0,
     reason,
+  });
+  await emitCommunicationEvent(db, {
+    sourceKind: "security_alert",
+    eventType: "staff.sessions_revoked",
+    entityType: "users",
+    entityId: targetUserId,
+    entityVersion: updatedAuth.auth_version,
+    dedupeKey: `staff.sessions_revoked:${targetUserId}:v${updatedAuth.auth_version}`,
+    metadata: { revoked_sessions_count: revoked.rowCount ?? 0, auth_version: updatedAuth.auth_version },
+    createdBy: actor.id,
+    channels: ["in_app"],
+    recipients: [{ userId: targetUserId, kind: "staff" }],
   });
   return { revoked_sessions_count: revoked.rowCount ?? 0 };
 }
@@ -551,6 +599,29 @@ export async function offboardStaffAccount(
     reason: input.reason,
     handover_count: handoversCreated,
   });
+  await emitActiveSuperAdminEvent(db, {
+    sourceKind: "security_alert",
+    eventType: "staff.offboarded",
+    entityType: "staff_profiles",
+    entityId: targetUserId,
+    dedupeKey: `staff.offboarded:${targetUserId}`,
+    metadata: { handover_count: handoversCreated },
+    createdBy: actor.id,
+    channels: ["in_app"],
+  });
+  if (input.handover_to_user_id && handoversCreated > 0) {
+    await emitCommunicationEvent(db, {
+      sourceKind: "auto_event",
+      eventType: "staff.handover_assigned",
+      entityType: "staff_handovers",
+      entityId: targetUserId,
+      dedupeKey: `staff.handover_assigned:${targetUserId}:${input.handover_to_user_id}`,
+      metadata: { from_user_id: targetUserId, handover_count: handoversCreated },
+      createdBy: actor.id,
+      channels: ["in_app"],
+      recipients: [{ userId: input.handover_to_user_id, kind: "staff" }],
+    });
+  }
   return { user_id: targetUserId, employment_status: "offboarded" as const, handovers_created: handoversCreated };
 }
 

@@ -3,7 +3,8 @@ import { publishReport } from "./inspection";
 import { executeRefund, expireCheckout, scheduleCheckoutExpirations } from "./payments";
 import { cleanupExpiredOcrJobs, runOcrJob } from "./ocr";
 import { consumeTrackingCallback, subscribeTrackingOnce, syncTrackingOnce } from "./logistics";
-import { consumeEmailWebhook, deliverEmailOnce, queueNotificationEmail } from "./email";
+import { consumeEmailWebhook, deliverEmailOnce } from "./email";
+import { emitCommunicationEvent, emitActiveSuperAdminEvent } from "./communications";
 import { cleanupStaleMediaUploads } from "./media";
 import { cleanupExpiredUnfinishedUploads, processMediaJob } from "./capture-evidence";
 import { processTranslationJob } from "./ai-translation-service";
@@ -98,11 +99,21 @@ export async function workOnce() {
       }
       else {
         if(j.type==="account.registered" && j.payload.warehouse_address_status==="pending") {
-          await db.query(`insert into notifications(user_id,template,locale,payload,dedupe_key)
-            select u.id,'warehouse.address_required','zh-CN','{}'::jsonb,'missing-warehouse-address:'||u.id::text
-            from users u join staff_roles s on s.user_id=u.id and s.role='super_admin'
-            where u.status='active' and not exists(select 1 from warehouse_addresses where is_default and active)
-            on conflict(dedupe_key) do update set read_at=null,created_at=now()`);
+          const admins=(await db.query<{user_id:string}>(
+            `select u.id as user_id from users u join staff_roles s on s.user_id=u.id and s.role='super_admin'
+             where u.status='active' and not exists(select 1 from warehouse_addresses where is_default and active)`
+          )).rows;
+          for(const adm of admins) {
+            await emitCommunicationEvent(db,{
+              sourceKind:"security_alert",
+              eventType:"warehouse.address_required",
+              entityType:"warehouse_addresses",
+              dedupeKey:`missing-warehouse-address:${adm.user_id}`,
+              resetReadOnConflict:true,
+              channels:["in_app"],
+              recipients:[{userId:adm.user_id,kind:"staff"}],
+            });
+          }
         }
         if(j.type==="quote.offered") {
           const current=(await db.query<{id:string}>(`select q.id from orders o
@@ -127,7 +138,7 @@ export async function workOnce() {
             `storage_quotes q join disposition_requests d on d.id=q.disposition_id where ${pendingStorageQuote}`;
           deliver=Boolean((await db.query(`select 1 from ${source} and q.id=$1`,[j.payload.quote_id])).rowCount);
         }
-        const recipient=!deliver?null:(await db.query(`select p.user_id from customer_receiving_profiles p where org_id=coalesce(
+        const recipient=!deliver?null:(await db.query<{user_id:string;org_id:string}>(`select p.user_id,p.org_id from customer_receiving_profiles p where org_id=coalesce(
           (select org_id from orders where id=$1),(select org_id from packages where id=$2),
           (select org_id from dispatch_batches where id=$3),(select b.org_id from shipments s join dispatch_batches b on b.id=s.batch_id where s.id=$4),
           (select org_id from charge_items where id=$5),(select org_id from tracking_records where id=$6),
@@ -135,9 +146,23 @@ export async function workOnce() {
           j.payload.batch_id??null,j.payload.shipment_id??null,j.payload.charge_id??null,j.payload.tracker_id??null,j.payload.org_id??null,j.payload.ticket_id??null])).rows[0];
         if(recipient) {
           const dedupeKey=eventDedupeKey(j);
-          const inserted=(await db.query<{id:string}>(`insert into notifications(user_id,order_id,template,locale,payload,dedupe_key)
-            values($1,$2,$3,'en',$4,$5) on conflict do nothing returning id`,[recipient.user_id,j.payload.order_id??null,j.type,j.payload,dedupeKey])).rows[0];
-          if(inserted) await queueNotificationEmail(db,inserted.id,recipient.user_id);
+          const orderMeta=j.payload.order_id?(await db.query<{public_no:string;is_test:boolean}>(
+            "select public_no,coalesce(is_test,false) is_test from orders where id=$1",[j.payload.order_id]
+          )).rows[0]:undefined;
+          await emitCommunicationEvent(db,{
+            sourceKind:j.type==="order.identity_mismatch"?"security_alert":"auto_event",
+            eventType:j.type,
+            eventId:String(j.id),
+            entityType:j.payload.order_id?"orders":j.payload.ticket_id?"tickets":j.payload.shipment_id?"shipments":j.payload.package_id?"packages":"notifications",
+            entityId:String(j.payload.order_id??j.payload.ticket_id??j.payload.shipment_id??j.payload.package_id??j.payload.charge_id??j.id),
+            orderId:j.payload.order_id??null,
+            orderPublicNo:orderMeta?.public_no??null,
+            isTest:Boolean(orderMeta?.is_test),
+            dedupeKey,
+            metadata:j.payload,
+            channels:["in_app","email"],
+            recipients:[{userId:recipient.user_id,kind:"customer",orgId:recipient.org_id}],
+          });
         }
       }
       await db.query("update outbox_events set processed_at=now(),last_error=null where id=$1",[j.id]);

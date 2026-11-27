@@ -11,6 +11,7 @@ import { integrationPreflight, signInMethods } from "./integrations";
 import { failedJobs, retryFailedJob } from "./worker";
 import { quotePolicy, quotePolicyInput, saveQuotePolicy } from "./quote-policy";
 import { customerEmailDeliveryStatus, createNotificationTemplateDraft, emailChannelReadiness, listNotificationTemplates, publishNotificationTemplate, receivePostmarkWebhook, receiveResendWebhook, retryEmailDelivery, staffEmailDeliveries } from "./email";
+import { adminCommunicationHistoryQuerySchema, getAdminCommunicationDetail, getCustomerNotificationDetail, getStaffNotificationDetail, listAdminCommunicationHistory, listStaffInbox, markAllStaffInboxRead, markStaffInboxRead, runLegacyReconciliation, staffNotificationQuerySchema } from "./communications";
 import { activateLegalEntity, createLegalEntityDraft, createMerchantInstance, evaluateOpeningReadinessMatrix, legalEntityCreateSchema, listLegalEntities, listMerchantInstances, merchantInstanceCreateSchema, merchantInstanceStatusSchema, retireLegalEntity, transitionMerchantInstanceStatus } from "./legal-merchants";
 import { acceptStaffInvitation, createAndInviteStaff, getStaffDetail, listStaffDirectory, offboardStaffAccount, previewStaffInvitation, resendStaffInvitation, revokeAllStaffSessions, revokeStaffInvitation, staffAcceptInviteSchema, staffInviteSchema, staffOffboardSchema, startStaffInvitationMfa } from "./staff-lifecycle";
 import { archiveRbacRole, assignCustomRoleToStaff, computeEffectiveStaffPermissions, createCustomRbacRoleDraft, listRbacRoles, previewRbacRoleImpact, publishRbacRole, rbacAssignmentSchema, rbacRoleDraftSchema, removeCustomRoleFromStaff } from "./rbac-admin";
@@ -496,6 +497,10 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const before=idSchema.nullable().parse(url.searchParams.get("before"));
     const category=notificationCategory.parse(url.searchParams.get("category")??"all");
     return json(await transaction(db=>customerNotifications(db,actorRequired(actor),unread,before,undefined,category)));
+  }
+  const customerNoticeDetail=path.match(/^\/me\/notifications\/([a-f0-9-]{36})$/i);
+  if(method==="GET"&&customerNoticeDetail) {
+    return json(await transaction(db=>getCustomerNotificationDetail(db,actorRequired(actor),idSchema.parse(customerNoticeDetail[1]))));
   }
   const readNotice=path.match(/^\/me\/notifications\/([a-f0-9-]{36})\/read$/i);
   if(method==="POST"&&readNotice)return extraWrite(req,path,actor,z.object({}).strict(),
@@ -1878,11 +1883,44 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     return extraWrite(req,path,actor,skillRevokeSchema,(db,a,b)=>revokeSkillGrant(db,a,idSchema.parse(skillRevoke[1]),b));
   }
   if(method==="GET" && path==="/staff/me/notifications") {
-    return json(await transaction(db=>listStaffOwnNotifications(db,actorRequired(actor))));
+    const q=staffNotificationQuerySchema.parse({
+      unread:url.searchParams.get("unread"),
+      category:url.searchParams.get("category")??"all",
+      before:url.searchParams.get("before"),
+    });
+    return json(await transaction(db=>listStaffInbox(db,actorRequired(actor),q)));
+  }
+  const staffNotifDetail=path.match(/^\/staff\/me\/notifications\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && staffNotifDetail) {
+    return json(await transaction(db=>getStaffNotificationDetail(db,actorRequired(actor),idSchema.parse(staffNotifDetail[1]))));
+  }
+  if(method==="POST" && path==="/staff/me/notifications/read-all") {
+    return extraWrite(req,path,actor,z.object({}).strict(),(db,a)=>markAllStaffInboxRead(db,a));
   }
   const staffNotifRead=path.match(/^\/staff\/me\/notifications\/([a-f0-9-]{36})\/read$/i);
   if(method==="POST" && staffNotifRead) {
-    return extraWrite(req,path,actor,z.object({}),(db,a)=>markStaffNotificationRead(db,a,idSchema.parse(staffNotifRead[1])));
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>markStaffInboxRead(db,a,idSchema.parse(staffNotifRead[1])));
+  }
+  if(method==="GET" && path==="/staff/admin/communications/history") {
+    const sp=url.searchParams;
+    const q=adminCommunicationHistoryQuerySchema.parse({
+      channel:sp.get("channel")??"all",
+      state:sp.get("state")??undefined,
+      event_type:sp.get("event_type")??undefined,
+      recipient_user_id:sp.get("recipient_user_id")??undefined,
+      entity_type:sp.get("entity_type")??undefined,
+      q:sp.get("q")??undefined,
+      include_test:sp.get("include_test")??"1",
+      page:sp.get("page")??1,
+    });
+    return json(await transaction(db=>listAdminCommunicationHistory(db,actorRequired(actor),q)));
+  }
+  const commDetail=path.match(/^\/staff\/admin\/communications\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && commDetail) {
+    return json(await transaction(db=>getAdminCommunicationDetail(db,actorRequired(actor),idSchema.parse(commDetail[1]))));
+  }
+  if(method==="POST" && path==="/staff/admin/communications/reconcile-legacy") {
+    return extraWrite(req,path,actor,z.object({}).strict(),(db,a)=>runLegacyReconciliation(db,a));
   }
 
   // ---------- TASK-184 Scheduling, Dispatch, Task Leases, Handovers & Late-Evidence Quarantine ----------

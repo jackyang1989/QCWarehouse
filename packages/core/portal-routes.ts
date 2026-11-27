@@ -25,12 +25,14 @@ const warehouseTabs=[
   ["/wh/dispatch","出库待办",staffAccess.dispatch],
   ["/wh/stocktakes","库存盘点",staffAccess.intake],
   ["/wh/logistics","物流监控",staffAccess.tracking],
+  ["/wh/notifications","个人收件箱",warehouseOverview],
 ] as const;
 const adminTabs=[
   ["/admin","运营总览",staffAccess.administration],
   ["/admin/orders","全部订单",staffAccess.orders],
   ["/admin/customers","客户档案",["super_admin"]],
   ["/admin/tickets","客户工单",staffAccess.orders],
+  ["/admin/notifications","消息与收件箱",["super_admin"]],
   ["/admin/inspections","质检与报告",["super_admin"]],
   ["/admin/media","媒体与证据",["super_admin","warehouse_admin","reviewer"]],
   ["/admin/dispositions","处置与报价",["super_admin"]],
@@ -66,6 +68,7 @@ export function staffTabs(area:"admin"|"warehouse",roles:readonly string[]):[str
 
 export function canOpenStaffPage(path:string,route:PortalRoute,roles:readonly string[]) {
   if(route.area!=="admin"&&route.area!=="warehouse") return false;
+  if(route.view==="staff-notifications") return hasStaffAccess(roles,["receiver","inspector","reviewer","warehouse_admin","support","super_admin","template_admin","finance"]);
   if(route.view==="task") return hasStaffAccess(roles,["inspector","reviewer","warehouse_admin","super_admin"]);
   if(route.view==="dispatch-batch") return hasStaffAccess(roles,staffAccess.dispatch);
   if(route.view==="staff-report") return hasStaffAccess(roles,[...staffAccess.reportEditing,"support","inspector"]);
@@ -95,7 +98,7 @@ export const legalPages = {
 } as const;
 
 type Area = "public" | "customer" | "warehouse" | "admin";
-type StaticView = "public-home" | "catalog" | "how-it-works" | "faq" | "report-guide" | "public-inquiry" | "legal" | "login" | "onboarding" | "account-recovery" | "staff-login" | "customer" | "customer-actions" | "warehouse" | "admin" | "admin-customers" | "admin-inspections" | "admin-media" | "admin-integrations" | "admin-translations" | "staff-tickets" | "logistics" | "logistics-configuration" | "storage-move" | "storage-locations" | "warehouse-scan" | "report-desk" | "operations";
+type StaticView = "public-home" | "catalog" | "how-it-works" | "faq" | "report-guide" | "public-inquiry" | "legal" | "login" | "onboarding" | "account-recovery" | "staff-login" | "customer" | "customer-actions" | "warehouse" | "admin" | "admin-customers" | "admin-inspections" | "admin-media" | "admin-integrations" | "admin-translations" | "staff-notifications" | "staff-tickets" | "logistics" | "logistics-configuration" | "storage-move" | "storage-locations" | "warehouse-scan" | "report-desk" | "operations";
 type DetailView = "order" | "report" | "parcel" | "shipment" | "task" | "demo" | "warehouse-package" | "warehouse-item" | "customer-case" | "staff-ticket" | "staff-order" | "admin-customer" | "admin-payment" | "admin-refund" | "admin-incident" | "admin-disposal" | "admin-inspection-task" | "admin-media-detail" | "order-quote" | "order-shipment" | "dispatch-batch" | "staff-report";
 export const orderSections={
   payment:"Payment",parcels:"Parcels",dispositions:"Item instructions",storage:"Storage",
@@ -131,11 +134,13 @@ for(const [paths,route] of [
   [["/admin/operations"],{area:"admin",view:"operations"}],
   [["/admin/catalog","/admin/categories","/admin/templates","/admin/dispositions","/admin/refunds","/admin/payments","/admin/incidents","/admin/shipping-rates","/admin/config","/admin/legal","/admin/users"],{area:"admin",view:"admin"}],
   [["/wh/logistics"],{area:"warehouse",view:"logistics"}],
+  [["/wh/notifications"],{area:"warehouse",view:"staff-notifications"}],
   [["/wh/storage","/wh/stocktakes"],{area:"warehouse",view:"storage-move"}],
   [["/wh/review"],{area:"warehouse",view:"report-desk"}],
   [["/wh/scan"],{area:"warehouse",view:"warehouse-scan"}],
   [["/admin/storage/locations"],{area:"admin",view:"storage-locations"}],
   [["/admin/logistics"],{area:"admin",view:"logistics"}],
+  [["/admin/notifications"],{area:"admin",view:"staff-notifications"}],
   [["/admin/integrations","/admin/integrations/payments","/admin/integrations/ocr","/admin/integrations/email","/admin/integrations/storage","/admin/integrations/ai"],{area:"admin",view:"admin-integrations"}],
   [["/admin/translations"],{area:"admin",view:"admin-translations"}],
   [["/admin/integrations/logistics"],{area:"admin",view:"logistics-configuration"}],

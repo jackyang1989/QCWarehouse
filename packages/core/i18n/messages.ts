@@ -151,6 +151,21 @@ export const FIXED_I18N_RESOURCES: readonly FixedResourceEntry[] = [
   entry("error.SOD_VIOLATION", "Separation of duties prevents self-approval of this record.", "职责分离规则禁止由本人审批自己提交的内容。"),
   entry("error.HUMAN_TRANSLATION_LOCKED", "Approved human translation is locked against AI overwrite.", "已人工锁定译文禁止被 AI 自动草稿覆盖。"),
   entry("error.SERVER_ERROR", "The operation failed. Please retry or contact support.", "系统处理失败，请重试或联系技术支持。"),
+
+  // Unified Notifications & Three-Portal Bell
+  entry("bell.label", "Notifications", "通知中心"),
+  entry("bell.unreadCount", "{count} unread notifications", "有 {count} 条未读通知", ["count"]),
+  entry("bell.openInbox", "Open full inbox", "查看全部通知"),
+  entry("bell.empty", "No notifications yet.", "暂无消息通知"),
+  entry(
+    "bell.todoNotice",
+    "Marking a notification as read does not complete or close Action Required tasks.",
+    "将通知标记为已读不会关闭对应的待办事项（请前往具体业务完成实际操作）。",
+  ),
+  entry("inbox.securityCategory", "Security & Governance", "安全与权限"),
+  entry("inbox.announcementsCategory", "Announcements", "系统公告"),
+  entry("inbox.channelInApp", "In-App", "站内"),
+  entry("inbox.channelEmail", "Email", "邮件"),
 ];
 
 const MESSAGE_MAP = new Map<string, FixedResourceEntry>(

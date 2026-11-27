@@ -2,6 +2,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { DB } from "../db";
 import { audit, event, guard, hash, lock, one, role, uuid, type Actor } from "./common";
+import { listStaffInbox, markStaffInboxRead } from "./communications";
 import { recordRevocationTombstone } from "./media-center";
 
 export const STATION_TYPES = ["A_receiving", "B_inspection_shoot", "C_pack_handover"] as const;
@@ -1339,26 +1340,10 @@ export async function evaluateServiceSellability(
 
 export async function listStaffOwnNotifications(db: Pick<DB, "query">, actor: Actor) {
   role(actor, ...READ_ROLES);
-  const { rows } = await db.query(
-    `select id, template, locale, payload, read_at, created_at
-     from notifications
-     where user_id = $1
-     order by created_at desc
-     limit 100`,
-    [actor.id],
-  );
-  return { notifications: rows };
+  return listStaffInbox(db, actor);
 }
 
 export async function markStaffNotificationRead(db: DB, actor: Actor, notificationId: string) {
   role(actor, ...READ_ROLES);
-  const row = await one(
-    db,
-    `update notifications
-     set read_at = coalesce(read_at, now())
-     where id = $1 and user_id = $2
-     returning id, template, read_at`,
-    [notificationId, actor.id],
-  );
-  return { notification: row };
+  return markStaffInboxRead(db, actor, notificationId);
 }

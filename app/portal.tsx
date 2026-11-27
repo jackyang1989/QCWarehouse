@@ -26,7 +26,7 @@ import { PublishedReports } from "./report-sharing";
 import { clearCustomerDraftRecovery } from "./draft-recovery";
 import { AuditDesk } from "./audit-desk";
 import { staffLoginCopy } from "./staff-login-copy";
-import { NotificationInbox } from "./notifications";
+import { NotificationInbox, StaffNotificationInbox, WorkspaceNotificationBell } from "./notifications";
 import { LocaleProvider, useLocale, WorkspaceLanguageSwitcher } from "./i18n-client";
 import { t } from "../packages/core/i18n/messages";
 import { localizePublicPath, type EnabledLocale } from "../packages/core/locale-contract";
@@ -146,6 +146,7 @@ function PortalInner({path,target,route,actor:a,demo=false,timeZone,customerAcco
   else if(route.view==="logistics-configuration") content=<LogisticsConfiguration/>;
   else if(route.view==="admin-integrations") content=<AdminIntegrationsDesk path={path} actor={a} demo={demo}/>;
   else if(route.view==="admin-translations") content=<AdminTranslationsDesk actor={a}/>;
+  else if(route.view==="staff-notifications") content=<StaffNotificationInbox actor={a} area={route.area as "warehouse"|"admin"}/>;
   else if(route.view==="warehouse-scan") content=<WarehouseScan actor={a}/>;
   else if(route.view==="warehouse-item") content=<WarehouseItemView code={route.id} actor={a}/>;
   else if(route.view==="warehouse-package") content=<WarehousePackageView code={route.id} actor={a}/>;
@@ -232,6 +233,7 @@ function PortalInner({path,target,route,actor:a,demo=false,timeZone,customerAcco
       </div>
       <span className="topspacer"/>
       <div className="header-right">
+        <WorkspaceNotificationBell area={route.area as "customer"|"warehouse"|"admin"} actor={a} locale={locale}/>
         <WorkspaceLanguageSwitcher locale={locale}/>
         {!isStaff&&a.kind==="customer"&&<Link className="workspace-account" href="/account/security" aria-current={path==="/account/security"?"page":undefined}>
           <strong title={customerAccount}>{customerAccount??"Account"}</strong>

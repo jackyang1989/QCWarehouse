@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { pool, transaction, type DB } from "../db";
 import { appOrigin, decryptSecret, encryptSecret, requireStaffMfa } from "./auth";
 import { audit, guard, hash, isDemo, lock, one, organization, role, uuid, type Actor } from "./common";
+import { emitCommunicationEvent, syncEmailDeliveryState } from "./communications";
 import { EMAIL_SUBMISSION_TIMEOUT_MS, submitEmail } from "./email-transport";
 import { emailSettings, postmarkSettings } from "./integrations";
 import { assertEnabledLocale, normalizeLocaleTag, type EnabledLocale } from "./locale-contract";
@@ -112,39 +113,58 @@ export async function queueNotificationEmail(
       ).rows[0];
   if (!recipient) return;
   const snapshot = encryptSecret(recipient.email);
+  const masked = maskEmail(recipient.email);
+  let insertedId: string | undefined;
   if (recipient.delivery_state === "bounced" || recipient.delivery_state === "complained") {
-    await db.query(
-      `insert into email_deliveries(id, notification_id, address_snapshot, attempt, state, updated_at, error_code)
-       values($1, $2, $3, 1, $4, now(), 'ADDRESS_SUPPRESSED')
-       on conflict(notification_id, attempt) do nothing`,
-      [uuid(), notificationId, snapshot, recipient.delivery_state],
-    );
-    return;
+    insertedId = (
+      await db.query<{ id: string }>(
+        `insert into email_deliveries(id, notification_id, address_snapshot, attempt, state, updated_at, error_code)
+         values($1, $2, $3, 1, $4, now(), 'ADDRESS_SUPPRESSED')
+         on conflict(notification_id, attempt) do nothing
+         returning id`,
+        [uuid(), notificationId, snapshot, recipient.delivery_state],
+      )
+    ).rows[0]?.id;
+  } else if (isDemo()) {
+    insertedId = (
+      await db.query<{ id: string }>(
+        `insert into email_deliveries(id, notification_id, address_snapshot, provider_message_id, attempt, state, updated_at)
+         values($1, $2, $3, $4, 1, 'submitted', now())
+         on conflict(notification_id, attempt) do nothing
+         returning id`,
+        [uuid(), notificationId, snapshot, `demo-${notificationId}`],
+      )
+    ).rows[0]?.id;
+  } else {
+    insertedId = (
+      await db.query<{ id: string }>(
+        `insert into email_deliveries(id, notification_id, address_snapshot, attempt, state, updated_at)
+         values($1, $2, $3, 1, 'queued', now())
+         on conflict(notification_id, attempt) do nothing
+         returning id`,
+        [uuid(), notificationId, snapshot],
+      )
+    ).rows[0]?.id;
   }
-  if (isDemo()) {
-    await db.query(
-      `insert into email_deliveries(id, notification_id, address_snapshot, provider_message_id, attempt, state, updated_at)
-       values($1, $2, $3, $4, 1, 'submitted', now())
-       on conflict(notification_id, attempt) do nothing`,
-      [uuid(), notificationId, snapshot, `demo-${notificationId}`],
-    );
-    return;
+  if (insertedId) {
+    await syncEmailDeliveryState(db, insertedId, { maskedContact: masked });
   }
-  await db.query(
-    `insert into email_deliveries(id, notification_id, address_snapshot, attempt, state, updated_at)
-     values($1, $2, $3, 1, 'queued', now())
-     on conflict(notification_id, attempt) do nothing`,
-    [uuid(), notificationId, snapshot],
-  );
 }
 
 async function notifyCustomerDeliveryFailed(db: DB, userId: string, normalizedEmail: string, state: "bounced" | "complained") {
-  await db.query(
-    `insert into notifications(user_id, template, locale, payload, dedupe_key)
-     values($1, 'email.delivery_failed', 'en', $2, $3)
-     on conflict(dedupe_key) do update set read_at = null, payload = excluded.payload`,
-    [userId, { delivery_state: state, masked_email: maskEmail(normalizedEmail) }, `email.delivery_failed:${userId}:${normalizedEmail}`],
-  );
+  const emailRef = hash(normalizedEmail).slice(0, 16);
+  await emitCommunicationEvent(db, {
+    sourceKind: "security_alert",
+    eventType: "email.delivery_failed",
+    entityType: "user_emails",
+    entityId: `${userId}:${emailRef}`,
+    priority: "high",
+    dedupeKey: `email.delivery_failed:${userId}:${emailRef}`,
+    metadata: { delivery_state: state, masked_email: maskEmail(normalizedEmail) },
+    channels: ["in_app"],
+    resetReadOnConflict: true,
+    recipients: [{ userId, kind: "customer" }],
+  });
 }
 
 async function notifyEmailChannelAlert(db: DB, deliveryId: string, errorCode: string) {
@@ -156,14 +176,18 @@ async function notifyEmailChannelAlert(db: DB, deliveryId: string, errorCode: st
        where sr.role = 'super_admin' and u.status = 'active'`,
     )
   ).rows;
-  for (const admin of admins) {
-    await db.query(
-      `insert into notifications(user_id, template, locale, payload, dedupe_key)
-       values($1, 'email.channel_degraded', 'zh-CN', $2, $3)
-       on conflict(dedupe_key) do nothing`,
-      [admin.user_id, { delivery_id: deliveryId, error_code: errorCode }, `email.channel_degraded:${deliveryId}:${admin.user_id}`],
-    );
-  }
+  if (admins.length === 0) return;
+  await emitCommunicationEvent(db, {
+    sourceKind: "security_alert",
+    eventType: "email.channel_degraded",
+    entityType: "email_deliveries",
+    entityId: deliveryId,
+    priority: "high",
+    dedupeKey: `email.channel_degraded:${deliveryId}`,
+    metadata: { delivery_id: deliveryId, error_code: errorCode },
+    channels: ["in_app"],
+    recipients: admins.map((a) => ({ userId: a.user_id, kind: "staff" as const })),
+  });
 }
 
 export async function deliverEmailOnce() {
@@ -192,11 +216,19 @@ export async function deliverEmailOnce() {
       )
     ).rows[0];
     if (!row) return null;
-    const recipient = decryptSecret(row.address_snapshot).trim().toLowerCase();
+    const rawRecipient = decryptSecret(row.address_snapshot).trim().toLowerCase();
+    const testInbox = row.order_is_test ? process.env.QCW_TEST_EMAIL_INBOX?.trim().toLowerCase() ?? "" : "";
+    const effectiveRecipient = testInbox || rawRecipient;
+    const evidenceNote = testInbox
+      ? `routed_to_test_inbox:${maskEmail(testInbox)}`
+      : row.order_is_test
+        ? "test_order_prefix_applied"
+        : null;
+
     const emailRow = (
       await db.query<{ delivery_state: string }>(
         `select delivery_state from user_emails where user_id = $1 and normalized_email = $2 limit 1`,
-        [row.user_id, recipient],
+        [row.user_id, rawRecipient],
       )
     ).rows[0];
     if (emailRow && (emailRow.delivery_state === "bounced" || emailRow.delivery_state === "complained")) {
@@ -204,16 +236,18 @@ export async function deliverEmailOnce() {
         `update email_deliveries set state = $2, error_code = 'ADDRESS_SUPPRESSED', updated_at = now() where id = $1`,
         [row.id, emailRow.delivery_state],
       );
+      await syncEmailDeliveryState(db, row.id, { maskedContact: maskEmail(effectiveRecipient), isTest: row.order_is_test });
       return { handled: true as const };
     }
     const mail = isDemo() ? { enabled: false as const } : await emailSettings(db);
     if (isDemo() && !mail.enabled) {
       await db.query(
         `update email_deliveries
-         set state = 'submitted', provider_message_id = $2, error_code = null, updated_at = now()
+         set state = 'submitted', provider_message_id = $2, error_code = null, delivery_evidence_note = coalesce($3, delivery_evidence_note), updated_at = now()
          where id = $1`,
-        [row.id, `demo-${row.notification_id}-${row.attempt}`],
+        [row.id, `demo-${row.notification_id}-${row.attempt}`, evidenceNote],
       );
+      await syncEmailDeliveryState(db, row.id, { maskedContact: maskEmail(effectiveRecipient), isTest: row.order_is_test });
       return { handled: true as const };
     }
     if (!mail.enabled) {
@@ -221,6 +255,7 @@ export async function deliverEmailOnce() {
         `update email_deliveries set state = 'deferred', error_code = 'PROVIDER_UNCONFIGURED', updated_at = now() where id = $1`,
         [row.id],
       );
+      await syncEmailDeliveryState(db, row.id, { maskedContact: maskEmail(effectiveRecipient), isTest: row.order_is_test });
       await notifyEmailChannelAlert(db, row.id, "PROVIDER_UNCONFIGURED");
       return { handled: true as const };
     }
@@ -231,16 +266,28 @@ export async function deliverEmailOnce() {
       isTest: row.order_is_test,
     });
     await db.query(
-      `update email_deliveries set provider = $2, state = 'unknown', error_code = $3, locale = $4, template_version = $5, updated_at = now() where id = $1`,
-      [row.id, mail.provider, SUBMISSION_IN_PROGRESS, rendered.locale, rendered.templateVersion],
+      `update email_deliveries
+       set provider = $2, state = 'unknown', error_code = $3, locale = $4, template_version = $5,
+           delivery_evidence_note = coalesce($6, delivery_evidence_note), updated_at = now()
+       where id = $1`,
+      [row.id, mail.provider, SUBMISSION_IN_PROGRESS, rendered.locale, rendered.templateVersion, evidenceNote],
     );
+    await syncEmailDeliveryState(db, row.id, {
+      maskedContact: maskEmail(effectiveRecipient),
+      renderedSubject: rendered.subject,
+      renderedBody: rendered.text,
+      renderedLocale: rendered.locale,
+      templateVersion: rendered.templateVersion,
+      isTest: row.order_is_test,
+    });
     return {
       handled: false as const,
       id: row.id,
       notificationId: row.notification_id,
       attempt: row.attempt,
       userId: row.user_id,
-      recipient,
+      rawRecipient,
+      recipient: effectiveRecipient,
       template: row.template,
       orderPublicNo: row.order_public_no,
       orderIsTest: row.order_is_test,
@@ -272,14 +319,24 @@ export async function deliverEmailOnce() {
        where id = $1 and state = 'unknown' and error_code = $5`,
       [claimed.id, outcome.kind, messageId, errorCode, SUBMISSION_IN_PROGRESS],
     );
-    if (!updated.rowCount || outcome.kind === "submitted") return;
+    if (!updated.rowCount) return;
+    await syncEmailDeliveryState(db, claimed.id, {
+      maskedContact: maskEmail(claimed.recipient),
+      renderedSubject: claimed.rendered.subject,
+      renderedBody: claimed.rendered.text,
+      renderedLocale: claimed.rendered.locale,
+      templateVersion: claimed.rendered.templateVersion,
+      isTest: claimed.orderIsTest,
+    });
+    if (outcome.kind === "submitted") return;
     if (outcome.kind === "bounced") {
+      if (claimed.orderIsTest) return;
       await db.query(
         `update user_emails set delivery_state = 'bounced' where user_id = $1 and normalized_email = $2
          and delivery_state is distinct from 'complained'`,
-        [claimed.userId, claimed.recipient],
+        [claimed.userId, claimed.rawRecipient],
       );
-      await notifyCustomerDeliveryFailed(db, claimed.userId, claimed.recipient, "bounced");
+      await notifyCustomerDeliveryFailed(db, claimed.userId, claimed.rawRecipient, "bounced");
       return;
     }
     await notifyEmailChannelAlert(db, claimed.id, outcome.errorCode);
@@ -439,16 +496,22 @@ function deliveryEvent(provider: "postmark" | "resend", raw: string) {
   }
 }
 
-async function applyDeliveryEvent(db: DB, provider: "postmark" | "resend", event: NonNullable<ReturnType<typeof deliveryEvent>>) {
+async function applyDeliveryEvent(
+  db: DB,
+  provider: "postmark" | "resend",
+  event: NonNullable<ReturnType<typeof deliveryEvent>>,
+  providerEventId?: string | null,
+) {
   const { messageId, deliveryId, recipients, state, errorCode } = event;
   const metadataId = typeof deliveryId === "string" &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(deliveryId) ? deliveryId : null;
 
   const delivery = (
-    await db.query<{ id: string; address_snapshot: Buffer; state: string; error_code: string | null; user_id: string }>(
-      `select d.id, d.address_snapshot, d.state, d.error_code, n.user_id
+    await db.query<{ id: string; address_snapshot: Buffer; state: string; error_code: string | null; user_id: string; order_is_test: boolean }>(
+      `select d.id, d.address_snapshot, d.state, d.error_code, n.user_id, coalesce(o.is_test, false) as order_is_test
        from email_deliveries d
        join notifications n on n.id = d.notification_id
+       left join orders o on o.id = n.order_id
        where d.provider = $1 and (d.provider_message_id = $2 or (d.id = $3::uuid and d.provider_message_id is null))
        order by (d.provider_message_id is not null) desc, d.attempt desc
        limit 1
@@ -458,7 +521,10 @@ async function applyDeliveryEvent(db: DB, provider: "postmark" | "resend", event
   ).rows[0];
   if (!delivery) return;
   const recipient = decryptSecret(delivery.address_snapshot).trim().toLowerCase();
-  if (recipients && !recipients.includes(recipient)) return;
+  const testInbox = delivery.order_is_test ? process.env.QCW_TEST_EMAIL_INBOX?.trim().toLowerCase() ?? "" : "";
+  const matchedRecipient =
+    !recipients || recipients.includes(recipient) || (Boolean(testInbox) && recipients.includes(testInbox));
+  if (!matchedRecipient) return;
   if (delivery.state === "complained") return;
   if (delivery.state === "bounced" && state !== "complained") return;
   if (delivery.state === "delivered" && (state === "deferred" || state === "submitted")) return;
@@ -471,6 +537,13 @@ async function applyDeliveryEvent(db: DB, provider: "postmark" | "resend", event
      where id = $1`,
     [delivery.id, state, messageId, errorCode],
   );
+  await syncEmailDeliveryState(db, delivery.id, {
+    maskedContact: maskEmail(testInbox || recipient),
+    providerEventId: providerEventId ?? messageId ?? null,
+    isTest: delivery.order_is_test,
+  });
+
+  if (delivery.order_is_test) return;
 
   const owner = [delivery.user_id, recipient];
   if (state === "bounced" || state === "complained") {
@@ -497,8 +570,8 @@ async function applyDeliveryEvent(db: DB, provider: "postmark" | "resend", event
 
 export async function consumeEmailWebhook(db: DB) {
   const inbox = (
-    await db.query<{ id: string; provider: "postmark" | "resend"; payload_ciphertext: Buffer }>(
-      `select id, provider, payload_ciphertext
+    await db.query<{ id: string; provider: "postmark" | "resend"; event_key: string; payload_ciphertext: Buffer }>(
+      `select id, provider, event_key, payload_ciphertext
        from email_webhook_inbox
        where provider in ('postmark', 'resend') and processed_at is null
        order by received_at, id
@@ -522,7 +595,7 @@ export async function consumeEmailWebhook(db: DB) {
       );
     }
   }
-  if (event?.messageId) await applyDeliveryEvent(db, inbox.provider, event);
+  if (event?.messageId) await applyDeliveryEvent(db, inbox.provider, event, inbox.event_key);
 
   await db.query(`update email_webhook_inbox set processed_at = now() where id = $1`, [inbox.id]);
   return true;
@@ -747,6 +820,11 @@ export async function retryEmailDelivery(
      values($1, $2, $3, $4, 'queued', now())`,
     [nextId, latest.notification_id, latest.address_snapshot, nextAttempt],
   );
+  await syncEmailDeliveryState(db, nextId, {
+    maskedContact: maskEmail(recipient),
+    retryBy: actor.id,
+    retryReason: reason.trim(),
+  });
   await audit(db, actor, "retry_email_delivery", "email_deliveries", nextId, {
     previous_delivery_id: deliveryId,
     previous_attempt: latest.attempt,
@@ -781,8 +859,26 @@ function templateActionLink(templateCode: string, orderPublicNo: string | null, 
       return orderPublicNo ? `${origin}/orders/${orderPublicNo}` : `${origin}/account`;
     case "ticket.reply":
       return `${origin}/support`;
+    case "ticket.created":
+    case "ticket.customer_replied":
+      return `${origin}/admin/tickets`;
+    case "owner.legal_entity_activated":
+    case "owner.legal_entity_retired":
+      return `${origin}/admin/legal`;
+    case "owner.merchant_instance_changed":
+      return `${origin}/admin/payments`;
     case "staff.invited":
+    case "staff.activated":
+    case "staff.sessions_revoked":
+    case "staff.role_changed":
       return `${origin}/staff/login`;
+    case "staff.offboarded":
+    case "staff.handover_assigned":
+      return `${origin}/admin/users`;
+    case "email.channel_degraded":
+      return `${origin}/admin/integrations/email`;
+    case "email.delivery_failed":
+      return `${origin}/account`;
     default:
       return `${origin}/account`;
   }

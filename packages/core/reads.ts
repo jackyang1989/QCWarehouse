@@ -614,26 +614,73 @@ export async function customerDesk(db:DB,actor:Actor,includeItems=true,focusedCh
     ...(chargePage?{has_more_charges:charges.length>billingPageSize}:{}),
     ...(refundPage?{has_more_refunds:refunds.length>billingPageSize}:{})};
 }
-export const notificationCategory=z.enum(["all","orders","reports","parcels","billing","support"]);
+export const notificationCategory=z.enum(["all","orders","reports","parcels","billing","support","security","system","announcements"]);
 export async function customerNotifications(db:DB,actor:Actor,unread=false,before:string|null=null,pageSize=50,
   category:z.infer<typeof notificationCategory>="all") {
   const org=organization(actor);
-  if(before)await one(db,"select id from notifications where id=$1 and user_id=$2",[before,actor.id]);
-  const {rows}=await db.query(`with batch as (
-    select n.id,n.template,n.read_at,n.created_at,n.order_id,n.payload
-    from notifications n where n.user_id=$1 and (not $3::boolean or n.read_at is null)
-    and case $6::text
-      when 'orders' then n.template like 'order.%'
-      when 'reports' then n.template like 'report.%'
-      when 'parcels' then n.template like 'package.%' or n.template like 'tracking.%' or n.template like 'shipment.%' or n.template='reference.sealed'
-      when 'billing' then n.template like 'payment.%' or n.template like 'refund.%' or n.template like '%.quoted' or n.template='quote.offered'
-      when 'support' then n.template like 'ticket.%' or n.template like 'incident.%' or n.template in ('email.delivery_failed','account.registered')
-      else true end
-    and ($4::uuid is null or (coalesce(n.created_at,'-infinity'),n.id)<(
-      select coalesce(prev.created_at,'-infinity'),prev.id from notifications prev where prev.id=$4 and prev.user_id=$1))
+  if(before) {
+    const validBefore=(await db.query(`select 1 from notifications where id=$1 and user_id=$2
+      union all select 1 from notification_recipients where id=$1 and recipient_user_id=$2 limit 1`,[before,actor.id])).rowCount;
+    guard(Boolean(validBefore),"NOT_FOUND","Notification cursor not found.",404);
+  }
+  const {rows}=await db.query(`with unified as (
+    select n.id,n.template,n.locale,n.read_at,n.created_at,n.order_id,n.payload,
+      nr.id as recipient_id,nr.category as nr_category,nm.source_kind,
+      coalesce(nr.title_snapshot,nm.title_snapshot) as title_snapshot,
+      coalesce(nr.body_snapshot,nm.body_snapshot) as body_snapshot,
+      coalesce(nr.cta_path,nm.cta_path) as cta_path,
+      nr.associated_todo_kind,nr.associated_todo_id,
+      coalesce(nm.is_test,false) as is_test,
+      nr.retracted_at
+    from notifications n
+    left join notification_recipients nr on nr.legacy_notification_id=n.id
+    left join notification_masters nm on nm.id=nr.notification_id
+    where n.user_id=$1
+    union all
+    select nr.id,nm.template_code as template,nr.locale,nr.read_at,nr.created_at,
+      case when nm.entity_type='orders' and nm.entity_id ~ '^[0-9a-f-]{36}$' then nm.entity_id::uuid else null::uuid end as order_id,
+      nm.metadata as payload,
+      nr.id as recipient_id,nr.category as nr_category,nm.source_kind,
+      coalesce(nr.title_snapshot,nm.title_snapshot) as title_snapshot,
+      coalesce(nr.body_snapshot,nm.body_snapshot) as body_snapshot,
+      coalesce(nr.cta_path,nm.cta_path) as cta_path,
+      nr.associated_todo_kind,nr.associated_todo_id,
+      nm.is_test,
+      nr.retracted_at
+    from notification_recipients nr
+    join notification_masters nm on nm.id=nr.notification_id
+    where nr.recipient_user_id=$1 and nr.legacy_notification_id is null
+  ), batch as (
+    select * from unified n
+    where n.retracted_at is null
+      and (not $3::boolean or n.read_at is null)
+      and case $6::text
+        when 'orders' then n.template like 'order.%'
+        when 'reports' then n.template like 'report.%'
+        when 'parcels' then n.template like 'package.%' or n.template like 'tracking.%' or n.template like 'shipment.%' or n.template='reference.sealed'
+        when 'billing' then n.template like 'payment.%' or n.template like 'refund.%' or n.template like '%.quoted' or n.template='quote.offered'
+        when 'support' then n.template like 'ticket.%' or n.template like 'incident.%' or n.template in ('email.delivery_failed','account.registered')
+        when 'security' then coalesce(n.nr_category,'')='security' or n.template='account.security_alert'
+        when 'announcements' then coalesce(n.source_kind,'')='announcement'
+        when 'system' then coalesce(n.nr_category,'')='system'
+        else true end
+      and ($4::uuid is null or (coalesce(n.created_at,'-infinity'),n.id)<(
+        select coalesce(prev.created_at,'-infinity'),prev.id from unified prev where prev.id=$4 limit 1))
     order by n.created_at desc nulls last,n.id desc limit $5
   )
-  select n.id,n.template,n.read_at,n.created_at,o.public_no order_number,
+  select n.id,n.template,n.locale,n.read_at,
+    n.created_at,o.public_no order_number,
+    n.title_snapshot,n.body_snapshot,n.cta_path,n.associated_todo_kind,n.associated_todo_id,n.is_test,
+    false as marking_read_closes_todo,
+    coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'channel',ncd.channel,'state',ncd.state,'masked_contact',ncd.masked_contact,
+        'rendered_locale',ncd.rendered_locale,'is_test',ncd.is_test,'error_code',ncd.error_code,
+        'delivered_at',ncd.delivered_at,'read_at',ncd.read_at
+      ) order by ncd.channel)
+      from notification_channel_deliveries ncd
+      where ncd.recipient_id=n.recipient_id
+    ),'[]'::jsonb) as channel_deliveries,
     (select v.version from reports r join report_versions v on v.report_id=r.id
       where r.order_id=o.id and v.version::text=n.payload->>'version' and v.state in ('published','superseded')) report_version,
     k.id case_id,k.public_no case_number,s.id shipment_id,a.id advice_id,
@@ -658,17 +705,51 @@ export async function customerNotifications(db:DB,actor:Actor,unread=false,befor
     and t.direction='inbound' and t.closed_at is null order by t.generation desc limit 1) parcel_tracking on true
   order by n.created_at desc nulls last,n.id desc`,[actor.id,org,unread,before,pageSize+1,category]);
   const page=rows.slice(0,pageSize);
-  const unread_count=(await one<{n:number}>(db,"select count(*)::int n from notifications where user_id=$1 and read_at is null",[actor.id])).n;
+  const unread_count=(await one<{n:number}>(db,`select (
+    (select count(*)::int from notifications n
+     left join notification_recipients nr on nr.legacy_notification_id=n.id
+     where n.user_id=$1 and nr.retracted_at is null and coalesce(nr.read_at,n.read_at) is null) +
+    (select count(*)::int from notification_recipients
+     where recipient_user_id=$1 and legacy_notification_id is null and retracted_at is null and read_at is null)
+  )::int as n`,[actor.id])).n;
   return {rows:page,unread_count,next_before:rows.length>pageSize?page.at(-1)?.id:null};
 }
 export async function markNotificationRead(db:DB,actor:Actor,id:string) {
   organization(actor);
-  return one(db,`update notifications set read_at=coalesce(read_at,now()) where id=$1 and user_id=$2 returning id,read_at`,[id,actor.id]);
+  const legacyUpd=(await db.query<{id:string;read_at:Date}>(
+    `update notifications set read_at=coalesce(read_at,now()) where id=$1 and user_id=$2 returning id,read_at`,
+    [id,actor.id],
+  )).rows[0];
+  const rec=(await db.query<{id:string;read_at:Date}>(
+    `update notification_recipients set read_at=coalesce(read_at,$2,now())
+     where recipient_user_id=$3 and (id=$1 or legacy_notification_id=$1)
+     returning id,read_at`,
+    [id,legacyUpd?.read_at??null,actor.id],
+  )).rows[0];
+  guard(Boolean(legacyUpd||rec),"NOT_FOUND","Notification not found.",404);
+  if(rec) {
+    await db.query(
+      `update notification_channel_deliveries set state='read',read_at=coalesce(read_at,$2),updated_at=now()
+       where recipient_id=$1 and channel='in_app'`,
+      [rec.id,rec.read_at],
+    );
+  }
+  return {id:legacyUpd?.id??rec!.id,read_at:legacyUpd?.read_at??rec!.read_at,business_todo_closed:false as const};
 }
 export async function markAllNotificationsRead(db:DB,actor:Actor) {
   organization(actor);
-  const {rowCount}=await db.query(`update notifications set read_at=now() where user_id=$1 and read_at is null`,[actor.id]);
-  return {updated:rowCount??0};
+  const {rowCount}=await db.query(`update notifications set read_at=coalesce(read_at,now()) where user_id=$1 and read_at is null`,[actor.id]);
+  await db.query(
+    `update notification_recipients set read_at=coalesce(read_at,now())
+     where recipient_user_id=$1 and read_at is null and retracted_at is null`,
+    [actor.id],
+  );
+  await db.query(
+    `update notification_channel_deliveries set state='read',read_at=coalesce(read_at,now()),updated_at=now()
+     where recipient_user_id=$1 and channel='in_app' and read_at is null`,
+    [actor.id],
+  );
+  return {updated:rowCount??0,business_todo_closed:false as const};
 }
 export async function warehousePackage(db:DB,actor:Actor,value:string,byCode=false) {
   role(actor,...staffAccess.intake);

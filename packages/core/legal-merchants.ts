@@ -3,6 +3,7 @@ import type { DB } from "../db";
 import { audit, guard, isDemo, lock, one, role, uuid, type Actor } from "./common";
 import { requireStaffMfa } from "./auth";
 import { emailChannelReadiness } from "./email";
+import { emitActiveSuperAdminEvent } from "./communications";
 import { integrationPreflight, signInMethods } from "./integrations";
 import { stripeSettingsFromDb } from "./integrations";
 import { demoWarehouseAddressZh } from "./demo-fixtures";
@@ -118,6 +119,15 @@ export async function activateLegalEntity(db: DB, actor: Actor, entityId: string
     entity_code: current.entity_code,
     is_default_for_new_orders: true,
   });
+  await emitActiveSuperAdminEvent(db, {
+    sourceKind: "auto_event",
+    eventType: "owner.legal_entity_activated",
+    entityType: "legal_entities",
+    entityId,
+    dedupeKey: `owner.legal_entity_activated:${entityId}:${String(activated.version ?? 1)}`,
+    metadata: { entity_code: current.entity_code, version: activated.version ?? 1 },
+    createdBy: actor.id,
+  });
   return activated;
 }
 
@@ -145,6 +155,15 @@ export async function retireLegalEntity(db: DB, actor: Actor, entityId: string, 
     [entityId],
   );
   await audit(db, actor, "retire_legal_entity", "legal_entities", entityId, { entity_code: current.entity_code });
+  await emitActiveSuperAdminEvent(db, {
+    sourceKind: "auto_event",
+    eventType: "owner.legal_entity_retired",
+    entityType: "legal_entities",
+    entityId,
+    dedupeKey: `owner.legal_entity_retired:${entityId}`,
+    metadata: { entity_code: current.entity_code },
+    createdBy: actor.id,
+  });
   return retired;
 }
 
@@ -215,6 +234,16 @@ export async function createMerchantInstance(
     environment: input.environment,
     status: input.status,
   });
+  await emitActiveSuperAdminEvent(db, {
+    sourceKind: "auto_event",
+    eventType: "owner.merchant_instance_changed",
+    entityType: "merchant_instances",
+    entityId: id,
+    entityVersion: 1,
+    dedupeKey: `owner.merchant_instance_changed:${id}:v1`,
+    metadata: { instance_code: input.instance_code.toLowerCase(), status: input.status },
+    createdBy: actor.id,
+  });
   return created;
 }
 
@@ -265,6 +294,20 @@ export async function transitionMerchantInstanceStatus(
     next_status: input.status,
     is_primary_for_new_orders: nextPrimary,
     reason: input.reason,
+  });
+  await emitActiveSuperAdminEvent(db, {
+    sourceKind: "auto_event",
+    eventType: "owner.merchant_instance_changed",
+    entityType: "merchant_instances",
+    entityId: instanceId,
+    entityVersion: Number(updated.config_version ?? 1),
+    dedupeKey: `owner.merchant_instance_changed:${instanceId}:v${String(updated.config_version ?? 1)}`,
+    metadata: {
+      instance_code: existing.instance_code,
+      previous_status: existing.status,
+      next_status: input.status,
+    },
+    createdBy: actor.id,
   });
   return updated;
 }

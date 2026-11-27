@@ -1,10 +1,30 @@
 import { z } from "zod";
 import type { DB } from "../db";
 import { audit, code, event, guard, hash, lock, one, organization, revision, role, uuid, type Actor } from "./common";
+import { emitCommunicationEvent } from "./communications";
 import { approvedIntakeAdviceSql, savePhoto } from "./intake";
+import { normalizeLocaleTag, type EnabledLocale } from "./locale-contract";
 import { hasStaffAccess, staffAccess } from "./staff-access";
 import { customerIncidentProposal } from "./storage";
 import { operationNoteLimit } from "./order-note-limits";
+
+function inferTextLocale(text: string, hint?: string | null): EnabledLocale {
+  const norm = normalizeLocaleTag(hint);
+  if (norm === "zh-CN") return "zh-CN";
+  if (norm === "en-US") return "en-US";
+  return /[\u4e00-\u9fff]/.test(text) ? "zh-CN" : "en-US";
+}
+
+async function supportQueueRecipients(db: DB, assigneeId: string | null) {
+  if (assigneeId) return [{ userId: assigneeId, kind: "staff" as const }];
+  const { rows } = await db.query<{ user_id: string }>(
+    `select distinct sr.user_id
+     from staff_roles sr
+     join users u on u.id = sr.user_id
+     where sr.role in ('support', 'super_admin') and u.status = 'active'`,
+  );
+  return rows.map((r) => ({ userId: r.user_id, kind: "staff" as const }));
+}
 
 const body=z.string().trim().min(2).max(2000);
 const version=z.number().int().positive();
@@ -39,12 +59,27 @@ export async function requestOrderInstruction(db:DB,actor:Actor,orderId:string,n
   const order=await one<{state:string}>(db,"select state from orders where id=$1 and org_id=$2 for update",[orderId,org]);
   guard(!["draft","closed","cancelled"].includes(order.state),"ORDER_INSTRUCTION_UNAVAILABLE",
     "This order is unavailable for inspection instruction requests.",409);
-  const id=uuid();
-  const created=await one(db,`insert into tickets(id,public_no,org_id,order_id,category,subject,next_action_at,details)
-    values($1,$2,$3,$4,'non_standard_quote','Additional inspection instructions',now()+interval '24 hours',$5)
-    returning id,public_no,state`,[id,code("C-"),org,orderId,{order_instruction:true}]);
-  await append(db,actor,id,"message",note);
+  const id=uuid(),public_no=code("C-"),origLocale=inferTextLocale(note);
+  const created=await one(db,`insert into tickets(id,public_no,org_id,order_id,category,subject,next_action_at,details,original_locale,source_channel)
+    values($1,$2,$3,$4,'non_standard_quote','Additional inspection instructions',now()+interval '24 hours',$5,$6,'portal')
+    returning id,public_no,state`,[id,public_no,org,orderId,{order_instruction:true},origLocale]);
+  await append(db,actor,id,"message",note,[],origLocale);
   await audit(db,actor,"create_ticket","tickets",id,{order_instruction:true});
+  const staffRecipients=await supportQueueRecipients(db,null);
+  if(staffRecipients.length>0) {
+    await emitCommunicationEvent(db,{
+      sourceKind:"auto_event",
+      eventType:"ticket.created",
+      entityType:"tickets",
+      entityId:id,
+      orderId,
+      dedupeKey:`ticket.created:${id}`,
+      metadata:{ticket_id:id,public_no,category:"non_standard_quote"},
+      createdBy:actor.id,
+      channels:["in_app"],
+      recipients:staffRecipients,
+    });
+  }
   return created;
 }
 
@@ -75,12 +110,26 @@ export async function createPublicInquiry(db:DB,actor:Actor|null,browser:string,
   const category=(await db.query(`select labels from categories where id=$1 and status in ('ACTIVE','PLANNED')
     and nullif(labels->>'en','') is not null for share`,[category_id])).rows[0];
   guard(category,"INQUIRY_CATEGORY_UNAVAILABLE","Select an available category.",422);
-  const id=uuid(),public_no=code("C-");
-  await db.query(`insert into tickets(id,public_no,org_id,category,subject,details,next_action_at)
-    values($1,$2,$3,'non_standard_quote','Custom inspection inquiry',$4,now()+interval '24 hours')`,
+  const id=uuid(),public_no=code("C-"),origLocale=inferTextLocale(description);
+  await db.query(`insert into tickets(id,public_no,org_id,category,subject,details,next_action_at,original_locale,source_channel)
+    values($1,$2,$3,'non_standard_quote','Custom inspection inquiry',$4,now()+interval '24 hours',$5,'public_inquiry')`,
     [id,public_no,org,{public_inquiry:true,contact_email:email,category_id,category_labels:category.labels,sample_count,
-      email_key:emailKey,browser_key:browserKey}]);
-  await append(db,actor,id,"message",description);
+      email_key:emailKey,browser_key:browserKey},origLocale]);
+  await append(db,actor,id,"message",description,[],origLocale);
+  const staffRecipients=await supportQueueRecipients(db,null);
+  if(staffRecipients.length>0) {
+    await emitCommunicationEvent(db,{
+      sourceKind:"auto_event",
+      eventType:"ticket.created",
+      entityType:"tickets",
+      entityId:id,
+      dedupeKey:`ticket.created:${id}`,
+      metadata:{ticket_id:id,public_no,category:"non_standard_quote",public_inquiry:true},
+      createdBy:actor?.id??null,
+      channels:["in_app"],
+      recipients:staffRecipients,
+    });
+  }
   return {public_no,...(org?{case_id:id}:{})};
 }
 
@@ -88,7 +137,7 @@ async function ticket(db:DB,actor:Actor,id:string,orderNumber:string|null,write=
   const org=actor.kind==="customer"?organization(actor):null;
   if(org===null)role(actor,...staffAccess.orders);
   return one(db,`select k.id,k.org_id,k.order_id,k.public_no,k.subject,k.category,k.state,k.revision,k.created_at,k.resolved_at,k.next_action_at,k.assignee_id,
-    u.display_name assignee,o.public_no order_number,o.state order_state,k.details
+    k.original_locale,k.source_channel,u.display_name assignee,o.public_no order_number,o.state order_state,k.details
     from tickets k left join orders o on o.id=k.order_id and o.org_id=k.org_id left join users u on u.id=k.assignee_id
     where k.id=$1 and ($2::uuid is null or k.org_id=$2) and ($3::text is null or o.public_no=$3)${write?" for update of k":""}`,
     [id,org,orderNumber]);
@@ -104,7 +153,7 @@ export async function caseDetail(db:DB,actor:Actor,id:string,orderNumber:string|
     proof_id:k.details.proof_id,
     advice_id:k.details.decision==="approve"?(await one(db,`select ${approvedIntakeAdviceSql} advice_id from tickets k where id=$1`,[id])).advice_id:null,
   }:null;
-  const {rows:events}=await db.query(`select e.id,e.actor_type,e.kind,e.body,e.media_ids,e.created_at,
+  const {rows:events}=await db.query(`select e.id,e.actor_type,e.kind,e.body,e.original_locale,e.media_ids,e.created_at,
     case when $2::boolean then u.display_name else null end actor_name
     from ticket_events e left join users u on u.id=e.actor_id
     where e.ticket_id=$1 and ($2::boolean or e.kind='message') order by e.created_at,e.id`,[id,actor.kind==="staff"]);
@@ -147,6 +196,7 @@ export async function caseDetail(db:DB,actor:Actor,id:string,orderNumber:string|
   const linkedChargeItemId=actor.kind==="staff"&&typeof k.details?.charge_item_id==="string"?k.details.charge_item_id:null;
   const teamOf=(cat:string)=>["receipt_mismatch","damage_or_loss","identity_unclear"].includes(cat)?"Warehouse & Ops":cat==="return_info_incomplete"?"Logistics & Billing":"Customer Support";
   return {id:k.id,public_no:k.public_no,subject:k.subject,category:k.category,state:k.state,revision:k.revision,
+    original_locale:k.original_locale,source_channel:k.source_channel,
     created_at:k.created_at,resolved_at:k.resolved_at,
     next_action_at:k.next_action_at,order_number:k.order_number,
     handling_team:teamOf(k.category),assigned:Boolean(k.assignee_id),
@@ -214,10 +264,11 @@ export async function staffTicketQueue(
     order by k.next_action_at nulls last,k.created_at desc,k.id limit 100`,[state,reference,category,assignee,actor.id]);
   return {rows};
 }
-async function append(db:DB,actor:Actor|null,id:string,kind:string,message:string,mediaIds:string[]=[]){
+async function append(db:DB,actor:Actor|null,id:string,kind:string,message:string,mediaIds:string[]=[],origLocale?:EnabledLocale){
   const eventId=uuid();
-  await db.query("insert into ticket_events(id,ticket_id,actor_type,actor_id,kind,body,media_ids) values($1,$2,$3,$4,$5,$6,$7)",
-    [eventId,id,actor?.kind??"customer",actor?.id??null,kind,message,mediaIds]);
+  const resolvedLocale=origLocale??inferTextLocale(message);
+  await db.query("insert into ticket_events(id,ticket_id,actor_type,actor_id,kind,body,media_ids,original_locale) values($1,$2,$3,$4,$5,$6,$7,$8)",
+    [eventId,id,actor?.kind??"customer",actor?.id??null,kind,message,mediaIds,resolvedLocale]);
   await audit(db,actor,"ticket_"+kind,"tickets",id,{event_id:eventId});
 }
 function ensureOpen(state:string) {
@@ -231,8 +282,26 @@ export async function replyToCase(db:DB,actor:Actor,id:string,input:z.infer<type
   const photos=Array.isArray(photo)?photo:photo?[photo]:[];
   const media:string[]=[];
   for(const bytes of photos) media.push((await savePhoto(db,actor,bytes,"attachment")).id);
-  await append(db,actor,id,"message",input.body,media);
+  const origLocale=inferTextLocale(input.body);
+  await append(db,actor,id,"message",input.body,media,origLocale);
   await db.query(`update tickets set state='waiting_internal',next_action_at=now()+interval '24 hours',revision=revision+1 where id=$1`,[id]);
+  const staffRecipients=await supportQueueRecipients(db,k.assignee_id??null);
+  if(staffRecipients.length>0) {
+    await emitCommunicationEvent(db,{
+      sourceKind:"auto_event",
+      eventType:"ticket.customer_replied",
+      entityType:"tickets",
+      entityId:id,
+      entityVersion:k.revision+1,
+      orderId:k.order_id??null,
+      orderPublicNo:k.order_number??null,
+      dedupeKey:`ticket.customer_replied:${id}:r${k.revision+1}`,
+      metadata:{ticket_id:id,public_no:k.public_no,category:k.category},
+      createdBy:actor.id,
+      channels:["in_app"],
+      recipients:staffRecipients,
+    });
+  }
   return {id,state:"waiting_internal",revision:k.revision+1};
 }
 export async function writeStaffTicket(db:DB,actor:Actor,id:string,input:z.infer<typeof staffTicketEvent>) {

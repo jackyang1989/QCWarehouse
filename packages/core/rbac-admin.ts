@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { DB } from "../db";
 import { audit, guard, lock, one, role, uuid, type Actor } from "./common";
+import { emitCommunicationEvent } from "./communications";
 import { requireStaffMfa } from "./auth";
 import { ACTION_CATALOG, resolvePermissionsForRoles, STAFF_ROLES, type AuthzAction } from "./authz-contract";
 import { staffTabs } from "./portal-routes";
@@ -242,13 +243,29 @@ export async function assignCustomRoleToStaff(
      on conflict (user_id, role_id) do update set warehouse_scope = excluded.warehouse_scope, assigned_by = excluded.assigned_by, assigned_at = now()`,
     [input.user_id, input.role_id, input.warehouse_scope, actor.id],
   );
-  await db.query("update users set auth_version = auth_version + 1, updated_at = now() where id = $1", [input.user_id]);
+  const authRow = await one<{ auth_version: number }>(
+    db,
+    "update users set auth_version = auth_version + 1, updated_at = now() where id = $1 returning auth_version",
+    [input.user_id],
+  );
   await db.query("update sessions set revoked_at = now() where user_id = $1 and revoked_at is null", [input.user_id]);
 
   await audit(db, actor, "assign_custom_rbac_role", "users", input.user_id, {
     role_id: input.role_id,
     role_code: roleRow.role_code,
     warehouse_scope: input.warehouse_scope,
+  });
+  await emitCommunicationEvent(db, {
+    sourceKind: "security_alert",
+    eventType: "staff.role_changed",
+    entityType: "users",
+    entityId: input.user_id,
+    entityVersion: authRow.auth_version,
+    dedupeKey: `staff.role_changed:assign:${input.user_id}:${input.role_id}:v${authRow.auth_version}`,
+    metadata: { action: "assign", role_id: input.role_id, role_code: roleRow.role_code, auth_version: authRow.auth_version },
+    createdBy: actor.id,
+    channels: ["in_app"],
+    recipients: [{ userId: input.user_id, kind: "staff" }],
   });
   return { user_id: input.user_id, role_id: input.role_id, role_code: roleRow.role_code, session_revoked: true };
 }
@@ -263,9 +280,25 @@ export async function removeCustomRoleFromStaff(
   role(actor, "super_admin");
   await requireStaffMfa(db, actor, sessionHash, 15);
   await db.query("delete from staff_custom_role_assignments where user_id = $1 and role_id = $2", [userId, roleId]);
-  await db.query("update users set auth_version = auth_version + 1, updated_at = now() where id = $1", [userId]);
+  const authRow = await one<{ auth_version: number }>(
+    db,
+    "update users set auth_version = auth_version + 1, updated_at = now() where id = $1 returning auth_version",
+    [userId],
+  );
   await db.query("update sessions set revoked_at = now() where user_id = $1 and revoked_at is null", [userId]);
   await audit(db, actor, "remove_custom_rbac_role", "users", userId, { role_id: roleId });
+  await emitCommunicationEvent(db, {
+    sourceKind: "security_alert",
+    eventType: "staff.role_changed",
+    entityType: "users",
+    entityId: userId,
+    entityVersion: authRow.auth_version,
+    dedupeKey: `staff.role_changed:remove:${userId}:${roleId}:v${authRow.auth_version}`,
+    metadata: { action: "remove", role_id: roleId, auth_version: authRow.auth_version },
+    createdBy: actor.id,
+    channels: ["in_app"],
+    recipients: [{ userId, kind: "staff" }],
+  });
   return { removed: true, session_revoked: true };
 }
 
