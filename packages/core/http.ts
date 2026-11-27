@@ -20,6 +20,7 @@ import { claimDeviceLease, createWorkstation, decideDeviceAuthorization, deviceA
 import { acceptTaskHandover, assignWorkItem, cancelTaskHandover, claimTaskLease, evidenceSubmitWithLeaseSchema, handoverAcceptSchema, handoverCancelSchema, handoverInitiateSchema, initiateTaskHandover, listDispatchWorkItems, listQuarantinedEvidence, listStaffShifts, pauseWorkItem, quarantineResolveSchema, registerDispatchWorkItem, resolveQuarantinedEvidence, resumeWorkItem, revokeStaffActiveLeases, staffShiftStatusSchema, staffShiftUpsertSchema, submitEvidenceWithLease, taskLeaseClaimSchema, updateStaffShiftStatus, upsertStaffShift, workItemAssignSchema, workItemPauseSchema, workItemRegisterSchema } from "./scheduling-dispatch";
 import { abortStorageUpload, authorizePrivateObjectRead, authorizePublicAssetUpload, authorizeStorageUpload, authorizeStorageUploadSchema, completeStorageUpload, completeStorageUploadSchema, deleteStorageObjectControlled, deleteStorageObjectSchema, issueMultipartPartUrl, listProviderCapabilities, multipartPartUrlSchema, recordBlockedDeletionAudit, streamPrivateObjectResponse, streamPublicAssetResponse } from "./storage-service";
 import { createStorageInstance, createStorageMigrationJob, deleteStorageInstance, getStorageInstanceDetail, getStorageMigrationJob, getStorageUsageMetrics, listStorageInstances, listStorageMigrationJobs, pauseStorageMigrationJob, probeStorageInstance, resumeStorageMigrationJob, retryFailedMigrationItems, revokeStorageInstanceSecret, rollbackStorageInstanceSecret, rollbackStorageMigrationJob, runStorageMigrationBatch, saveStorageInstanceSecret, saveStorageSecretSchema, revokeStorageSecretSchema, rollbackStorageSecretSchema, switchPrimaryStorageInstance, transitionStorageInstanceState, updateStorageInstance } from "./storage-hub";
+import { authorizeEvidenceUpload, authorizeEvidenceUploadSchema, cancelCaptureCommand, cancelCaptureCommandSchema, cleanupExpiredUnfinishedUploads, completeEvidenceUpload, getEvidenceDetail, issueCaptureCommand, issueCaptureCommandSchema, linkEvidenceSchema, linkEvidenceToEntity, listEvidenceSyncQueue, resolveQuarantinedEvidenceRecord, resolveQuarantineEvidenceSchema, retryMediaProcessingJob } from "./capture-evidence";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
@@ -2101,6 +2102,56 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   }
   if(method==="POST" && path==="/staff/admin/storage/public-assets/authorize") {
     return extraWrite(req,path,actor,authorizeStorageUploadSchema,(db,a,b)=>authorizePublicAssetUpload(db,a,b),201);
+  }
+
+  // ---------- TASK-187 Capture Evidence & Media Contract ----------
+  if(method==="POST" && path==="/staff/capture/commands") {
+    csrf(req);
+    const a=actorRequired(actor),key=idSchema.parse(req.headers.get("idempotency-key")),data=issueCaptureCommandSchema.parse(await input(req));
+    const res=await transaction(db=>idempotent(db,a.id+":"+path,key,data,()=>issueCaptureCommand(db,a,data))) as {replayed?:boolean};
+    return json(res,res.replayed?200:201);
+  }
+  const cmdCancel=path.match(/^\/staff\/capture\/commands\/([a-f0-9-]{36})\/cancel$/i);
+  if(method==="POST" && cmdCancel) {
+    return extraWrite(req,path,actor,cancelCaptureCommandSchema,(db,a,b)=>cancelCaptureCommand(db,a,idSchema.parse(cmdCancel[1]),b));
+  }
+  if(method==="POST" && path==="/evidence/uploads/authorize") {
+    csrf(req);
+    const a=actorRequired(actor),key=idSchema.parse(req.headers.get("idempotency-key")),data=authorizeEvidenceUploadSchema.parse(await input(req));
+    const res=await transaction(db=>idempotent(db,a.id+":"+path,key,data,()=>authorizeEvidenceUpload(db,a,data))) as {replayed?:boolean};
+    return json(res,res.replayed?200:201);
+  }
+  const evComplete=path.match(/^\/evidence\/([a-f0-9-]{36})\/complete$/i);
+  if(method==="POST" && evComplete) {
+    csrf(req);
+    const a=actorRequired(actor),key=idSchema.parse(req.headers.get("idempotency-key")),data=completeStorageUploadSchema.parse(await input(req));
+    const eid=idSchema.parse(evComplete[1]);
+    const res=await transaction(db=>idempotent(db,a.id+":"+path,key,data,()=>completeEvidenceUpload(db,a,eid,data))) as {quarantined?:boolean;late_quarantined?:boolean};
+    return json(res,res.quarantined?(res.late_quarantined?202:422):200);
+  }
+  const evRetry=path.match(/^\/evidence\/([a-f0-9-]{36})\/retry-processing$/i);
+  if(method==="POST" && evRetry) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>retryMediaProcessingJob(db,a,idSchema.parse(evRetry[1])));
+  }
+  const evLinks=path.match(/^\/staff\/evidence\/([a-f0-9-]{36})\/links$/i);
+  if(method==="POST" && evLinks) {
+    return extraWrite(req,path,actor,linkEvidenceSchema,(db,a,b)=>linkEvidenceToEntity(db,a,idSchema.parse(evLinks[1]),b),201);
+  }
+  const evResolve=path.match(/^\/staff\/evidence\/([a-f0-9-]{36})\/resolve-quarantine$/i);
+  if(method==="POST" && evResolve) {
+    return extraWrite(req,path,actor,resolveQuarantineEvidenceSchema,(db,a,b)=>resolveQuarantinedEvidenceRecord(db,a,idSchema.parse(evResolve[1]),b));
+  }
+  const evDetail=path.match(/^\/evidence\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && evDetail) {
+    return json(await transaction(db=>getEvidenceDetail(db,actorRequired(actor),idSchema.parse(evDetail[1]))));
+  }
+  if(method==="GET" && path==="/staff/sync/queue") {
+    const state=url.searchParams.get("state")??undefined;
+    const deviceId=url.searchParams.get("device_id")?idSchema.parse(url.searchParams.get("device_id")):undefined;
+    return json(await transaction(db=>listEvidenceSyncQueue(db,actorRequired(actor),{state,device_id:deviceId})));
+  }
+  if(method==="POST" && path==="/staff/evidence/cleanup-expired") {
+    return extraWrite(req,path,actor,z.object({min_age_minutes:z.number().int().min(1).max(10080).default(60)}),(db,a,b)=>cleanupExpiredUnfinishedUploads(db,b.min_age_minutes,a));
   }
 
   return null;

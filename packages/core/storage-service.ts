@@ -400,6 +400,126 @@ async function authorizeScopedStorageUpload(
   };
 }
 
+export async function reissueStorageUploadSession(
+  db: DB,
+  actor: Actor,
+  objectId: string,
+  uploadMode?: "presigned_put" | "multipart",
+  expectedParts?: number,
+) {
+  const obj = await one<{
+    id: string;
+    storage_instance_id: string | null;
+    storage_provider_key: string;
+    bucket: string;
+    object_key: string;
+    visibility: string;
+    org_id: string | null;
+    owner_user_id: string | null;
+    created_by: string | null;
+    declared_mime: string;
+    size_bytes: string;
+    expected_sha256: string;
+    status: string;
+    variant_kind: string;
+    is_immutable: boolean;
+  }>(
+    db,
+    `select id, storage_instance_id, storage_provider_key, bucket, object_key, visibility,
+            org_id, owner_user_id, created_by, declared_mime, size_bytes::text as size_bytes,
+            expected_sha256, status, variant_kind, is_immutable
+     from storage_objects where id = $1 for update`,
+    [objectId],
+  );
+  assertActorCanAccessObject(actor, obj);
+  guard(
+    ["authorized", "uploading", "uploaded_unverified"].includes(obj.status),
+    "OBJECT_STATE_INVALID",
+    `Cannot reissue upload session for object in status '${obj.status}'.`,
+    409,
+  );
+  const { provider, instance } = await resolveReadProviderAndInstance(db, obj);
+  const stagingKey = stagingKeyFor(obj.object_key);
+  const presignPutTtl = instance?.presign_put_ttl_sec ?? 600;
+
+  const existingOpen = (
+    await db.query<{ id: string; upload_mode: string; provider_upload_id: string | null; expected_parts: number | null; is_expired: boolean }>(
+      `select id, upload_mode, provider_upload_id, expected_parts, (expires_at <= now()) as is_expired
+       from storage_upload_sessions
+       where object_id = $1 and status = 'open'
+       order by created_at desc limit 1 for update`,
+      [obj.id],
+    )
+  ).rows[0];
+
+  const resolvedMode = uploadMode ?? (existingOpen?.upload_mode === "multipart" ? "multipart" : "presigned_put");
+  const resolvedParts = expectedParts ?? existingOpen?.expected_parts ?? 1;
+
+  if (existingOpen && existingOpen.is_expired) {
+    await db.query(
+      "update storage_upload_sessions set status = 'expired', updated_at = now() where id = $1",
+      [existingOpen.id],
+    );
+  }
+
+  let providerUploadId: string | null = existingOpen && !existingOpen.is_expired ? existingOpen.provider_upload_id : null;
+  let sessionId: string;
+  let expiresAt: string;
+  let uploadTarget: Record<string, unknown>;
+
+  if (resolvedMode === "multipart") {
+    if (!providerUploadId) {
+      const mp = await provider.createMultipartUpload(stagingKey, obj.declared_mime);
+      providerUploadId = mp.uploadId;
+    }
+    const partUrls = Array.from({ length: resolvedParts }, (_, idx) => ({
+      part_number: idx + 1,
+      ...provider.presignUploadPart(stagingKey, providerUploadId!, idx + 1, presignPutTtl),
+    }));
+    uploadTarget = {
+      upload_mode: "multipart",
+      upload_id: providerUploadId,
+      part_urls: partUrls,
+    };
+  } else {
+    const put = provider.presignPutObject(stagingKey, obj.declared_mime, presignPutTtl);
+    uploadTarget = {
+      upload_mode: "presigned_put",
+      ...put,
+    };
+  }
+
+  if (existingOpen && !existingOpen.is_expired && existingOpen.upload_mode === resolvedMode) {
+    const row = await one<{ id: string; expires_at: string }>(
+      db,
+      "update storage_upload_sessions set expires_at = now() + interval '15 minutes', updated_at = now() where id = $1 returning id, expires_at",
+      [existingOpen.id],
+    );
+    sessionId = row.id;
+    expiresAt = row.expires_at;
+  } else {
+    if (existingOpen && !existingOpen.is_expired) {
+      await db.query("update storage_upload_sessions set status = 'aborted', updated_at = now() where id = $1", [existingOpen.id]);
+    }
+    const inserted = await one<{ id: string; expires_at: string }>(
+      db,
+      `insert into storage_upload_sessions(
+         id, object_id, upload_mode, provider_upload_id, expected_parts, status, expires_at, created_by
+       ) values($1, $2, $3, $4, $5, 'open', now() + interval '15 minutes', $6)
+       returning id, expires_at`,
+      [uuid(), obj.id, resolvedMode, providerUploadId, resolvedMode === "multipart" ? resolvedParts : null, actor.id],
+    );
+    sessionId = inserted.id;
+    expiresAt = inserted.expires_at;
+  }
+
+  return {
+    object: obj,
+    session: { id: sessionId, upload_mode: resolvedMode, status: "open", expires_at: expiresAt },
+    upload: uploadTarget,
+  };
+}
+
 export async function issueMultipartPartUrl(
   db: DB,
   actor: Actor,
@@ -703,6 +823,13 @@ export async function abortStorageUpload(db: DB, actor: Actor, objectId: string)
     [obj.id],
   );
   return { object: updated };
+}
+
+export async function resolveObjectStorageProviderForRead(
+  db: Pick<DB, "query">,
+  obj: { storage_instance_id?: string | null; storage_provider_key: string; visibility?: string },
+): Promise<{ provider: ObjectStorageProvider; instance: StorageInstanceRow | null }> {
+  return resolveReadProviderAndInstance(db, obj);
 }
 
 export async function authorizePrivateObjectRead(
