@@ -14,6 +14,7 @@ import { customerEmailDeliveryStatus, createNotificationTemplateDraft, emailChan
 import { activateLegalEntity, createLegalEntityDraft, createMerchantInstance, evaluateOpeningReadinessMatrix, legalEntityCreateSchema, listLegalEntities, listMerchantInstances, merchantInstanceCreateSchema, merchantInstanceStatusSchema, retireLegalEntity, transitionMerchantInstanceStatus } from "./legal-merchants";
 import { acceptStaffInvitation, createAndInviteStaff, getStaffDetail, listStaffDirectory, offboardStaffAccount, previewStaffInvitation, resendStaffInvitation, revokeAllStaffSessions, revokeStaffInvitation, staffAcceptInviteSchema, staffInviteSchema, staffOffboardSchema, startStaffInvitationMfa } from "./staff-lifecycle";
 import { archiveRbacRole, assignCustomRoleToStaff, computeEffectiveStaffPermissions, createCustomRbacRoleDraft, listRbacRoles, previewRbacRoleImpact, publishRbacRole, rbacAssignmentSchema, rbacRoleDraftSchema, removeCustomRoleFromStaff } from "./rbac-admin";
+import { createAddressSnapshot, createAddressSnapshotSchema, createRegionAlias, getActiveRegionOverview, getAddressSnapshot, getRegionDetail, importRegionDatasetDraft, listRegionChildren, listRegionDatasetVersions, parseChineseAddress, parseChineseAddressSchema, publishRegionDatasetVersion, regionAliasCreateSchema, regionChildrenQuerySchema, regionImportDraftSchema, regionPathValidateSchema, regionSearchQuerySchema, revokeRegionAlias, rollbackRegionDatasetVersion, searchRegions, validateRegionPath } from "./regions";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
@@ -1617,6 +1618,77 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   }
   if(method==="GET" && path==="/staff/me/effective-permissions") {
     return json(await transaction(db=>computeEffectiveStaffPermissions(db,actorRequired(actor))));
+  }
+
+  if(method==="GET" && path==="/regions/overview") {
+    return json(await transaction(db=>getActiveRegionOverview(db)));
+  }
+  if(method==="GET" && path==="/regions/children") {
+    const q=new URL(req.url).searchParams;
+    const parsed=regionChildrenQuerySchema.parse({
+      version_id:q.get("version_id")??undefined,
+      parent_id:q.get("parent_id")??undefined,
+      level:q.get("level")??undefined,
+      limit:q.get("limit")??undefined,
+      offset:q.get("offset")??undefined,
+    });
+    return json(await transaction(db=>listRegionChildren(db,parsed)));
+  }
+  if(method==="GET" && path==="/regions/search") {
+    const q=new URL(req.url).searchParams;
+    const parsed=regionSearchQuerySchema.parse({
+      q:q.get("q")??"",
+      version_id:q.get("version_id")??undefined,
+      level:q.get("level")??undefined,
+      market_scope:q.get("market_scope")??undefined,
+      limit:q.get("limit")??undefined,
+    });
+    return json(await transaction(db=>searchRegions(db,parsed)));
+  }
+  const regionDetailMatch=path.match(/^\/regions\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && regionDetailMatch) {
+    return json(await transaction(db=>getRegionDetail(db,idSchema.parse(regionDetailMatch[1]))));
+  }
+  if(method==="POST" && path==="/regions/validate-path") {
+    csrf(req,"origin_only");
+    const body=regionPathValidateSchema.parse(await input(req));
+    return json(await transaction(db=>validateRegionPath(db,body)));
+  }
+  if(method==="POST" && path==="/addresses/parse") {
+    csrf(req,"origin_only");
+    actorRequired(actor);
+    const body=parseChineseAddressSchema.parse(await input(req));
+    return json(await transaction(db=>parseChineseAddress(db,body)));
+  }
+  if(method==="POST" && path==="/addresses/snapshots") {
+    return extraWrite(req,path,actor,createAddressSnapshotSchema,(db,a,b)=>createAddressSnapshot(db,a,b),201);
+  }
+  const addressSnapMatch=path.match(/^\/addresses\/snapshots\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && addressSnapMatch) {
+    return json(await transaction(db=>getAddressSnapshot(db,actorRequired(actor),idSchema.parse(addressSnapMatch[1]))));
+  }
+  if(method==="GET" && path==="/staff/admin/regions/versions") {
+    return json(await transaction(db=>listRegionDatasetVersions(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/regions/import") {
+    return extraWrite(req,path,actor,regionImportDraftSchema,(db,a,b)=>importRegionDatasetDraft(db,a,b,hash(getCookie(req,"session"))),201);
+  }
+  const regionPubMatch=path.match(/^\/staff\/admin\/regions\/versions\/([a-f0-9-]{36})\/publish$/i);
+  if(method==="POST" && regionPubMatch) {
+    return extraWrite(req,path,actor,z.object({reason:z.string().trim().min(4).max(500)}),
+      (db,a,b)=>publishRegionDatasetVersion(db,a,idSchema.parse(regionPubMatch[1]),b.reason,hash(getCookie(req,"session"))));
+  }
+  const regionRollMatch=path.match(/^\/staff\/admin\/regions\/versions\/([a-f0-9-]{36})\/rollback$/i);
+  if(method==="POST" && regionRollMatch) {
+    return extraWrite(req,path,actor,z.object({reason:z.string().trim().min(4).max(500)}),
+      (db,a,b)=>rollbackRegionDatasetVersion(db,a,idSchema.parse(regionRollMatch[1]),b.reason,hash(getCookie(req,"session"))));
+  }
+  if(method==="POST" && path==="/staff/admin/regions/aliases") {
+    return extraWrite(req,path,actor,regionAliasCreateSchema,(db,a,b)=>createRegionAlias(db,a,b,hash(getCookie(req,"session"))),201);
+  }
+  const aliasRevokeMatch=path.match(/^\/staff\/admin\/regions\/aliases\/([a-f0-9-]{36})\/revoke$/i);
+  if(method==="POST" && aliasRevokeMatch) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>revokeRegionAlias(db,a,idSchema.parse(aliasRevokeMatch[1]),hash(getCookie(req,"session"))));
   }
 
   return null;

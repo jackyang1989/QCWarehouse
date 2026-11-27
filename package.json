@@ -9,10 +9,11 @@
     "check": "tsc --noEmit",
     "db:migrate": "node --env-file-if-exists=.env scripts/migrate.mjs",
     "db:demo": "node --env-file-if-exists=.env --import tsx scripts/demo.ts",
+    "db:regions": "node --env-file-if-exists=.env --import tsx scripts/import-china-regions.mjs",
     "test:brand": "node --import tsx --test tests/brand-consistency.test.mts",
     "test:pkg1-contracts": "node --import tsx --test tests/pkg1-wave1-contracts.test.mts",
     "test:pkg1-wave23": "node --import tsx --test tests/pkg1-wave23-contracts.test.mts",
-    "test:integration": "node --env-file-if-exists=.env --import tsx --test --test-concurrency=1 tests/brand-consistency.test.mts tests/pkg1-wave1-contracts.test.mts tests/pkg1-wave23-contracts.test.mts tests/pkg1-wave56-email-entities.test.mts tests/pkg1-wave78-staff-rbac.test.mts tests/workflow.test.mts tests/admin-workbench.test.mts tests/round5-payments-ocr.test.mts",
+    "test:integration": "node --env-file-if-exists=.env --import tsx --test --test-concurrency=1 tests/brand-consistency.test.mts tests/pkg1-wave1-contracts.test.mts tests/pkg1-wave23-contracts.test.mts tests/pkg1-wave56-email-entities.test.mts tests/pkg1-wave78-staff-rbac.test.mts tests/pkg1-wave9-regions.test.mts tests/workflow.test.mts tests/admin-workbench.test.mts tests/round5-payments-ocr.test.mts",
     "worker": "node --env-file-if-exists=.env --import tsx scripts/worker.ts",
     "integrations:check": "node --env-file-if-exists=.env --import tsx scripts/integration-preflight.ts",
     "ops:backup-verify": "node scripts/pre-migration-backup-restore.mjs"
@@ -21,6 +22,7 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@province-city-china/data": "9.0.0",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "next": "16.4.5",

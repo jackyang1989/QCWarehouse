@@ -1,0 +1,34 @@
+{
+  "package": "@province-city-china/data",
+  "version": "9.0.0",
+  "license": "MIT",
+  "repository_url": "https://github.com/uiwjs/province-city-china.git",
+  "npm_published_at": "2026-10-09T11:26:38.024Z",
+  "acquired_at": "2026-11-27T19:14:58+08:00",
+  "code_standard": "MCA GB/T 2260 (6-digit province/prefecture/county) + 12-digit verifiable township/street layer",
+  "raw_file": "node_modules/@province-city-china/data/data.json",
+  "raw_file_bytes": 5744376,
+  "raw_file_sha256": "afc9663c3150eb4df6e55d61d04a329965906673a3c4441bd39f5ff007d38f13",
+  "package_json_sha256": "81188a220624e45b602cd8337b29937a790e6d52cc3a6bd91ad0bfe8375f1c0a",
+  "raw_record_count": 42177,
+  "normalized_counts": {
+    "provinces_total": 34,
+    "provinces_mainland": 31,
+    "provinces_hk_mo_tw": 3,
+    "prefectures_real": 333,
+    "synthetic_prefecture_placeholders_skipped": 4,
+    "counties_total": 2873,
+    "counties_mainland": 2847,
+    "counties_hk_mo_tw": 26,
+    "townships_raw": 38933,
+    "townships_unique": 38930,
+    "townships_deduped_as_aliases": 3
+  },
+  "normalization_rules": [
+    "Skip 4 synthetic province-direct county group placeholders (419000, 429000, 469000, 659000); parent their county rows directly to their province node.",
+    "Municipalities (110000 Beijing, 120000 Tianjin, 310000 Shanghai, 500000 Chongqing) carry no synthetic prefecture tier; their districts parent directly to the municipality node.",
+    "Mark direct-administered prefecture cities without county subdivisions (441900 Dongguan, 442000 Zhongshan, 460400 Danzhou, 620200 Jiayuguan) as is_terminal_official = true.",
+    "Tag Taiwan (71*), Hong Kong (81*), and Macau (82*) nodes with market_scope = hk_mo_tw so mainland freight auto-quotes never silently apply.",
+    "Deduplicate the 3 repeated records sharing township code 659001100000 and retain alternate spellings (石北泉镇, 石总场北泉镇) as region_aliases."
+  ]
+}
