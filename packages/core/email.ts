@@ -93,16 +93,23 @@ export function renderEmailContent(template: string, orderPublicNo: string | nul
   }
 }
 
-export async function queueNotificationEmail(db: DB, notificationId: string, userId: string) {
-  const recipient = (
-    await db.query<{ email: string; delivery_state: string }>(
-      `select normalized_email::text as email, delivery_state
-       from user_emails
-       where user_id = $1 and is_primary and verified_at is not null
-       limit 1`,
-      [userId],
-    )
-  ).rows[0];
+export async function queueNotificationEmail(
+  db: DB,
+  notificationId: string,
+  userId: string,
+  recipientEmailOverride?: string,
+) {
+  const recipient = recipientEmailOverride
+    ? { email: recipientEmailOverride.trim().toLowerCase(), delivery_state: "active" }
+    : (
+        await db.query<{ email: string; delivery_state: string }>(
+          `select normalized_email::text as email, delivery_state
+           from user_emails
+           where user_id = $1 and is_primary and verified_at is not null
+           limit 1`,
+          [userId],
+        )
+      ).rows[0];
   if (!recipient) return;
   const snapshot = encryptSecret(recipient.email);
   if (recipient.delivery_state === "bounced" || recipient.delivery_state === "complained") {

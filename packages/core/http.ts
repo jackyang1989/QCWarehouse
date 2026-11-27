@@ -12,6 +12,8 @@ import { failedJobs, retryFailedJob } from "./worker";
 import { quotePolicy, quotePolicyInput, saveQuotePolicy } from "./quote-policy";
 import { customerEmailDeliveryStatus, createNotificationTemplateDraft, emailChannelReadiness, listNotificationTemplates, publishNotificationTemplate, receivePostmarkWebhook, receiveResendWebhook, retryEmailDelivery, staffEmailDeliveries } from "./email";
 import { activateLegalEntity, createLegalEntityDraft, createMerchantInstance, evaluateOpeningReadinessMatrix, legalEntityCreateSchema, listLegalEntities, listMerchantInstances, merchantInstanceCreateSchema, merchantInstanceStatusSchema, retireLegalEntity, transitionMerchantInstanceStatus } from "./legal-merchants";
+import { acceptStaffInvitation, createAndInviteStaff, getStaffDetail, listStaffDirectory, offboardStaffAccount, previewStaffInvitation, resendStaffInvitation, revokeAllStaffSessions, revokeStaffInvitation, staffAcceptInviteSchema, staffInviteSchema, staffOffboardSchema, startStaffInvitationMfa } from "./staff-lifecycle";
+import { archiveRbacRole, assignCustomRoleToStaff, computeEffectiveStaffPermissions, createCustomRbacRoleDraft, listRbacRoles, previewRbacRoleImpact, publishRbacRole, rbacAssignmentSchema, rbacRoleDraftSchema, removeCustomRoleFromStaff } from "./rbac-admin";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
@@ -1543,6 +1545,78 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   }
   if(method==="GET" && path==="/staff/admin/opening-readiness") {
     return json(await transaction(db=>evaluateOpeningReadinessMatrix(db,actorRequired(actor))));
+  }
+
+  // ---------- TASK-179 & TASK-180 Staff Security Lifecycle & Dynamic RBAC ----------
+  if(method==="GET" && path==="/staff/invitations/preview") {
+    const tokenParam=new URL(req.url).searchParams.get("token")??"";
+    return json(await transaction(db=>previewStaffInvitation(db,tokenParam)));
+  }
+  if(method==="POST" && path==="/staff/invitations/start-mfa") {
+    csrf(req,"origin_only");
+    const data=z.object({token:z.string().trim().min(16).max(256)}).parse(await input(req));
+    return json(await transaction(db=>startStaffInvitationMfa(db,data.token)));
+  }
+  if(method==="POST" && path==="/staff/invitations/accept") {
+    csrf(req,"origin_only");
+    const data=staffAcceptInviteSchema.parse(await input(req));
+    return json(await transaction(db=>acceptStaffInvitation(db,data)));
+  }
+  if(method==="GET" && path==="/staff/admin/employees") {
+    return json(await transaction(db=>listStaffDirectory(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/employees") {
+    return extraWrite(req,path,actor,staffInviteSchema,(db,a,b)=>createAndInviteStaff(db,a,b,hash(getCookie(req,"session"))),201);
+  }
+  const staffEmpDetail=path.match(/^\/staff\/admin\/employees\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && staffEmpDetail) {
+    return json(await transaction(db=>getStaffDetail(db,actorRequired(actor),idSchema.parse(staffEmpDetail[1]))));
+  }
+  const staffEmpResend=path.match(/^\/staff\/admin\/employees\/([a-f0-9-]{36})\/invitations\/resend$/i);
+  if(method==="POST" && staffEmpResend) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>resendStaffInvitation(db,a,idSchema.parse(staffEmpResend[1]),hash(getCookie(req,"session"))));
+  }
+  const staffEmpRevokeInv=path.match(/^\/staff\/admin\/employees\/([a-f0-9-]{36})\/invitations\/revoke$/i);
+  if(method==="POST" && staffEmpRevokeInv) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>revokeStaffInvitation(db,a,idSchema.parse(staffEmpRevokeInv[1]),hash(getCookie(req,"session"))));
+  }
+  const staffEmpRevokeSess=path.match(/^\/staff\/admin\/employees\/([a-f0-9-]{36})\/revoke-sessions$/i);
+  if(method==="POST" && staffEmpRevokeSess) {
+    return extraWrite(req,path,actor,z.object({reason:z.string().trim().min(4).max(500).default("Administrator revocation")}),
+      (db,a,b)=>revokeAllStaffSessions(db,a,idSchema.parse(staffEmpRevokeSess[1]),b.reason,hash(getCookie(req,"session"))));
+  }
+  const staffEmpOffboard=path.match(/^\/staff\/admin\/employees\/([a-f0-9-]{36})\/offboard$/i);
+  if(method==="POST" && staffEmpOffboard) {
+    return extraWrite(req,path,actor,staffOffboardSchema,(db,a,b)=>offboardStaffAccount(db,a,idSchema.parse(staffEmpOffboard[1]),b,hash(getCookie(req,"session"))));
+  }
+  if(method==="GET" && path==="/staff/admin/rbac/roles") {
+    return json(await transaction(db=>listRbacRoles(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/rbac/roles") {
+    return extraWrite(req,path,actor,rbacRoleDraftSchema,(db,a,b)=>createCustomRbacRoleDraft(db,a,b,hash(getCookie(req,"session"))),201);
+  }
+  const rbacImpact=path.match(/^\/staff\/admin\/rbac\/roles\/([a-f0-9-]{36})\/impact$/i);
+  if(method==="GET" && rbacImpact) {
+    return json(await transaction(db=>previewRbacRoleImpact(db,actorRequired(actor),idSchema.parse(rbacImpact[1]))));
+  }
+  const rbacPublish=path.match(/^\/staff\/admin\/rbac\/roles\/([a-f0-9-]{36})\/publish$/i);
+  if(method==="POST" && rbacPublish) {
+    return extraWrite(req,path,actor,z.object({reason:z.string().trim().min(4).max(500)}),
+      (db,a,b)=>publishRbacRole(db,a,idSchema.parse(rbacPublish[1]),b.reason,hash(getCookie(req,"session"))));
+  }
+  const rbacArchive=path.match(/^\/staff\/admin\/rbac\/roles\/([a-f0-9-]{36})\/archive$/i);
+  if(method==="POST" && rbacArchive) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>archiveRbacRole(db,a,idSchema.parse(rbacArchive[1]),hash(getCookie(req,"session"))));
+  }
+  if(method==="POST" && path==="/staff/admin/rbac/assignments") {
+    return extraWrite(req,path,actor,rbacAssignmentSchema,(db,a,b)=>assignCustomRoleToStaff(db,a,b,hash(getCookie(req,"session"))));
+  }
+  if(method==="DELETE" && path==="/staff/admin/rbac/assignments") {
+    return extraWrite(req,path,actor,z.object({user_id:idSchema,role_id:idSchema}),
+      (db,a,b)=>removeCustomRoleFromStaff(db,a,b.user_id,b.role_id,hash(getCookie(req,"session"))));
+  }
+  if(method==="GET" && path==="/staff/me/effective-permissions") {
+    return json(await transaction(db=>computeEffectiveStaffPermissions(db,actorRequired(actor))));
   }
 
   return null;
