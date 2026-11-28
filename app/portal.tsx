@@ -18,6 +18,7 @@ import { AdminOrderDetailWorkbench } from "./admin-orders";
 import { Action, request, Tag, WorkspaceTimeZone } from "./ui";
 import { Brand, InternalWorkspaceFooter, PublicFooter, PublicHeader, QuickSwitch, SiteFooter, switchDemoPortal, WorkspaceNavigation } from "./chrome";
 import { FAQ } from "./faq";
+import { PublicContactWidget } from "./public-contact-widget";
 import { PublicInquiry } from "./public-inquiry";
 import { PublicCatalogRouter, PublicHowItWorks, PublicLegal } from "./public-site";
 import { ReportGuide } from "./report-guide";
@@ -201,11 +202,15 @@ function PortalInner({path,target,route,actor:a,demo=false,timeZone,customerAcco
   else content=<CustomerDesk path={path==="/billing"?"/account/billing":path} demo={demo}/>;
   const signOut=a?<Action run={async()=>{await request("/auth/logout","POST",{});if(a.kind==="customer") clearCustomerDraftRecovery(a.id);else{try{for(const k of Object.keys(window.localStorage)){if(k.startsWith("qcw_task_draft_"))window.localStorage.removeItem(k);}}catch{}}location.assign(a.kind==="staff"?"/staff/login":"/login");}}>{a.kind==="staff"?t(locale,"workspace.signOutStaff"):t(locale,"workspace.signOutCustomer")}</Action>:undefined;
   const homeLink=a?.kind==="customer"?"/account":undefined;
-  if(publicPage||!a||links.length===0) return <>
-    <PublicHeader path={path} accountHref={homeLink} staff={a?.kind==="staff"} accountAction={a?.kind==="customer"?signOut:undefined} actor={a} demo={demo} locale={locale}/>
-    <main className={`public-shell view-${route.view}`} id="main-content" lang={locale}>{content}</main>
-    {publicPage ? <PublicFooter locale={locale}/> : <SiteFooter locale={locale}/>}
-  </>;
+  if(publicPage||!a||links.length===0) {
+    const showContactWidget = publicPage && !["login", "staff-login", "onboarding", "account-recovery"].includes(route.view);
+    return <>
+      <PublicHeader path={path} accountHref={homeLink} staff={a?.kind==="staff"} accountAction={a?.kind==="customer"?signOut:undefined} actor={a} demo={demo} locale={locale}/>
+      <main className={`public-shell view-${route.view}`} id="main-content" lang={locale}>{content}</main>
+      {publicPage ? <PublicFooter locale={locale} path={canonicalPublicPath} authenticated={Boolean(a)}/> : <SiteFooter locale={locale}/>}
+      {showContactWidget && <PublicContactWidget locale={locale} actor={a}/>}
+    </>;
+  }
 
   const normPath = path==="/billing"?"/account/billing":path==="/notifications"?"/account/notifications":path;
   const section=route.area==="admin"?t(locale,"workspace.adminTitle"):route.area==="warehouse"?t(locale,"workspace.warehouseTitle"):t(locale,"workspace.customerTitle");

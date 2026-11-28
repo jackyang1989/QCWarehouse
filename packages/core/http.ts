@@ -31,6 +31,7 @@ import { initializeKnowledgeBase } from "./knowledge-seed";
 import { initializeMeasurementTemplates } from "./measurement-seed";
 import { initializeUnifiedPricing } from "./pricing-seed";
 import { initializeLaborAndCostDefaults } from "./labor-cost-seed";
+import { deletePublicRetiredRoute, getAdminPublicContactConfig, getPublicContactConfig, listPublicRetiredRoutes, resolvePublicRetiredRoute, routeStatusQuerySchema, updatePublicContactConfig, upsertPublicRetiredRoute } from "./public-website";
 import { initializeCapacitySlaDefaults } from "./capacity-sla-seed";
 import { calculateWorkloadAndSla, extendOrderSlaCommitment, getCapacityPolicyDetail, getOrderSlaCommitments, getWarehouseCapacityDashboard, listCapacitySlaPolicies, pauseOrderSlaCommitment, publishCapacityPolicy, resumeOrderSlaCommitment, retireCapacityPolicy, rollbackCapacityPolicy, saveCapacityPolicyDraft, startOrderSlaCommitment, submitCapacityPolicy } from "./capacity-sla-engine";
 import { completeLaborEvent, correctLaborEvent, generateStandardCostMatrix, getCostModelDetail, getLaborCostOverview, getLaborStatistics, getOrderCostProfitBreakdown, listCostModels, listLaborBaselines, listLaborEvents, markStaleOpenLaborEventsPendingCalibration, pauseLaborEvent, publishCostModel, recordBackgroundSystemMetric, recordOrderCostEntry, resumeLaborEvent, retireCostModel, rollbackCostModel, saveCostModelDraft, simulateUnitEconomicsAndMargin, startLaborEvent, submitCostModel, updateLaborBaselineAssumption } from "./labor-cost-engine";
@@ -255,6 +256,14 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const versions=url.searchParams.getAll("version");
     guard(versions.length<=1&&versions[0]!=="","INVALID_REQUEST","Provide one policy version.",422);
     return json({terms:[await transaction(db=>publicPolicy(db,policy[1],versions[0]??null))]});
+  }
+  if(method==="GET" && path==="/public/contact-config") {
+    return json(await transaction(db=>getPublicContactConfig(db)));
+  }
+  if(method==="GET" && path==="/public/route-status") {
+    const query=routeStatusQuerySchema.parse({path:url.searchParams.get("path")??""});
+    const resolved=await transaction(db=>resolvePublicRetiredRoute(db,query.path));
+    return json(resolved ?? {found:false,path:query.path});
   }
   if(method==="GET" && path==="/public/inquiry-categories") {
     const browser=idSchema.safeParse(getCookie(req,"qcw_browser")).data??uuid();
@@ -3018,6 +3027,23 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
       return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),(db,a,b)=>resumeOrderSlaCommitment(db,a,id,b,staffSessionHash));
     }
     return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),(db,a,b)=>extendOrderSlaCommitment(db,a,id,b,staffSessionHash));
+  }
+
+  // TASK-200: Public Website Contact Config & Retired Route (301/410) Admin Governance
+  if(method==="GET" && path==="/staff/admin/public-contact-config") {
+    return json(await transaction(db=>getAdminPublicContactConfig(db,actorRequired(actor))));
+  }
+  if(method==="PUT" && path==="/staff/admin/public-contact-config") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),(db,a,b)=>updatePublicContactConfig(db,a,b,staffSessionHash));
+  }
+  if(method==="GET" && path==="/staff/admin/public-retired-routes") {
+    return json(await transaction(db=>listPublicRetiredRoutes(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/public-retired-routes") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),(db,a,b)=>upsertPublicRetiredRoute(db,a,b,staffSessionHash));
+  }
+  if(method==="DELETE" && path==="/staff/admin/public-retired-routes") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),(db,a,b)=>deletePublicRetiredRoute(db,a,b,staffSessionHash));
   }
 
   return null;

@@ -97,6 +97,7 @@ const publicNavLinks: [string, string][] = [
   ["/report-guide", "nav.public.sampleReports"],
   ["/pricing", "nav.public.pricing"],
   ["/faq", "nav.public.faq"],
+  ["/contact", "nav.public.contact"],
 ];
 
 export function PublicHeader({accountHref,staff,path="/",actor,locale:explicitLocale}:{
@@ -189,7 +190,6 @@ export function PublicHeader({accountHref,staff,path="/",actor,locale:explicitLo
                 {t(locale, key)}
               </Link>
             ))}
-            <Link href={hrefFor("/contact")} onClick={() => setMenuOpen(false)}>{t(locale, "nav.public.contact")}</Link>
           </nav>
           <div className="public-mobile-actions">
             <PublicLanguageSwitcher path={canonicalPath} authenticated={actor?.kind === "customer" || actor?.kind === "staff"} locale={locale}/>
@@ -215,9 +215,18 @@ export function PublicHeader({accountHref,staff,path="/",actor,locale:explicitLo
   </>;
 }
 
-export function PublicFooter({locale:explicitLocale}:{locale?:EnabledLocale} = {}) {
+export function PublicFooter({
+  locale:explicitLocale,
+  path="/",
+  authenticated=false,
+}:{
+  locale?:EnabledLocale;
+  path?:string;
+  authenticated?:boolean;
+} = {}) {
   const { locale: ctxLocale } = useLocale();
   const locale = explicitLocale ?? ctxLocale;
+  const canonicalPath = path === "/zh" ? "/" : path.startsWith("/zh/") ? (path.slice(3) || "/") : path;
   const hrefFor = (base: string) => localizePublicPath(base, locale);
   return <footer className="public-footer">
     <div className="public-footer-inner">
@@ -266,6 +275,8 @@ export function PublicFooter({locale:explicitLocale}:{locale?:EnabledLocale} = {
       <div className="public-footer-bottom">
         <span>© {new Date().getFullYear()} {BRAND_NAME} · {BRAND_TAGLINE}</span>
         <div className="public-footer-meta">
+          <PublicLanguageSwitcher path={canonicalPath} authenticated={authenticated} locale={locale} />
+          <span aria-hidden="true">·</span>
           <Link href={hrefFor("/legal")}>{t(locale, "public.linkAllPolicies")}</Link>
           <span aria-hidden="true">·</span>
           <Link href={hrefFor("/contact")}>{t(locale, "nav.public.contact")}</Link>

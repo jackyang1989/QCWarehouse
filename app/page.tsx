@@ -8,6 +8,7 @@ import { localizePublicPath, type EnabledLocale } from "../packages/core/locale-
 import { catalog } from "../packages/core/orders";
 import { PlatformIcon, PublicFooter, PublicHeader } from "./chrome";
 import { LocaleProvider } from "./i18n-client";
+import { PublicContactWidget } from "./public-contact-widget";
 import { homeJsonLd, metadataForPath } from "./public-seo";
 import { SampleReportPreview } from "./report-guide";
 
@@ -716,7 +717,8 @@ export async function PublicHomePage({ locale = "en-US" }: { locale?: EnabledLoc
         </section>
       </main>
 
-      <PublicFooter locale={locale} />
+      <PublicFooter locale={locale} path={isZh ? "/zh" : "/"} authenticated={Boolean(actor)} />
+      <PublicContactWidget locale={locale} actor={actor} />
     </LocaleProvider>
   );
 }
