@@ -2665,7 +2665,7 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
         </Panel>
       )}
 
-      <Panel title="检验能力准入与独立审批" subtitle="检查模板必须绑定已获独立批准的检验能力；能力创建人与审批人不得为同一人。" badge={<Link className="button sm" href="/admin/knowledge">服装专业知识库 (PAGE-M47) →</Link>}>
+      <Panel title="检验能力准入与独立审批" subtitle="检查模板必须绑定已获独立批准的检验能力；能力创建人与审批人不得为同一人。" badge={<div className="actions"><Link className="button sm" href="/admin/knowledge">服装专业知识库 (PAGE-M47) →</Link><Link className="button sm" href="/admin/measurement-templates">动态测量 SVG 模板 (PAGE-M23) →</Link></div>}>
         <Table headers={["能力编码","标准检验方法与工器具","审批状态","操作"]} rows={(data.allCapabilities??data.capabilities).map((cap:Row)=>[
           <span key="c" className="code">{cap.code}</span>,
           cap.method,

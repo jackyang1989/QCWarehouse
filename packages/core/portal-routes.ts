@@ -43,6 +43,7 @@ const adminTabs=[
   ["/admin/incidents","库存事故",["super_admin"]],
   ["/admin/catalog","品类与服务",["super_admin"]],
   ["/admin/knowledge","专业知识库",["super_admin","reviewer"]],
+  ["/admin/measurement-templates","动态测量模板",["super_admin","reviewer"]],
   ["/admin/templates","检查模板",["super_admin"]],
   ["/admin/settings","仓址及模板",staffAccess.templates],
   ["/admin/storage/locations","库位管理",staffAccess.locations],
@@ -99,7 +100,7 @@ export const legalPages = {
 } as const;
 
 type Area = "public" | "customer" | "warehouse" | "admin";
-type StaticView = "public-home" | "catalog" | "how-it-works" | "faq" | "report-guide" | "public-inquiry" | "legal" | "login" | "onboarding" | "account-recovery" | "staff-login" | "customer" | "customer-actions" | "warehouse" | "admin" | "admin-customers" | "admin-inspections" | "admin-media" | "admin-integrations" | "admin-translations" | "admin-knowledge" | "staff-notifications" | "staff-tickets" | "logistics" | "logistics-configuration" | "storage-move" | "storage-locations" | "warehouse-scan" | "report-desk" | "operations";
+type StaticView = "public-home" | "catalog" | "how-it-works" | "faq" | "report-guide" | "public-inquiry" | "legal" | "login" | "onboarding" | "account-recovery" | "staff-login" | "customer" | "customer-actions" | "warehouse" | "admin" | "admin-customers" | "admin-inspections" | "admin-media" | "admin-integrations" | "admin-translations" | "admin-knowledge" | "admin-measurement-templates" | "staff-notifications" | "staff-tickets" | "logistics" | "logistics-configuration" | "storage-move" | "storage-locations" | "warehouse-scan" | "report-desk" | "operations";
 type DetailView = "order" | "report" | "parcel" | "shipment" | "task" | "demo" | "warehouse-package" | "warehouse-item" | "customer-case" | "staff-ticket" | "staff-order" | "admin-customer" | "admin-payment" | "admin-refund" | "admin-incident" | "admin-disposal" | "admin-inspection-task" | "admin-media-detail" | "order-quote" | "order-shipment" | "dispatch-batch" | "staff-report";
 export const orderSections={
   payment:"Payment",parcels:"Parcels",dispositions:"Item instructions",storage:"Storage",
@@ -145,6 +146,7 @@ for(const [paths,route] of [
   [["/admin/integrations","/admin/integrations/payments","/admin/integrations/ocr","/admin/integrations/email","/admin/integrations/storage","/admin/integrations/ai"],{area:"admin",view:"admin-integrations"}],
   [["/admin/translations"],{area:"admin",view:"admin-translations"}],
   [["/admin/knowledge"],{area:"admin",view:"admin-knowledge"}],
+  [["/admin/measurement-templates"],{area:"admin",view:"admin-measurement-templates"}],
   [["/admin/integrations/logistics"],{area:"admin",view:"logistics-configuration"}],
 ] satisfies [string[],PortalRoute][]) {
   for(const path of paths) fixed.set(path,route);

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { BilingualEntityPanel } from "./bilingual-editor";
 import { Action, ErrorBlock, Field, Form, Panel, request, Select, Table, Tag, text, useLoad } from "./ui";
 import type { Actor } from "../packages/core/common";
@@ -102,6 +103,9 @@ export function AdminKnowledgeDesk({ actor }: { actor: Actor }) {
         subtitle="管理 L1–L5 复杂度、M01–M11 检验模块、54 类服装目录、标准检查项、24 部位、19 类缺陷、9 类返工、双语专业术语及 SOP。"
         badge={
           <div className="actions">
+            <Link className="button sm" href="/admin/measurement-templates">
+              动态测量 SVG 编辑器 (PAGE-M23) →
+            </Link>
             {canEdit && (
               <Action
                 sm

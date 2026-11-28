@@ -11,6 +11,7 @@ import { audit, code, event, guard, hash, lock, one, organization, reportCode, r
 import { attachEvidence } from "./intake";
 import { checkSchema, templateSchema } from "./orders";
 import { compileKnowledgeTaskBlueprint } from "./knowledge-base";
+import { resolvePublishedMeasurementForProductType } from "./measurement-templates";
 import { staffAccess } from "./staff-access";
 import { sampleCodePattern } from "./portal-routes";
 import { assertItemsOutsideQuarantine } from "./storage";
@@ -160,7 +161,7 @@ function checkThreshold(
 async function lockedTask(db:DB,id:string) {
   const initial=await one(db,`select l.org_id from inspection_tasks t join order_lines l on l.id=t.order_line_id where t.id=$1`,[id]);
   await lock(db,"org:"+initial.org_id);
-  return one(db,`select t.*,l.org_id,l.order_id,l.attributes line_attributes,v.content,o.state order_state,
+  return one(db,`select t.*,l.org_id,l.order_id,l.options line_options,l.attributes line_attributes,v.content,o.state order_state,
     e.declared_fields,a.item_id task_item_id
     from inspection_tasks t join order_lines l on l.id=t.order_line_id join orders o on o.id=l.order_id
     join template_versions v on v.id=t.template_version_id
@@ -452,7 +453,7 @@ export async function findInspectionTaskByScan(db:DB,actor:Actor,input:{code:str
 
 export async function taskDetail(db:DB,actor:Actor,id:string) {
   role(actor,"inspector","reviewer","warehouse_admin","super_admin","support");
-  const t=await one(db,`select t.id,t.state,t.revision,t.assignee_id,u.display_name assignee_name,t.group_id,t.template_version_id,v.content,
+  const t=await one(db,`select t.id,t.state,t.revision,t.assignee_id,u.display_name assignee_name,t.group_id,t.template_version_id,t.measurement_template_version_id,v.content,
     v.version template_version,parsed_key.key template_key,
     o.public_no,o.id order_id,o.revision order_revision,o.state order_state,o.sla_due_at,o.samples_ready_at,o.customer_notes,
     crp.receiving_code,l.options line_options,l.attributes line_attributes,e.declared_fields,e.position expected_position,
@@ -552,11 +553,21 @@ export async function taskDetail(db:DB,actor:Actor,id:string) {
       knowledgeBlueprint=null;
     }
   }
+  const frozenMeasVersionId=typeof t.measurement_template_version_id==="string"&&t.measurement_template_version_id.trim()
+    ? t.measurement_template_version_id.trim()
+    : null;
+  let measurementDiagram:Record<string,unknown>|null=null;
+  if(ptCode || frozenMeasVersionId) {
+    const resolved=await resolvePublishedMeasurementForProductType(db,ptCode ?? "",frozenMeasVersionId);
+    measurementDiagram=resolved?(resolved as Record<string,unknown>):null;
+  }
   return {
     ...t,
     tolerances,
     tolerance_mode:toleranceMode,
     knowledge_blueprint:knowledgeBlueprint,
+    measurement_diagram:measurementDiagram,
+    measurement_template_version_id:frozenMeasVersionId,
     attachment_ids:referenceAttachments.map(a=>a.id),
     reference_attachments:referenceAttachments,
     purchase_evidences:purchaseEvidences,
@@ -595,13 +606,26 @@ export async function startTask(db:DB,actor:Actor,id:string,rev:number) {
   const ref=(await db.query(`select r.id from inspection_groups g join reference_samples r on r.id=g.reference_id
     where g.id=$1 and (r.state<>'active' or r.expires_at<=now())`,[t.group_id])).rowCount;
   guard(!ref,"REFERENCE_UNAVAILABLE","The reference sample is no longer active.");
-  const updated=await one<{id:string;state:string;revision:number;template_version_id:string}>(db,`update inspection_tasks
-    set state='IN_PROGRESS',assignee_id=$2,revision=revision+1 where id=$1 returning *`,[id,actor.id]);
-  await db.query("update orders set state='inspecting',revision=revision+1 where id=$1 and state='queued'",[t.order_id]);
   const attrs:Record<string,unknown>={
     ...(typeof t.line_attributes==="object"&&t.line_attributes?t.line_attributes as Record<string,unknown>:{}),
     ...(typeof t.declared_fields==="object"&&t.declared_fields?t.declared_fields as Record<string,unknown>:{}),
   };
+  const lineOptObj=(typeof t.line_options==="object"&&t.line_options?t.line_options:{}) as Record<string,unknown>;
+  const ptCode=typeof attrs.product_type_code==="string"&&attrs.product_type_code.trim()
+    ? attrs.product_type_code.trim()
+    : typeof lineOptObj.product_type_code==="string"&&lineOptObj.product_type_code.trim()
+      ? lineOptObj.product_type_code.trim()
+      : null;
+  let frozenMeasurementVersionId:string|null=typeof t.measurement_template_version_id==="string"?t.measurement_template_version_id:null;
+  if(!frozenMeasurementVersionId && ptCode) {
+    const resolvedMeas=await resolvePublishedMeasurementForProductType(db,ptCode);
+    if(resolvedMeas && typeof (resolvedMeas as Record<string,unknown>).measurement_template_version_id==="string") {
+      frozenMeasurementVersionId=String((resolvedMeas as Record<string,unknown>).measurement_template_version_id);
+    }
+  }
+  const updated=await one<{id:string;state:string;revision:number;template_version_id:string;measurement_template_version_id:string|null}>(db,`update inspection_tasks
+    set state='IN_PROGRESS',assignee_id=$2,revision=revision+1,measurement_template_version_id=coalesce(measurement_template_version_id,$3::uuid) where id=$1 returning *`,[id,actor.id,frozenMeasurementVersionId]);
+  await db.query("update orders set state='inspecting',revision=revision+1 where id=$1 and state='queued'",[t.order_id]);
   const template=templateSchema.parse(t.content);
   const members=await components(db,t);
   for(const member of members) {

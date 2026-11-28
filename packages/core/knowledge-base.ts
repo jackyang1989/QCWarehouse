@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { DB } from "../db";
 import { requireStaffMfa } from "./auth";
 import { audit, guard, lock, one, role, type Actor } from "./common";
+import { resolvePublishedMeasurementForProductType } from "./measurement-templates";
 
 export const KNOWLEDGE_READ_ROLES = [
   "super_admin",
@@ -1641,8 +1642,13 @@ export async function getCatalogFormSchema(
   const applicableSet = selectedType ? new Set(selectedType.applicable_module_codes) : null;
   const scopedModules = applicableSet ? pub.modules.filter((m) => applicableSet.has(m.code)) : pub.modules;
 
+  const measurementTemplate = selectedType
+    ? await resolvePublishedMeasurementForProductType(db, selectedType.code)
+    : null;
+
   return {
     product_type: selectedType,
+    measurement_template: measurementTemplate,
     available_product_types: pub.product_types,
     offer_template: offerTemplate,
     structural_options: selectedType?.structural_options ?? [],
@@ -1883,6 +1889,7 @@ export async function compileKnowledgeTaskBlueprint(db: DB, rawInput: unknown) {
     ["catalog_product_type", "inspection_module"],
     [productType.id, ...baseModules.map((m) => m.id), ...billableAddonModules.map((m) => m.id)],
   );
+  const measurementTemplate = await resolvePublishedMeasurementForProductType(db, productType.code);
 
   return {
     product_type: {
@@ -1897,6 +1904,7 @@ export async function compileKnowledgeTaskBlueprint(db: DB, rawInput: unknown) {
       quote_mode: productType.quote_mode,
       internal_complexity_code: productType.default_complexity_code,
     },
+    measurement_template: measurementTemplate,
     manual_quote_required: manualQuoteRequired,
     structural_flags: input.structural_flags,
     included_base_modules: baseModules.map((m) => ({

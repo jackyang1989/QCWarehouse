@@ -28,6 +28,8 @@ import { applyCandidateSchema, applyTranslationCandidate, cancelTranslationBatch
 import { appendAiModelRateVersion, appendAiRateSchema, approveAiModel, approveAiProviderInstance, createAiInstanceSchema, createAiProviderInstance, deprecateAiModel, getAdminAiCostLedger, getAdminAiOverview, listAiInvocations, manualAiModelSchema, probeAiProviderInstance, reconciliationSchema, recordAiCostReconciliation, registerAiModelManual, revokeAiInstanceSecret, revokeAiSecretSchema, runSyntheticTranslationTest, saveAiInstanceSecret, saveAiSecretSchema, syncAiProviderModels, syntheticTestSchema, transitionAiInstanceLifecycle, updateAiInstanceSchema, updateAiProviderInstance, upsertAiBudgetPolicy, upsertBudgetPolicySchema } from "./ai-service";
 import { approveGlossaryTerm, cancelTranslationJob, createGlossaryTerm, createGlossaryTermSchema, createPromptDraft, createPromptDraftSchema, createPurposeRouteDraft, createPurposeRouteSchema, enqueueTranslationJob, enqueueTranslationJobSchema, getTranslationJobDetail, invalidateTenantTranslationCache, listEvalRuns, listGlossaryTerms, listPromptVersions, listPurposeRoutes, publishPromptVersion, publishPurposeRoute, retryTranslationJob, retryTranslationJobSchema, reviewEvalHumanQaSchema, reviewEvalRunHumanQa, rollbackPromptVersion, rollbackPurposeRoute, runEvalSuiteSchema, runTranslationEvalSuite, seedDefaultAiPrompts, seedDefaultEvalCases } from "./ai-translation-service";
 import { initializeKnowledgeBase } from "./knowledge-seed";
+import { initializeMeasurementTemplates } from "./measurement-seed";
+import { batchPublishMeasurementTemplates, cloneMeasurementTemplate, getMeasurementOverview, getMeasurementTemplateDetail, listMeasurementTemplates, listMeasurementTemplateVersions, MEASUREMENT_READ_ROLES, publishMeasurementTemplate, retireMeasurementTemplate, rollbackMeasurementTemplate, saveCameraPreset, saveMeasurementTemplateDraft, submitMeasurementTemplate } from "./measurement-templates";
 import { batchKnowledgeTransition, cloneProductType, compileKnowledgeTaskBlueprint, exportKnowledgeSnapshot, getCatalogFormSchema, getKnowledgeRevisionHistory, getPublicCatalogKnowledge, listKnowledgeEntities, listKnowledgeOverview, parseKnowledgeKind, publishKnowledgeEntity, retireKnowledgeEntity, rollbackKnowledgeEntity, saveKnowledgeEntity, submitKnowledgeEntity } from "./knowledge-base";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
@@ -2668,6 +2670,71 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const k=parseKnowledgeKind(kbHistory[1]);
     const id=idSchema.parse(kbHistory[2]);
     return json({history:await transaction(db=>getKnowledgeRevisionHistory(db,actorRequired(actor),k,id))});
+  }
+
+  if(method==="GET" && path==="/staff/admin/measurement-templates/overview") {
+    return json(await transaction(db=>getMeasurementOverview(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/measurement-templates/seed-init") {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>initializeMeasurementTemplates(db,a,staffSessionHash));
+  }
+  if(method==="GET" && path==="/staff/admin/measurement-templates/presets") {
+    const current=actorRequired(actor);
+    role(current,...MEASUREMENT_READ_ROLES);
+    return json({
+      presets:await transaction(db=>db.query("select * from measurement_camera_presets order by sort_order asc, code asc").then(r=>r.rows)),
+    });
+  }
+  if(method==="POST" && path==="/staff/admin/measurement-templates/presets") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),(db,a,b)=>saveCameraPreset(db,a,b,staffSessionHash));
+  }
+  if(method==="POST" && path==="/staff/admin/measurement-templates/batch-publish") {
+    return extraWrite(req,path,actor,z.object({ids:z.array(idSchema).min(1).max(100),note:z.string().optional()}),
+      (db,a,b)=>batchPublishMeasurementTemplates(db,a,b.ids,b.note,staffSessionHash));
+  }
+  if(method==="GET" && path==="/staff/admin/measurement-templates") {
+    return json(await transaction(db=>listMeasurementTemplates(db,actorRequired(actor),{
+      status:url.searchParams.get("status")??undefined,
+      product_type_code:url.searchParams.get("product_type_code")??undefined,
+      search:url.searchParams.get("search")??undefined,
+    })));
+  }
+  if(method==="POST" && path==="/staff/admin/measurement-templates") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),(db,a,b)=>saveMeasurementTemplateDraft(db,a,b,staffSessionHash));
+  }
+  const mtDetail=path.match(/^\/staff\/admin\/measurement-templates\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && mtDetail) {
+    return json(await transaction(db=>getMeasurementTemplateDetail(db,actorRequired(actor),idSchema.parse(mtDetail[1]))));
+  }
+  const mtVersions=path.match(/^\/staff\/admin\/measurement-templates\/([a-f0-9-]{36})\/versions$/i);
+  if(method==="GET" && mtVersions) {
+    return json({versions:await transaction(db=>listMeasurementTemplateVersions(db,actorRequired(actor),idSchema.parse(mtVersions[1])))});
+  }
+  const mtClone=path.match(/^\/staff\/admin\/measurement-templates\/([a-f0-9-]{36})\/clone$/i);
+  if(method==="POST" && mtClone) {
+    return extraWrite(req,path,actor,z.object({
+      code:z.string(),
+      name_zh:z.string(),
+      name_en:z.string(),
+      inherit:z.boolean().optional(),
+      applicable_product_type_codes:z.array(z.string()).optional(),
+    }),(db,a,b)=>cloneMeasurementTemplate(db,a,idSchema.parse(mtClone[1]),b,staffSessionHash),201);
+  }
+  const mtAction=path.match(/^\/staff\/admin\/measurement-templates\/([a-f0-9-]{36})\/(submit|publish|retire|rollback)$/i);
+  if(method==="POST" && mtAction) {
+    const id=idSchema.parse(mtAction[1]);
+    const act=mtAction[2];
+    if(act==="submit") {
+      return extraWrite(req,path,actor,z.object({note:z.string().optional()}),(db,a,b)=>submitMeasurementTemplate(db,a,id,b.note,staffSessionHash));
+    }
+    if(act==="publish") {
+      return extraWrite(req,path,actor,z.object({note:z.string().optional()}),(db,a,b)=>publishMeasurementTemplate(db,a,id,b.note,staffSessionHash));
+    }
+    if(act==="retire") {
+      return extraWrite(req,path,actor,z.object({note:z.string().optional()}),(db,a,b)=>retireMeasurementTemplate(db,a,id,b.note,staffSessionHash));
+    }
+    return extraWrite(req,path,actor,z.object({target_version:z.number().int().min(1),note:z.string().optional()}),
+      (db,a,b)=>rollbackMeasurementTemplate(db,a,id,b.target_version,b.note,staffSessionHash));
   }
 
   return null;
