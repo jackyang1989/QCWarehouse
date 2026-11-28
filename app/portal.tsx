@@ -9,6 +9,7 @@ import { AdminPaymentDetail, AdminRefundDetail } from "./admin-finance";
 import { AdminIntegrationsDesk } from "./admin-integrations";
 import { AdminKnowledgeDesk } from "./admin-knowledge";
 import { AdminMeasurementTemplatesDesk } from "./admin-measurement-templates";
+import { AdminPricingDesk } from "./admin-pricing";
 import { AdminTranslationsDesk } from "./admin-translations";
 import { ROLE_ZH } from "./admin-labels";
 import { AdminDisposalDetail, AdminIncidentDetail, AdminInspectionsWorkbench, AdminInspectionTaskDetail } from "./admin-operations";
@@ -150,6 +151,7 @@ function PortalInner({path,target,route,actor:a,demo=false,timeZone,customerAcco
   else if(route.view==="admin-translations") content=<AdminTranslationsDesk actor={a}/>;
   else if(route.view==="admin-knowledge") content=<AdminKnowledgeDesk actor={a}/>;
   else if(route.view==="admin-measurement-templates") content=<AdminMeasurementTemplatesDesk actor={a}/>;
+  else if(route.view==="admin-pricing") content=<AdminPricingDesk actor={a}/>;
   else if(route.view==="staff-notifications") content=<StaffNotificationInbox actor={a} area={route.area as "warehouse"|"admin"}/>;
   else if(route.view==="warehouse-scan") content=<WarehouseScan actor={a}/>;
   else if(route.view==="warehouse-item") content=<WarehouseItemView code={route.id} actor={a}/>;

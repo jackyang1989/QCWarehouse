@@ -2136,6 +2136,82 @@ export function PublicPricing() {
         </div>
       </section>
 
+      {/* 4B. Live Modular Inspection Schedule (Published Unified Pricing Projection) */}
+      {data?.pricing_catalog && (() => {
+        const pc = data.pricing_catalog as Record<string, any>;
+        const curCode = String(pc.currency ?? "USD");
+        const fmtMoney = (cents: number) =>
+          new Intl.NumberFormat("en-US", { style: "currency", currency: curCode }).format(cents / 100);
+        const sr = (pc.service_rules ?? {}) as Record<string, any>;
+        return (
+          <section className="card pub-block" aria-labelledby="modular-pricing-heading">
+            <div className="card-head">
+              <div>
+                <p className="pub-eyebrow" style={{ marginBottom: 4 }}>
+                  MODULAR INSPECTION ADD-ONS &amp; SERVICE RATES · v{String(pc.book_version)} · {curCode}
+                </p>
+                <h2 id="modular-pricing-heading">{String(pc.name_en)}</h2>
+                <p>{String(pc.description_en || "")}</p>
+              </div>
+              {pc.business_approved === false && (
+                <span className="tag yellow">
+                  Sandbox Verification Schedule · Commercial Approval Pending (Not for Production Sales)
+                </span>
+              )}
+            </div>
+            <div className="tablewrap">
+              <table className="tbl">
+                <thead>
+                  <tr>
+                    <th>Module</th>
+                    <th>Options</th>
+                    <th>Billing Unit</th>
+                    <th>{pc.business_approved ? `Published Rate (${curCode})` : `Sandbox Reference Rate (${curCode})`}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {((pc.modules as Record<string, any>[]) ?? []).flatMap((m) =>
+                    Object.entries((m.options as Record<string, any>) ?? {}).map(([optKey, opt]: [string, any]) => (
+                      <tr key={`${String(m.code)}:${optKey}`}>
+                        <td>
+                          <strong>{String(m.code)} · {String(m.name_en)}</strong>
+                        </td>
+                        <td>{String(opt.label_en)}</td>
+                        <td><code>{String(opt.billing_unit ?? m.billing_unit)}</code></td>
+                        <td>
+                          <strong>
+                            {opt.manual_quote
+                              ? "Manual Quote"
+                              : m.included_in_base
+                                ? "Included in Base"
+                                : fmtMoney(Number(opt.unit_cents ?? 0))}
+                          </strong>
+                        </td>
+                      </tr>
+                    )),
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <p className="small muted" style={{ marginTop: 10 }}>
+              Sample Comparison: {sr.compare_2_items_cents != null ? fmtMoney(Number(sr.compare_2_items_cents)) : "—"} (2 items) /{" "}
+              {sr.compare_3_items_cents != null ? fmtMoney(Number(sr.compare_3_items_cents)) : "—"} (3 items) /{" "}
+              {sr.compare_extra_item_cents != null ? `+${fmtMoney(Number(sr.compare_extra_item_cents))}` : "—"} each additional item ·{" "}
+              Golden Sample Archival {sr.golden_archive_seal_cents != null ? fmtMoney(Number(sr.golden_archive_seal_cents)) : "—"},{" "}
+              Batch Retrieval {sr.golden_call_batch_cents != null ? fmtMoney(Number(sr.golden_call_batch_cents)) : "—"},{" "}
+              Matching {sr.golden_match_item_cents != null ? fmtMoney(Number(sr.golden_match_item_cents)) : "—"}/unit.
+            </p>
+            {Array.isArray(pc.disclosures) && pc.disclosures.length > 0 && (
+              <ul className="small muted" style={{ marginTop: 6, paddingLeft: 18 }}>
+                {(pc.disclosures as string[]).map((d) => (
+                  <li key={d}>{d}</li>
+                ))}
+              </ul>
+            )}
+          </section>
+        );
+      })()}
+
       {/* 5. Detailed Active Packages (Complete Template Schedule) */}
       <details className="card pub-block pub-schedule-drawer" id="full-schedule">
         <summary className="pub-schedule-summary">

@@ -172,6 +172,7 @@ export const ADMIN_DIRECT_ROUTE_ROLES: Record<string, readonly StaffRole[]> = {
   "/admin/refunds": staffAccess.finance,
   "/admin/payments": staffAccess.finance,
   "/admin/catalog": ["super_admin"],
+  "/admin/pricing": ["super_admin", "finance", "reviewer"],
   "/admin/categories": ["super_admin"],
   "/admin/knowledge": ["super_admin", "template_admin", "reviewer"],
   "/admin/measurement-templates": ["super_admin", "template_admin", "reviewer"],

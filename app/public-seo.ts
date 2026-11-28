@@ -258,6 +258,7 @@ const PORTAL_ROUTE_TITLES: Record<string, string> = {
   "/admin/logistics": "物流监控 · 运营管理后台",
   "/admin/incidents": "库存事故 · 运营管理后台",
   "/admin/catalog": "品类与服务 · 运营管理后台",
+  "/admin/pricing": "统一定价与审批配置中心 · 运营管理后台",
   "/admin/knowledge": "商品目录与专业知识库 · 运营管理后台",
   "/admin/measurement-templates": "动态测量图模板编辑器 · 运营管理后台",
   "/admin/categories": "品类与服务 · 运营管理后台",

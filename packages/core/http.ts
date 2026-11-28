@@ -29,6 +29,8 @@ import { appendAiModelRateVersion, appendAiRateSchema, approveAiModel, approveAi
 import { approveGlossaryTerm, cancelTranslationJob, createGlossaryTerm, createGlossaryTermSchema, createPromptDraft, createPromptDraftSchema, createPurposeRouteDraft, createPurposeRouteSchema, enqueueTranslationJob, enqueueTranslationJobSchema, getTranslationJobDetail, invalidateTenantTranslationCache, listEvalRuns, listGlossaryTerms, listPromptVersions, listPurposeRoutes, publishPromptVersion, publishPurposeRoute, retryTranslationJob, retryTranslationJobSchema, reviewEvalHumanQaSchema, reviewEvalRunHumanQa, rollbackPromptVersion, rollbackPurposeRoute, runEvalSuiteSchema, runTranslationEvalSuite, seedDefaultAiPrompts, seedDefaultEvalCases } from "./ai-translation-service";
 import { initializeKnowledgeBase } from "./knowledge-seed";
 import { initializeMeasurementTemplates } from "./measurement-seed";
+import { initializeUnifiedPricing } from "./pricing-seed";
+import { batchAdjustPricingBook, clonePricingBook, createUnifiedQuote, exportPricingBookSnapshot, getPricingBookDetail, getPricingOverview, getPublicPublishedPricingProjection, getUnifiedQuoteDetail, listPricingBooks, listPricingBookVersions, publishPricingBook, quoteRequestSchema, retirePricingBook, revokeScheduledPricingBookVersion, rollbackPricingBook, runSection43WorkedExamples, savePricingBookDraft, submitPricingBook, verifyAndLockUnifiedQuote } from "./pricing-engine";
 import { batchPublishMeasurementTemplates, cloneMeasurementTemplate, getMeasurementOverview, getMeasurementTemplateDetail, listMeasurementTemplates, listMeasurementTemplateVersions, MEASUREMENT_READ_ROLES, publishMeasurementTemplate, retireMeasurementTemplate, rollbackMeasurementTemplate, saveCameraPreset, saveMeasurementTemplateDraft, submitMeasurementTemplate } from "./measurement-templates";
 import { batchKnowledgeTransition, cloneProductType, compileKnowledgeTaskBlueprint, exportKnowledgeSnapshot, getCatalogFormSchema, getKnowledgeRevisionHistory, getPublicCatalogKnowledge, listKnowledgeEntities, listKnowledgeOverview, parseKnowledgeKind, publishKnowledgeEntity, retireKnowledgeEntity, rollbackKnowledgeEntity, saveKnowledgeEntity, submitKnowledgeEntity } from "./knowledge-base";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
@@ -225,6 +227,7 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     return json(await transaction(async db=>({
       offers:await catalog(db),
       knowledge_catalog:await getPublicCatalogKnowledge(db),
+      pricing_catalog:await getPublicPublishedPricingProjection(db),
     })));
   }
   if(method==="GET" && path==="/catalog/form-schema") {
@@ -2735,6 +2738,108 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     }
     return extraWrite(req,path,actor,z.object({target_version:z.number().int().min(1),note:z.string().optional()}),
       (db,a,b)=>rollbackMeasurementTemplate(db,a,id,b.target_version,b.note,staffSessionHash));
+  }
+
+  // Unified Modular Pricing Public/Customer Endpoints (§06-§08, §43.2, T01, T30)
+  if(method==="POST" && path==="/pricing/quote") {
+    csrf(req,actor?"session":"origin_only");
+    const parsed=quoteRequestSchema.parse(await input(req));
+    if(!actor) {
+      guard(parsed.quote_kind==="simulation","UNAUTHORIZED","Anonymous visitors may only run 'simulation' quotes; sign in for formal quotes.",401);
+      return json(await transaction(db=>createUnifiedQuote(db,null,parsed)));
+    }
+    const key=idSchema.parse(req.headers.get("idempotency-key"));
+    return json(await transaction(db=>idempotent(db,actor.id+":"+path,key,parsed,()=>createUnifiedQuote(db,actor,parsed))),parsed.quote_kind==="simulation"?200:201);
+  }
+  const pricingQuoteId=path.match(/^\/pricing\/quotes\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && pricingQuoteId) {
+    return json(await transaction(db=>getUnifiedQuoteDetail(db,actorRequired(actor),idSchema.parse(pricingQuoteId[1]))));
+  }
+  const pricingQuoteLock=path.match(/^\/pricing\/quotes\/([a-f0-9-]{36})\/verify-lock$/i);
+  if(method==="POST" && pricingQuoteLock) {
+    csrf(req);
+    const a=actorRequired(actor);
+    idSchema.parse(req.headers.get("idempotency-key"));
+    const id=idSchema.parse(pricingQuoteLock[1]);
+    const out=await transaction(db=>verifyAndLockUnifiedQuote(db,a,id));
+    if(!out.ok) return json({error:{code:out.errorCode,message:out.message}},out.status);
+    return json(out.quote);
+  }
+
+  // Staff Admin Unified Pricing Console (PAGE-M22)
+  if(method==="GET" && path==="/staff/admin/pricing/overview") {
+    return json(await transaction(db=>getPricingOverview(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/pricing/seed-init") {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>initializeUnifiedPricing(db,a,staffSessionHash));
+  }
+  if(method==="GET" && path==="/staff/admin/pricing/books") {
+    return json(await transaction(db=>listPricingBooks(db,actorRequired(actor),{
+      status:url.searchParams.get("status")??undefined,
+      search:url.searchParams.get("search")??undefined,
+    })));
+  }
+  if(method==="POST" && path==="/staff/admin/pricing/books") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),(db,a,b)=>savePricingBookDraft(db,a,b,staffSessionHash));
+  }
+  const pbDetail=path.match(/^\/staff\/admin\/pricing\/books\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && pbDetail) {
+    return json(await transaction(db=>getPricingBookDetail(db,actorRequired(actor),idSchema.parse(pbDetail[1]))));
+  }
+  const pbVersions=path.match(/^\/staff\/admin\/pricing\/books\/([a-f0-9-]{36})\/versions$/i);
+  if(method==="GET" && pbVersions) {
+    return json({versions:await transaction(db=>listPricingBookVersions(db,actorRequired(actor),idSchema.parse(pbVersions[1])))});
+  }
+  const pbExport=path.match(/^\/staff\/admin\/pricing\/books\/([a-f0-9-]{36})\/export$/i);
+  if(method==="GET" && pbExport) {
+    return json(await transaction(db=>exportPricingBookSnapshot(db,actorRequired(actor),idSchema.parse(pbExport[1]),staffSessionHash)));
+  }
+  const pbClone=path.match(/^\/staff\/admin\/pricing\/books\/([a-f0-9-]{36})\/clone$/i);
+  if(method==="POST" && pbClone) {
+    return extraWrite(req,path,actor,z.object({
+      code:z.string(),
+      name_zh:z.string(),
+      name_en:z.string(),
+      note:z.string().optional(),
+    }),(db,a,b)=>clonePricingBook(db,a,idSchema.parse(pbClone[1]),b,staffSessionHash),201);
+  }
+  const pbAdjust=path.match(/^\/staff\/admin\/pricing\/books\/([a-f0-9-]{36})\/batch-adjust$/i);
+  if(method==="POST" && pbAdjust) {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),(db,a,b)=>batchAdjustPricingBook(db,a,idSchema.parse(pbAdjust[1]),b,staffSessionHash));
+  }
+  const pbSim=path.match(/^\/staff\/admin\/pricing\/books\/([a-f0-9-]{36})\/simulate$/i);
+  if(method==="POST" && pbSim) {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),async(db,a,b)=>{
+      const bookId=idSchema.parse(pbSim[1]);
+      if(b.run_worked_examples===true) {
+        const detail=await getPricingBookDetail(db,a,bookId);
+        return { worked_examples: runSection43WorkedExamples(detail.book) };
+      }
+      return createUnifiedQuote(db,a,{...b,quote_kind:"simulation",draft_book_id:bookId});
+    });
+  }
+  const pbAction=path.match(/^\/staff\/admin\/pricing\/books\/([a-f0-9-]{36})\/(submit|publish|retire|rollback)$/i);
+  if(method==="POST" && pbAction) {
+    const id=idSchema.parse(pbAction[1]);
+    const act=pbAction[2];
+    if(act==="submit") {
+      return extraWrite(req,path,actor,z.object({note:z.string().optional()}),(db,a,b)=>submitPricingBook(db,a,id,b.note,staffSessionHash));
+    }
+    if(act==="publish") {
+      return extraWrite(req,path,actor,z.object({note:z.string().optional()}),(db,a,b)=>publishPricingBook(db,a,id,b.note,staffSessionHash));
+    }
+    if(act==="retire") {
+      return extraWrite(req,path,actor,z.object({note:z.string().optional()}),(db,a,b)=>retirePricingBook(db,a,id,b.note,staffSessionHash));
+    }
+    return extraWrite(req,path,actor,z.object({target_version:z.number().int().min(1),note:z.string().optional()}),
+      (db,a,b)=>rollbackPricingBook(db,a,id,b.target_version,b.note,staffSessionHash));
+  }
+  const pbRevoke=path.match(/^\/staff\/admin\/pricing\/books\/([a-f0-9-]{36})\/versions\/([0-9]+)\/revoke$/i);
+  if(method==="POST" && pbRevoke) {
+    const id=idSchema.parse(pbRevoke[1]);
+    const ver=z.coerce.number().int().min(1).parse(pbRevoke[2]);
+    return extraWrite(req,path,actor,z.object({note:z.string().optional()}),
+      (db,a,b)=>revokeScheduledPricingBookVersion(db,a,id,ver,b.note,staffSessionHash));
   }
 
   return null;

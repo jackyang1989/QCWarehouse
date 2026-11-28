@@ -375,7 +375,7 @@ const navIcons:Record<string,string>={
   "/admin":"overview","/admin/orders":"orders","/admin/customers":"users","/admin/tickets":"support","/admin/notifications":"notifications",
   "/admin/inspections":"inspection","/admin/media":"reports","/admin/dispositions":"compare",
   "/admin/refunds":"refunds","/admin/payments":"payments","/admin/finance":"analytics","/admin/logistics":"logistics",
-  "/admin/incidents":"incidents","/admin/catalog":"catalog","/admin/knowledge":"catalog","/admin/measurement-templates":"templates","/admin/templates":"templates",
+  "/admin/incidents":"incidents","/admin/catalog":"catalog","/admin/pricing":"payments","/admin/knowledge":"catalog","/admin/measurement-templates":"templates","/admin/templates":"templates",
   "/admin/settings":"warehouse_address","/admin/storage/locations":"locations",
   "/admin/shipping-rates":"shipping_rates","/admin/config":"settings","/admin/legal":"legal",
   "/admin/users":"users","/admin/audit":"audit","/admin/operations":"operations",
@@ -397,7 +397,7 @@ const navigationSections = {
   ],
   admin: [
     ["运营管理",["/admin","/admin/orders","/admin/customers","/admin/tickets","/admin/notifications","/admin/inspections","/admin/media","/admin/dispositions","/admin/refunds","/admin/payments","/admin/finance","/admin/logistics","/admin/incidents"]],
-    ["平台配置",["/admin/catalog","/admin/knowledge","/admin/measurement-templates","/admin/templates","/admin/storage/locations","/admin/shipping-rates","/admin/config","/admin/legal","/admin/users","/admin/audit","/admin/operations","/admin/integrations","/admin/integrations/payments","/admin/integrations/ocr","/admin/integrations/logistics","/admin/integrations/email","/admin/integrations/storage"]],
+    ["平台配置",["/admin/catalog","/admin/pricing","/admin/knowledge","/admin/measurement-templates","/admin/templates","/admin/storage/locations","/admin/shipping-rates","/admin/config","/admin/legal","/admin/users","/admin/audit","/admin/operations","/admin/integrations","/admin/integrations/payments","/admin/integrations/ocr","/admin/integrations/logistics","/admin/integrations/email","/admin/integrations/storage"]],
   ],
 } satisfies Record<string,[string,string[]][]>;
 

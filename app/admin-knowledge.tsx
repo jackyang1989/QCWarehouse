@@ -106,6 +106,9 @@ export function AdminKnowledgeDesk({ actor }: { actor: Actor }) {
             <Link className="button sm" href="/admin/measurement-templates">
               动态测量 SVG 编辑器 (PAGE-M23) →
             </Link>
+            <Link className="button sm" href="/admin/pricing">
+              统一定价与审批 (PAGE-M22) →
+            </Link>
             {canEdit && (
               <Action
                 sm

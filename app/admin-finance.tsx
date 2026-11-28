@@ -50,6 +50,7 @@ function FinanceSubNav({ active }: { active: "payments" | "refunds" | "finance" 
       <Link className={`button sm${active === "payments" ? " primary" : ""}`} href="/admin/payments">支付流水与对账</Link>
       <Link className={`button sm${active === "refunds" ? " primary" : ""}`} href="/admin/refunds">退款审批工作台</Link>
       <Link className={`button sm${active === "finance" ? " primary" : ""}`} href="/admin/finance">财务收入与毛利分析</Link>
+      <Link className="button sm" href="/admin/pricing">统一定价与审批 (PAGE-M22) →</Link>
     </div>
   );
 }
