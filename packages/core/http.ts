@@ -27,6 +27,8 @@ import { createImmutableLocaleSnapshot, createLocaleSnapshotSchema, decideDynami
 import { applyCandidateSchema, applyTranslationCandidate, cancelTranslationBatch, createBatchSchema, createTranslationBatch, exportTranslationBatchCsv, getTranslationBatchDetail, getTranslationDiff, listTranslationBatches, pauseTranslationBatch, previewBatchSchema, previewTranslationBatch, publishCheckSchema, publishEntityTranslations, publishEntityTranslationsSchema, assertRequiredLocalesReadyForPublish, rejectTranslationCandidate, requestFieldOrFormTranslation, requestTranslationSchema, resumeTranslationBatch, retryFailedBatchItems } from "./translation-workflow";
 import { appendAiModelRateVersion, appendAiRateSchema, approveAiModel, approveAiProviderInstance, createAiInstanceSchema, createAiProviderInstance, deprecateAiModel, getAdminAiCostLedger, getAdminAiOverview, listAiInvocations, manualAiModelSchema, probeAiProviderInstance, reconciliationSchema, recordAiCostReconciliation, registerAiModelManual, revokeAiInstanceSecret, revokeAiSecretSchema, runSyntheticTranslationTest, saveAiInstanceSecret, saveAiSecretSchema, syncAiProviderModels, syntheticTestSchema, transitionAiInstanceLifecycle, updateAiInstanceSchema, updateAiProviderInstance, upsertAiBudgetPolicy, upsertBudgetPolicySchema } from "./ai-service";
 import { approveGlossaryTerm, cancelTranslationJob, createGlossaryTerm, createGlossaryTermSchema, createPromptDraft, createPromptDraftSchema, createPurposeRouteDraft, createPurposeRouteSchema, enqueueTranslationJob, enqueueTranslationJobSchema, getTranslationJobDetail, invalidateTenantTranslationCache, listEvalRuns, listGlossaryTerms, listPromptVersions, listPurposeRoutes, publishPromptVersion, publishPurposeRoute, retryTranslationJob, retryTranslationJobSchema, reviewEvalHumanQaSchema, reviewEvalRunHumanQa, rollbackPromptVersion, rollbackPurposeRoute, runEvalSuiteSchema, runTranslationEvalSuite, seedDefaultAiPrompts, seedDefaultEvalCases } from "./ai-translation-service";
+import { initializeKnowledgeBase } from "./knowledge-seed";
+import { batchKnowledgeTransition, cloneProductType, compileKnowledgeTaskBlueprint, exportKnowledgeSnapshot, getCatalogFormSchema, getKnowledgeRevisionHistory, getPublicCatalogKnowledge, listKnowledgeEntities, listKnowledgeOverview, parseKnowledgeKind, publishKnowledgeEntity, retireKnowledgeEntity, rollbackKnowledgeEntity, saveKnowledgeEntity, submitKnowledgeEntity } from "./knowledge-base";
 import { catalog, issueManualQuote, orderDetail, quoteOrder, requestManualQuote, saveOrder, submitOrder } from "./orders";
 import { advise, assign, attachPackageOpenPhotos, bindUnmatchedPackageOwner, checkIn, customerIntakeClaims, decideIntakeClaim, getIntakeContext, identifyItem, intakeItems, linkParcelToOrder, lookup, quarantineItem, quarantinePackage, reportPackageQuantityDiscrepancy, requestIntakeClaim, reviewLateComparisonParcel, savePhoto, unassignItem, waybill } from "./intake";
 import { amendReport, amendReportInput, approveReport, checkTaskCompleteness, createReportDispute, editReportRevision, findInspectionTaskByScan, readReport, recordResults, recordTaskShot, recordTaskStep, reportDesk, returnReport, revisionChanges, staffReport, startTask, submitReport, submitReportRevision, submitTask, taskDetail, translateReportCandidate } from "./inspection";
@@ -217,7 +219,20 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     await pool.query("select 1");
     return json({status:"ok"});
   }
-  if(method==="GET" && path==="/catalog") return json({offers:await transaction(catalog)});
+  if(method==="GET" && path==="/catalog") {
+    return json(await transaction(async db=>({
+      offers:await catalog(db),
+      knowledge_catalog:await getPublicCatalogKnowledge(db),
+    })));
+  }
+  if(method==="GET" && path==="/catalog/form-schema") {
+    const offerId=url.searchParams.get("offer_id");
+    const productTypeCode=url.searchParams.get("product_type_code");
+    return json(await transaction(db=>getCatalogFormSchema(db,{
+      offer_id:offerId?idSchema.parse(offerId):null,
+      product_type_code:productTypeCode?z.string().trim().regex(/^[a-z0-9_]{2,80}$/).parse(productTypeCode):null,
+    })));
+  }
   if(method==="GET" && path==="/carriers") return json({carriers:(await pool.query(`select code,labels,
     jsonb_build_object('required',coalesce(phone_rule->>'required'='true',false),
       'format',case when phone_rule->>'format'='last4' then 'last4' else 'full' end) phone_rule,
@@ -1065,8 +1080,16 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   if(method==="POST" && capRevoke) return extraWrite(req,path,actor,staffSchemas.capabilityRevoke,(db,a,b)=>revokeCapability(db,a,idSchema.parse(capRevoke[1]),b.reason));
   if(method==="POST" && path==="/staff/admin/categories")
     return extraWrite(req,path,actor,staffSchemas.categoryCreate,createCategory);
-  const catStatus=path.match(/^\/staff\/admin\/categories\/([a-f0-9-]{36})\/status$/i);
-  if(method==="POST" && catStatus) return extraWrite(req,path,actor,staffSchemas.categoryStatus,(db,a,b)=>updateCategoryStatus(db,a,idSchema.parse(catStatus[1]),b));
+  const catStatus=path.match(/^\/staff\/admin\/categories\/([a-z0-9_-]{2,64})\/status$/i);
+  if((method==="POST"||method==="PUT") && catStatus) {
+    return extraWrite(req,path,actor,staffSchemas.categoryStatus,async(db,a,b)=>{
+      const rawRef=catStatus[1];
+      const catId=idSchema.safeParse(rawRef).success
+        ? rawRef
+        : (await one<{id:string}>(db,"select id from categories where slug=$1",[rawRef.toLowerCase()])).id;
+      return updateCategoryStatus(db,a,catId,b);
+    });
+  }
   if(method==="POST" && path==="/staff/admin/offers")
     return extraWrite(req,path,actor,staffSchemas.offer,upsertOffer);
   const skuPrice=path.match(/^\/staff\/admin\/skus\/([a-z0-9_-]{2,80})\/prices$/i);
@@ -2574,6 +2597,77 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   if(method==="GET" && dynBatchExport) {
     const out=await transaction(db=>exportTranslationBatchCsv(db,actorRequired(actor),hash(getCookie(req,"session")),idSchema.parse(dynBatchExport[1])));
     return new Response(out.csv,{status:200,headers:{"content-type":"text/csv; charset=utf-8","content-disposition":`attachment; filename="${out.filename}"`}});
+  }
+
+  const staffSessionHash=hash(getCookie(req,"session"));
+  if(method==="GET" && path==="/staff/admin/knowledge/overview") {
+    return json(await transaction(db=>listKnowledgeOverview(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/knowledge/seed-init") {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>initializeKnowledgeBase(db,a,staffSessionHash));
+  }
+  if(method==="POST" && path==="/staff/admin/knowledge/compile-preview") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),async(db,a,b)=>{
+      role(a,"super_admin","template_admin","reviewer","warehouse_admin","inspector","support");
+      const canOverrideCaps=a.roles.some(r=>r==="super_admin"||r==="template_admin"||r==="reviewer");
+      const payload=canOverrideCaps?b:{...b,available_capabilities:undefined};
+      return compileKnowledgeTaskBlueprint(db,payload);
+    });
+  }
+  if(method==="GET" && path==="/staff/admin/knowledge/export") {
+    const kindParam=url.searchParams.get("kind");
+    return json(await transaction(db=>exportKnowledgeSnapshot(db,actorRequired(actor),staffSessionHash,kindParam?parseKnowledgeKind(kindParam):undefined)));
+  }
+  const kbListOrSave=path.match(/^\/staff\/admin\/knowledge\/entities\/([a-z_]+)$/i);
+  if(method==="GET" && kbListOrSave) {
+    const k=parseKnowledgeKind(kbListOrSave[1]);
+    return json(await transaction(db=>listKnowledgeEntities(db,actorRequired(actor),k,{
+      status:url.searchParams.get("status")??undefined,
+      group_code:url.searchParams.get("group_code")??undefined,
+      module_code:url.searchParams.get("module_code")??undefined,
+      locale:url.searchParams.get("locale")??undefined,
+      search:url.searchParams.get("search")??undefined,
+    })));
+  }
+  if(method==="POST" && kbListOrSave) {
+    const k=parseKnowledgeKind(kbListOrSave[1]);
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),(db,a,b)=>saveKnowledgeEntity(db,a,k,b,staffSessionHash));
+  }
+  const kbClone=path.match(/^\/staff\/admin\/knowledge\/product-types\/([a-f0-9-]{36})\/clone$/i);
+  if(method==="POST" && kbClone) {
+    return extraWrite(req,path,actor,z.object({code:z.string(),name_zh:z.string(),name_en:z.string(),note:z.string().optional()}),
+      (db,a,b)=>cloneProductType(db,a,idSchema.parse(kbClone[1]),b,staffSessionHash),201);
+  }
+  const kbBatch=path.match(/^\/staff\/admin\/knowledge\/entities\/([a-z_]+)\/(batch-submit|batch-publish)$/i);
+  if(method==="POST" && kbBatch) {
+    const k=parseKnowledgeKind(kbBatch[1]);
+    const act=kbBatch[2]==="batch-submit"?"submit":"publish";
+    return extraWrite(req,path,actor,z.object({ids:z.array(idSchema).min(1).max(200),public_sellable:z.boolean().optional(),note:z.string().optional()}),
+      (db,a,b)=>batchKnowledgeTransition(db,a,act,k,b.ids,{public_sellable:b.public_sellable,note:b.note},staffSessionHash));
+  }
+  const kbAction=path.match(/^\/staff\/admin\/knowledge\/entities\/([a-z_]+)\/([a-f0-9-]{36})\/(submit|publish|retire|rollback)$/i);
+  if(method==="POST" && kbAction) {
+    const k=parseKnowledgeKind(kbAction[1]);
+    const id=idSchema.parse(kbAction[2]);
+    const act=kbAction[3];
+    if(act==="submit") {
+      return extraWrite(req,path,actor,z.object({note:z.string().optional()}),(db,a,b)=>submitKnowledgeEntity(db,a,k,id,b.note,staffSessionHash));
+    }
+    if(act==="publish") {
+      return extraWrite(req,path,actor,z.object({public_sellable:z.boolean().optional(),note:z.string().optional()}),
+        (db,a,b)=>publishKnowledgeEntity(db,a,k,id,b,staffSessionHash));
+    }
+    if(act==="retire") {
+      return extraWrite(req,path,actor,z.object({note:z.string().optional()}),(db,a,b)=>retireKnowledgeEntity(db,a,k,id,b.note,staffSessionHash));
+    }
+    return extraWrite(req,path,actor,z.object({target_version:z.number().int().min(1),note:z.string().optional()}),
+      (db,a,b)=>rollbackKnowledgeEntity(db,a,k,id,b.target_version,b.note,staffSessionHash));
+  }
+  const kbHistory=path.match(/^\/staff\/admin\/knowledge\/entities\/([a-z_]+)\/([a-f0-9-]{36})\/history$/i);
+  if(method==="GET" && kbHistory) {
+    const k=parseKnowledgeKind(kbHistory[1]);
+    const id=idSchema.parse(kbHistory[2]);
+    return json({history:await transaction(db=>getKnowledgeRevisionHistory(db,actorRequired(actor),k,id))});
   }
 
   return null;

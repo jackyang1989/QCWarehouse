@@ -10,6 +10,7 @@ import type { DB } from "../db";
 import { audit, code, event, guard, hash, lock, one, organization, reportCode, resolveSampleCode, revision, role, uuid, type Actor } from "./common";
 import { attachEvidence } from "./intake";
 import { checkSchema, templateSchema } from "./orders";
+import { compileKnowledgeTaskBlueprint } from "./knowledge-base";
 import { staffAccess } from "./staff-access";
 import { sampleCodePattern } from "./portal-routes";
 import { assertItemsOutsideQuarantine } from "./storage";
@@ -532,10 +533,30 @@ export async function taskDetail(db:DB,actor:Actor,id:string) {
     ||(typeof lineAttr.product_url==="string"&&lineAttr.product_url.trim())
     ||null;
   const toleranceMode=Object.keys(tolerances).length>0?"custom":"record_only";
+  const lineOptObj=(typeof t.line_options==="object"&&t.line_options?t.line_options:{}) as Record<string,unknown>;
+  const ptCode=typeof attrs.product_type_code==="string"&&attrs.product_type_code.trim()
+    ? attrs.product_type_code.trim()
+    : typeof lineOptObj.product_type_code==="string"&&lineOptObj.product_type_code.trim()
+      ? lineOptObj.product_type_code.trim()
+      : null;
+  let knowledgeBlueprint:Record<string,unknown>|null=null;
+  if(ptCode) {
+    try {
+      const selMods=Array.isArray(lineOptObj.selected_module_codes)?lineOptObj.selected_module_codes.map(String):[];
+      knowledgeBlueprint=await compileKnowledgeTaskBlueprint(db,{
+        product_type_code:ptCode,
+        selected_module_codes:selMods,
+        customer_authorized_destructive:lineOptObj.customer_authorized_destructive===true,
+      });
+    } catch {
+      knowledgeBlueprint=null;
+    }
+  }
   return {
     ...t,
     tolerances,
     tolerance_mode:toleranceMode,
+    knowledge_blueprint:knowledgeBlueprint,
     attachment_ids:referenceAttachments.map(a=>a.id),
     reference_attachments:referenceAttachments,
     purchase_evidences:purchaseEvidences,

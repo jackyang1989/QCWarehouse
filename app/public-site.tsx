@@ -1224,6 +1224,32 @@ export function PublicCategories() {
             );
           })}
         </div>
+
+        {(data?.knowledge_catalog?.groups?.length ?? 0) > 0 && (
+          <div className="card-soft" style={{ marginTop: 18 }}>
+            <div className="row between flexwrap" style={{ gap: 8, marginBottom: 10 }}>
+              <strong>Standard Apparel Catalog Coverage ({data?.knowledge_catalog?.product_types?.length ?? 0} garment types across {data?.knowledge_catalog?.groups?.length ?? 0} groups)</strong>
+              <span className="small muted">Only approved apparel types are published; internal pricing/complexity codes remain internal.</span>
+            </div>
+            <div className="pub-future-grid">
+              {((data?.knowledge_catalog?.groups ?? []) as { group_code: string; group_name_en: string; count: number }[]).map((grp) => (
+                <div className="pub-future-card" key={grp.group_code}>
+                  <div className="row between" style={{ gap: 8 }}>
+                    <strong style={{ fontSize: 13 }}>{grp.group_name_en}</strong>
+                    <span className="tag blue">{grp.count} types</span>
+                  </div>
+                  <p className="small muted" style={{ margin: 0, fontSize: 12 }}>
+                    {((data?.knowledge_catalog?.product_types ?? []) as { group_code: string; name_en: string }[])
+                      .filter((pt) => pt.group_code === grp.group_code)
+                      .slice(0, 6)
+                      .map((pt) => pt.name_en)
+                      .join(", ")}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
 
       {/* Secondary Downgraded Section: Planned & Restricted Categories */}

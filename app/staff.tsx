@@ -2358,14 +2358,17 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
     />}
 
     {(page==="catalog"||page==="settings")&&<>
-      <AdminTabs
-        active={catalogTab}
-        onChange={next=>setCatalogTab(next as typeof catalogTab)}
-        tabs={[
-          {id:"categories",label:"类目运营准入",count:(data.categories??[]).length},
-          ...(superAdmin?[{id:"offers",label:"可售套餐 SKU 与版本定价",count:(data.offers??[]).length}]:[]),
-        ]}
-      />
+      <div className="row between flexwrap" style={{marginBottom:10,gap:8}}>
+        <AdminTabs
+          active={catalogTab}
+          onChange={next=>setCatalogTab(next as typeof catalogTab)}
+          tabs={[
+            {id:"categories",label:"类目运营准入",count:(data.categories??[]).length},
+            ...(superAdmin?[{id:"offers",label:"可售套餐 SKU 与版本定价",count:(data.offers??[]).length}]:[]),
+          ]}
+        />
+        <Link className="button sm" href="/admin/knowledge">服装知识库与模块目录 (PAGE-M47) →</Link>
+      </div>
       {catalogTab==="categories"&&<>
         {admittingCategory&&superAdmin&&(
           <Panel
@@ -2662,7 +2665,7 @@ export function AdminDesk({actor,path,demo=false}:{actor:Row;path:string;demo?:b
         </Panel>
       )}
 
-      <Panel title="检验能力准入与独立审批" subtitle="检查模板必须绑定已获独立批准的检验能力；能力创建人与审批人不得为同一人。">
+      <Panel title="检验能力准入与独立审批" subtitle="检查模板必须绑定已获独立批准的检验能力；能力创建人与审批人不得为同一人。" badge={<Link className="button sm" href="/admin/knowledge">服装专业知识库 (PAGE-M47) →</Link>}>
         <Table headers={["能力编码","标准检验方法与工器具","审批状态","操作"]} rows={(data.allCapabilities??data.capabilities).map((cap:Row)=>[
           <span key="c" className="code">{cap.code}</span>,
           cap.method,
