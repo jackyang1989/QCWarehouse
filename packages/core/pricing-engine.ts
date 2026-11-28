@@ -879,7 +879,7 @@ export function runSection43WorkedExamples(rawBook: Record<string, any>) {
   ];
 }
 
-async function loadCatalogPricingContext(db: DB, productTypeCode: string): Promise<CatalogPricingContext> {
+export async function loadCatalogPricingContext(db: DB, productTypeCode: string): Promise<CatalogPricingContext> {
   const row = (
     await db.query<{
       code: string;
@@ -925,7 +925,7 @@ async function loadCatalogPricingContext(db: DB, productTypeCode: string): Promi
   };
 }
 
-async function applyPricingBookTranslations(
+export async function applyPricingBookTranslations(
   db: DB,
   bookId: string,
   snap: Record<string, any>,
@@ -970,7 +970,7 @@ async function applyPricingBookTranslations(
   };
 }
 
-async function resolveCurrentEffectiveVersion(db: DB) {
+export async function resolveCurrentEffectiveVersion(db: DB) {
   return (
     await db.query<{
       book_id: string;

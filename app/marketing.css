@@ -2506,3 +2506,64 @@ html:has(.public-top) {
   display: grid;
   gap: 4px;
 }
+
+.pub-est-shell {
+  display: grid;
+  gap: 14px;
+}
+
+.pub-est-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.pub-est-batchbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #f1f6fd;
+  border: 1px solid #d5e3f5;
+}
+
+.pub-est-group-card {
+  background: #ffffff;
+  border: 1px solid #dbe5f2;
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.pub-est-modules {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #e6edf6;
+}
+
+.pub-est-mod-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.pub-est-mod-item {
+  border: 1px solid #dce6f2;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fafcff;
+}
+
+.pub-est-mod-item.active {
+  border-color: #2563eb;
+  background: #f0f6ff;
+}
+
+@media (max-width: 720px) {
+  .pub-est-mod-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

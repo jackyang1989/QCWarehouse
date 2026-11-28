@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { localizePublicPath } from "../packages/core/locale-contract";
 import { legalPages, servicePages } from "../packages/core/portal-routes";
 import { useLocale } from "./i18n-client";
+import { PublicModularEstimator } from "./public-estimator";
 import { Empty, ErrorBlock, Panel, Tabs, usd, useLoad } from "./ui";
 
 export type CatalogCheck = {
@@ -1933,118 +1934,6 @@ export function PublicPricing() {
   const refOffers = offers.filter((o) => o.service === "reference_match");
   const hasDemoRates = offers.some((o) => o.rules?.demo === true);
 
-  const [service, setService] = useState<"inspection" | "compare" | "reference_match">("inspection");
-  const [offerId, setOfferId] = useState<string>("");
-  const [qty, setQty] = useState<number>(10);
-
-  const servicePool = offers.filter((o) => o.service === service);
-
-  useEffect(() => {
-    if (!servicePool.length) return;
-    const currentValid = servicePool.some((o) => o.offer_id === offerId);
-    if (!currentValid) {
-      const preferred =
-        service === "inspection"
-          ? servicePool.find((o) => !o.content?.subcategory) ?? servicePool[0]
-          : servicePool[0];
-      setOfferId(preferred.offer_id);
-      if (service === "compare") {
-        setQty(preferred.rules.minimum);
-      } else if (service === "reference_match") {
-        setQty(1);
-      } else if (qty < 1 || qty > 350) {
-        setQty(10);
-      }
-    }
-  }, [service, servicePool, offerId, qty]);
-
-  const activeOffer = servicePool.find((o) => o.offer_id === offerId) ?? servicePool[0];
-
-  function handleOfferChange(nextId: string) {
-    setOfferId(nextId);
-    const picked = servicePool.find((o) => o.offer_id === nextId);
-    if (picked && picked.service === "compare") {
-      setQty(picked.rules.minimum);
-    } else if (picked && picked.service === "reference_match" && qty > 20) {
-      setQty(1);
-    }
-  }
-
-  // Exact server-equivalent calculation (mirrors packages/core/orders.ts)
-  let calcHeadline = isZh ? "正在计算…" : "Loading…";
-  let calcSubnote = "";
-  let calcUnitText = "";
-  let isManualQuote = false;
-  let isCustomInquiry = false;
-
-  if (activeOffer) {
-    const safeQty = Math.max(1, Math.floor(Number.isFinite(qty) ? qty : 1));
-    if (service === "inspection") {
-      const unit = activeOffer.rules.unit_cents ?? 0;
-      calcUnitText = isZh
-        ? `${usd(unit)} × ${safeQty} 件实物`
-        : `${usd(unit)} × ${safeQty} ${safeQty === 1 ? "item" : "items"}`;
-      if (safeQty > 300) {
-        isCustomInquiry = true;
-        calcHeadline = isZh ? "专项人工批检报价" : "Custom Quotation";
-        calcSubnote = isZh
-          ? "单笔委托超过 300 件上限时须转为专项批检排期，由运营团队单独核定报价。"
-          : "Orders above 300 physical items exceed single-order online limits and are quoted as a scheduled batch.";
-      } else if (safeQty > activeOffer.rules.maximum) {
-        isManualQuote = true;
-        calcHeadline = isZh ? "人工工位核价草稿" : "Manual Staff Quote";
-        calcSubnote = isZh
-          ? `${activeOffer.rules.maximum + 1}–300 件区间的订单会先保存为草稿，待仓内复核排期与工位产能后出价再支付。`
-          : `Quantities of ${activeOffer.rules.maximum + 1}–300 items are saved as a draft order and reviewed by staff to confirm turnaround & bench capacity before payment.`;
-      } else {
-        calcHeadline = usd(unit * safeQty);
-        calcSubnote = isZh
-          ? `支持直接线上结账 · 全部 ${safeQty} 件点收齐备后约 ${activeOffer.rules.business_days} 个工作日交付报告。`
-          : `Standard online checkout · Est. ${activeOffer.rules.business_days} business days after all ${safeQty} items are received & identified.`;
-      }
-    } else if (service === "compare") {
-      const pkg = activeOffer.rules.package_cents ?? 0;
-      const validSetSize = activeOffer.rules.minimum;
-      calcUnitText = isZh
-        ? `固定 ${validSetSize} 件同台对比组套餐`
-        : `Fixed ${validSetSize}-item comparison package`;
-      calcHeadline = usd(pkg);
-      calcSubnote = isZh
-        ? `包含 ${validSetSize} 件同类样品同框评估并合出一份对比报告（${activeOffer.rules.business_days} 个工作日）。如需对 4 件及以上大货单独建档，请切换回“实物商品质检”。`
-        : `Covers ${validSetSize} comparable items evaluated side by side in one report (${activeOffer.rules.business_days} business days). Need 4+ items checked individually? Switch to Product Inspection.`;
-    } else {
-      // reference_match: server rules minimum=1, maximum=1 per order line, up to 20 order lines per order
-      const pkg = activeOffer.rules.package_cents ?? 0;
-      if (safeQty > 20) {
-        isCustomInquiry = true;
-        calcUnitText = isZh ? `${safeQty} 件待比对来料` : `${safeQty} incoming samples`;
-        calcHeadline = isZh ? "专项人工核价" : "Custom Quotation";
-        calcSubnote = isZh
-          ? "每条确认样比对明细对应 1 件新来料比对 1 件封存标杆样（单笔在线最多 20 条）；更大批比对请联系我们。"
-          : "Each Reference Match line compares 1 incoming item against 1 retained Golden Sample (up to 20 lines per online order). Contact us for larger batch matching.";
-      } else {
-        calcUnitText = isZh
-          ? safeQty === 1
-            ? `${usd(pkg)} × 1 条单件比对明细`
-            : `${usd(pkg)} × ${safeQty} 条独立 1 对 1 比对明细`
-          : safeQty === 1
-            ? `${usd(pkg)} × 1 incoming item line`
-            : `${usd(pkg)} × ${safeQty} separate 1-item reference lines`;
-        calcHeadline = usd(pkg * safeQty);
-        calcSubnote = isZh
-          ? safeQty === 1
-            ? `以账户内已封存的 1 件有效标杆确认样为基准，比对 1 件新来料（${activeOffer.rules.business_days} 个工作日）。`
-            : `按“1 件新来料对 1 份标杆样”共计 ${safeQty} 条明细合算（${usd(pkg * safeQty)}）。若需查验 20+ 件无逐件对标要求的中小批补货，建议改选“实物商品质检”。`
-          : safeQty === 1
-            ? `Matches 1 incoming item against 1 active Golden Sample held in protected reference storage (${activeOffer.rules.business_days} business days).`
-            : `Quotes Reference Matching at 1 incoming item per order line (${safeQty} lines = ${usd(pkg * safeQty)}). For 20+ restock units without individual reference pairs, consider Product Inspection.`;
-      }
-    }
-  } else if (data) {
-    calcHeadline = isZh ? "请联系获取报价" : "Quote on request";
-    calcSubnote = isZh ? "当前所选条件下暂无已上线服务方案。" : "No active catalog offer found for this selection.";
-  }
-
   return (
     <>
       <div className="breadcrumb">
@@ -2197,174 +2086,22 @@ export function PublicPricing() {
         </section>
       </div>
 
-      {/* Interactive Server-Consistent Fee Calculator */}
+      {/* Interactive Server-Consistent Unified Modular Fee Estimator */}
       <section className="pub-surface-box pub-block" id="pricing-calculator" aria-labelledby="calc-heading">
         <div>
-          <p className="pub-eyebrow">{isZh ? "服务端同源计费规则试算" : "SERVER-CONSISTENT FEE ESTIMATOR"}</p>
-          <h2 id="calc-heading" className="pub-h2">{isZh ? "实时测算当次质检服务费用" : "Estimate Your Exact Inspection Fee"}</h2>
+          <p className="pub-eyebrow">{isZh ? "服务端同源统一计费引擎试算" : "SERVER-CONSISTENT UNIFIED FEE ESTIMATOR"}</p>
+          <h2 id="calc-heading" className="pub-h2">{isZh ? "免登录模块化质检费用实时估算" : "Estimate Your Exact Inspection Fee"}</h2>
           <p className="pub-lead" style={{ fontSize: 14 }}>
             {isZh
-              ? "采用与订单结算页完全一致的服务准入、单件/按组计费口径及人工排期阈值，无虚假折扣。"
-              : "Uses the same offer eligibility, unit/package billing rules, and manual-quote thresholds as QC Warehouse’s order checkout engine."}
+              ? "采用与后台试算、客户草稿及正式结算完全一致的统一价格内核、模块依赖与抽检覆盖规则；支持保存匿名草稿并在登录后认领。"
+              : "Uses the exact same unified pricing engine, module dependencies, and coverage rules as staff simulation and formal checkout; save an anonymous draft anytime."}
           </p>
         </div>
 
-        <div className="pub-calc-grid">
-          <div style={{ display: "grid", gap: 16, alignContent: "start" }}>
-            <div className="field">
-              <label htmlFor="calc-service">{isZh ? "1. 选择质检服务模式" : "1. Choose Service Type"}</label>
-              <select
-                id="calc-service"
-                value={service}
-                onChange={(e) => setService(e.target.value as "inspection" | "compare" | "reference_match")}
-              >
-                <option value="inspection">{isZh ? "实物商品质检（逐件查验 · 按件计费）" : "Product Inspection (Piece-by-Piece · per item)"}</option>
-                <option value="compare">{isZh ? "供应商样品对比（2 或 3 件同框 · 按组计费）" : "Sample Comparison (2 or 3 items · per group)"}</option>
-                <option value="reference_match">{isZh ? "标杆确认样比对（1 件来料 vs 封存基准样）" : "Golden Sample Matching (1 incoming item vs retained reference)"}</option>
-              </select>
-            </div>
-
-            <div className="field">
-              <label htmlFor="calc-offer">{isZh ? "2. 选择已获批服装模板 / 方案" : "2. Select Approved Apparel Template / Package"}</label>
-              <select
-                id="calc-offer"
-                value={activeOffer?.offer_id ?? ""}
-                onChange={(e) => handleOfferChange(e.target.value)}
-              >
-                {servicePool.map((o) => {
-                  const rate = usd(o.rules.unit_cents ?? o.rules.package_cents ?? 0);
-                  const unit = o.rules.unit_cents != null
-                    ? (isZh ? "/ 件" : "/ item")
-                    : o.service === "reference_match"
-                      ? (isZh ? "/ 次" : "/ match")
-                      : (isZh ? "/ 组" : "/ set");
-                  return (
-                    <option key={o.offer_id} value={o.offer_id}>
-                      {isZh ? (o.title["zh-CN"] || o.title.en) : o.title.en} — {rate} {unit}
-                    </option>
-                  );
-                })}
-              </select>
-            </div>
-
-            {service === "inspection" && (
-              <div className="field">
-                <label htmlFor="calc-qty">{isZh ? "3. 拟逐件查验的实物商品总件数" : "3. Number of Physical Items to Inspect Individually"}</label>
-                <input
-                  id="calc-qty"
-                  type="number"
-                  min={1}
-                  max={500}
-                  step={1}
-                  value={qty}
-                  onChange={(e) => setQty(Math.max(1, Number(e.target.value) || 1))}
-                />
-                <div className="pub-qty-pills" role="group" aria-label={isZh ? "常用件数快捷选择" : "Quick quantity presets"}>
-                  {[1, 5, 15, 30, 50, 100, 150].map((preset) => (
-                    <button
-                      key={preset}
-                      type="button"
-                      className={`pub-qty-pill${qty === preset ? " active" : ""}`}
-                      onClick={() => setQty(preset)}
-                    >
-                      {isZh ? `${preset} 件` : `${preset} ${preset === 1 ? "item" : "items"}`}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {service === "compare" && activeOffer && (
-              <div className="field">
-                <label>{isZh ? "3. 同组对比样品数量" : "3. Comparison Group Size"}</label>
-                <div className="line-note" style={{ margin: 0 }}>
-                  {isZh ? (
-                    <>当前套餐固定于同一份对比报告内并排核验 <strong>{activeOffer.rules.minimum} 件同品类样品</strong>。如需切换 2 件组或 3 件组，请在上方第 2 步重选。</>
-                  ) : (
-                    <>This package compares exactly <strong>{activeOffer.rules.minimum} comparable items</strong> in a single side-by-side report. Choose a 2-item or 3-item package in Step 2 above.</>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {service === "reference_match" && (
-              <div className="field">
-                <label htmlFor="calc-ref-qty">{isZh ? "3. 需对照封存标杆样的来料样品数量" : "3. Incoming Samples to Benchmark Against Retained Reference(s)"}</label>
-                <input
-                  id="calc-ref-qty"
-                  type="number"
-                  min={1}
-                  max={30}
-                  step={1}
-                  value={qty}
-                  onChange={(e) => setQty(Math.max(1, Number(e.target.value) || 1))}
-                />
-                <div className="pub-qty-pills" role="group" aria-label={isZh ? "来料比对件数快捷选档" : "Reference match sample count"}>
-                  {[1, 2, 3, 5].map((preset) => (
-                    <button
-                      key={preset}
-                      type="button"
-                      className={`pub-qty-pill${qty === preset ? " active" : ""}`}
-                      onClick={() => setQty(preset)}
-                    >
-                      {isZh ? `${preset} 件来料` : `${preset} ${preset === 1 ? "incoming sample" : "incoming samples"}`}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="pub-calc-result" aria-live="polite">
-            <div>
-              <div className="pub-eyebrow" style={{ color: "#93b8ff", marginBottom: 2 }}>
-                {isZh ? "预估质检服务费（不含国内运费）" : "ESTIMATED INSPECTION FEE (EXCL. SHIPPING)"}
-              </div>
-              <div className="pub-calc-amount">{calcHeadline}</div>
-              <div style={{ fontSize: 13, color: "#bfd4ef", fontWeight: 650 }}>{calcUnitText}</div>
-            </div>
-
-            <div className="pub-calc-breakdown">
-              <div>
-                <span>{isZh ? "已选检验模板" : "Selected Template"}</span>
-                <strong>{activeOffer ? (isZh ? (activeOffer.title["zh-CN"] || activeOffer.title.en) : activeOffer.title.en) : "—"}</strong>
-              </div>
-              <div>
-                <span>{isZh ? "包含检查点数量" : "Included Checkpoints"}</span>
-                <strong>
-                  {activeOffer
-                    ? isZh
-                      ? `${activeOffer.content.checks.length} 项 + 必拍工位原片`
-                      : `${activeOffer.content.checks.length} checks + mandatory photos`
-                    : "—"}
-                </strong>
-              </div>
-              <div>
-                <span>{isZh ? "检后寄递 / 超期仓储" : "Outbound Shipping / Storage"}</span>
-                <strong>{isZh ? "发运前按实际重量与指令核价" : "Quoted later by actual parcel"}</strong>
-              </div>
-            </div>
-
-            <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.55, color: "#d5e4f7" }}>{calcSubnote}</p>
-
-            <div>
-              {isCustomInquiry ? (
-                <Link className="button primary full" href={hrefFor(`/contact?topic=quote&qty=${qty}`)}>
-                  {isZh ? "提交大批量专属人工报价申请 →" : "Request Custom Batch Quotation →"}
-                </Link>
-              ) : (
-                <Link
-                  className="button primary full"
-                  href={activeOffer ? `/orders/new?offer=${activeOffer.offer_id}` : "/orders/new"}
-                >
-                  {isManualQuote
-                    ? (isZh ? "创建草稿并申请人工核价 →" : "Create Draft & Request Staff Quote →")
-                    : (isZh ? "使用此套餐创建订单 →" : "Continue With This Package →")}
-                </Link>
-              )}
-            </div>
-          </div>
-        </div>
+        <PublicModularEstimator
+          knowledgeCatalog={data?.knowledge_catalog}
+          pricingCatalog={data?.pricing_catalog ?? null}
+        />
       </section>
 
       {/* Complete Included vs Extra Cost Breakdown */}

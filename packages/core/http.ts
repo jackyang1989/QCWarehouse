@@ -32,6 +32,7 @@ import { initializeMeasurementTemplates } from "./measurement-seed";
 import { initializeUnifiedPricing } from "./pricing-seed";
 import { initializeLaborAndCostDefaults } from "./labor-cost-seed";
 import { deletePublicRetiredRoute, getAdminPublicContactConfig, getPublicContactConfig, listPublicRetiredRoutes, resolvePublicRetiredRoute, routeStatusQuerySchema, updatePublicContactConfig, upsertPublicRetiredRoute } from "./public-website";
+import { assertPublicEstimateRateLimit, calculatePublicMultiGroupEstimate, createAnonymousEstimateDraft, deleteAnonymousEstimateDraft, getAnonymousEstimateDraft, updateAnonymousEstimateDraft } from "./public-estimator";
 import { initializeCapacitySlaDefaults } from "./capacity-sla-seed";
 import { calculateWorkloadAndSla, extendOrderSlaCommitment, getCapacityPolicyDetail, getOrderSlaCommitments, getWarehouseCapacityDashboard, listCapacitySlaPolicies, pauseOrderSlaCommitment, publishCapacityPolicy, resumeOrderSlaCommitment, retireCapacityPolicy, rollbackCapacityPolicy, saveCapacityPolicyDraft, startOrderSlaCommitment, submitCapacityPolicy } from "./capacity-sla-engine";
 import { completeLaborEvent, correctLaborEvent, generateStandardCostMatrix, getCostModelDetail, getLaborCostOverview, getLaborStatistics, getOrderCostProfitBreakdown, listCostModels, listLaborBaselines, listLaborEvents, markStaleOpenLaborEventsPendingCalibration, pauseLaborEvent, publishCostModel, recordBackgroundSystemMetric, recordOrderCostEntry, resumeLaborEvent, retireCostModel, rollbackCostModel, saveCostModelDraft, simulateUnitEconomicsAndMargin, startLaborEvent, submitCostModel, updateLaborBaselineAssumption } from "./labor-cost-engine";
@@ -96,6 +97,9 @@ function privateShareResponse(response:Response) {
   response.headers.set("referrer-policy","no-referrer");
   response.headers.set("x-robots-tag","noindex, nofollow");
   return response;
+}
+function privateJson(value:unknown,status=200,cookies:string[] = []) {
+  return privateShareResponse(json(value,status,cookies));
 }
 function json(value:unknown,status=200,cookies:string[] = []) {
   const headers=new Headers({"cache-control":"no-store"});
@@ -264,6 +268,45 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const query=routeStatusQuerySchema.parse({path:url.searchParams.get("path")??""});
     const resolved=await transaction(db=>resolvePublicRetiredRoute(db,query.path));
     return json(resolved ?? {found:false,path:query.path});
+  }
+  if(method==="POST" && path==="/public/estimate") {
+    csrf(req,actor?"session":"origin_only");
+    const rateKey=idSchema.safeParse(getCookie(req,"qcw_browser")).data
+      ?? req.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+      ?? "anon-public";
+    assertPublicEstimateRateLimit(rateKey);
+    const body=await input(req);
+    return json(await transaction(db=>calculatePublicMultiGroupEstimate(db,body)));
+  }
+  if(method==="POST" && path==="/public/estimate-drafts") {
+    csrf(req,actor?"session":"origin_only");
+    const rateKey=idSchema.safeParse(getCookie(req,"qcw_browser")).data
+      ?? req.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+      ?? "anon-public";
+    assertPublicEstimateRateLimit(rateKey);
+    const browser=idSchema.safeParse(getCookie(req,"qcw_browser")).data??uuid();
+    const body=await input(req);
+    const created=await transaction(db=>createAnonymousEstimateDraft(db,browser,body));
+    return privateJson(created,201,[cookie("qcw_browser",browser,2592000)]);
+  }
+  const anonDraftMatch=path.match(/^\/public\/estimate-drafts\/([A-Za-z0-9_-]{32,128})$/);
+  if(anonDraftMatch) {
+    const token=anonDraftMatch[1];
+    const browser=idSchema.safeParse(getCookie(req,"qcw_browser")).data??"";
+    if(method==="GET") {
+      return privateJson(await transaction(db=>getAnonymousEstimateDraft(db,browser,token)));
+    }
+    if(method==="PUT") {
+      csrf(req,actor?"session":"origin_only");
+      const rateKey=browser || req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "anon-public";
+      assertPublicEstimateRateLimit(rateKey);
+      const body=await input(req);
+      return privateJson(await transaction(db=>updateAnonymousEstimateDraft(db,browser,token,body)));
+    }
+    if(method==="DELETE") {
+      csrf(req,actor?"session":"origin_only");
+      return privateJson(await transaction(db=>deleteAnonymousEstimateDraft(db,browser,token)));
+    }
   }
   if(method==="GET" && path==="/public/inquiry-categories") {
     const browser=idSchema.safeParse(getCookie(req,"qcw_browser")).data??uuid();
