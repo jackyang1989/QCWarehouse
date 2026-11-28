@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { AdminCostMarginPanel } from "./admin-cost-margin";
 import { BilingualEntityPanel } from "./bilingual-editor";
 import { Action, ErrorBlock, Field, Form, Panel, request, Select, Table, Tag, text, useLoad } from "./ui";
 import type { Actor } from "../packages/core/common";
@@ -40,6 +41,7 @@ function toDatetimeLocalValue(iso?: string | null): string {
 }
 
 export function AdminPricingDesk({ actor }: { actor: Actor }) {
+  const [deskTab, setDeskTab] = useState<"pricing" | "cost_margin">("pricing");
   const [statusFilter, setStatusFilter] = useState("");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -211,6 +213,26 @@ export function AdminPricingDesk({ actor }: { actor: Actor }) {
 
   return (
     <div className="desk-stack">
+      <div className="actions" style={{ marginBottom: 4 }}>
+        <button
+          type="button"
+          className={`button sm${deskTab === "pricing" ? " primary" : ""}`}
+          onClick={() => setDeskTab("pricing")}
+        >
+          统一价格簿与审批（TASK-197）
+        </button>
+        <button
+          type="button"
+          className={`button sm${deskTab === "cost_margin" ? " primary" : ""}`}
+          onClick={() => setDeskTab("cost_margin")}
+        >
+          工时统计、成本模型与毛利沙盘（TASK-198）
+        </button>
+      </div>
+      {deskTab === "cost_margin" ? (
+        <AdminCostMarginPanel actor={actor} />
+      ) : (
+        <>
       <Panel
         title="统一商业定价与审批配置中心（PAGE-M22）"
         subtitle="管理内部复杂度基价（对客严格隐藏）、M01–M11 模块分项定价与依赖/互斥、21 种合法计费单位、Compare/Golden 专项模型、优惠与覆盖规则、批量调价预览与 §43.2 算例核算。"
@@ -1242,6 +1264,8 @@ export function AdminPricingDesk({ actor }: { actor: Actor }) {
               )}
             </div>
           </Panel>
+        </>
+      )}
         </>
       )}
     </div>

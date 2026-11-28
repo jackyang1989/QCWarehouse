@@ -15,6 +15,15 @@ import { resolvePublishedMeasurementForProductType } from "./measurement-templat
 import { staffAccess } from "./staff-access";
 import { sampleCodePattern } from "./portal-routes";
 import { assertItemsOutsideQuarantine } from "./storage";
+import { completeLaborEvent, completeOpenTaskLaborEvents, startLaborEvent } from "./labor-cost-engine";
+
+const STEP_TO_LABOR_ACTIVITY: Record<"prep" | "measure" | "visual" | "compare" | "qa_review", "garment_prep" | "measurement_point" | "visual_inspect" | "module_inspect" | "qa_review"> = {
+  prep: "garment_prep",
+  measure: "measurement_point",
+  visual: "visual_inspect",
+  compare: "module_inspect",
+  qa_review: "qa_review",
+};
 
 type ResultInput={item_key:string;component:string;attempt:number;status:string;method:string;is_final:boolean;typed_value?:unknown;unit?:string;reason?:string;evidence_ids?:string[];details?:Record<string,unknown>};
 
@@ -488,6 +497,8 @@ export async function taskDetail(db:DB,actor:Actor,id:string) {
     order by created_at,id`,[id])).rows;
   const stepTimings=(await db.query(`select id,step_code,operator_id,started_at,ended_at,seconds
     from step_timings where order_id=$1 order by started_at desc,id desc limit 50`,[t.order_id])).rows;
+  const laborTimeEvents=(await db.query(`select id,activity_code,time_bucket,operator_id,source_kind,started_at,ended_at,effective_seconds,status
+    from labor_time_events where inspection_task_id=$1 order by started_at desc,id desc limit 50`,[id])).rows;
   const completeness=await evaluateCompleteness(db,t);
   const parsedTpl=templateSchema.parse(t.content);
   const attrs:Record<string,unknown>={
@@ -577,6 +588,7 @@ export async function taskDetail(db:DB,actor:Actor,id:string) {
     sibling_tasks:siblingTasks,
     shots,
     step_timings:stepTimings,
+    labor_time_events:laborTimeEvents,
     operation_notes:await orderOperationNotes(db,t.order_id,id),
     completeness,
     results:(await db.query(`select r.*,array(select m.id from media_assets m where m.result_id=r.id order by m.id) evidence_ids
@@ -640,6 +652,14 @@ export async function startTask(db:DB,actor:Actor,id:string,rev:number) {
       }
     }
   }
+  await startLaborEvent(db,actor,{
+    order_id:t.order_id,
+    inspection_task_id:id,
+    product_type_code:ptCode??undefined,
+    activity_code:"visual_inspect",
+    time_bucket:"active_labor",
+    source_kind:"auto_hook",
+  });
   await audit(db,actor,"start_task","inspection_tasks",id);
   return dto(updated);
 }
@@ -842,7 +862,8 @@ export async function recordTaskStep(
     `select t.id,l.order_id from inspection_tasks t join order_lines l on l.id=t.order_line_id where t.id=$1`,
     [id]
   );
-  const act=input.action ?? (input.seconds!==undefined || input.ended_at ? "record" : "start");
+  const act=input.action ?? (input.seconds!==undefined || (input.started_at && input.ended_at) ? "record" : "start");
+  const activityCode=STEP_TO_LABOR_ACTIVITY[input.step_code];
   if(act==="start") {
     await db.query(
       `update step_timings set ended_at=now() where order_id=$1 and operator_id=$2 and step_code=$3 and ended_at is null`,
@@ -854,6 +875,14 @@ export async function recordTaskStep(
        returning id,step_code,started_at,ended_at,seconds`,
       [uuid(),t.order_id,input.step_code,actor.id,input.started_at??null]
     );
+    await startLaborEvent(db,actor,{
+      order_id:t.order_id,
+      inspection_task_id:t.id,
+      activity_code:activityCode,
+      time_bucket:"active_labor",
+      source_kind:"operator_timer",
+      started_at:input.started_at,
+    });
     return row;
   }
   if(act==="stop") {
@@ -861,19 +890,61 @@ export async function recordTaskStep(
       `select id from step_timings where order_id=$1 and operator_id=$2 and step_code=$3 and ended_at is null order by started_at desc limit 1`,
       [t.order_id,actor.id,input.step_code]
     )).rows[0];
-    if(open) {
-      return one<{id:string;step_code:string;started_at:Date;ended_at:Date|null;seconds:number|null}>(db,
-        `update step_timings set ended_at=coalesce($2::timestamptz,now()) where id=$1 returning id,step_code,started_at,ended_at,seconds`,
-        [open.id,input.ended_at??null]
-      );
+    guard(open,"NO_ACTIVE_TIMING",`No active timing session to stop for step '${input.step_code}'.`,409);
+    const stopped=await one<{id:string;step_code:string;started_at:Date;ended_at:Date|null;seconds:number|null}>(db,
+      `update step_timings set ended_at=coalesce($2::timestamptz,now()) where id=$1 returning id,step_code,started_at,ended_at,seconds`,
+      [open.id,input.ended_at??null]
+    );
+    const openLabor=(await db.query<{id:string}>(
+      `select id from labor_time_events
+       where (inspection_task_id=$1 or order_id=$2)
+         and operator_id=$3
+         and activity_code=$4
+         and status in ('active','paused')
+       order by (case when inspection_task_id=$1 then 0 else 1 end), started_at desc limit 1`,
+      [t.id,t.order_id,actor.id,activityCode]
+    )).rows[0];
+    if(openLabor) {
+      await completeLaborEvent(db,actor,openLabor.id,{endedAt:input.ended_at});
     }
+    return stopped;
   }
-  const secs=Math.max(1,Math.min(86400,Math.round(input.seconds??60)));
+  let secs:number|null=null;
+  let startedExpr="now()-($5::int * interval '1 second')";
+  let endedExpr="now()";
+  let rowParams:unknown[];
+  if(input.seconds!==undefined) {
+    guard(Number.isFinite(input.seconds)&&input.seconds>=1&&input.seconds<=86400,"INVALID_TIMING","Seconds must be between 1 and 86400.",422);
+    secs=Math.round(input.seconds);
+    rowParams=[uuid(),t.order_id,input.step_code,actor.id,secs];
+  } else {
+    guard(Boolean(input.started_at && input.ended_at),"TIMING_DURATION_REQUIRED",
+      "Explicit seconds or started_at + ended_at timestamps are required (no hardcoded 60s fallback).",422);
+    const startMs=Date.parse(input.started_at!);
+    const endMs=Date.parse(input.ended_at!);
+    guard(Number.isFinite(startMs)&&Number.isFinite(endMs)&&endMs>startMs,"INVALID_TIME_RANGE","ended_at must be strictly after started_at.",422);
+    secs=Math.max(1,Math.min(86400,Math.round((endMs-startMs)/1000)));
+    startedExpr="$5::timestamptz";
+    endedExpr="$6::timestamptz";
+    rowParams=[uuid(),t.order_id,input.step_code,actor.id,input.started_at,input.ended_at];
+  }
   const row=await one<{id:string;step_code:string;started_at:Date;ended_at:Date|null;seconds:number|null}>(db,
     `insert into step_timings(id,order_id,step_code,operator_id,started_at,ended_at)
-     values($1,$2,$3,$4,now()-($5::int * interval '1 second'),now())
+     values($1,$2,$3,$4,${startedExpr},${endedExpr})
      returning id,step_code,started_at,ended_at,seconds`,
-    [uuid(),t.order_id,input.step_code,actor.id,secs]
+    rowParams
+  );
+  await db.query(
+    `insert into labor_time_events(
+      order_id,inspection_task_id,activity_code,time_bucket,operator_id,
+      source_kind,data_provenance,started_at,ended_at,effective_seconds,status
+    ) values (
+      $1,$2,$3,'active_labor',$4,'operator_timer','measured_system',
+      coalesce($5::timestamptz, now() - ($7::int * interval '1 second')),
+      coalesce($6::timestamptz, now()),
+      $7::int,'completed'
+    )`,
+    [t.order_id,t.id,activityCode,actor.id,input.started_at??null,input.ended_at??null,secs]
   );
   return row;
 }
@@ -888,6 +959,11 @@ export async function submitTask(db:DB,actor:Actor,id:string,rev:number) {
   const comp=await evaluateCompleteness(db,t);
   guard(comp.ok,"INSPECTION_INCOMPLETE",comp.missing[0]?.hint ?? "Complete all required checks and photos before submitting.");
   await db.query("update inspection_tasks set state='SUBMITTED',revision=revision+1 where id=$1",[id]);
+  await db.query(
+    "update step_timings set ended_at=now() where order_id=$1 and operator_id=$2 and ended_at is null",
+    [t.order_id,actor.id]
+  );
+  await completeOpenTaskLaborEvents(db,id,actor.id);
   await audit(db,actor,"submit_task","inspection_tasks",id);
   return dto({...t,state:"SUBMITTED",revision:t.revision+1} as Parameters<typeof dto>[0]);
 }

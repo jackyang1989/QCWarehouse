@@ -30,6 +30,8 @@ import { approveGlossaryTerm, cancelTranslationJob, createGlossaryTerm, createGl
 import { initializeKnowledgeBase } from "./knowledge-seed";
 import { initializeMeasurementTemplates } from "./measurement-seed";
 import { initializeUnifiedPricing } from "./pricing-seed";
+import { initializeLaborAndCostDefaults } from "./labor-cost-seed";
+import { completeLaborEvent, correctLaborEvent, generateStandardCostMatrix, getCostModelDetail, getLaborCostOverview, getLaborStatistics, getOrderCostProfitBreakdown, listCostModels, listLaborBaselines, listLaborEvents, markStaleOpenLaborEventsPendingCalibration, pauseLaborEvent, publishCostModel, recordBackgroundSystemMetric, recordOrderCostEntry, resumeLaborEvent, retireCostModel, rollbackCostModel, saveCostModelDraft, simulateUnitEconomicsAndMargin, startLaborEvent, submitCostModel, updateLaborBaselineAssumption } from "./labor-cost-engine";
 import { batchAdjustPricingBook, clonePricingBook, createUnifiedQuote, exportPricingBookSnapshot, getPricingBookDetail, getPricingOverview, getPublicPublishedPricingProjection, getUnifiedQuoteDetail, listPricingBooks, listPricingBookVersions, publishPricingBook, quoteRequestSchema, retirePricingBook, revokeScheduledPricingBookVersion, rollbackPricingBook, runSection43WorkedExamples, savePricingBookDraft, submitPricingBook, verifyAndLockUnifiedQuote } from "./pricing-engine";
 import { batchPublishMeasurementTemplates, cloneMeasurementTemplate, getMeasurementOverview, getMeasurementTemplateDetail, listMeasurementTemplates, listMeasurementTemplateVersions, MEASUREMENT_READ_ROLES, publishMeasurementTemplate, retireMeasurementTemplate, rollbackMeasurementTemplate, saveCameraPreset, saveMeasurementTemplateDraft, submitMeasurementTemplate } from "./measurement-templates";
 import { batchKnowledgeTransition, cloneProductType, compileKnowledgeTaskBlueprint, exportKnowledgeSnapshot, getCatalogFormSchema, getKnowledgeRevisionHistory, getPublicCatalogKnowledge, listKnowledgeEntities, listKnowledgeOverview, parseKnowledgeKind, publishKnowledgeEntity, retireKnowledgeEntity, rollbackKnowledgeEntity, saveKnowledgeEntity, submitKnowledgeEntity } from "./knowledge-base";
@@ -730,8 +732,8 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   if(method==="POST" && taskSteps) return extraWrite(req,path,actor,z.object({
     step_code:z.enum(["prep","measure","visual","compare","qa_review"]),
     action:z.enum(["start","stop","record"]).optional(),
-    started_at:z.string().optional(),
-    ended_at:z.string().optional(),
+    started_at:z.iso.datetime({offset:true}).optional(),
+    ended_at:z.iso.datetime({offset:true}).optional(),
     seconds:z.number().int().min(1).max(86400).optional(),
   }),(db,a,b)=>recordTaskStep(db,a,idSchema.parse(taskSteps[1]),b));
   const report=path.match(/^\/orders\/([a-f0-9-]{36})\/report(?:\/versions\/(\d+)(\/file)?)?$/i);
@@ -2840,6 +2842,118 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
     const ver=z.coerce.number().int().min(1).parse(pbRevoke[2]);
     return extraWrite(req,path,actor,z.object({note:z.string().optional()}),
       (db,a,b)=>revokeScheduledPricingBookVersion(db,a,id,ver,b.note,staffSessionHash));
+  }
+
+  // Real-Clock Labor Capture, Statistical Percentiles, Cost Models & Margin Sandbox (TASK-198 / §10 / §43.3 / PAGE-M22)
+  if(method==="POST" && path==="/staff/labor/events/start") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),(db,a,b)=>startLaborEvent(db,a,b),201);
+  }
+  const laborPause=path.match(/^\/staff\/labor\/events\/([a-f0-9-]{36})\/pause$/i);
+  if(method==="POST" && laborPause) {
+    return extraWrite(req,path,actor,z.object({wait_reason:z.string().optional()}),
+      (db,a,b)=>pauseLaborEvent(db,a,idSchema.parse(laborPause[1]),b.wait_reason));
+  }
+  const laborResume=path.match(/^\/staff\/labor\/events\/([a-f0-9-]{36})\/resume$/i);
+  if(method==="POST" && laborResume) {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>resumeLaborEvent(db,a,idSchema.parse(laborResume[1])));
+  }
+  const laborComplete=path.match(/^\/staff\/labor\/events\/([a-f0-9-]{36})\/complete$/i);
+  if(method==="POST" && laborComplete) {
+    return extraWrite(req,path,actor,z.object({
+      ended_at:z.iso.datetime({offset:true}).optional(),
+      is_rework:z.boolean().optional(),
+      rework_attribution:z.string().optional(),
+    }),(db,a,b)=>completeLaborEvent(db,a,idSchema.parse(laborComplete[1]),{
+      endedAt:b.ended_at,isRework:b.is_rework,reworkAttribution:b.rework_attribution,
+    }));
+  }
+  if(method==="POST" && path==="/staff/labor/events/background-metric") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),(db,a,b)=>recordBackgroundSystemMetric(db,a,b),201);
+  }
+  if(method==="POST" && path==="/staff/labor/events/mark-stale-calibration") {
+    return extraWrite(req,path,actor,z.object({max_age_minutes:z.number().int().min(1).max(10080).default(240)}),
+      (db,a,b)=>markStaleOpenLaborEventsPendingCalibration(db,a,b.max_age_minutes,staffSessionHash));
+  }
+  const laborCorrect=path.match(/^\/staff\/labor\/events\/([a-f0-9-]{36})\/correct$/i);
+  if(method==="POST" && laborCorrect) {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),
+      (db,a,b)=>correctLaborEvent(db,a,idSchema.parse(laborCorrect[1]),b,staffSessionHash));
+  }
+  if(method==="GET" && path==="/staff/labor/events") {
+    return json(await transaction(db=>listLaborEvents(db,actorRequired(actor),{
+      order_id:url.searchParams.get("order_id")??undefined,
+      inspection_task_id:url.searchParams.get("inspection_task_id")??undefined,
+      operator_id:url.searchParams.get("operator_id")??undefined,
+      status:url.searchParams.get("status")??undefined,
+      limit:url.searchParams.get("limit")??undefined,
+    })));
+  }
+  if(method==="GET" && path==="/staff/labor/stats") {
+    return json(await transaction(db=>getLaborStatistics(db,actorRequired(actor),{
+      product_type_code:url.searchParams.get("product_type_code")??undefined,
+      complexity_code:url.searchParams.get("complexity_code")??undefined,
+      module_code:url.searchParams.get("module_code")??undefined,
+      days:url.searchParams.get("days")??undefined,
+    })));
+  }
+  if(method==="GET" && path==="/staff/admin/cost-models/overview") {
+    return json(await transaction(db=>getLaborCostOverview(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/cost-models/seed-init") {
+    return extraWrite(req,path,actor,z.object({}),(db,a)=>initializeLaborAndCostDefaults(db,a,staffSessionHash));
+  }
+  if(method==="GET" && path==="/staff/admin/cost-models/baselines") {
+    return json(await transaction(db=>listLaborBaselines(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/cost-models/baselines") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),
+      (db,a,b)=>updateLaborBaselineAssumption(db,a,b,staffSessionHash));
+  }
+  if(method==="GET" && path==="/staff/admin/cost-models") {
+    return json(await transaction(db=>listCostModels(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/cost-models") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),
+      (db,a,b)=>saveCostModelDraft(db,a,b,staffSessionHash));
+  }
+  const cmDetail=path.match(/^\/staff\/admin\/cost-models\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && cmDetail) {
+    return json(await transaction(db=>getCostModelDetail(db,actorRequired(actor),idSchema.parse(cmDetail[1]))));
+  }
+  const cmAction=path.match(/^\/staff\/admin\/cost-models\/([a-f0-9-]{36})\/(submit|publish|retire|rollback)$/i);
+  if(method==="POST" && cmAction) {
+    const id=idSchema.parse(cmAction[1]);
+    const act=cmAction[2];
+    if(act==="submit") {
+      return extraWrite(req,path,actor,z.object({note:z.string().optional()}),(db,a,b)=>submitCostModel(db,a,id,b.note,staffSessionHash));
+    }
+    if(act==="publish") {
+      return extraWrite(req,path,actor,z.object({note:z.string().optional()}),(db,a,b)=>publishCostModel(db,a,id,b.note,staffSessionHash));
+    }
+    if(act==="retire") {
+      return extraWrite(req,path,actor,z.object({note:z.string().optional()}),(db,a,b)=>retireCostModel(db,a,id,b.note,staffSessionHash));
+    }
+    return extraWrite(req,path,actor,z.object({target_version:z.number().int().min(1),note:z.string().optional()}),
+      (db,a,b)=>rollbackCostModel(db,a,id,b.target_version,b.note,staffSessionHash));
+  }
+  if(method==="POST" && path==="/staff/admin/cost-models/simulate-margin") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),
+      (db,a,b)=>simulateUnitEconomicsAndMargin(db,a,b));
+  }
+  if(method==="POST" && path==="/staff/admin/cost-models/standard-matrix") {
+    return extraWrite(req,path,actor,z.object({
+      cost_model_id:z.string().uuid().optional(),
+      pricing_book_id:z.string().uuid().optional(),
+    }),(db,a,b)=>generateStandardCostMatrix(db,a,b));
+  }
+  const orderCostEntries=path.match(/^\/staff\/admin\/orders\/([a-f0-9-]{36})\/cost-entries$/i);
+  if(method==="POST" && orderCostEntries) {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),
+      (db,a,b)=>recordOrderCostEntry(db,a,idSchema.parse(orderCostEntries[1]),b,staffSessionHash),201);
+  }
+  const orderCostBreakdown=path.match(/^\/staff\/admin\/orders\/([a-f0-9-]{36})\/cost-breakdown$/i);
+  if(method==="GET" && orderCostBreakdown) {
+    return json(await transaction(db=>getOrderCostProfitBreakdown(db,actorRequired(actor),idSchema.parse(orderCostBreakdown[1]))));
   }
 
   return null;

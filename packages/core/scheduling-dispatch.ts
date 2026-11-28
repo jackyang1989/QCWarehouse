@@ -3,6 +3,12 @@ import { z } from "zod";
 import type { DB } from "../db";
 import { audit, event, guard, hash, lock, one, role, uuid, type Actor } from "./common";
 import { assertItemsOutsideQuarantine } from "./storage";
+import {
+  completeOpenTaskLaborEvents,
+  openHandoverTaskLaborEvent,
+  pauseOpenTaskOrWorkItemLaborEvents,
+  resumeOpenTaskOrWorkItemLaborEvents,
+} from "./labor-cost-engine";
 
 export const TASK_DOMAINS = ["inspection", "receiving", "packing", "qa_review", "stocktake", "ticket"] as const;
 export const HANDOVER_TYPES = ["assign", "relay", "reassign", "emergency_takeover", "qa_return_reassign"] as const;
@@ -900,6 +906,11 @@ export async function pauseWorkItem(
     pausedAt: new Date(),
     pauseReason: input.reason,
   });
+  await pauseOpenTaskOrWorkItemLaborEvents(db, {
+    inspectionTaskId: wi.inspection_task_id,
+    dispatchWorkItemId: wi.id,
+    waitReason: input.reason,
+  });
   await audit(db, actor, "dispatch_work_item_paused", "dispatch_work_items", wi.id, {
     reason: input.reason,
     execution_generation: nextGeneration,
@@ -952,6 +963,10 @@ export async function resumeWorkItem(db: DB, actor: Actor, workItemId: string) {
     inspectionTaskId: wi.inspection_task_id,
     pausedAt: null,
     pauseReason: null,
+  });
+  await resumeOpenTaskOrWorkItemLaborEvents(db, {
+    inspectionTaskId: wi.inspection_task_id,
+    dispatchWorkItemId: wi.id,
   });
   await audit(db, actor, "dispatch_work_item_resumed", "dispatch_work_items", wi.id, { next_status: nextStatus });
   return { work_item: updated };
@@ -1072,6 +1087,11 @@ export async function initiateTaskHandover(
     pausedAt: new Date(),
     pauseReason: `Handover pending: ${input.reason}`,
   });
+  await pauseOpenTaskOrWorkItemLaborEvents(db, {
+    inspectionTaskId: wi.inspection_task_id,
+    dispatchWorkItemId: wi.id,
+    waitReason: `handover_pending:${input.reason}`,
+  });
 
   await emitDispatchInboxNotification(db, {
     template: "task.handover_requested",
@@ -1187,6 +1207,22 @@ export async function acceptTaskHandover(
   });
   if (wi.inspection_task_id) {
     await db.query("update inspection_tasks set revision = revision + 1 where id = $1", [wi.inspection_task_id]);
+    // Complete outgoing operator's open labor segment (keeping original operator_id intact!) and start fresh segment only if task is already IN_PROGRESS
+    if (ho.from_user_id) {
+      await completeOpenTaskLaborEvents(db, wi.inspection_task_id, ho.from_user_id);
+    }
+    const taskStateRow = (
+      await db.query<{ state: string }>("select state from inspection_tasks where id = $1", [wi.inspection_task_id])
+    ).rows[0];
+    if (taskStateRow?.state === "IN_PROGRESS") {
+      await openHandoverTaskLaborEvent(db, {
+        warehouseId: wi.warehouse_id,
+        inspectionTaskId: wi.inspection_task_id,
+        dispatchWorkItemId: wi.id,
+        operatorId: ho.to_user_id,
+        workstationId: ho.to_workstation_id ?? wi.workstation_id,
+      });
+    }
   }
 
   await emitDispatchInboxNotification(db, {
@@ -1380,6 +1416,11 @@ export async function revokeStaffActiveLeases(
       executionGeneration: nextGen,
       pausedAt: new Date(),
       pauseReason: reason,
+    });
+    await pauseOpenTaskOrWorkItemLaborEvents(db, {
+      inspectionTaskId: wi.inspection_task_id,
+      dispatchWorkItemId: wi.id,
+      waitReason: reason,
     });
     revokedWorkItemIds.push(wi.id);
   }

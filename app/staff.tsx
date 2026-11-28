@@ -1442,13 +1442,16 @@ export function TaskView({id,actor}:{id:string;actor:Row}) {
         </div>
       </div>
     </Panel>
-    {writable&&<Panel title="分步作业计时">
-      <div className="actions">
-        {([["prep","准备"],["measure","测量"],["visual","外观检查"],["compare","对比核对"]] as const).map(([code,name])=><Action key={code} run={async()=>{
-          await request("/staff/inspection-tasks/"+id+"/steps","POST",{step_code:code,action:"record",seconds:60});reload();
-        }}>记录 {name} 工时</Action>)}
+    {writable&&<Panel title="分步作业真实时钟计时（无固定60秒预设）">
+      <div className="actions" style={{flexWrap:"wrap",gap:8}}>
+        {([["prep","准备"],["measure","测量"],["visual","外观检查"],["compare","对比核对"]] as const).map(([code,name])=>{
+          const open=(data.step_timings??[]).find((s:Row)=>s.step_code===code&&s.operator_id===actor.id&&!s.ended_at);
+          return <Action key={code} primary={Boolean(open)} run={async()=>{
+            await request("/staff/inspection-tasks/"+id+"/steps","POST",{step_code:code,action:open?"stop":"start"});reload();
+          }}>{open?`停止 ${name} 计时`:`开始 ${name} 计时`}</Action>;
+        })}
       </div>
-      {(data.step_timings?.length??0)>0&&<p className="muted small">已记录步骤：{data.step_timings.map((s:Row)=>`${s.step_code}(${s.seconds??0}s)`).join("、")}</p>}
+      {(data.step_timings?.length??0)>0&&<p className="muted small">已记录步骤：{data.step_timings.map((s:Row)=>s.ended_at?`${s.step_code}(${s.seconds??0}s)`:`${s.step_code}(进行中)`).join("、")}</p>}
     </Panel>}
     {data.content.measure_conditions&&<div className="notice"><strong>测量与拍摄条件</strong><p>{data.content.measure_conditions}</p></div>}
     {data.content.diagram&&<details className="panel" id="task-diagram">
