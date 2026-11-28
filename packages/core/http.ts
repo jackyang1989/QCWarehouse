@@ -31,6 +31,8 @@ import { initializeKnowledgeBase } from "./knowledge-seed";
 import { initializeMeasurementTemplates } from "./measurement-seed";
 import { initializeUnifiedPricing } from "./pricing-seed";
 import { initializeLaborAndCostDefaults } from "./labor-cost-seed";
+import { initializeCapacitySlaDefaults } from "./capacity-sla-seed";
+import { calculateWorkloadAndSla, extendOrderSlaCommitment, getCapacityPolicyDetail, getOrderSlaCommitments, getWarehouseCapacityDashboard, listCapacitySlaPolicies, pauseOrderSlaCommitment, publishCapacityPolicy, resumeOrderSlaCommitment, retireCapacityPolicy, rollbackCapacityPolicy, saveCapacityPolicyDraft, startOrderSlaCommitment, submitCapacityPolicy } from "./capacity-sla-engine";
 import { completeLaborEvent, correctLaborEvent, generateStandardCostMatrix, getCostModelDetail, getLaborCostOverview, getLaborStatistics, getOrderCostProfitBreakdown, listCostModels, listLaborBaselines, listLaborEvents, markStaleOpenLaborEventsPendingCalibration, pauseLaborEvent, publishCostModel, recordBackgroundSystemMetric, recordOrderCostEntry, resumeLaborEvent, retireCostModel, rollbackCostModel, saveCostModelDraft, simulateUnitEconomicsAndMargin, startLaborEvent, submitCostModel, updateLaborBaselineAssumption } from "./labor-cost-engine";
 import { batchAdjustPricingBook, clonePricingBook, createUnifiedQuote, exportPricingBookSnapshot, getPricingBookDetail, getPricingOverview, getPublicPublishedPricingProjection, getUnifiedQuoteDetail, listPricingBooks, listPricingBookVersions, publishPricingBook, quoteRequestSchema, retirePricingBook, revokeScheduledPricingBookVersion, rollbackPricingBook, runSection43WorkedExamples, savePricingBookDraft, submitPricingBook, verifyAndLockUnifiedQuote } from "./pricing-engine";
 import { batchPublishMeasurementTemplates, cloneMeasurementTemplate, getMeasurementOverview, getMeasurementTemplateDetail, listMeasurementTemplates, listMeasurementTemplateVersions, MEASUREMENT_READ_ROLES, publishMeasurementTemplate, retireMeasurementTemplate, rollbackMeasurementTemplate, saveCameraPreset, saveMeasurementTemplateDraft, submitMeasurementTemplate } from "./measurement-templates";
@@ -2954,6 +2956,68 @@ async function extras(req:Request,path:string,actor:Actor|null):Promise<Response
   const orderCostBreakdown=path.match(/^\/staff\/admin\/orders\/([a-f0-9-]{36})\/cost-breakdown$/i);
   if(method==="GET" && orderCostBreakdown) {
     return json(await transaction(db=>getOrderCostProfitBreakdown(db,actorRequired(actor),idSchema.parse(orderCostBreakdown[1]))));
+  }
+
+  // TASK-199: Capacity & Dynamic SLA routes
+  if(method==="POST" && path==="/staff/admin/capacity/seed") {
+    return extraWrite(req,path,actor,z.object({}).default({}),(db,a)=>initializeCapacitySlaDefaults(db,a,staffSessionHash),201);
+  }
+  if(method==="GET" && path==="/staff/admin/capacity/dashboard") {
+    const query=Object.fromEntries(new URL(req.url).searchParams.entries());
+    return json(await transaction(db=>getWarehouseCapacityDashboard(db,actorRequired(actor),query)));
+  }
+  if(method==="GET" && path==="/staff/admin/capacity/policies") {
+    return json(await transaction(db=>listCapacitySlaPolicies(db,actorRequired(actor))));
+  }
+  if(method==="POST" && path==="/staff/admin/capacity/policies") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),
+      (db,a,b)=>saveCapacityPolicyDraft(db,a,b,staffSessionHash));
+  }
+  const capPolicyDetail=path.match(/^\/staff\/admin\/capacity\/policies\/([a-f0-9-]{36})$/i);
+  if(method==="GET" && capPolicyDetail) {
+    return json(await transaction(db=>getCapacityPolicyDetail(db,actorRequired(actor),idSchema.parse(capPolicyDetail[1]))));
+  }
+  const capPolicyAction=path.match(/^\/staff\/admin\/capacity\/policies\/([a-f0-9-]{36})\/(submit|publish|retire|rollback)$/i);
+  if(method==="POST" && capPolicyAction) {
+    const id=idSchema.parse(capPolicyAction[1]);
+    const act=capPolicyAction[2];
+    if(act==="submit") {
+      return extraWrite(req,path,actor,z.object({note:z.string().optional()}).default({}),(db,a,b)=>submitCapacityPolicy(db,a,id,b.note,staffSessionHash));
+    }
+    if(act==="publish") {
+      return extraWrite(req,path,actor,z.object({publication_scope:z.enum(["sandbox_acceptance","production"]).optional(),note:z.string().optional()}).default({}),
+        (db,a,b)=>publishCapacityPolicy(db,a,id,b,staffSessionHash));
+    }
+    if(act==="retire") {
+      return extraWrite(req,path,actor,z.object({reason:z.string().min(3)}),(db,a,b)=>retireCapacityPolicy(db,a,id,b.reason,staffSessionHash));
+    }
+    return extraWrite(req,path,actor,z.object({target_version:z.number().int().min(1)}),
+      (db,a,b)=>rollbackCapacityPolicy(db,a,id,b.target_version,staffSessionHash));
+  }
+  if(method==="POST" && path==="/staff/admin/capacity/simulate") {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),
+      (db,a,b)=>calculateWorkloadAndSla(db,a,b,staffSessionHash));
+  }
+  const orderSlaRead=path.match(/^\/staff\/admin\/orders\/([a-f0-9-]{36})\/sla$/i);
+  if(method==="GET" && orderSlaRead) {
+    return json(await transaction(db=>getOrderSlaCommitments(db,actorRequired(actor),idSchema.parse(orderSlaRead[1]))));
+  }
+  const orderSlaStart=path.match(/^\/staff\/admin\/orders\/([a-f0-9-]{36})\/sla\/start$/i);
+  if(method==="POST" && orderSlaStart) {
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),
+      (db,a,b)=>startOrderSlaCommitment(db,a,idSchema.parse(orderSlaStart[1]),b,staffSessionHash),201);
+  }
+  const slaClockAction=path.match(/^\/staff\/admin\/sla\/([a-f0-9-]{36})\/(pause|resume|extend)$/i);
+  if(method==="POST" && slaClockAction) {
+    const id=idSchema.parse(slaClockAction[1]);
+    const act=slaClockAction[2];
+    if(act==="pause") {
+      return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),(db,a,b)=>pauseOrderSlaCommitment(db,a,id,b,staffSessionHash));
+    }
+    if(act==="resume") {
+      return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),(db,a,b)=>resumeOrderSlaCommitment(db,a,id,b,staffSessionHash));
+    }
+    return extraWrite(req,path,actor,z.record(z.string(),z.unknown()),(db,a,b)=>extendOrderSlaCommitment(db,a,id,b,staffSessionHash));
   }
 
   return null;

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { AdminCapacitySlaPanel } from "./admin-capacity-sla";
 import { AdminCostMarginPanel } from "./admin-cost-margin";
 import { BilingualEntityPanel } from "./bilingual-editor";
 import { Action, ErrorBlock, Field, Form, Panel, request, Select, Table, Tag, text, useLoad } from "./ui";
@@ -41,7 +42,7 @@ function toDatetimeLocalValue(iso?: string | null): string {
 }
 
 export function AdminPricingDesk({ actor }: { actor: Actor }) {
-  const [deskTab, setDeskTab] = useState<"pricing" | "cost_margin">("pricing");
+  const [deskTab, setDeskTab] = useState<"pricing" | "cost_margin" | "capacity_sla">("pricing");
   const [statusFilter, setStatusFilter] = useState("");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -228,8 +229,17 @@ export function AdminPricingDesk({ actor }: { actor: Actor }) {
         >
           工时统计、成本模型与毛利沙盘（TASK-198）
         </button>
+        <button
+          type="button"
+          className={`button sm${deskTab === "capacity_sla" ? " primary" : ""}`}
+          onClick={() => setDeskTab("capacity_sla")}
+        >
+          产能与 SLA 计算底座（TASK-199）
+        </button>
       </div>
-      {deskTab === "cost_margin" ? (
+      {deskTab === "capacity_sla" ? (
+        <AdminCapacitySlaPanel actor={actor} />
+      ) : deskTab === "cost_margin" ? (
         <AdminCostMarginPanel actor={actor} />
       ) : (
         <>

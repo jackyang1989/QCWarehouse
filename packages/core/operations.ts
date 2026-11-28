@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { DB } from "../db";
 import { requireCustomerActive } from "./auth";
+import { syncOrderSlaOnCancel, syncOrderSlaOnHold, syncOrderSlaOnResume } from "./capacity-sla-engine";
 import { audit, code, event, guard, hash, isDemo, lock, one, organization, revision, role, uuid, type Actor } from "./common";
 import { emailSettings, integrationPreflight, stripeSettingsFromDb } from "./integrations";
 import { demoTermsVersion, demoWarehouseAddressZh } from "./demo-fixtures";
@@ -100,6 +101,7 @@ export async function cancelOrder(db:DB,actor:Actor,id:string,rev:number) {
     where r.group_id=g.id and g.order_line_id=l.id and l.order_id=$1 and r.released_at is null`,[id]);
   await db.query("update order_blocks set resolved_at=now() where order_id=$1 and resolved_at is null",[id]);
   await db.query("update orders set state='cancelled',held_at=null,held_from_state=null,hold_reason=null,revision=revision+1 where id=$1",[id]);
+  await syncOrderSlaOnCancel(db,actor,id,"Customer cancelled order");
   if(o.paid_at && preview) {
     await db.query(
       `insert into tickets(id,public_no,org_id,order_id,category,subject,details)
@@ -215,6 +217,7 @@ export async function holdOrder(db:DB,actor:Actor,id:string,reason:string) {
   await db.query(`insert into order_blocks(id,order_id,reason,object_key,opened_at)
     values($1,$2,'staff_hold','order',now())
     on conflict(order_id,reason,object_key) where resolved_at is null do nothing`,[uuid(),id]);
+  await syncOrderSlaOnHold(db,actor,id,reason.trim());
   await audit(db,actor,"hold_order","orders",id,{reason:reason.trim(),from_state:o.state});
   await event(db,"order.held",{order_id:id});
   return updated;
@@ -250,6 +253,7 @@ export async function resumeOrder(db:DB,actor:Actor,id:string,reason:string) {
   await db.query(`update orders set state=$2,
     sla_due_at=case when sla_due_at is not null and held_at is not null then sla_due_at+greatest(now()-held_at,interval '0 seconds') else sla_due_at end,
     held_at=null,held_from_state=null,hold_reason=null,revision=revision+1 where id=$1`,[id,fromState]);
+  await syncOrderSlaOnResume(db,actor,id,reason.trim());
   if(paidWhileHeld) {
     await activatePaidOrder(db,id);
   } else if(fromState==="awaiting_samples") {
